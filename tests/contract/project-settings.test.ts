@@ -383,6 +383,17 @@ it("the audit row keeps the old chosen value when only the old side was hidden b
   const audit = w.db.find((row) => row.entityType === "COMPANY_LOG").map((row) => row.changes as unknown[]);
   expect(audit[1]).toContainEqual({ field: "model_budget_usd", before: 5, after: 4, chosenBefore: 9, chosenAfter: 4 });
 });
+it("a preset change a pinned preset_level override hides is named in the audit event; an ordinary one is not", async () => {
+  const w = world();
+  await w.call("PUT", { expectedRevision: 0, preset: "careful", overrides: { preset_level: "balanced" } });
+  await w.call("PUT", { expectedRevision: 1, preset: "lightweight" });
+  await w.call("PUT", { expectedRevision: 2, overrides: {} });
+  const events = w.db.find((row) => row.entityType === "COMPANY_LOG").sort((a, b) => Number(a.revision) - Number(b.revision));
+  expect(events[0]).not.toHaveProperty("presetBefore");
+  expect(events[1]).toMatchObject({ presetBefore: "careful", presetAfter: "lightweight" });
+  // Dropping the pin shows the preset in the values themselves, so no extra names.
+  expect(events[2]).not.toHaveProperty("presetBefore");
+});
 it("a clamped preset still needs the fresh step-up first", async () => {
   const w = world(); w.hook({ ci_fix_rounds: 2 }); w.setStepUp(noStepUp());
   await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });

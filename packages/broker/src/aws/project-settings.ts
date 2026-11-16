@@ -174,6 +174,9 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
       const [appliedBefore, appliedAfter] = [before.values[field.id]!.value, after.values[field.id]!.value];
       return { field: field.id, before: appliedBefore, after: appliedAfter, ...(chosenBefore !== appliedBefore || chosenAfter !== appliedAfter ? { chosenBefore, chosenAfter } : {}) };
     });
+  // A pinned preset_level override hides a preset change from every resolved value, so the event names the presets themselves in that case.
+  const presetNamed = current?.preset !== row.preset && storedBefore.values["preset_level"]!.value === storedAfter.values["preset_level"]!.value
+    ? { presetBefore: current?.preset ?? null, presetAfter: row.preset ?? null } : {};
   budget.check();
   try {
     // One atomic write: a losing revision or failed audit leaves both records untouched.
@@ -182,7 +185,7 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
         ConditionExpression: input.expectedRevision === 0 ? "attribute_not_exists(pk)" : "#revision = :expected",
         ...(input.expectedRevision === 0 ? {} : { ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":expected": input.expectedRevision } }) } },
       { Put: { TableName: deps.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${row.updatedAt}#${randomUUID()}`, entityType: "COMPANY_LOG",
-        event: "project_settings_changed", companyId, personId: caller.developerId, projectName, changes, revision: row.revision }, ConditionExpression: "attribute_not_exists(pk)" } },
+        event: "project_settings_changed", companyId, personId: caller.developerId, projectName, changes, revision: row.revision, ...presetNamed }, ConditionExpression: "attribute_not_exists(pk)" } },
     ] }));
   } catch (error) {
     const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | undefined)?.CancellationReasons;
