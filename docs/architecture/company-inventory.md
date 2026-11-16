@@ -654,8 +654,8 @@ Each row names its feeding constructor set. A generic DocumentStore/stream site 
 
 | kind | file:line:column:field | exact expression | why generic | feeding constructors |
 |---|---|---|---|---|
-| forwarding | packages/broker/src/aws/worker-machines/dispatcher-lessons.ts:80:77:pk | key.pk | Company-scoped read-only L10 transport: expected runtime company must match the authoritative workspace, then the task record; one total read budget, no writes. | taskPointerKey, taskKey (existing raw-key gaps, guarded here); lessonSetKey, lessonKey, hosted lesson settings and projectRevisionKey (company-scoped) |
-| forwarding | packages/broker/src/aws/worker-machines/dispatcher-lessons.ts:80:89:sk | key.sk | Company-scoped read-only L10 transport: expected runtime company must match the authoritative workspace, then the task record; one total read budget, no writes. | taskPointerKey, taskKey (existing raw-key gaps, guarded here); lessonSetKey, lessonKey, hosted lesson settings and projectRevisionKey (company-scoped) |
+| forwarding | packages/broker/src/aws/worker-machines/dispatcher-lessons.ts:81:77:pk | key.pk | Company-scoped read-only L10 transport: expected runtime company must match the authoritative workspace, then the task record; one total read budget, no writes. | taskPointerKey, taskKey (existing raw-key gaps, guarded here); lessonSetKey, lessonKey, hosted lesson settings and projectRevisionKey (company-scoped) |
+| forwarding | packages/broker/src/aws/worker-machines/dispatcher-lessons.ts:81:89:sk | key.sk | Company-scoped read-only L10 transport: expected runtime company must match the authoritative workspace, then the task record; one total read budget, no writes. | taskPointerKey, taskKey (existing raw-key gaps, guarded here); lessonSetKey, lessonKey, hosted lesson settings and projectRevisionKey (company-scoped) |
 
 ## Known gaps: table indexes and change feed
 

@@ -12,6 +12,7 @@ import { documentLessonVectors } from "../../lessons/document-vectors.js";
 import { createHostedLessonParts, type HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
 import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, selectLessons } from "../../lessons/load.js";
+import { readVisible } from "../../lessons/read-visible.js";
 import { modeAllows, resolveLearning, resolveLoadBudget, whyLearningOff } from "../../lessons/policy.js";
 import { workspaceCompanyReader } from "./workspace-company.js";
 
@@ -126,12 +127,13 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       const lessons = new DocumentLessonStore(store, now, (id) => id, () => undefined);
       const all = await lessons.list({ workspaceId: company, project: task.project });
       if (all.length !== Object.keys(set.data.members).length || all.some((lesson) => lesson.workspaceId !== company || lesson.project !== task.project || lesson.version !== set.data.members[lesson.id])) refuse();
+      const visible = await readVisible({ access: parts.access, key: { workspaceId: company, project: task.project }, viewer: undefined, lessons: all, where: "load", running: { taskId: task.taskId } });
       const project = await createStoreProjectSource(store, company).revision(task.project, task.startingRevision);
       if (project === undefined) refuse();
       const stage = request.data.workflowMode as "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "REVIEW";
       const selected = await selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
         key: { workspaceId: company, project: task.project }, stage, resolved,
-        active: all.filter((lesson) => lesson.status === "active" && lesson.expiresAt > now() && !hasStaleCitation(lesson)),
+        active: visible.filter((lesson) => lesson.status === "active" && lesson.expiresAt > now() && !hasStaleCitation(lesson)),
         intent: [task.title, task.requestText?.slice(0, 600) ?? ""].join("\n"),
         repos: codeRepositoriesOf(project.definition).map((repo) => repo.name), files: [], languages: [],
         reader: { running: { taskId: task.taskId } }, where: "load", budget: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }),
