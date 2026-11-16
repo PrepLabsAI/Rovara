@@ -4,7 +4,7 @@
 // (no control or format characters) that readers escape for their own markup, and a pack for any other candidate digest is ignored by the broker.
 import { z } from "zod";
 import { EvidenceAiSchema, readEvidenceAi } from "./evidence-ai.js";
-import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES, isRegisteredCheckKind, partsOutsideKind } from "./check-kinds.js";
+import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES, isRegisteredCheckKind, partsOutsideKind, type EvidenceTrustClass } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
 import { TEST_ID_MAX } from "./test-id.js";
@@ -219,20 +219,49 @@ export type EvidenceFinding = z.infer<typeof EvidenceFindingSchema>;
 // Self-contained on purpose: this file is in the browser entry's exact import graph, so it imports nothing new (the usage record schema is a leaf of that graph already). A contract test keeps `EVIDENCE_BACKING_KINDS` equal to `TEST_ENV_BACKING_KINDS`.
 // Replaces: nothing. `environment.services` keeps its old meaning and old packs still parse; a run with test services carries `environment.dependencies` beside it. Readers of the pack are strict, so a reader built before this field REJECTS a pack that carries it: roll out forward only (every reader upgraded before any writer sets the field; the switch `tx` stays off until then).
 
-export const EVIDENCE_BACKING_KINDS = ["local", "project_image", "emulated", "test_account", "fake", "none"] as const;
+export const EVIDENCE_BACKING_KINDS = ["local", "project_image", "emulated", "test_account", "vendor_test", "fake", "none"] as const;
 export type EvidenceBackingKind = (typeof EVIDENCE_BACKING_KINDS)[number];
 /** The honesty labels of 2.4, by id. The BROKER computes the label from the pinned plan (`evidenceDependencyLabelFor`); a worker's own words never set it. */
-export const EVIDENCE_DEPENDENCY_LABELS = ["real", "real_project_image", "company_approved", "rovara_local_aws", "test_account", "recorded_fake", "hand_written_fake", "faked_by_tests", "not_available"] as const;
+export const EVIDENCE_DEPENDENCY_LABELS = ["real", "real_project_image", "company_approved", "rovara_local_aws", "test_account", "vendor_test", "recorded_fake", "hand_written_fake", "rovara_made_fake", "faked_by_tests", "not_available"] as const;
 export type EvidenceDependencyLabel = (typeof EVIDENCE_DEPENDENCY_LABELS)[number];
 /** The backing each label can belong to: a label that does not fit its backing is refused. */
 export const EVIDENCE_DEPENDENCY_LABEL_BACKING: Record<EvidenceDependencyLabel, EvidenceBackingKind> = {
-  real: "local", real_project_image: "project_image", company_approved: "local", rovara_local_aws: "emulated", test_account: "test_account",
-  recorded_fake: "fake", hand_written_fake: "fake", faked_by_tests: "none", not_available: "none",
+  real: "local", real_project_image: "project_image", company_approved: "local", rovara_local_aws: "emulated", test_account: "test_account", vendor_test: "vendor_test",
+  recorded_fake: "fake", hand_written_fake: "fake", rovara_made_fake: "fake", faked_by_tests: "none", not_available: "none",
 };
+/**
+ * The trust class each label earns (O51; the nine labels stay as the detail under the owner's words). Real: real software, a project or company image, a test account, a vendor's test mode. Recorded: a recording of a real
+ * answer (never Real, O11). Simulated: Rovara local AWS, the customer's own fakes, a test that fakes the dependency itself, and a dependency nothing answered (it says no more than "not the real thing"). Made by Rovara: a mock Rovara wrote.
+ */
+export const EVIDENCE_DEPENDENCY_LABEL_TRUST: Record<EvidenceDependencyLabel, EvidenceTrustClass> = {
+  real: "real", real_project_image: "real", company_approved: "real", test_account: "real", vendor_test: "real",
+  recorded_fake: "recorded",
+  rovara_local_aws: "simulated", hand_written_fake: "simulated", faked_by_tests: "simulated", not_available: "simulated",
+  rovara_made_fake: "made_by_rovara",
+};
+/** The trust class of a label. A label this build does not know is the weakest class (Simulated), never Real: a newer writer's better word is not trusted by an older reader. */
+export function trustClassOf(label: string): EvidenceTrustClass {
+  return Object.hasOwn(EVIDENCE_DEPENDENCY_LABEL_TRUST, label) ? EVIDENCE_DEPENDENCY_LABEL_TRUST[label as EvidenceDependencyLabel] : "simulated";
+}
+/**
+ * The trust class of a dependency row: the class its label earns, except that a row whose fake made up ANY answer is Made by Rovara, whatever else answered (DECISIONS 169 and 155(b): made-up answers are labelled
+ * "Made by Rovara" and never count toward the proof). Fail closed on an unknown count: a count that is not a whole number is read as some, and so is a fake that may make up answers (`pinned.makesUpAnswers`, the
+ * pinned backing's `schema_synth`) whose ledger was not read (no `usage`), unless the count was read as 0. A caller that does not know the pinned fake gets today's reading. The row's words are unchanged.
+ */
+export function evidenceDependencyTrustClass(
+  row: { label: string; madeUpAnswers?: number | undefined; usage?: unknown },
+  pinned?: { makesUpAnswers?: boolean | undefined },
+): EvidenceTrustClass {
+  const count = row.madeUpAnswers;
+  if (count !== undefined && !(Number.isInteger(count) && count >= 0)) return "made_by_rovara";
+  if (count !== undefined && count > 0) return "made_by_rovara";
+  if (pinned?.makesUpAnswers === true && FAKE_LABELS.includes(row.label as EvidenceDependencyLabel) && row.usage === undefined) return "made_by_rovara";
+  return trustClassOf(row.label);
+}
 /** The fixed words of each label. `company_approved` is completed with the service by `evidenceDependencyLabelWords`; a fake that made up answers adds "(+N made-up answers)" there too. */
 export const EVIDENCE_DEPENDENCY_LABEL_WORDS: Record<EvidenceDependencyLabel, string> = {
-  real: "real", real_project_image: "real (company-approved image)", company_approved: "company-approved image", rovara_local_aws: "Rovara local AWS", test_account: "test account",
-  recorded_fake: "recorded fake", hand_written_fake: "hand-written fake", faked_by_tests: "faked by your tests", not_available: "not available",
+  real: "real", real_project_image: "real (company-approved image)", company_approved: "company-approved image", rovara_local_aws: "Rovara local AWS", test_account: "test account", vendor_test: "vendor test mode",
+  recorded_fake: "recorded fake", hand_written_fake: "hand-written fake", rovara_made_fake: "fake made by Rovara", faked_by_tests: "faked by your tests", not_available: "not available",
 };
 /** Why a run used the fallback (a fake, or nothing) in place of the dependency's backing. Fixed words, never an error text. */
 export const EVIDENCE_FALLBACK_REASONS = ["test_account_unreachable", "test_account_expired", "test_account_busy", "did_not_start"] as const;
@@ -241,16 +270,17 @@ export const EVIDENCE_FALLBACK_REASON_WORDS: Record<EvidenceFallbackReason, stri
   test_account_unreachable: "test account unreachable", test_account_expired: "test account expired", test_account_busy: "test account busy", did_not_start: "did not start",
 };
 export const EVIDENCE_DEPENDENCIES_MAX = 24;
-const FAKE_LABELS: readonly EvidenceDependencyLabel[] = ["recorded_fake", "hand_written_fake"];
+const FAKE_LABELS: readonly EvidenceDependencyLabel[] = ["recorded_fake", "hand_written_fake", "rovara_made_fake"];
 
-/** The label a pinned backing earns. A fake of unknown origin is "hand-written", the less trusted of the two words. */
-export function evidenceDependencyLabelFor(input: { backing: "local"; substituteImage?: boolean } | { backing: "project_image" } | { backing: "emulated" } | { backing: "test_account" } | { backing: "fake"; recorded: boolean } | { backing: "none"; fakedByTests: boolean }): EvidenceDependencyLabel {
+/** The label a pinned backing earns. A fake of unknown origin is "hand-written", the less trusted of the two words; a fake Rovara made is "made by Rovara" even when it was recorded (never the better word). */
+export function evidenceDependencyLabelFor(input: { backing: "local"; substituteImage?: boolean } | { backing: "project_image" } | { backing: "emulated" } | { backing: "test_account" } | { backing: "vendor_test" } | { backing: "fake"; recorded: boolean; madeByRovara?: boolean } | { backing: "none"; fakedByTests: boolean }): EvidenceDependencyLabel {
   switch (input.backing) {
     case "local": return input.substituteImage === true ? "company_approved" : "real";
     case "project_image": return "real_project_image";
     case "emulated": return "rovara_local_aws";
     case "test_account": return "test_account";
-    case "fake": return input.recorded ? "recorded_fake" : "hand_written_fake";
+    case "vendor_test": return "vendor_test";
+    case "fake": return input.madeByRovara === true ? "rovara_made_fake" : input.recorded ? "recorded_fake" : "hand_written_fake";
     case "none": return input.fakedByTests ? "faked_by_tests" : "not_available";
   }
 }
@@ -278,7 +308,7 @@ export const EvidenceDependencySchema = z
     /** Tests that did not run because nothing backed this dependency. */
     testsNotRun: CountSchema.optional(),
     /** The backing this run used instead of the pinned one: the label and the other facts above describe what actually ran. */
-    fellBack: z.object({ from: z.enum(["local", "project_image", "emulated", "test_account"]), reason: z.enum(EVIDENCE_FALLBACK_REASONS) }).strict().optional(),
+    fellBack: z.object({ from: z.enum(["local", "project_image", "emulated", "test_account", "vendor_test"]), reason: z.enum(EVIDENCE_FALLBACK_REASONS) }).strict().optional(),
     startedMs: z.number().int().min(0).max(86_400_000).optional(),
     usage: z.object({ requests: CountSchema, unmatched: CountSchema, faults: CountSchema }).strict().optional(),
   })
@@ -295,7 +325,7 @@ export const EvidenceDependencySchema = z
     if (entry.label !== "not_available" && entry.testsNotRun !== undefined) problem("testsNotRun", "only a dependency that was not available has tests that did not run");
     if (entry.fellBack !== undefined && entry.backing !== "fake" && entry.backing !== "none") problem("fellBack", "a fallback is a fake or nothing");
     // A fallback is a fake, or nothing: the tests' own fake (`faked_by_tests`) is not something a run falls back to.
-    if (entry.fellBack !== undefined && entry.label !== "recorded_fake" && entry.label !== "hand_written_fake" && entry.label !== "not_available") problem("fellBack", "a fallback is a recorded fake, a hand-written fake or not available");
+    if (entry.fellBack !== undefined && !FAKE_LABELS.includes(entry.label) && entry.label !== "not_available") problem("fellBack", "a fallback is a fake or not available");
     if (entry.fellBack !== undefined && entry.fellBack.reason.startsWith("test_account_") && entry.fellBack.from !== "test_account") problem("fellBack", "a test account reason belongs to a fallback from a test account");
     if (entry.usage !== undefined && entry.usage.unmatched > entry.usage.requests) problem("usage", "unmatched requests are some of the requests");
   });
@@ -706,6 +736,16 @@ function evidencePackV2Schemas(mode: Mode) {
   });
   const dependencyChecked = mode === "strict"
     ? dependency.superRefine((entry, context) => {
+      // TE-A3 (O11, O51): the class is the one the label earns, and the label belongs to the backing that ran, so a recording can never be written as Real and a fake never as real software.
+      if (EVIDENCE_DEPENDENCY_LABEL_BACKING[entry.label] !== entry.backing) context.addIssue({ code: "custom", path: ["label"], message: "the label belongs to the backing that ran" });
+      // A fake that made up answers is written as Made by Rovara (`evidenceDependencyTrustClass`): the one weaker class a fake's row may take instead of its label's, never a better one.
+      const madeUp = entry.trust === "made_by_rovara" && FAKE_LABELS.includes(entry.label);
+      if (entry.trust !== trustClassOf(entry.label) && !madeUp) context.addIssue({ code: "custom", path: ["trust"], message: "the trust class is the one the label earns" });
+      // Where an answer's facts may be stated: a mock set only for a fake Rovara made (and one is required), a recording and its day only for a recorded answer.
+      if (entry.label === "rovara_made_fake" && entry.mock === undefined) context.addIssue({ code: "custom", path: ["mock"], message: "a fake made by Rovara names its stored mock set" });
+      if (entry.label !== "rovara_made_fake" && entry.mock !== undefined) context.addIssue({ code: "custom", path: ["mock"], message: "only a fake made by Rovara has a mock set" });
+      if (entry.trust !== "recorded" && entry.recordedOn !== undefined) context.addIssue({ code: "custom", path: ["recordedOn"], message: "only a recorded answer was recorded" });
+      if (entry.trust !== "recorded" && entry.recording !== undefined) context.addIssue({ code: "custom", path: ["recording"], message: "only a recorded answer has a recording" });
       if (entry.trust === "recorded" && entry.recordedOn === undefined && entry.recording === undefined) context.addIssue({ code: "custom", path: ["recordedOn"], message: "a recorded answer states when it was recorded" });
     })
     : dependency;
@@ -944,6 +984,16 @@ export interface EvidenceV2Context {
   level: EvidencePackV2["level"];
   result: EvidencePackV2["result"];
   repositories?: EvidencePackV2["candidate"]["repositories"];
+}
+
+/**
+ * A v1 environment's dependency row as a v2 pack's row, with its trust class (`evidenceDependencyTrustClass`: a recording is Recorded, never Real; a fake that made up answers is Made by Rovara and states no recording
+ * day). A v1 row has no kind, so the caller may name one (`other` by default).
+ */
+export function evidenceDependencyV1ToV2(row: EvidenceDependency, kind = "other", pinned?: { makesUpAnswers?: boolean | undefined }): NonNullable<EvidencePackV2["dependencies"]>[number] {
+  const recordedOn = row.recordedAt?.slice(0, 10);
+  const trust = evidenceDependencyTrustClass(row, pinned);
+  return { name: row.name, kind, backing: row.backing, label: row.label, trust, ...(recordedOn === undefined || row.label !== "recorded_fake" || trust !== "recorded" ? {} : { recordedOn }) };
 }
 
 /** A v1 pack as a v2 pack, with everything v1 held kept (`evidencePackV2ToV1` gives the same v1 pack back). Validate the result with `EvidencePackV2Schema` before storing it. */

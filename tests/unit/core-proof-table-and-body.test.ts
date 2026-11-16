@@ -4,7 +4,7 @@
 // (Port lane L7b: the cases that went through Cloud's broker and the worker's own test-proof writer are not here; the proofs below are written out by hand in the worker's format.)
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { ProofTableViewSchema, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
+import { ProofTableViewSchema, checkCountsTowardProof, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { REVIEW_SAME_MODEL_NOTE } from "../../packages/broker/src/core/proof/review-model-lines.js";
 import { PULL_REQUEST_BODY_MAX_BYTES } from "../../packages/broker/src/core/proof/pull-request-body.js";
@@ -713,6 +713,13 @@ describe("192a agent-written replies", () => {
   ] as const)("golden row for %s", (result, state, reason, words) => {
     const table = buildProofTable(input({ realModelRun: result === undefined ? undefined : realRun(result) }));
     expect(rowOf(table, "1.1")).toEqual({ claimId: "1.1", requirement: "The retry waits longer each time.", evidence: [{ kind: "check", label: `${words}: Unit tests`, state, ...(reason === undefined ? {} : { notProvenReason: reason }) }], result: state });
+  });
+  // TE-A3 rework (a): the contract's counting rule gives every reply case the Proof table's own answer (one rule, one set of words).
+  it.each([
+    [undefined, "unconfirmed"], ["not_run", "unconfirmed"], ["failed", "disagreed"], ["passed", "confirmed"], ["passed_on_rerun", "confirmed"],
+  ] as const)("the contract counts a task_made reply case exactly when the Proof table proves it (%s)", (result, realModel) => {
+    const row = rowOf(buildProofTable(input({ realModelRun: result === undefined ? undefined : realRun(result) })), "1.1");
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "task_made", realModel })).toBe(row.result === "proven");
   });
   it("keeps marked non-proving checks plain and Passed with no reply reason", () => {
     for (const testProof of [undefined, proofFor(CODE.digest, "does_not_prove"), proofFor(OTHER.digest)]) {
