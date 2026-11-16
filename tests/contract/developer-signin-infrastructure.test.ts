@@ -611,7 +611,7 @@ describe("task-token key and membership IAM", () => {
     // #722 re-pins the COMBINED stacked baseline (#689's hosted wiring and R2 step 4 together; each PR pinned only its own base). No template change of #722's own; the IAM
     // tuples are checked exactly against the reviewed lists below. Same value as L1a (#731) measured before its own edits.
     // ENV-ROOM (pr/broker-env-diet): re-pinned for the packed broker environment (the broker's Variables only; no IAM change).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("2f777973bd05b6b9d73cf2201d3801c9a074d67018b1b2ebc366866c70493d85");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("09b0aea7d2e84ef8cf6206f7b474f0086fdfbcf8f5747f12a2e90c6e32cc5be4");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {

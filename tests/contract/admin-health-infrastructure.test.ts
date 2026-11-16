@@ -211,6 +211,9 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/task-flow/owner-note.ts",
       // Task actions (decision 201): who accepted a review finding and by what way (one FINDING_ACCEPT row per decision, read when the pull request description is made), kept 400 days like the decision records and then expired.
       "packages/broker/src/core/task-flow/finding-accept.ts",
+      // Batch merge (#733 L2a, #754 M7): a step-up claim row expires after its token's own expiry plus a short keep (hosted-approvers.ts); the after-merge watcher's watch and action rows
+      // expire after their kept days (after-merge/watch.ts names the store's TTL attribute, defaulting to this one). Neither is a durable record.
+      "packages/broker/src/core-host/hosted-approvers.ts", "packages/broker/src/core/after-merge/watch.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
