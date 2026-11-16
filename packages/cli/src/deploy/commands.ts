@@ -67,11 +67,15 @@ export interface DeployCliDependencies {
 // `agentx init`'s own InitAnswersSchema (install-state.ts), so both answer files agree on what a
 // valid region, account, identity, models or images answer looks like.
 
-const GithubAnswersSchema = z
+/** Install answers must name the GitHub App. Upgrade answers may leave `appId` out: the upgrade then
+ * keeps the control plane's deployed GitHubAppId, including an empty one (the broker then reads the
+ * App id from the private-key secret). An empty string is refused in both modes, so an answers file
+ * can never reset a deployed App id by accident. */
+const githubAnswersSchema = (mode: "install" | "upgrade") => z
   .object({
     // Still accepted from answer files written before #123; the control plane no longer takes them.
     account: z.string().min(1).optional(),
-    appId: z.string().min(1),
+    appId: mode === "install" ? z.string().min(1) : z.string().min(1).optional(),
     installationId: z.string().min(1).optional(),
     privateKeySecretArn: z.string().min(1),
     credentialRef: z.string().min(1).optional(),
@@ -95,7 +99,7 @@ function requireOidcAdminAndClient(answers: { identity: z.infer<typeof IdentityA
   }
 }
 
-export const DeployAnswersSchema = z
+const deployAnswersSchema = (mode: "install" | "upgrade") => z
   .object({
     env: EnvironmentNameSchema,
     region: z.string().regex(REGION_PATTERN, "region must look like us-east-1"),
@@ -103,7 +107,7 @@ export const DeployAnswersSchema = z
     partition: z.string().min(1).optional(),
     models: ModelsAnswersSchema,
     identity: IdentityAnswersSchema,
-    github: GithubAnswersSchema,
+    github: githubAnswersSchema(mode),
     permissionsBoundaryArn: z.string().min(1).optional(),
     operatorPrincipalArn: z.string().min(1).optional(),
     images: ImagesAnswersSchema.optional(),
@@ -112,6 +116,11 @@ export const DeployAnswersSchema = z
   })
   .strict()
   .superRefine(requireOidcAdminAndClient);
+
+/** The install answers file: every field an install needs, strictly. */
+export const DeployAnswersSchema = deployAnswersSchema("install");
+/** The upgrade answers file: the same, except github.appId may be left out to keep the deployed one. */
+export const UpgradeDeployAnswersSchema = deployAnswersSchema("upgrade");
 
 /** The first zod issue's path and message, so a schema failure always names the field. */
 function firstIssueMessage(prefix: string, error: z.ZodError): string {
@@ -147,7 +156,7 @@ export function deployImagesAnswers(images: { worker?: string | undefined; slack
   };
 }
 
-function toDeployAnswers(parsed: z.infer<typeof DeployAnswersSchema>): DeployAnswers {
+function toDeployAnswers(parsed: z.infer<typeof UpgradeDeployAnswersSchema>): DeployAnswers {
   const images = deployImagesAnswers(parsed.images);
   return {
     env: parsed.env,
@@ -158,7 +167,7 @@ function toDeployAnswers(parsed: z.infer<typeof DeployAnswersSchema>): DeployAns
     identity: deployIdentityAnswers(parsed.identity),
     github: {
       ...(parsed.github.account === undefined ? {} : { account: parsed.github.account }),
-      appId: parsed.github.appId,
+      ...(parsed.github.appId === undefined ? {} : { appId: parsed.github.appId }),
       ...(parsed.github.installationId === undefined ? {} : { installationId: parsed.github.installationId }),
       privateKeySecretArn: parsed.github.privateKeySecretArn,
       ...(parsed.github.credentialRef === undefined ? {} : { credentialRef: parsed.github.credentialRef }),
@@ -172,8 +181,9 @@ function toDeployAnswers(parsed: z.infer<typeof DeployAnswersSchema>): DeployAns
 }
 
 /** Reads and validates `--answers`, throwing CONFIG_INVALID naming the field on any failure (an
- * unreadable file, invalid JSON, or a schema mismatch). */
-export async function loadDeployAnswers(path: string): Promise<DeployAnswers> {
+ * unreadable file, invalid JSON, or a schema mismatch). The install schema is the default; only
+ * `mode: "upgrade"` lets github.appId be left out (keep the deployed GitHubAppId). */
+export async function loadDeployAnswers(path: string, options: { mode?: "install" | "upgrade" } = {}): Promise<DeployAnswers> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
@@ -186,7 +196,7 @@ export async function loadDeployAnswers(path: string): Promise<DeployAnswers> {
   } catch {
     throw agentXError("CONFIG_INVALID", `answers file ${path} is not valid JSON`);
   }
-  const parsed = DeployAnswersSchema.safeParse(json);
+  const parsed = (options.mode === "upgrade" ? UpgradeDeployAnswersSchema : DeployAnswersSchema).safeParse(json);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", firstIssueMessage(`answers file ${path} is invalid`, parsed.error));
   return toDeployAnswers(parsed.data);
 }
@@ -232,6 +242,8 @@ export function progressLine(event: DeployEvent): string {
       return `deployed ${event.stackName}`;
     case "kept":
       return `kept ${event.stackName}: ${event.kept.join(", ") || "nothing"}${event.dropped.length === 0 ? "" : `; not in this release, so not sent: ${event.dropped.join(", ")}`}`;
+    case "settings-legacy-keys-dropped":
+      return `settings ${event.env}: dropped the legacy keys ${event.keys.join(", ")}`;
   }
 }
 
@@ -551,7 +563,7 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
     throw agentXError("CONFIG_INVALID", "--engine cdk has no change set review; pass --yes to deploy with cdk");
   }
 
-  const answers = await loadDeployAnswers(options.answersFile);
+  const answers = await loadDeployAnswers(options.answersFile, { mode: options.mode });
   if (options.expectedEnv !== undefined && options.expectedEnv !== answers.env) {
     throw agentXError("CONFIG_INVALID", `--env ${options.expectedEnv} does not match the answers file's environment ${answers.env}`);
   }

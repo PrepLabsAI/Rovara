@@ -77,11 +77,11 @@ describe("review routing regressions", () => {
       const full = { format, total: all.length, passed: all.length, failed: 0, skipped: 0, errored: 0, tests: all.map((name) => ({ name, status: "passed" as const })) };
       return { names: all, before: full, after: { ...full, tests: [], total: 0, passed: 0 } };
     };
-    // Scaling check: the cost must grow no faster than the long id (the largest is the old 1,000,000 characters).
+    // Scaling check: the cost must grow no faster than the long id. The timed 8N input is 256 KiB (about 32,000 characters; it appears in both reports), so it stays in CPU cache; the old 1,000,000 characters are checked once below.
     expectLinearScaling((longLength) => {
       const { before, after } = reports(longLength);
       return () => absentOnNew(before, after);
-    }, { n: 125_000, label: `absentOnNew with a long ${format} id` });
+    }, { n: 16_384, unitBytes: 2, label: `absentOnNew with a long ${format} id` });
     const { names, before, after } = reports(1_000_000);
     const shown = absentOnNew(before, after)!;
     expect(shown.count).toBe(names.length);

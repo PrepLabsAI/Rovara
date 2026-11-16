@@ -106,9 +106,9 @@ describe("modelRecordKey", () => {
     const base = chatFrame(world);
     const big = withBody(base, { model: "m", messages: [{ role: "user", content: "x".repeat(1024 * 1024) }] });
     expect(keyOf(big)).toMatch(/^[a-f0-9]{64}$/u);
-    // The cost must not grow faster than the body (128 KiB -> 1 MiB, the original size).
+    // The cost must not grow faster than the body (32,000 -> 256,000 characters: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1 MiB body is keyed once, un-timed, above).
     let key = "";
-    expectLinearScaling((size) => { const frame = withBody(base, { model: "m", messages: [{ role: "user", content: "x".repeat(size) }] }); return () => { key = keyOf(frame); }; }, { n: 128 * 1024, label: "model record key of a large body" });
+    expectLinearScaling((size) => { const frame = withBody(base, { model: "m", messages: [{ role: "user", content: "x".repeat(size) }] }); return () => { key = keyOf(frame); }; }, { n: 32_000, label: "model record key of a large body" });
     expect(key).toMatch(/^[a-f0-9]{64}$/u);
   });
 

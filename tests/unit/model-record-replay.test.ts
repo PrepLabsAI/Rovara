@@ -313,10 +313,10 @@ describe.each(["memory", "file"] as StoreKind[])("record and replay on the %s st
 
   it("handles a 1 MB answer fast, on both record and replay, byte-identical", async () => {
     const answer = (size: number) => JSON.stringify({ choices: [{ message: { content: "y".repeat(size) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
-    // Scaling check: recording then replaying an answer must cost no more than linear in its size (the largest is the old 1 MB). Each run starts from an empty store, so each records afresh.
+    // Scaling check: recording then replaying an answer must cost no more than linear in its size (the 8N input stays at or under 256 KiB, counting the body, its recording and its replay, so it stays in CPU cache; the full 1 MB answer is recorded and replayed once, un-timed, below). Each run starts from an empty store, so each records afresh.
     let recorded!: Awaited<ReturnType<typeof drain>>;
     let replayed!: Awaited<ReturnType<typeof drain>>;
-    await expectLinearScalingAsync((size) => {
+    const roundTrip = (size: number) => {
       const body = answer(size);
       return async () => {
         rig.world.provider.script({ body });
@@ -325,7 +325,9 @@ describe.each(["memory", "file"] as StoreKind[])("record and replay on the %s st
         replayed = await drain(await engine.serve(MATCHING(rig)));
         await engine.endTask();
       };
-    }, { n: 128 * 1024, label: `recording and replaying a large answer (${kind})` });
+    };
+    await expectLinearScalingAsync(roundTrip, { n: 10_000, unitBytes: 3, label: `recording and replaying a large answer (${kind})` });
+    await roundTrip(1024 * 1024)();
     expect(replayed.body).toBe(recorded.body);
     expect(recorded.body.length).toBeGreaterThan(1024 * 1024);
   });

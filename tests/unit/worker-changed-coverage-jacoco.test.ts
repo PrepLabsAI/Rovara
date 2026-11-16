@@ -50,7 +50,7 @@ describe("looksLikeJacocoXml", () => {
       expectLinearScaling((comments) => {
         const hostile = build(comments);
         return () => looksLikeJacocoXml(hostile);
-      }, { n: 4, label: `looksLikeJacocoXml on ${label}` });
+      }, { n: 4, unitBytes: 7, label: `looksLikeJacocoXml on ${label}` });
     }
     expect(looksLikeJacocoXml("<!---->".repeat(1000) + "x")).toBe(false);
     expect(looksLikeJacocoXml("<!---->".repeat(30) + "x")).toBe(false);
@@ -61,7 +61,7 @@ describe("looksLikeJacocoXml", () => {
     expectLinearScaling((comments) => {
       const hostile = "<!---->".repeat(comments) + "x";
       return () => parseLineCoverage(hostile, { javaSourceRoots: ROOTS });
-    }, { n: 4, label: "parseLineCoverage on empty comments" });
+    }, { n: 4, unitBytes: 7, label: "parseLineCoverage on empty comments" });
     expect(parseLineCoverage("<!---->".repeat(1000) + "x", { javaSourceRoots: ROOTS })).toBeUndefined();
   });
 });

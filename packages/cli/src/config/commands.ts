@@ -47,6 +47,9 @@ export interface ConfigServices {
 
 export interface ConfigRow { key: string; value: string; where: string; description: string }
 
+/** The line a settings write prints when it dropped the old monolith's legacy keys (names only). */
+const legacyKeysNote = (services: ConfigServices, env: string) => (keys: string[]) => services.write(`settings ${env}: dropped the legacy keys ${keys.join(", ")}`);
+
 const notInstalled = (env: string) => agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
 
 /** The deployment's live environment name; before agentx env adopt it has no settings record, and it is still the legacy deployment. */
@@ -159,7 +162,7 @@ async function recordModel(services: ConfigServices, env: string, role: ModelRol
   try {
     const current = await installed(services, env);
     if (current.models[role] !== modelId) {
-      await writeEnvironmentSettings(services.store, { ...current, models: { ...current.models, [role]: modelId }, updatedAt: new Date(services.now()).toISOString() });
+      await writeEnvironmentSettings(services.store, { ...current, models: { ...current.models, [role]: modelId }, updatedAt: new Date(services.now()).toISOString() }, { onLegacyKeysDropped: legacyKeysNote(services, env) });
     }
     what = "the install answers";
     const answers = await readInstallAnswers(services.store, env);
@@ -488,7 +491,7 @@ async function changeAlertAddress(
   // Only once the new address is subscribed: until then the secret keeps the old one.
   if (target.kind === "webhook") await storeAlertWebhook(services.secrets, secretName, target.endpoint);
   const current = await installed(services, env);
-  await writeEnvironmentSettings(services.store, { ...current, alertAddress: shown, updatedAt: new Date(services.now()).toISOString() });
+  await writeEnvironmentSettings(services.store, { ...current, alertAddress: shown, updatedAt: new Date(services.now()).toISOString() }, { onLegacyKeysDropped: legacyKeysNote(services, env) });
   const answers = await readInstallAnswers(services.store, env);
   if (answers !== undefined) {
     await writeInstallAnswers(services.store, { ...answers, alert: target.kind === "email" ? { kind: "email", address: target.address } : { kind: "webhook", display: target.display, secretName } });

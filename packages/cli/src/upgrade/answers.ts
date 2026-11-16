@@ -3,7 +3,9 @@
 // settings do not hold (the GitHub App, your own OIDC provider's admin claim, the operator
 // principal). Operator-set parameters are carried by deployEnvironment (Task 1), not here, and the
 // callback signing key comes from Secrets Manager.
+import { writeFile } from "node:fs/promises";
 import { agentXError } from "@agentx/contracts";
+import { UpgradeDeployAnswersSchema } from "../deploy/commands.js";
 import type { DeployAnswers } from "../deploy/deploy-environment.js";
 import type { StackReader } from "../environments/adopt.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
@@ -60,4 +62,45 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
     ...(operatorPrincipalArn === undefined || operatorPrincipalArn === "" ? {} : { operatorPrincipalArn }),
     ...(images === undefined ? {} : { images }),
   };
+}
+
+/**
+ * `agentx upgrade --answers-from-deployed <file>`: the answers `agentx deploy --mode upgrade --answers`
+ * reads, from the environment itself, without deploying anything and for either engine. The answers
+ * come from upgradeAnswers (the settings and the deployed stacks), the same answers `agentx upgrade`
+ * deploys with. The operator's settings (budget, posted messages, ...) are not written: an upgrade
+ * keeps each deployed one (OPERATOR_PARAMETERS), and drops one the target no longer declares. An empty deployed GitHubAppId is written as no appId at all: an
+ * upgrade then keeps the deployed (empty) one. The file is checked against the upgrade answers schema
+ * before it is written, and an existing file is never overwritten. No secret is in it: the callback
+ * signing key and every provider key stay in Secrets Manager (only ARNs are written).
+ */
+export async function writeAnswersFromDeployed(input: {
+  file: string; settings: EnvironmentSettings; stacks: StackReader; images?: { worker?: string; slack?: string };
+}): Promise<{ file: string }> {
+  const answers = await upgradeAnswers({ settings: input.settings, stacks: input.stacks, ...(input.images === undefined ? {} : { images: input.images }) });
+  const { appId, ...github } = answers.github;
+  const file = {
+    env: answers.env,
+    region: answers.region,
+    account: answers.account,
+    ...(answers.partition === undefined ? {} : { partition: answers.partition }),
+    models: answers.models,
+    identity: answers.identity,
+    github: { ...(appId === undefined || appId === "" ? {} : { appId }), ...github },
+    ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
+    ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
+    ...(answers.images === undefined ? {} : { images: answers.images }),
+  };
+  const checked = UpgradeDeployAnswersSchema.safeParse(file);
+  if (!checked.success) {
+    throw agentXError("CONFIG_INVALID", `the answers read from environment ${answers.env} do not form valid upgrade answers (${checked.error.issues[0]?.path.join(".") ?? "?"}); nothing was written`);
+  }
+  try {
+    await writeFile(input.file, `${JSON.stringify(file, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") throw agentXError("CONFIG_INVALID", `${input.file} already exists; choose a new file`);
+    throw agentXError("CONFIG_INVALID", `${input.file} could not be written (${typeof code === "string" && /^[A-Z]+$/.test(code) ? code : "error"}); nothing was written`);
+  }
+  return { file: input.file };
 }

@@ -118,17 +118,21 @@ describe("workspace call limits", () => {
 
 describe("bounded workspace patterns", () => {
   it("rejects the review's 127 KiB pattern bomb quickly", async () => {
-    // A scaling check, not a wall-clock bound: the same bomb (n folders, n positive and n negative patterns) at an eighth of the review's size and at its full size
-    // (4000) may take about eight times as long to refuse, never sixty-four.
+    // A scaling check, not a wall-clock bound: the same bomb (n folders, n positive and n negative patterns; both sizes are over the 256-pattern limit) at 130 folders and at eight times that
+    // (about 190 bytes a folder, so the 8N input stays at or under 256 KiB and stays in CPU cache) may take about eight times as long to refuse, never sixty-four. The review's full size (4000) is refused once, un-timed.
     let outcome: unknown;
-    await expectLinearScalingAsync((count) => {
+    const bomb = (count: number) => {
       const files: Files = {};
       const patterns: string[] = [];
       for (let n = 0; n < count; n += 1) { files[`d/x${String(n)}/package.json`] = node; patterns.push(`  - 'd/x${String(n)}'`); }
       for (let n = 0; n < count; n += 1) patterns.push(`  - '!d/zz${String(n)}/**'`);
       files["pnpm-workspace.yaml"] = `packages:\n${patterns.join("\n")}\n`;
       return async () => { outcome = await declaration(files).then(() => undefined, (error: unknown) => error); };
-    }, { n: 500, label: "pattern bomb refusal" });
+    };
+    await expectLinearScalingAsync(bomb, { n: 130, unitBytes: 190, label: "pattern bomb refusal" });
+    expect(outcome).toBeInstanceOf(Error);
+    outcome = undefined;
+    await bomb(4000)();
     expect(outcome).toBeInstanceOf(Error);
   }, 60_000);
 
@@ -141,12 +145,12 @@ describe("bounded workspace patterns", () => {
       files["pnpm-workspace.yaml"] = `packages: ${JSON.stringify(patterns)}`;
       return files;
     };
-    // The time must grow about eight times from 500 to 4000 folders, never sixty-four (a scaling check, not a wall-clock bound).
+    // The time must grow about eight times from 300 to 2400 folders (about 100 bytes a folder, so the 8N input stays at or under 256 KiB and stays in CPU cache), never sixty-four (a scaling check, not a wall-clock bound). The full 4000 folders run once below.
     let roots: string[] | undefined;
     await expectLinearScalingAsync((folders) => {
       const files = filesOf(folders);
       return async () => { roots = await declaration(files); };
-    }, { n: 500, label: "prefix-pruned patterns against folders" });
+    }, { n: 300, unitBytes: 100, label: "prefix-pruned patterns against folders" });
     expect(roots).toHaveLength(128);
     // The work counter: with the prefix seek, 4000 folders cost far fewer than 20000 pattern tests.
     const files = filesOf(4000);

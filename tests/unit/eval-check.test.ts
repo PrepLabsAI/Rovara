@@ -31,9 +31,9 @@ describe("eval evidence", () => {
     const text = "x".repeat(1_048_576);
     const result = evalCheckResult({ roundKind: "check_unsealed", questions: [{ ...row("__proto__"), first: answer(false, text) }], changedPromptCalls: 1, subsetSupported: false });
     expect(result.questions[0]!.newAnswers[0]!.length).toBeLessThan(1100);
-    // The cost must not grow faster than the answer (131,072 -> 1,048,576 characters, the original size).
+    // The cost must not grow faster than the answer (32,768 -> 262,144 characters: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1,048,576 characters are checked once above).
     let scaled = result;
-    expectLinearScaling((size) => { const questions = [{ ...row("__proto__"), first: answer(false, "x".repeat(size)) }]; return () => { scaled = evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1, subsetSupported: false }); }; }, { n: 131_072, label: "eval check with a long answer" });
+    expectLinearScaling((size) => { const questions = [{ ...row("__proto__"), first: answer(false, "x".repeat(size)) }]; return () => { scaled = evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1, subsetSupported: false }); }; }, { n: 32_768, label: "eval check with a long answer" });
     expect(scaled.questions[0]!.newAnswers[0]!.length).toBeLessThan(1100);
     const questions = Array.from({ length: 1000 }, (_, i) => row(String(i)));
     expect(evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1 }).label).toBe("No regression measured (eval)");
@@ -77,10 +77,10 @@ it("never echoes malformed reasons or stored sentences, even with a megabyte of 
     expect(evalContracts.evalNotTestedEntry({ ...result, notRun: { reason: reason as never, sentence: hostile } })).toEqual({ kind: "check", id: "eval", what: "Eval comparison", reason: "question results are incomplete or invalid" });
   }
   for (const value of [null, undefined, {}, { kind: "eval", outcome: "other" }]) expect(evalContracts.evalNotTestedEntry(value as never)).toBeUndefined();
-  // The cost of refusing the hostile text must not grow faster than it does (5,000 -> 40,000 repeats, the original size).
+  // The cost of refusing the hostile text must not grow faster than it does (800 -> 6,400 repeats of 36 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 40,000 repeats are checked once above).
   expectLinearScaling((repeats) => { const text = "@secret [x](https://private.invalid)".repeat(repeats); return () => {
     const result = evalNotRunResult({ roundKind: "check_unsealed", reason: text as never });
     JSON.stringify(result);
     evalContracts.evalNotTestedEntry({ ...result, notRun: { reason: text as never, sentence: text } });
-  }; }, { n: 5_000, label: "refusing hostile eval not-run text" });
+  }; }, { n: 800, unitBytes: 36, label: "refusing hostile eval not-run text" });
 });

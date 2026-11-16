@@ -60,9 +60,9 @@ describe("company adapter", () => {
   it("bounds oversized input before splitting it", async () => {
     const {store, service} = world();
     await expect(store.read(A, {awsSecret:"a/".repeat(500_000)})).rejects.toThrow("the secret reference is not valid");
-    // Refusing it must not cost more as the input grows (62,500 -> 500,000 repeats, the original size).
+    // Refusing it must not cost more as the input grows (N stays small so 8N is at most 256 KiB and stays in CPU cache; the full 500,000 repeats was refused once above).
     const refusals: unknown[] = [];
-    await expectLinearScalingAsync((repeats) => { const ref = {awsSecret:"a/".repeat(repeats)}; return async () => { try { await store.read(A, ref); refusals.push("accepted"); } catch (error) { refusals.push(error instanceof Error ? error.message : String(error)); } }; }, {n: 62_500, label: "refusing an oversized secret reference"});
+    await expectLinearScalingAsync((repeats) => { const ref = {awsSecret:"a/".repeat(repeats)}; return async () => { try { await store.read(A, ref); refusals.push("accepted"); } catch (error) { refusals.push(error instanceof Error ? error.message : String(error)); } }; }, {n: 16_384, unitBytes: 2, label: "refusing an oversized secret reference"});
     expect(new Set(refusals)).toEqual(new Set(["the secret reference is not valid"]));
     expect(service.reads).toEqual([]);
   });

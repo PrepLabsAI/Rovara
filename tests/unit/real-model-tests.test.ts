@@ -38,23 +38,26 @@ describe("changed AI selection", () => {
     expect(selectChangedAiTests(raw)).toMatchObject({ status: "not_run", reason: "invalid_input" });
   });
   it("bounds the total inventory and bytes without quadratic matching", () => {
-    // Refusing too many rows costs nothing per row: 10,001 rows, then eight times as many (the rows are built before the timing).
+    // Refusing too many rows costs nothing per row: 10,001 rows, then eight times as many (the rows are built before the timing). The refusal is on the row count alone, before any row is read, so the timed arrays are sparse (no row is built: nothing that grows with n sits in memory, unitBytes 0); the real rows, 10,001 and 80,008 of them, are refused once, un-timed, below.
     const refusals = new Map<number, ReturnType<typeof selectChangedAiTests>>();
     expectLinearScaling((count) => {
-      const raw = { ...world().input.selection, tests: Array.from({ length: count }, (_, i) => test(String(i))) };
+      const raw = { ...world().input.selection, tests: new Array<ScriptedAiTest>(count) };
       return () => { refusals.set(count, selectChangedAiTests(raw)); };
-    }, { n: 10_001, label: "real model tests: too many rows" });
+    }, { n: 10_001, unitBytes: 0, label: "real model tests: too many rows" });
     expect(refusals.get(10_001)).toMatchObject({ status: "not_run", reason: "input_limit" });
     expect(refusals.get(80_008)).toMatchObject({ status: "not_run", reason: "input_limit" });
+    for (const count of [10_001, 80_008]) expect(selectChangedAiTests({ ...world().input.selection, tests: Array.from({ length: count }, (_, i) => test(String(i))) })).toMatchObject({ status: "not_run", reason: "input_limit" });
   });
   it("refuses one very long test name without work that grows faster than its length", () => {
-    // 125,000, then 1,000,000 characters.
+    // 32,000, then 256,000 characters (the 8N input stays at or under 256 KiB so it stays in CPU cache); the 1,000,000-character name is refused once, un-timed.
     const longNames = new Map<number, ReturnType<typeof selectChangedAiTests>>();
+    const nameOf = (length: number) => ({ ...world().input.selection, tests: [test("x".repeat(length))] });
     expectLinearScaling((length) => {
-      const raw = { ...world().input.selection, tests: [test("x".repeat(length))] };
+      const raw = nameOf(length);
       return () => { longNames.set(length, selectChangedAiTests(raw)); };
-    }, { n: 125_000, label: "real model tests: one huge name" });
-    expect(longNames.get(125_000)).toMatchObject({ status: "not_run" });
+    }, { n: 32_000, label: "real model tests: one huge name" });
+    longNames.set(1_000_000, selectChangedAiTests(nameOf(1_000_000)));
+    expect(longNames.get(32_000)).toMatchObject({ status: "not_run" });
     expect(longNames.get(1_000_000)).toMatchObject({ status: "not_run" });
   });
 });
@@ -155,15 +158,17 @@ describe("real model boundary controls", () => {
     expect(w.reserve.mock.calls[0]![0]).toMatchObject({ calls: 100, costMicros: 100_000 });
   });
   it("resolves 10,000 combined rows and files within a bounded time", () => {
-    // 625 changes and 625 tests, then eight times as many (5,000 and 5,000 = 10,000 rows, 10,000 files): the matching is indexed, so the work grows linearly.
+    // 90 changes and 90 tests, then eight times as many (about 350 bytes a pair, so the 8N input stays at or under 256 KiB and stays in CPU cache): the matching is indexed, so the work grows linearly. The full 5,000 and 5,000 = 10,000 rows, 10,000 files run once, un-timed, below.
     const outcomes = new Map<number, { result: ReturnType<typeof selectChangedAiTests>; last: ScriptedAiTest }>();
-    expectLinearScaling((count) => {
+    const rowsOf = (count: number) => {
       const changes = Array.from({ length: count }, (_, i) => ({ path: `src/m${i}.ts`, status: "modified" as const }));
       const tests = Array.from({ length: count }, (_, i) => ({ ...test(String(i), 0), modelFiles: [changes[i]!.path] }));
       tests[count - 1]!.modelCalls = 1;
       return () => { outcomes.set(count, { result: selectChangedAiTests({ changes, tests, attribution: "test" }), last: tests[count - 1]! }); };
-    }, { n: 625, label: "real model tests: 10,000 rows and files" });
-    for (const count of [625, 5000]) expect(outcomes.get(count)!.result).toMatchObject({ status: "selected", tests: [outcomes.get(count)!.last] });
+    };
+    expectLinearScaling(rowsOf, { n: 90, unitBytes: 350, label: "real model tests: 10,000 rows and files" });
+    rowsOf(5000)();
+    for (const count of [90, 5000]) expect(outcomes.get(count)!.result).toMatchObject({ status: "selected", tests: [outcomes.get(count)!.last] });
   });
   it("refuses aggregate bytes and files, even though every row fits", () => {
     const input = world().input.selection;
@@ -314,13 +319,15 @@ describe("stage ceilings", () => {
 describe("untrusted boundary budgets", () => {
   it("bounds tier reasons before parsing and refuses a missing runner", async () => {
     const w = world();
-    // A 100,000-reason tier is refused on its length, before its reasons are parsed: the cost does not grow with the list (12,500, then 100,000).
+    // A 100,000-reason tier is refused on its length, before its reasons are parsed: the cost does not grow with the list (500, then 4,000 reasons of about 60 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; both are over the 100-reason limit; the full 100,000 runs once, un-timed).
     const reasons = new Map<number, string | undefined>();
-    await expectLinearScalingAsync((count) => {
+    const refuseTier = (count: number) => {
       const tier = { reasons: Array.from({ length: count }, () => ({ code: "eval_hint" })) };
       return async () => { reasons.set(count, (await runRealModelTests({ ...w.input, tier })).reason); };
-    }, { n: 12_500, label: "real model tests: a huge tier list" });
-    expect([reasons.get(12_500), reasons.get(100_000)]).toEqual(["invalid_input", "invalid_input"]); expect(w.reserve).not.toHaveBeenCalled();
+    };
+    await expectLinearScalingAsync(refuseTier, { n: 500, unitBytes: 60, label: "real model tests: a huge tier list" });
+    await refuseTier(100_000)();
+    expect([reasons.get(500), reasons.get(4_000), reasons.get(100_000)]).toEqual(["invalid_input", "invalid_input", "invalid_input"]); expect(w.reserve).not.toHaveBeenCalled();
     expect((await runRealModelTests({ ...w.input, run: undefined } as never)).reason).toBe("invalid_input");
   });
   it.each(["../source.ts", "/source.ts", "src\\source.ts", "src/\nsource.ts"])("refuses malformed paths as a whole: %s", path => {

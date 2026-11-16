@@ -13,7 +13,9 @@ export type DeployEvent =
   | { kind: "deploying"; stackName: string }
   | { kind: "deployed"; stackName: string }
   /** An upgrade kept these operator parameters' deployed values; `dropped` names ones this release no longer declares. Names only, never values. */
-  | { kind: "kept"; stackName: string; kept: string[]; dropped: string[] };
+  | { kind: "kept"; stackName: string; kept: string[]; dropped: string[] }
+  /** The settings write dropped these legacy keys (LEGACY_SETTINGS_KEYS) the old monolith stored. Names only. */
+  | { kind: "settings-legacy-keys-dropped"; env: string; keys: string[] };
 
 export interface DeployRequest {
   part: DeployPart;

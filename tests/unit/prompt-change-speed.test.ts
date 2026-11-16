@@ -34,7 +34,9 @@ const workBound = (result: PromptChangeResult) => {
   expect(result.stats).toBeDefined();
   expect(result.stats!.steps).toBeLessThanOrEqual(13 * (result.stats!.bytes + 1) + 10_000);
 };
-const measurePair = (name: string, size: number, make: (n: number) => () => PromptChangeResult, timedN = size / 2) => {
+// timedMake / unitBytes / timedN describe ONLY the timed ratio check: expectLinearScaling refuses an 8N input over 256 KiB (it leaves the CPU cache and CI reads a steady ratio of about 25 for linear code), so the timed
+// check runs on a small input while the deterministic work counts below always run at the full size and 4x.
+const measurePair = (name: string, size: number, make: (n: number) => () => PromptChangeResult, timedN = size / 2, timedMake = make, unitBytes = 1) => {
   const small = make(size); const large = make(size * 4);
   const a = small(); const b = large();
   for (const result of [a, b]) {
@@ -47,24 +49,29 @@ const measurePair = (name: string, size: number, make: (n: number) => () => Prom
   {
     // Time is a scaling check on top of the deterministic work counts above: the same scan at N and at 8N (8N is the old 4N size), fastest of several runs of each,
     // must not cost more than 24 times as much. There is no fixed millisecond bound: a slow runner makes both sizes slower, and the work counts above already refuse super-linear work exactly.
-    const timed = expectLinearScaling(make, { n: timedN, label: `prompt change scan: ${name}` });
+    const timed = expectLinearScaling(timedMake, { n: timedN, unitBytes, label: `prompt change scan: ${name}` });
     console.info(JSON.stringify({ corpus: name, N: timedN, batches: timed.batches, bytesN: a.stats!.bytes, stepsN: a.stats!.steps, steps4N: b.stats!.steps,
       msN: +timed.ms.toFixed(2), ms8N: +timed.msK.toFixed(2), ratio: +timed.ratio.toFixed(2) }));
     return { n: 0, four: 0 };
   }
   return { n: 0, four: 0 };
 };
+// The timed N is 8 KiB (8N = 64 KiB); the work counts above still run at 128 KiB and 512 KiB.
 it.each(corpora)("linear adversarial scan: %s", (name, make) => {
-  measurePair(name, 128 * 1024, make);
+  measurePair(name, 128 * 1024, make, 8 * 1024);
 });
 it("scales actual scanned files and bounds a 5000-file 32 MiB diff", () => {
   const one = "prompt: '" + "a".repeat(MiB - 12) + "'";
   const make = (count: number) => () => detectPromptChanges({ files: Array.from({ length: count }, (_, i) => ({ path: `ai/${i}.ts`, before: "", after: one, wholeFile: true })) }, { stats: true });
-  measurePair("four scanned files", 1, make, 1); // 1 -> 8 one-MiB files
+  // The work counts run on 1 and 4 one-MiB files; the timed ratio uses 2 -> 16 files of 16 KiB (8N = 256 KiB), so the 8N input stays in CPU cache.
+  const smallFile = "prompt: '" + "a".repeat(16 * 1024 - 12) + "'";
+  const makeSmall = (count: number) => () => detectPromptChanges({ files: Array.from({ length: count }, (_, i) => ({ path: `ai/${i}.ts`, before: "", after: smallFile, wholeFile: true })) }, { stats: true });
+  measurePair("four scanned files", 1, make, 2, makeSmall, 16 * 1024);
   const chunk = "x".repeat(6600);
-  const diffOf = (count: number) => Array.from({ length: count }, (_, i) => `diff --git a/${i}.ts b/${i}.ts\n@@ -1 +1 @@\n-old\n+${chunk}\n`).join("");
-  // The big diff is a scaling check too (625 -> 5000 files; the work caps at 32 MiB), then the full-size result is checked once.
-  expectLinearScaling((count) => { const diff = diffOf(count); return () => detectPromptChangesInDiff(diff); }, { n: 625, label: "5000-file diff" });
+  const diffOf = (count: number, body = chunk) => Array.from({ length: count }, (_, i) => `diff --git a/${i}.ts b/${i}.ts\n@@ -1 +1 @@\n-old\n+${body}\n`).join("");
+  // The big diff is a scaling check too (78 -> 624 small files, 8N = about 200 KiB so it stays in CPU cache), then the full-size 5000-file 32 MiB result is checked once.
+  const smallChunk = "x".repeat(200);
+  expectLinearScaling((count) => { const diff = diffOf(count, smallChunk); return () => detectPromptChangesInDiff(diff); }, { n: 78, unitBytes: 260, label: "624-file diff" });
   expect(detectPromptChangesInDiff(diffOf(5000)).report.coverage).toBe("partial");
 });
 it("long ancestor identifiers cannot multiply token work", () => {

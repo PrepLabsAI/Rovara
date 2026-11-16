@@ -122,7 +122,7 @@ describe("proofHolds: scripted AI replies (DEC 192a)", () => {
         result = hold({ proof: proof(items), scriptedReplies });
         lines = cases.map(([input]) => proofHoldLine(hold({ ...input, scriptedReplies: { unit: hostile } }).reasons));
       };
-    }, { n: 25, label: "proof hold with hostile origin text" });
+    }, { n: 25, unitBytes: 100, label: "proof hold with hostile origin text" }); // 8N = 200 items of about 100 bytes (the 1 MB hostile string is one shared constant)
     expect(result).toMatchObject({ holds: false, provenCount: 200, proofBasis: "scripted_ai_replies" });
     expect(JSON.stringify(result)).not.toContain("example.invalid");
     expect(lines).toEqual(cases.map(([, expected]) => expected));
@@ -252,11 +252,12 @@ describe("Round 2 M2: only explicit assertion proof counts", () => {
     expect(hold({ proof: proof(Array.from({ length: 200 }, () => PROVES)) }).provenCount).toBe(200);
     expect(hold({ proof: proof(Array.from({ length: 201 }, () => PROVES)) })).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
     // A million rows are refused on their count: the cost must not grow with the size (a scaling check, not a wall-clock bound).
-    let refused: ReturnType<typeof hold> | undefined;
+    // The timed N is small so the 8N array (8 bytes per row) stays at or under 256 KiB and in CPU cache; the full million rows are checked once, un-timed.
     expectLinearScaling((count) => {
       const many = new Array<TestProofItem>(count).fill(PROVES);
-      return () => { refused = hold({ proof: proof(many) }); };
-    }, { n: 125_000, label: "proof hold refuses oversized rows" });
+      return () => { hold({ proof: proof(many) }); };
+    }, { n: 4_096, unitBytes: 8, label: "proof hold refuses oversized rows" });
+    const refused = hold({ proof: proof(new Array<TestProofItem>(1_000_000).fill(PROVES)) });
     expect(refused).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
   });
 });

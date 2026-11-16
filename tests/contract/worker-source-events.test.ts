@@ -252,14 +252,14 @@ describe("the text guard and JSON (ME-17: runs split across newlines inside JSON
   });
   it("takes linear time on a long run of backslashes (no pathological backtracking)", async () => {
     const guard = await guardOf(SOURCE);
-    // Scaling check: the cost must grow no faster than the input (the largest size is the old 2 x 200,000 backslashes).
+    // Scaling check: the cost must grow no faster than the input (8N stays at or under 256 KiB so it stays in CPU cache; the full 2 x 200,000 backslashes is checked once below).
     let output = "";
     expectLinearScaling((half) => {
       const hostile = `${"\\".repeat(half)}x ${"\\".repeat(half)}`;
       return () => { output = guard.redact(hostile); };
-    }, { n: 25_000, label: "the text guard on a long run of backslashes" });
+    }, { n: 16_000, unitBytes: 2, label: "the text guard on a long run of backslashes" });
+    expect(output).toBe(`${"\\".repeat(128_000)}x ${"\\".repeat(128_000)}`);
     const hostile = `${"\\".repeat(200_000)}x ${"\\".repeat(200_000)}`;
-    expect(output).toBe(hostile);
     expect(guard.redact(hostile)).toBe(hostile);
   });
   it("fix round: a run split across two strings of a JSON array or object is removed and the JSON still parses (the whole of each touched string goes)", async () => {

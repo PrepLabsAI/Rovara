@@ -50,8 +50,8 @@ describe("real model artifact", () => {
     expect(line).not.toMatch(/\[|<b>|@person|#123|https:\/\/example|\n|\ufe0f/u);
   });
   it("refuses a megabyte without echo or unbounded work", () => {
-    // A scaling check, not a wall-clock bound: refusing a longer string must not cost more than linearly more (8 x 125,000 = the original 1,000,000 characters).
-    expectLinearScaling((n) => { const hostile = { ...result(), model: "x".repeat(n) }; return () => realModelCheckLine(hostile); }, { n: 125_000, label: "realModelCheckLine on a huge model name" });
+    // A scaling check, not a wall-clock bound: refusing a longer string must not cost more than linearly more (8N stays at or under 256 KiB so it stays in CPU cache; the full 1,000,000 characters is checked once below).
+    expectLinearScaling((n) => { const hostile = { ...result(), model: "x".repeat(n) }; return () => realModelCheckLine(hostile); }, { n: 32_768, label: "realModelCheckLine on a huge model name" });
     expect(realModelCheckLine({ ...result(), model: "x".repeat(1_000_000) })).toBe("Real model check: not run: real model results could not be read.");
   });
 });
@@ -95,8 +95,8 @@ describe("TE-192a reference reader", () => {
       Object.defineProperty(list, 0, { get: () => { throw new Error("must not visit"); } });
       return list;
     };
-    // A scaling check, not a wall-clock bound: refusing a longer array must not cost more than linearly more (8 x 12,500 = the original 100,000 items).
-    expectLinearScaling((n) => { const hostile = run(oversizedOf(n)); return () => RealModelCheckSchema.safeParse(hostile); }, { n: 12_500, label: "RealModelCheckSchema on a huge items array" });
+    // A scaling check, not a wall-clock bound: refusing a longer array must not cost more than linearly more (unitBytes 8 is a pointer per item; 8N stays under 256 KiB so it stays in CPU cache; the full 100,000 items is checked once below).
+    expectLinearScaling((n) => { const hostile = run(oversizedOf(n)); return () => RealModelCheckSchema.safeParse(hostile); }, { n: 4_096, unitBytes: 8, label: "RealModelCheckSchema on a huge items array" });
     expect(RealModelCheckSchema.safeParse(run(oversizedOf(100_000))).success).toBe(false);
   });
   it.each([

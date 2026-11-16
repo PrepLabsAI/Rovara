@@ -265,9 +265,9 @@ describe("inert text", () => {
 
   it("cuts its input before processing, so a hostile megabyte costs as much as a short line", () => {
     for (const text of ["![".repeat(500_000), "[](".repeat(500_000), "<".repeat(1_000_000), "&".repeat(1_000_000), "a".repeat(1_000_000)]) expect(Array.from(inert(text)).length).toBeLessThanOrEqual(300);
-    // The cost must not grow faster than the input: each hostile shape at an eighth of its size (the input cap is 262,144 characters) and at full size.
-    for (const [unit, repeats] of [["![", 500_000], ["[](", 500_000], ["<", 1_000_000], ["&", 1_000_000], ["a", 1_000_000]] as const) {
-      expectLinearScaling((scale) => { const text = unit.repeat(scale); return () => inert(text); }, { n: repeats / 8, label: `inert text of ${JSON.stringify(unit)} repeated` });
+    // The cost must not grow faster than the input: each hostile shape at a small size (8N stays at or under 256 KiB so it stays in CPU cache). The full size was checked once above.
+    for (const unit of ["![", "[](", "<", "&", "a"] as const) {
+      expectLinearScaling((scale) => { const text = unit.repeat(scale); return () => inert(text); }, { n: Math.floor(32_768 / unit.length), unitBytes: unit.length, label: `inert text of ${JSON.stringify(unit)} repeated` });
     }
   });
 
@@ -277,9 +277,9 @@ describe("inert text", () => {
       expect(Array.from(out).length).toBeLessThanOrEqual(2_000);
       expect(Array.from(inertEvidenceText("[](".repeat(400_000), max)).length).toBeLessThanOrEqual(2_000);
     }
-    // Both hostile inputs at an eighth of their size and at full size, for each max, must cost about eight times, not sixty-four.
+    // Both hostile inputs at a small size (8N stays at or under 256 KiB so it stays in CPU cache; the full size was checked once above), for each max, must cost about eight times, not sixty-four.
     for (const max of [2_000, 1_000_000_000]) {
-      expectLinearScaling((scale) => { const angles = "<".repeat(scale * 2.5); const links = "[](".repeat(scale); return () => { inertEvidenceText(angles, max); inertEvidenceText(links, max); }; }, { n: 50_000, label: `inertEvidenceText with max ${String(max)}` });
+      expectLinearScaling((scale) => { const angles = "<".repeat(scale * 2.5); const links = "[](".repeat(scale); return () => { inertEvidenceText(angles, max); inertEvidenceText(links, max); }; }, { n: 5_900, unitBytes: 5.5, label: `inertEvidenceText with max ${String(max)}` });
     }
   });
 

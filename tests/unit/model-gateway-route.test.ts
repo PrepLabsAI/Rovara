@@ -147,8 +147,8 @@ it.each([{ expiresAt: undefined }, { expiresAt: "9999999999" }, { expiresAt: 999
 it("bounds the whole capability before decoding or reading records", async () => {
   const w = await world(); let reads = 0;
   w.h.deps.store.get = async () => { reads += 1; return undefined; };
-  // A scaling check, not a wall-clock bound: refusing a longer capability must not cost more than linearly more (8 x 125,000 = the original 1,000,000 characters).
-  await expectLinearScalingAsync((n) => { const hostile = w.issue({ actions: ["model-access", "a".repeat(n)] }); return () => w.call(hostile); }, { n: 125_000, label: "refusing a huge capability" });
+  // A scaling check, not a wall-clock bound: refusing a longer capability must not cost more than linearly more (8 x 16,000 characters stays at or under 256 KiB so it stays in CPU cache; the original 1,000,000 characters runs once, un-timed, below).
+  await expectLinearScalingAsync((n) => { const hostile = w.issue({ actions: ["model-access", "a".repeat(n)] }); return () => w.call(hostile); }, { n: 16_000, unitBytes: 2, label: "refusing a huge capability" });
   const token = w.issue({ actions: ["model-access", "a".repeat(1000000)] });
   const answer = await w.call(token);
   expect(answer).toMatchObject({ statusCode: 409, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"invalid capability"}}' });

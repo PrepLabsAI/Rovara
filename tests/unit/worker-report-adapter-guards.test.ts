@@ -69,12 +69,14 @@ describe("adapter boundaries", () => {
     let name = "";
     let read = undefined as ReturnType<typeof parseReportParts>;
     let shown = undefined as ReturnType<typeof evidenceTests>["names"][number] | undefined;
-    // 125,000 characters, then 1,000,000: linear work grows about 8x.
-    expectLinearScaling((size) => {
+    // 16,384 characters, then 131,072 (the name appears twice, so the timed 8N input is 256 KiB and stays in CPU cache): linear work grows about 8x. The old 1,000,000 characters are read once below.
+    const work = (size: number) => {
       name = "x".repeat(size);
       const text = ctrf([{ name, filepath: name, status: "passed" }]);
       return () => { read = parseReportParts(text); shown = evidenceTests(read!.tests!).names[0]; };
-    }, { n: 125_000, label: "a huge test name" });
+    };
+    expectLinearScaling(work, { n: 16_384, unitBytes: 2, label: "a huge test name" });
+    work(1_000_000)();
     expect(name.length).toBe(1_000_000);
     expect(read!.tests?.tests[0]).toMatchObject({ name: testText(name), file: testText(name) });
     expect(shown!.name).toBe(displayLine(inertEvidenceText(`${testText(name)}::${testText(name)}`, 500).replace(/^\u200D/u, "· ")));
@@ -96,11 +98,15 @@ describe("adapter boundaries", () => {
   it.each(["junit.xml", "jest.json", "go.jsonl", "trx.xml", "ctrf.json", "measures.json"])("reads an 8 MiB %s input in time that grows no faster than its size", (file) => {
     const sample = fixture(file);
     let read: ReturnType<typeof parseReportParts>;
-    // 1 MiB, then 8 MiB (the largest input read): linear work grows about 8x.
-    expectLinearScaling((bytes) => {
+    // 32 KiB, then 256 KiB (the timed 8N input stays in CPU cache): linear work grows about 8x. The 8 MiB input (the largest read) is read once, untimed, below.
+    const work = (bytes: number) => {
       const text = sample + " ".repeat(bytes - Buffer.byteLength(sample));
       return () => { read = parseReportParts(text); };
-    }, { n: TEST_REPORT_MAX_BYTES / 8, label: `a ${file} report padded to its size limit` });
+    };
+    expectLinearScaling(work, { n: 32 * 1024, label: `a ${file} report padded to its size limit` });
+    expect(read).toBeDefined();
+    read = undefined;
+    work(TEST_REPORT_MAX_BYTES)();
     expect(read).toBeDefined();
   });
 });
@@ -122,15 +128,18 @@ it.each(["junit", "gotest"])("handles an adversarial 8 MiB %s scan in linear tim
     import { expectLinearScaling } from './tests/support/scaling.ts';
     let total = null;
     let scaling = null;
-    // One unit is an eighth of the 8 MiB input: 15,000 comment blocks or 10,000 Go events, padded to 1 MiB.
-    const build = (units) => {
+    // The timed unit is 32 KiB of input: 480 comment blocks or 300 Go events, padded to 32 KiB (so the timed 8N input is 256 KiB and stays in CPU cache).
+    // The full size, 8 MiB (15,000 comment blocks or 10,000 Go events per MiB), is read once below.
+    const buildAt = (blocksPerUnit, unitBytes) => (units) => {
       const body = ${JSON.stringify(format)} === 'junit'
-        ? '<testsuite>' + '<!-- some output -->'.repeat(15_000 * units) + '<testcase name="x"/></testsuite>'
-        : Array.from({ length: 10_000 * units }, (_, i) => JSON.stringify({ Action: 'fail', Package: 'package' + i })).join('\\n');
-      const text = body + ' '.repeat(1024 * 1024 * units - Buffer.byteLength(body));
+        ? '<testsuite>' + '<!-- some output -->'.repeat(blocksPerUnit * units) + '<testcase name="x"/></testsuite>'
+        : Array.from({ length: blocksPerUnit * units }, (_, i) => JSON.stringify({ Action: 'fail', Package: 'package' + i })).join('\\n');
+      const text = body + ' '.repeat(unitBytes * units - Buffer.byteLength(body));
       return () => { total = parseReportParts(text)?.tests?.total ?? null; };
     };
-    try { scaling = { ok: true, result: expectLinearScaling(build, { n: 1, label: 'adversarial ${format} scan' }) }; } catch (error) { scaling = { ok: false, message: String(error && error.message) }; }
+    const small = ${JSON.stringify(format)} === 'junit' ? 480 : 300;
+    try { scaling = { ok: true, result: expectLinearScaling(buildAt(small, 32 * 1024), { n: 1, unitBytes: 32 * 1024, label: 'adversarial ${format} scan' }) }; } catch (error) { scaling = { ok: false, message: String(error && error.message) }; }
+    buildAt(${JSON.stringify(format)} === 'junit' ? 15_000 : 10_000, 1024 * 1024)(8)();
     console.log(JSON.stringify({ scaling, total }));
   `], { cwd: new URL("../../", import.meta.url), timeout: 120_000, encoding: "utf8" });
   const read = JSON.parse(output) as { scaling: { ok: boolean; message?: string }; total: number | null };
@@ -146,11 +155,15 @@ it.each([
   ["measures", '{"schemaVersion":1,"measures":[{"name":"', '","unit":"B","value":1,"direction":"down_good"}]}', false],
 ] as const)("bounds an 8 MiB single-line %s field", (_format, prefix, suffix, readable) => {
   let parsed: unknown;
-  // The field grows 8x (1 MiB to 8 MiB): linear work grows about 8x.
-  expectLinearScaling((bytes) => {
+  // The field grows 8x (32 KiB to 256 KiB, so the timed 8N input stays in CPU cache): linear work grows about 8x. The full 8 MiB field is read once, untimed, below.
+  const work = (bytes: number) => {
     const text = prefix + "x".repeat(bytes - prefix.length - suffix.length) + suffix;
     return () => { parsed = parseReportParts(text); };
-  }, { n: TEST_REPORT_MAX_BYTES / 8, label: "a single-line field up to the size limit" });
+  };
+  expectLinearScaling(work, { n: 32 * 1024, label: "a single-line field up to the size limit" });
+  expect(parsed !== undefined).toBe(readable);
+  parsed = undefined;
+  work(TEST_REPORT_MAX_BYTES)();
   expect(parsed !== undefined).toBe(readable);
 });
 

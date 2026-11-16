@@ -103,15 +103,18 @@ describe("the key-echo scrub", () => {
   });
   it("a 1 MB body checks in time that grows no faster than its size", () => {
     let big = enc("");
-    let scrubbed = undefined as ReturnType<typeof scrubResponseBody> | undefined;
-    // 125 KB, then 1 MB (60,000 repeats): linear work grows about 8x.
-    expectLinearScaling((repeats) => {
+    // 1,800 repeats (about 32 KB), then 14,400 (about 260 KB, the 8N input stays at or under 256 KiB so it stays in CPU cache): linear work grows about 8x. The 1 MB body (60,000 repeats) is scrubbed once, un-timed, below.
+    const inputOf = (repeats: number) => {
       big = enc(`{"text":"${"lorem ipsum dolor ".repeat(repeats)}"}`);
-      const input = { ...body(""), body: big };
-      return () => { scrubbed = scrubResponseBody(input); };
-    }, { n: 7_500, label: "scrubbing a large response body" });
+      return { ...body(""), body: big };
+    };
+    expectLinearScaling((repeats) => {
+      const input = inputOf(repeats);
+      return () => scrubResponseBody(input);
+    }, { n: 1_800, unitBytes: 18, label: "scrubbing a large response body" });
+    const scrubbed = scrubResponseBody(inputOf(60_000));
     expect(big.byteLength).toBeGreaterThan(1_000_000);
-    expect(scrubbed!.replaced).toBe(false);
+    expect(scrubbed.replaced).toBe(false);
   });
 
   describe("on a stream", () => {
@@ -257,13 +260,15 @@ describe("usage", () => {
     const line = `data: ${json({ choices: [{ delta: { content: "x".repeat(1000) } }] })}\n\n`;
     const last = `data: ${json({ usage: { prompt_tokens: 1, completion_tokens: 2 } })}\n\n`;
     let usage = undefined as ReturnType<ReturnType<typeof createUsageScanner>["finish"]>;
-    // 125 lines of 1 KB, then 1,000: linear work grows about 8x.
-    expectLinearScaling((lines) => () => {
+    // 30 lines of 1 KB, then 240 (the 8N stream stays under 256 KiB so it stays in CPU cache): linear work grows about 8x. The 1,000-line stream is scanned once, un-timed, below.
+    const scan = (lines: number) => () => {
       const scanner = createUsageScanner("openai_compatible");
       for (let index = 0; index < lines; index += 1) scanner.push(line);
       scanner.push(last);
       usage = scanner.finish();
-    }, { n: 125, label: "scanning a long stream for usage" });
+    };
+    expectLinearScaling(scan, { n: 30, unitBytes: 1024, label: "scanning a long stream for usage" });
+    scan(1_000)();
     expect(usage).toEqual({ inputTokens: 1, outputTokens: 2 });
   });
 });

@@ -10,6 +10,10 @@
  * The work is repeated inside one timed sample until the fastest N sample takes at least `minSampleMs` (20 ms), so a
  * single timer tick, GC pause or scheduler hiccup cannot dominate the N time. The repeat count is calibrated on N
  * from warm, fastest-of-several samples (a single cold sample under-counts the real cost) and then reused for k*N.
+ * Keep the k*N input small. Once the input outgrows the CPU cache (a few MB at k*N) every run is slower per byte than the small one, and shared CI runners then show a steady
+ * ratio of about 25 for LINEAR code (limit 24, quadratic ~64). The repeat count above keeps a small N stable, so shrink N instead: the helper refuses a k*N input over
+ * `maxInputBytes` (256 KiB). State how many bytes one unit of n costs in `unitBytes` (default 1: n is a size in bytes or characters); work that builds no input that grows with n
+ * (a loop of n calls on a fixed input) sets `unitBytes: 0`.
  * Prove each use with a mutant: make the code under test
  * quadratic and the test must fail.
  */
@@ -26,6 +30,10 @@ export type ScalingOptions = {
   floorMs?: number;
   /** The N sample (fastest of the timed runs) must be at least this long, so the work is repeated inside one sample (the same count at N and k*N). Default 20. */
   minSampleMs?: number;
+  /** Approximate bytes one unit of n adds to the input. Default 1. Use 0 when the work builds no input that grows with n. */
+  unitBytes?: number;
+  /** The largest allowed k*N input in bytes, default 262144 (256 KiB): larger inputs leave the CPU cache and read a steady ~25 on CI for linear code. Shrink N rather than raise this. */
+  maxInputBytes?: number;
   /** Generous hang limit for ONE timed sample, in ms. Default 30000. */
   hangMs?: number;
   /** Shown in failure messages. */
@@ -50,7 +58,11 @@ function settings(options: ScalingOptions) {
   const minSampleMs = options.minSampleMs ?? 20;
   const hangMs = options.hangMs ?? 30_000;
   const label = options.label ?? "scaling";
-  if (!(options.n >= 1) || !(k > 1) || runs < 1 || !(maxRatio > k)) throw new Error(`${label}: bad scaling options`);
+  const unitBytes = options.unitBytes ?? 1;
+  const maxInputBytes = options.maxInputBytes ?? 262_144;
+  if (!(options.n >= 1) || !(k > 1) || runs < 1 || !(maxRatio > k) || !(unitBytes >= 0)) throw new Error(`${label}: bad scaling options`);
+  const inputBytes = options.n * k * unitBytes;
+  if (inputBytes > maxInputBytes) throw new Error(`${label}: the ${k}N input is about ${Math.round(inputBytes)} bytes, over the ${maxInputBytes} byte limit. Larger inputs leave the CPU cache and CI shows a steady ratio of about 25 for linear code. Shrink N (the repeat count keeps a small N stable).`);
   return { n: options.n, k, runs, maxRatio, floorMs, minSampleMs, hangMs, label };
 }
 
