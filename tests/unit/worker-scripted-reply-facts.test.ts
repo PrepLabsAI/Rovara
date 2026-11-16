@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { type ProjectCommand } from "../../packages/contracts/src/index.js";
 import { runChecks, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { withModelHelperRound, type ModelHelperRoundResult, type StartedModelHelper } from "../../packages/worker/src/model-helper-round.js";
@@ -106,17 +107,24 @@ describe("candidate reply facts", () => {
     expect(facts(f.results)).toEqual([fact(0, 2)]);
   });
   it("supports 200 checks and refuses oversized summaries and fact collections in bounded time", async () => {
-    const started = performance.now();
     const full = fixture(Array.from({ length: 200 }, (_, i) => summary(i + 1)));
     await round(full.wrapped, 200);
     expect(facts(full.results)).toEqual(Array.from({ length: 200 }, (_, i) => fact(i, 1)));
     const tooMany = fixture([summary()]);
     await round(tooMany.wrapped, 201);
     expect(facts(tooMany.results)).toBe("unknown");
-    const huge = fixture([{ ...summary(), escapes: { count: 0, hosts: Array.from({ length: 100_000 }, () => "x".repeat(10)), unreadable: 0 } }]);
-    await round(huge.wrapped, 1);
-    expect(facts(huge.results)).toBe("unknown");
-    expect(performance.now() - started).toBeLessThan(2000);
+    // A scaling check, not a wall-clock bound: refusing a summary with 12,500 escape hosts and one with 100,000 (the old input) may take about eight times as long, never sixty-four.
+    let refused: unknown;
+    await expectLinearScalingAsync((hostCount) => {
+      const hosts = Array.from({ length: hostCount }, () => "x".repeat(10));
+      const oversized = { ...summary(), escapes: { count: 0, hosts, unreadable: 0 } };
+      return async () => {
+        const huge = fixture([oversized]);
+        await round(huge.wrapped, 1);
+        refused = facts(huge.results);
+      };
+    }, { n: 12_500, label: "oversized escape-host summary" });
+    expect(refused).toBe("unknown");
   });
 });
 

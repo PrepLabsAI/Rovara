@@ -214,6 +214,8 @@ describe("the health route's grants (A13)", () => {
       // Batch merge (#733 L2a, #754 M7): a step-up claim row expires after its token's own expiry plus a short keep (hosted-approvers.ts); the after-merge watcher's watch and action rows
       // expire after their kept days (after-merge/watch.ts names the store's TTL attribute, defaulting to this one). Neither is a durable record.
       "packages/broker/src/core-host/hosted-approvers.ts", "packages/broker/src/core/after-merge/watch.ts",
+      // After-merge reporter (#787 M7 slice 2): its own AFTER_MERGE_SENT claim rows (one per report and surface, kept WATCH_KEPT_DAYS, then expired) and nothing else; no other record shares the key.
+      "packages/broker/src/core/after-merge/reporter.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

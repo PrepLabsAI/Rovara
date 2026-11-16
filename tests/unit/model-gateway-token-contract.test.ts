@@ -2,6 +2,7 @@ import * as taskContract from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { expectLinearScaling } from "../support/scaling.js";
 import { TaskTokenClaimsSchema, parseTaskTokenClaims, taskTokenClaimsFor, TASK_TOKEN_AUDIENCE, TASK_TOKEN_TYP, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SECONDS, TASK_TOKEN_CLAIMS, type TaskTokenClaims } from "@agentx/contracts";
 const bytes = () => readFileSync(new URL("../../contracts/shared/model-gateway-token.v1.json", import.meta.url), "utf8");
 const vector = () => JSON.parse(bytes()) as { constants: object; claims: Array<{ name: string; type: string; required: boolean }>; testVector: { claims: TaskTokenClaims } };
@@ -39,9 +40,13 @@ describe("TC-1 claims", () => {
     expect(parseTaskTokenClaims({ ...vector().testVector.claims, mdl: Array(16).fill("a".repeat(128)) })).toBeDefined();
   });
   it("bounds a large model array before schema traversal", () => {
-    const input = { ...vector().testVector.claims, mdl: Array(250000).fill("a") };
-    const start = performance.now(); expect(parseTaskTokenClaims(input)).toBeUndefined();
-    expect(performance.now() - start).toBeLessThan(1000);
+    // The array is refused on its length: the cost does not grow with it (31,250, then 250,000 entries).
+    const results = new Map<number, unknown>();
+    expectLinearScaling((count) => {
+      const input = { ...vector().testVector.claims, mdl: Array(count).fill("a") };
+      return () => { results.set(count, parseTaskTokenClaims(input)); };
+    }, { n: 31_250, label: "task token claims: a huge model array" });
+    expect([results.get(31_250), results.get(250_000)]).toEqual([undefined, undefined]);
   });
   it("does not visit any element of an over-limit model array", () => {
     const models = Array<string>(17).fill("model"); let reads = 0;

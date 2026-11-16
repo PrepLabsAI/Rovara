@@ -44,6 +44,9 @@ export const CORE_JOBS: readonly CoreJob[] = [
   { name: "person-erase-resume", area: "flow", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("person-erase-resume") },
   // Lessons (optional service, wired only where `ROVARA_CORE_LESSONS` covers the company): milestones due, the shared reflection queue, and once a day the upkeep (`lessons.ts`).
   { name: "lessons", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("lessons") },
+  // The after-merge watcher's pass (optional service, M7 slice 2): windows that ended close, a report that could not be sent goes out again, and the deploy read backs up a deployment event that never came. The service is the
+  // one `createAfterMergeService` makes for this company (`core/after-merge/service.ts`); it does nothing for a project whose own `afterMergeWatch` setting is off, and a runtime that wires none skips this job.
+  { name: "after-merge", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("after-merge") },
 ];
 
 /** The `source` of the event a core job schedule sends to the broker: `{ source: "agentx.core-job", job: <name> }`. */

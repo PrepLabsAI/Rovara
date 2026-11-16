@@ -1,5 +1,6 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 import { createHmac, randomUUID } from "node:crypto";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { describe, expect, it, vi } from "vitest";
 import { createCallbackHandler, type CallbackDeps } from "../../packages/broker/src/services/callbacks.js";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
@@ -146,10 +147,12 @@ it.each([{ expiresAt: undefined }, { expiresAt: "9999999999" }, { expiresAt: 999
 it("bounds the whole capability before decoding or reading records", async () => {
   const w = await world(); let reads = 0;
   w.h.deps.store.get = async () => { reads += 1; return undefined; };
+  // A scaling check, not a wall-clock bound: refusing a longer capability must not cost more than linearly more (8 x 125,000 = the original 1,000,000 characters).
+  await expectLinearScalingAsync((n) => { const hostile = w.issue({ actions: ["model-access", "a".repeat(n)] }); return () => w.call(hostile); }, { n: 125_000, label: "refusing a huge capability" });
   const token = w.issue({ actions: ["model-access", "a".repeat(1000000)] });
-  const start = performance.now(); const answer = await w.call(token);
+  const answer = await w.call(token);
   expect(answer).toMatchObject({ statusCode: 409, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"invalid capability"}}' });
-  expect(performance.now() - start).toBeLessThan(1000); expect(reads).toBe(0); expect(w.w.signs()).toBe(0);
+  expect(reads).toBe(0); expect(w.w.signs()).toBe(0);
 });
 it.each(["operation", "workspace", "pointer", "task"])("refuses a missing %s record", async missing => {
   const w = await world(); const get = w.h.store.get.bind(w.h.store);
