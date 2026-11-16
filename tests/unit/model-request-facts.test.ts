@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { PROMPT_TEXT_MAX_CHARS, readModelRequestFacts } from "../../packages/contracts/src/model-request-facts.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const facts = (body: unknown) => readModelRequestFacts(typeof body === "string" ? body : JSON.stringify(body));
 
@@ -79,10 +80,14 @@ describe("readModelRequestFacts", () => {
     let deep: unknown = "buried";
     for (let index = 0; index < 40; index += 1) deep = { content: deep };
     expect(facts({ messages: [deep] }).promptText).toBe(""); // past depth 16 nothing is collected
-    const started = performance.now();
-    const huge = facts({ messages: [{ role: "user", content: "x".repeat(900_000) }] });
+    // 32,000 characters, then 256,000 (the 8N input stays at or under 256 KiB so it stays in CPU cache): linear work grows about 8x. The 900,000-character prompt runs once, un-timed, below.
+    const textOf = (size: number) => JSON.stringify({ messages: [{ role: "user", content: "x".repeat(size) }] });
+    expectLinearScaling((size) => {
+      const text = textOf(size);
+      return () => facts(text);
+    }, { n: 32_000, label: "reading the facts of a large prompt" });
+    const huge = facts(textOf(900_000));
     expect(huge.promptText?.length).toBe(900_000);
-    expect(performance.now() - started).toBeLessThan(1000);
     const many = facts({ messages: Array.from({ length: 150_000 }, () => ({ content: "a" })) });
     expect((many.promptText?.length ?? 0)).toBeLessThanOrEqual(PROMPT_TEXT_MAX_CHARS);
   });

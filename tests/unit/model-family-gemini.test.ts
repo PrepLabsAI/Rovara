@@ -20,6 +20,7 @@ import { buildChatCompletion, buildChatCompletionStream, routeOpenAiCompatibleRe
 import { serveModelRequest } from "../../packages/contracts/src/model-serve.js";
 import { builtinModelCatalog } from "../../packages/contracts/src/model-catalog-rows.js";
 import type { ModelReply } from "../../packages/contracts/src/model-family-common.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 let connects = 0;
 let fetches = 0;
@@ -127,10 +128,19 @@ describe("routeGeminiRequest: every path form of the redirect check", () => {
   it("is safe against hostile keys and is fast on huge input", () => {
     expect(route("/v1beta/models/m:generateContent", { query: "__proto__=x&constructor=y&alt=sse", headers: JSON.parse(`{"__proto__":"x","x-goog-api-key":"k"}`) as Record<string, string> })).toMatchObject({ ok: true });
     expect(({} as Record<string, unknown>).x).toBeUndefined();
-    const started = Date.now();
+    // Scaling check: refusing a huge path or query must not cost more as the input grows (N is small so the 8N input stays at or under 256 KiB and stays in CPU cache; the old 1,000,000-character path and 1,500,000-character query are checked once at full size below).
+    let results: unknown[] = [];
+    const { ratio } = expectLinearScaling((size) => {
+      const path = "/v1beta/models/" + "a".repeat(size);
+      const query = "a=".concat("%41".repeat(size / 2));
+      return () => { results = [route(path), route("/v1beta/models/m:generateContent", { query })]; };
+    }, { n: 12_000, unitBytes: 2.5, label: "routeGeminiRequest on a huge path and query" });
+    // Both are refused before they are read, so the work is flat (ratio near 1); work that reads them would grow about 8 times.
+    expect(ratio).toBeLessThan(3);
+    expect(results[0]).toMatchObject({ ok: false });
+    expect(results[1]).toEqual({ ok: false, reason: "bad_query" });
     expect(route("/v1beta/models/" + "a".repeat(1_000_000))).toMatchObject({ ok: false });
     expect(route("/v1beta/models/m:generateContent", { query: "a=".concat("%41".repeat(500_000)) })).toEqual({ ok: false, reason: "bad_query" });
-    expect(Date.now() - started).toBeLessThan(250);
   });
   it("accepts headers as arrays and in any case", () => {
     expect(routeGeminiRequest({ method: "POST", path: "/v1beta/models/m:generateContent", query: "", headers: { "X-GOOG-API-KEY": [fakeKey()] } })).toMatchObject({ credential: "x-goog-api-key" });
@@ -201,11 +211,14 @@ describe("Gemini response builders", () => {
   });
   it("is bounded: a huge reply grows the chunk size instead of the chunk count, and one past the cap is refused", () => {
     const big = "x".repeat(MODEL_REPLY_MAX_CHARS);
-    const started = Date.now();
+    // Scaling check: building the chunks and the body must grow no faster than the reply (N is small so the 8N input stays at or under 256 KiB and stays in CPU cache; the cap, 1,000,000 characters, is built once at full size below).
+    expectLinearScaling((size) => {
+      const text = "x".repeat(size);
+      return () => geminiSseBody(buildGeminiStreamChunks(reply({ text }), { model: "m", seed: "s", chunkChars: 1 }), "lf");
+    }, { n: 32_000, label: "a huge Gemini stream reply" });
     const chunks = buildGeminiStreamChunks(reply({ text: big }), { model: "m", seed: "s", chunkChars: 1 });
     expect(chunks.length).toBeLessThanOrEqual(20_000);
     expect(geminiSseBody(chunks, "lf").length).toBeGreaterThan(MODEL_REPLY_MAX_CHARS);
-    expect(Date.now() - started).toBeLessThan(2000);
     expect(() => buildGeminiGenerateContent(reply({ text: big + "y" }), { model: "m", seed: "s" })).toThrow(RangeError);
     expect(() => buildGeminiGenerateContent(reply(), { model: "m".repeat(129), seed: "s" })).toThrow(RangeError);
     expect(chunkText("héllo wörld", 3).join("")).toBe("héllo wörld");
@@ -336,9 +349,15 @@ describe("serveModelRequest: the one entry the helper calls", () => {
     expect(serve("/p/gemini/v1beta/models/m:generateContent", { body: "x".repeat(1024 * 1024) }).status).toBe(200);
     expect(serve("/p/gemini/v1beta/models/m:countTokens", { body: "x".repeat(400) }).body).toContain("totalTokens");
     expect(serve("/p/gemini/v1beta/models/m:embedContent").status).toBe(501);
-    const started = Date.now();
-    serve("/p/gemini/" + "a".repeat(1_000_000));
-    expect(Date.now() - started).toBeLessThan(250);
+    // Scaling check: a huge path is refused without being read (N is small so the 8N input stays in CPU cache; the old 1,000,000 characters is checked once at full size below), so the work is flat (ratio near 1); work that reads it would grow about 8 times.
+    let served: { status: number } | undefined;
+    const { ratio } = expectLinearScaling((size) => {
+      const path = "/p/gemini/" + "a".repeat(size);
+      return () => { served = serve(path); };
+    }, { n: 32_000, label: "serveModelRequest on a huge path" });
+    expect(ratio).toBeLessThan(3);
+    expect(served?.status).toBeGreaterThanOrEqual(400);
+    expect(serve("/p/gemini/" + "a".repeat(1_000_000)).status).toBeGreaterThanOrEqual(400);
   });
   it("never throws: a BigInt in a tool call, an oversize reply or a hostile request is a fixed 500 or 4xx", () => {
     const bigint = serve("/p/gemini/v1beta/models/m:generateContent", {}, reply({ toolCalls: [{ name: "f", args: { n: 1n } }], finish: "tool_calls" }));

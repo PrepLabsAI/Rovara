@@ -18,6 +18,7 @@ import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { CASE_ID, call } from "../support/e2e-model-fixtures.js";
 import { createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
+import { expectLinearScaling } from "../support/scaling.js";
 import type { ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 
 // MIDSTEP-2, end to end through the real pieces: the real classifier, source, registry and redactor, the real channel client, the real worker proxy. Only the browser is a stand-in here
@@ -392,9 +393,10 @@ describe("fix round 1 (review of 334c7ced)", () => {
 
   it("I-2: registering thousands of values is close to linear, and evidence registrations stop at the cap (the rest go to the model's mask)", { timeout: 30_000 }, () => {
     const redactor = createCredentialRedactor([]);
-    const started = Date.now();
-    for (let index = 0; index < 12_000; index += 1) redactor.addSessionSecret(`opaque-session-value-${String(index).padStart(6, "0")}-abcdef`, { evidenceOnly: true });
-    expect(Date.now() - started).toBeLessThan(4_000);
+    const registerMany = (target: ReturnType<typeof createCredentialRedactor>, count: number) => { for (let index = 0; index < count; index += 1) target.addSessionSecret(`opaque-session-value-${String(index).padStart(6, "0")}-abcdef`, { evidenceOnly: true }); };
+    registerMany(redactor, 12_000);
+    // Close to linear as a scaling check: eight times the values (500 -> 4,000; the 8N input, about 60 bytes a value, stays at or under 256 KiB so it stays in CPU cache; the full 12,000 are registered once above) costs about eight times, not sixty-four.
+    expectLinearScaling((count) => () => { registerMany(createCredentialRedactor([]), count); }, { n: 500, unitBytes: 60, label: "registering session values" });
     expect(redactor.contains(bytesOf("opaque-session-value-011999-abcdef"), "all")).toBe(true);
     expect(redactor.text("x opaque-session-value-000001-abcdef y")).toBe("x <session> y");
     const told: string[] = [];

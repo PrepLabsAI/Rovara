@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { evalCheckResult, evalNotRunResult, type EvalQuestionComparison } from "../../packages/contracts/src/eval-check.js";
+import { expectLinearScaling } from "../support/scaling.js";
 const answer = (pass: boolean, text = "answer") => ({ pass, answer: text });
 const row = (id: string): EvalQuestionComparison => ({ id, category: "ordinary", old: [answer(true), answer(true), answer(true)], first: answer(true) });
 describe("eval evidence", () => {
@@ -28,10 +29,12 @@ describe("eval evidence", () => {
   });
   it("bounds a megabyte answer quickly and accepts the stated 1000-question maximum", () => {
     const text = "x".repeat(1_048_576);
-    const start = performance.now();
     const result = evalCheckResult({ roundKind: "check_unsealed", questions: [{ ...row("__proto__"), first: answer(false, text) }], changedPromptCalls: 1, subsetSupported: false });
     expect(result.questions[0]!.newAnswers[0]!.length).toBeLessThan(1100);
-    expect(performance.now() - start).toBeLessThan(1000);
+    // The cost must not grow faster than the answer (32,768 -> 262,144 characters: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1,048,576 characters are checked once above).
+    let scaled = result;
+    expectLinearScaling((size) => { const questions = [{ ...row("__proto__"), first: answer(false, "x".repeat(size)) }]; return () => { scaled = evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1, subsetSupported: false }); }; }, { n: 32_768, label: "eval check with a long answer" });
+    expect(scaled.questions[0]!.newAnswers[0]!.length).toBeLessThan(1100);
     const questions = Array.from({ length: 1000 }, (_, i) => row(String(i)));
     expect(evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1 }).label).toBe("No regression measured (eval)");
     expect(evalCheckResult({ roundKind: "check_unsealed", questions: [...questions, row("extra")], changedPromptCalls: 1 }).label).toBe("Not run");
@@ -66,7 +69,7 @@ it("maps every refusal to fixed not-tested words and renders the measuring golde
   expect(evalContracts.evalNotTestedEntry(evalCheckResult({ roundKind: "check_unsealed", questions: [row("q")], changedPromptCalls: 1 }))).toBeUndefined();
 });
 it("never echoes malformed reasons or stored sentences, even with a megabyte of hostile text", () => {
-  const hostile = "@secret [x](https://private.invalid)".repeat(40_000); const start = performance.now();
+  const hostile = "@secret [x](https://private.invalid)".repeat(40_000);
   for (const reason of ["__proto__", "constructor", "unknown", 5, undefined, null, hostile]) {
     const result = evalNotRunResult({ roundKind: "check_unsealed", reason: reason as never });
     expect(result.notRun).toEqual({ reason: "invalid_question_data", sentence: "not run: question results are incomplete or invalid" });
@@ -74,5 +77,10 @@ it("never echoes malformed reasons or stored sentences, even with a megabyte of 
     expect(evalContracts.evalNotTestedEntry({ ...result, notRun: { reason: reason as never, sentence: hostile } })).toEqual({ kind: "check", id: "eval", what: "Eval comparison", reason: "question results are incomplete or invalid" });
   }
   for (const value of [null, undefined, {}, { kind: "eval", outcome: "other" }]) expect(evalContracts.evalNotTestedEntry(value as never)).toBeUndefined();
-  expect(performance.now() - start).toBeLessThan(1000);
+  // The cost of refusing the hostile text must not grow faster than it does (800 -> 6,400 repeats of 36 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 40,000 repeats are checked once above).
+  expectLinearScaling((repeats) => { const text = "@secret [x](https://private.invalid)".repeat(repeats); return () => {
+    const result = evalNotRunResult({ roundKind: "check_unsealed", reason: text as never });
+    JSON.stringify(result);
+    evalContracts.evalNotTestedEntry({ ...result, notRun: { reason: text as never, sentence: text } });
+  }; }, { n: 800, unitBytes: 36, label: "refusing hostile eval not-run text" });
 });

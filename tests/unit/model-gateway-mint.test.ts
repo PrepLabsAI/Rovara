@@ -3,6 +3,7 @@ import { mintTaskToken, type TaskTokenDescription } from "../../packages/broker/
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { issueAccessToken } from "../../packages/broker/src/developer/tokens.js";
 import { claimVector, signingWorld } from "../support/model-gateway.js";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 const v = claimVector();
 const operation = { workspaceId: v.ws, operationId: v.op, fence: 1 };
 const description = (): TaskTokenDescription => ({ companyId: v.cid, project: v.pid, person: v.per!, payer: v.pay, taskId: v.tid, step: v.stp, origin: "app", models: v.mdl });
@@ -81,9 +82,11 @@ it.each([false, true])("signs the largest fitting input and refuses the next lar
 it("rejects an issuer larger than the whole byte budget before a key read", async () => {
   const w = setup(); let keys = 0; const key = w.deps.signer.publicJwk.bind(w.deps.signer);
   w.deps.signer.publicJwk = async () => { keys += 1; return key(); };
-  const start = performance.now();
-  await expect(mintTaskToken({ ...w.deps, issuer: "a".repeat(1000000) }, operation)).rejects.toThrow("invalid or expired model access");
-  expect(performance.now() - start).toBeLessThan(1000); expect(keys).toBe(0); expect(w.signs()).toBe(0);
+  // The refusal must cost no more than the size of the issuer: 32 KB, then 256 KB, grows about 8x at most (the 8N input stays at or under 256 KiB so it stays in CPU cache; the 1 MB issuer runs once, un-timed, below).
+  const refuse = (issuer: string) => mintTaskToken({ ...w.deps, issuer }, operation).then(() => "minted", (error: unknown) => (error instanceof Error ? error.message : String(error)));
+  await expectLinearScalingAsync((size) => { const issuer = "a".repeat(size); return () => refuse(issuer); }, { n: 32_000, label: "refusing an oversized issuer" });
+  const message = await refuse("a".repeat(1_000_000));
+  expect(message).toContain("invalid or expired model access"); expect(keys).toBe(0); expect(w.signs()).toBe(0);
 });
 
 it.each(["developer", undefined, "untrusted-purpose-marker", null, 3])("refuses a signer without task purpose (%s), without a token or key diagnostics", async purpose => {

@@ -40,7 +40,7 @@ describe("one bridge per run", () => {
     const root = await makeRoot(); const e = egressOf();
     const sandbox = sandboxOf(async (input) => { const answered = await send(input, frame("one")); expect(answered.status).toBe(200); expect(answered.settle).toMatchObject({ class: "ok", costMicros: 10 }); return ok(input); });
     const result = await createBridgedEvalExec({ sandbox, runDir: root }).run(request(e));
-    expect(result).toEqual({ report: location, changedPromptCalls: 0 });
+    expect(result).toEqual({ report: location, changedPromptCalls: 1 });
     expect(e.seen).toHaveLength(1); expect(e.scopes).toEqual([scope]);
     expect(Object.keys(sandbox.inputs[0]!).sort()).toEqual(["ids", "model", "runs", "side", "signal"]);
     expect(Object.keys(sandbox.inputs[0]!.model).sort()).toEqual(["socketPath", "token"]);
@@ -147,10 +147,11 @@ describe("the changed prompt is the worker's own count", () => {
     // call-2 fails (provider error): it is not an exercised prompt
     expect((await calls(4, named, (_f, i) => (i === 2 ? classAnswer("provider_error", 502) : answer()))).changedPromptCalls).toBe(1);
   });
-  it("is 0 with no classifier, and a classifier that throws or answers a non-true value counts nothing", async () => {
-    expect((await calls(3, undefined)).changedPromptCalls).toBe(0);
-    expect((await calls(3, () => { throw new Error("x"); })).changedPromptCalls).toBe(0);
-    expect((await calls(3, (() => "yes") as never)).changedPromptCalls).toBe(0);
+  it("counts unknown classifications as changed; only an explicit false proves unchanged", async () => {
+    expect((await calls(3, undefined)).changedPromptCalls).toBe(3);
+    expect((await calls(3, () => { throw new Error("x"); })).changedPromptCalls).toBe(3);
+    expect((await calls(3, (() => "yes") as never)).changedPromptCalls).toBe(3);
+    expect((await calls(3, () => false)).changedPromptCalls).toBe(0);
   });
   it("the sandbox cannot raise it: its own result field is ignored", async () => {
     const root = await makeRoot();

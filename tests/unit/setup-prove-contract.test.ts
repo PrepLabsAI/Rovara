@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { WorkerInvocationSchema, TestEnvironmentBodySchema, testEnvDigest, TEST_ENV_PROVE_MEASURE_FEATURE } from "../../packages/contracts/src/index.js";
 import { PrepareSetupProveSchema, SETUP_PROVE_RESULT_PATH } from "../../packages/contracts/src/setup-prove.js";
+import { expectLinearScaling } from "../support/scaling.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 
 const environment = TestEnvironmentBodySchema.parse({
@@ -35,11 +36,23 @@ it("absent setupProve retains the exact ordinary prepare parse", () => {
   expect(JSON.stringify(WorkerInvocationSchema.parse(ordinary))).toBe(JSON.stringify(ordinary));
 });
 it("one total job byte bound refuses huge and aggregate inputs without silently dropping fields", () => {
-  const started = performance.now();
-  expect(PrepareSetupProveSchema.safeParse({ ...job, extra: "x".repeat(1_000_000) }).success).toBe(false);
-  const repos = Array.from({ length: 16 }, (_, i) => ({ repositoryId: `r${i}`, setupCommands: Array.from({ length: 20 }, () => ({ cwd: "svc", executable: "echo", args: ["x".repeat(2000)], timeoutSeconds: 60 })), checks: [] }));
-  expect(PrepareSetupProveSchema.safeParse({ ...job, environment: { ...environment, repos } }).success).toBe(false);
-  expect(performance.now() - started).toBeLessThan(1000);
+  // Scaling checks: a refusal must be needed only past 256 KiB, but the 8N input of a scaling check stays at or under 256 KiB so it stays in CPU cache, so the timed runs use the sizes below the bound
+  // (the job is copied and measured the same way whatever the verdict; one huge string is refused here by its unknown key, the aggregate may be accepted). The refusals past the bound run once at full size, un-timed
+  // (the largest sizes are 2.4 MB of one string, and 16 repositories of 20 commands with 8,000-character arguments).
+  const hugeOf = (size: number) => ({ ...job, extra: "x".repeat(size) });
+  const aggregateOf = (size: number) => {
+    const repos = Array.from({ length: 16 }, (_, i) => ({ repositoryId: `r${i}`, setupCommands: Array.from({ length: 20 }, () => ({ cwd: "svc", executable: "echo", args: ["x".repeat(size)], timeoutSeconds: 60 })), checks: [] }));
+    return { ...job, environment: { ...environment, repos } };
+  };
+  expectLinearScaling((size) => {
+    const huge = hugeOf(size);
+    return () => PrepareSetupProveSchema.safeParse(huge);
+  }, { n: 32_000, label: "reading one huge string in a setup-prove job" });
+  expectLinearScaling((size) => {
+    const aggregate = aggregateOf(size);
+    return () => PrepareSetupProveSchema.safeParse(aggregate);
+  }, { n: 90, unitBytes: 320, label: "reading an aggregate of many commands in a setup-prove job" });
+  expect([PrepareSetupProveSchema.safeParse(hugeOf(2_400_000)).success, PrepareSetupProveSchema.safeParse(aggregateOf(8_000)).success]).toEqual([false, false]);
 });
 
 it("unreadable JSON is refused without invoking accessors or toJSON", () => {

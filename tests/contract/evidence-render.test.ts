@@ -8,6 +8,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const withLevel = (reached: string, isolation = "sealed", result = "verified"): EvidencePackV2 => v2Pack({ level: { reached, required: [] }, producer: { edition: "cloud", isolation }, result });
@@ -263,19 +264,23 @@ describe("inert text", () => {
   });
 
   it("cuts its input before processing, so a hostile megabyte costs as much as a short line", () => {
-    const started = Date.now();
     for (const text of ["![".repeat(500_000), "[](".repeat(500_000), "<".repeat(1_000_000), "&".repeat(1_000_000), "a".repeat(1_000_000)]) expect(Array.from(inert(text)).length).toBeLessThanOrEqual(300);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // The cost must not grow faster than the input: each hostile shape at a small size (8N stays at or under 256 KiB so it stays in CPU cache). The full size was checked once above.
+    for (const unit of ["![", "[](", "<", "&", "a"] as const) {
+      expectLinearScaling((scale) => { const text = unit.repeat(scale); return () => inert(text); }, { n: Math.floor(32_768 / unit.length), unitBytes: unit.length, label: `inert text of ${JSON.stringify(unit)} repeated` });
+    }
   });
 
   it("stays linear for a large max: the largest allowed max is capped, so a million '<' finishes at once", () => {
-    const started = Date.now();
     for (const max of [2_000, 1_000_000_000]) {
       const out = inertEvidenceText("<".repeat(1_000_000), max);
       expect(Array.from(out).length).toBeLessThanOrEqual(2_000);
       expect(Array.from(inertEvidenceText("[](".repeat(400_000), max)).length).toBeLessThanOrEqual(2_000);
     }
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // Both hostile inputs at a small size (8N stays at or under 256 KiB so it stays in CPU cache; the full size was checked once above), for each max, must cost about eight times, not sixty-four.
+    for (const max of [2_000, 1_000_000_000]) {
+      expectLinearScaling((scale) => { const angles = "<".repeat(scale * 2.5); const links = "[](".repeat(scale); return () => { inertEvidenceText(angles, max); inertEvidenceText(links, max); }; }, { n: 5_900, unitBytes: 5.5, label: `inertEvidenceText with max ${String(max)}` });
+    }
   });
 
   it("reads at most 256 KiB of raw input", () => {
@@ -353,6 +358,9 @@ describe("callers", () => {
     // v2 export (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
     const proofOnly = ["EvidenceTrustClass", "SCRIPTED_AI_PROOF_WORDS", "AGENT_REPLIES_UNCONFIRMED_WORDS", "AGENT_REPLIES_DISAGREED_WORDS"];
     const writerFiles = [
+      // TE-H1 slice 2 (DEC 241, #756): the reader that serves a browser-evidence picture (`readEvidenceArtifact`) takes the task's v2 pack as `EvidencePackV2` / `EvidencePackV2Read`, so it can serve the pairs of its `visual` check
+      // and nothing else of a v2 pack (the download rule is `servableBrowserEvidenceImage`, in contracts/browser-evidence-wire.ts). It only reads.
+      "packages/broker/src/core/proof/evidence-artifacts.ts",
       "packages/broker/src/core/proof/evidence-guard.ts",
       "packages/broker/src/core/proof/evidence-keep.ts",
       "packages/broker/src/core/proof/evidence-lines.ts",
@@ -392,10 +400,18 @@ describe("nothing turns the version 2 writer on yet", () => {
   it("only the writer's own file and the local wiring name keepEvidence, and the wiring gives it no writer", () => {
     expect(grep("-lE", "keepEvidence\\(").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/local/app/evidence.ts"]);
     expect(readFileSync(`${root}/packages/broker/src/local/app/evidence.ts`, "utf8")).not.toMatch(/\bwriter\b/u);
-    expect(grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2")).toEqual([]);
+    // TE-H1 slice 2 (DEC 241, #756): the one place a writer is given. A pack needs the v2 form only to carry the browser evidence `visual` check and its pairs, so `keepEvidence` makes the v2 writer itself, and ONLY when this run's
+    // `browserEvidence` was uploaded and stored (no browser evidence = no writer = the v1 pack, byte for byte: tests/unit/browser-evidence-keep.test.ts). Every v2 reader is already in place or ships in the same change: the v1 view
+    // (`loadEvidencePack`, which the proof page reads; the risk input has no caller in Code yet and would read the same view), the description's reader (`loadEvidenceRead`, off until `evidenceWriter: 2`), the panel, the PR lines and the picture route (local/app/evidence.ts), and the
+    // erase by task prefix; nothing else (Slack, MCP, the CLI, Cloud) reads a pack Code keeps. A failure to build the v2 form falls back to the plain v1 pack. Exactly this one line is approved, by its words.
+    const approvedForcedWriter = (entry: string) => entry.startsWith("packages/broker/src/core/proof/evidence-keep.ts:") && entry.includes("{ version: 2, producer: { edition: \"code\", isolation: browser.isolation } }");
+    const writers = grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2");
+    expect(writers.filter((entry) => !approvedForcedWriter(entry))).toEqual([]);
+    expect(writers.filter(approvedForcedWriter)).toHaveLength(1);
   });
   it("only the evidence keep file and a comment in the evidence lines name loadEvidenceRead", () => {
-    expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts"]);
+    // TE-H1 slice 2 (DEC 241, #756): the local wiring (local/app/evidence.ts) reads the task's v2 pack to show the before/after panel, write the PR's text lines and serve the pictures. It only reads, and only for the current code.
+    expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts", "packages/broker/src/local/app/evidence.ts"]);
   });
 });
 
@@ -429,6 +445,8 @@ describe("no callers", () => {
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
     const approved = new Set([
+      // TE-H1 slice 2 (DEC 241, #756): the reader that serves a browser-evidence picture takes the v2 pack's types (see the callers test above).
+      "packages/broker/src/core/proof/evidence-artifacts.ts",
       "packages/broker/src/core/proof/evidence-guard.ts", "packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts",
       "packages/broker/src/core/proof/evidence-pack.ts", "packages/broker/src/core/proof/evidence-v2-lines.ts", "packages/broker/src/core/proof/proof-table.ts",
       "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts",

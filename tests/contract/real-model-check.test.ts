@@ -3,6 +3,7 @@ import type { z } from "zod";
 import { REAL_MODEL_CHECK_ARTIFACT, RealModelCheckSchema, RealModelCheckWriteSchema, realModelCheckLine, realModelPassed } from "../../packages/contracts/src/real-model-check.js";
 import { TestProofSchema, TestProofWriteSchema } from "../../packages/contracts/src/test-proof.js";
 import { agentRepliesStatus } from "../../packages/broker/src/core/proof/agent-replies.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 function result(): z.infer<typeof RealModelCheckWriteSchema> {
   return { schemaVersion: 1, candidateDigest: "a".repeat(64), status: "completed", items: [{ checkId: "unit", test: "test_refund", result: "passed" }], totals: { selected: 1, passed: 1, passedOnRerun: 0, failed: 0, notRun: 0 }, calls: 3, costMicros: 40_000, model: "gemini-2.5-flash" };
@@ -49,9 +50,9 @@ describe("real model artifact", () => {
     expect(line).not.toMatch(/\[|<b>|@person|#123|https:\/\/example|\n|\ufe0f/u);
   });
   it("refuses a megabyte without echo or unbounded work", () => {
-    const start = performance.now();
+    // A scaling check, not a wall-clock bound: refusing a longer string must not cost more than linearly more (8N stays at or under 256 KiB so it stays in CPU cache; the full 1,000,000 characters is checked once below).
+    expectLinearScaling((n) => { const hostile = { ...result(), model: "x".repeat(n) }; return () => realModelCheckLine(hostile); }, { n: 32_768, label: "realModelCheckLine on a huge model name" });
     expect(realModelCheckLine({ ...result(), model: "x".repeat(1_000_000) })).toBe("Real model check: not run: real model results could not be read.");
-    expect(performance.now() - start).toBeLessThan(1000);
   });
 });
 
@@ -89,11 +90,14 @@ describe("TE-192a reference reader", () => {
     const items = Array.from({ length: 200 }, (_, i) => ({ checkId: "c".repeat(64), test: String(i).padEnd(500, "x"), result: "passed" }));
     expect(RealModelCheckSchema.safeParse(run(items)).success).toBe(true);
     expect(realModelPassed(run(items), items[0]!.checkId, items[0]!.test)).toBe(true);
-    const oversized = Array.from({ length: 100_000 }, () => item);
-    Object.defineProperty(oversized, 0, { get: () => { throw new Error("must not visit"); } });
-    const start = performance.now();
-    expect(RealModelCheckSchema.safeParse(run(oversized)).success).toBe(false);
-    expect(performance.now() - start).toBeLessThan(1000);
+    const oversizedOf = (length: number) => {
+      const list = Array.from({ length }, () => item);
+      Object.defineProperty(list, 0, { get: () => { throw new Error("must not visit"); } });
+      return list;
+    };
+    // A scaling check, not a wall-clock bound: refusing a longer array must not cost more than linearly more (unitBytes 8 is a pointer per item; 8N stays under 256 KiB so it stays in CPU cache; the full 100,000 items is checked once below).
+    expectLinearScaling((n) => { const hostile = run(oversizedOf(n)); return () => RealModelCheckSchema.safeParse(hostile); }, { n: 4_096, unitBytes: 8, label: "RealModelCheckSchema on a huge items array" });
+    expect(RealModelCheckSchema.safeParse(run(oversizedOf(100_000))).success).toBe(false);
   });
   it.each([
     { totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 } },

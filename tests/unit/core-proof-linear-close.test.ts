@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionBinding } from "@agentx/contracts";
 import { inertLine } from "../../packages/broker/src/core/proof/inert-text.js";
 import { breakLinearKeys, linearCloseLine, linearIssueKeyOf, linearIssueKeyOfBindings, neutralizeLinearWords, parseLinearIssue, sealLinearText } from "../../packages/broker/src/core/proof/linear-close.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const issue = (issueId: string, url = "https://linear.app/acme/issue/ENG-142/fix-the-retry-bug"): SessionBinding => ({ kind: "linear_issue", issueId, url });
 const THREAD: SessionBinding = { kind: "slack_thread", teamId: "T0TEAM001", channelId: "C0CHAN001", threadTs: "1695500000.000031" };
@@ -119,9 +120,19 @@ describe("a model-written line cannot close or link a Linear issue", () => {
   });
 
   it("runs in time proportional to the text, however it is shaped", () => {
-    const started = Date.now();
-    for (const text of ["fix ".repeat(50_000), `fix ${"a".repeat(200_000)}-1`, "fixes &".repeat(30_000), `${"a1".repeat(100_000)}-5`]) neutralizeLinearWords(text);
-    expect(Date.now() - started).toBeLessThan(3_000);
+    // Scaling checks: each shape is timed at a size and at eight times it (the largest 8N inputs are 200,000 characters, under 256 KiB so they stay in CPU cache); the cost must grow no faster than the text.
+    const shapes: Array<[string, number, number, (size: number) => string]> = [
+      ["repeated fix", 6_250, 4, (size) => "fix ".repeat(size)],
+      ["fix then a long word", 25_000, 1, (size) => `fix ${"a".repeat(size)}-1`],
+      ["repeated fixes and an ampersand", 3_750, 7, (size) => "fixes &".repeat(size)],
+      ["a long run of letters and digits", 12_500, 2, (size) => `${"a1".repeat(size)}-5`],
+    ];
+    for (const [label, n, unitBytes, build] of shapes) {
+      expectLinearScaling((size) => {
+        const text = build(size);
+        return () => neutralizeLinearWords(text);
+      }, { n, unitBytes, label: `neutralizeLinearWords on ${label}` });
+    }
   });
 
   it("seals every line but Rovara's own Fixes line", () => {

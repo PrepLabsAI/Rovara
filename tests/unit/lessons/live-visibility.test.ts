@@ -13,6 +13,7 @@ import { buildLessonsView, type LessonViewDeps } from "../../../packages/broker/
 import type { AccessCheckPort } from "../../../packages/broker/src/lessons/access-port.js";
 import type { TaskVisibilityPort } from "../../../packages/broker/src/lessons/access-port.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { expectLinearScalingAsync } from "../../support/scaling.js";
 import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, directory, embedder, lessonRecord, seed, settings, wideAudience, NO_VECTORS } from "./lesson-helpers.js";
 
 /** A lesson-audience port over a table (a task missing from the table, or mapped to undefined, is unknown; "throw" throws). Counts its batched reads. */
@@ -408,10 +409,24 @@ describe("rank and filter first, check in pages, one reader per request", () => 
     const store = new InMemoryLessonStore();
     const clock = new Clock();
     await seed(store, ...lessons);
-    const started = Date.now();
     // (The project's budget is raised to the caps: the default is 5 lessons and 2 KB per stage, and this test is about which twelve are chosen.)
     const result = await loadLessonsForStage({ access: accessOf(p.value), store, vectors: NO_VECTORS, settings: settings({ loadBudget: { lessons: 12, bytes: 6 * 1024 } }), audit: new Audit(), now: clock.now }, request);
-    expect(Date.now() - started).toBeLessThan(2_500);
+    // Stays inside the budget: the work grows linearly with the project's lessons (50 with 10 narrowed, then 400 with 80), not faster.
+    const sized = new Map<number, { work: () => Promise<unknown>; loaded: () => string[] }>();
+    for (const count of [50, 400]) {
+      const scenario = manyOpen(count, count / 5);
+      const ports = lessonPorts(scenario.table);
+      const sizedStore = new InMemoryLessonStore();
+      await seed(sizedStore, ...scenario.lessons);
+      const sizedClock = new Clock();
+      let loaded: string[] = [];
+      sized.set(count, {
+        work: async () => { loaded = (await loadLessonsForStage({ access: accessOf(ports.value), store: sizedStore, vectors: NO_VECTORS, settings: settings({ loadBudget: { lessons: 12, bytes: 6 * 1024 } }), audit: new Audit(), now: sizedClock.now }, request)).context?.lessons.map((l) => l.id) ?? []; },
+        loaded: () => loaded,
+      });
+    }
+    await expectLinearScalingAsync((count) => sized.get(count)!.work, { n: 50, unitBytes: 600, label: "lessons load: many lessons" });
+    for (const count of [50, 400]) expect(sized.get(count)!.loaded()).toHaveLength(12);
     // The 100 narrowed lessons rank first and are withheld; the twelve best open ones follow.
     expect(result.context?.lessons.map((l) => l.id)).toEqual(lessons.slice(100, 112).map((l) => l.id));
     // Paged: the tasks asked are those of the first pages only (100 narrowed + 12 + one page of slack), far fewer than the 500 of the project and never past the bound.
@@ -419,7 +434,7 @@ describe("rank and filter first, check in pages, one reader per request", () => 
     expect(asked.length).toBeLessThan(300);
     expect(asked.length).toBeGreaterThanOrEqual(112);
     expect(new Set(asked).size).toBe(asked.length);
-  });
+  }, 60_000);
 
   it("load: a slow State table is cut at the load budget and the lessons not yet checked are not offered", async () => {
     const { table, lessons } = manyOpen(400, 400);

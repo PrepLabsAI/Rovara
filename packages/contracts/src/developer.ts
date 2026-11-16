@@ -1,6 +1,7 @@
 // Spec 025 phase 25a: the developer sign-in's shared names and wire shapes. The CLI parses server
 // responses with the non-strict schemas here, so a newer control plane can add fields.
 import { z } from "zod";
+import { OrgIdSchema } from "./browser-ids.js";
 import { ProjectRoleSchema } from "./app-projects.js";
 import { EnvironmentNameSchema } from "./environments.js";
 export { normalizeEmail } from "./email.js";
@@ -199,9 +200,16 @@ export const DEVELOPER_WORKSPACES_PER_PROJECT = 200;
  * cold channels fits, with room for a second page of members each. */
 export const CHANNEL_MEMBERS_MAX_CHANNELS = 50;
 
+/** Internal Slack authority context. Receivers recheck the workspace binding before credentials. */
+export const SlackWorkspaceScopeSchema = z.object({
+  companyId: OrgIdSchema,
+  teamId: SlackTeamIdSchema.refine((team) => team.startsWith("T")),
+}).strict();
+export type SlackWorkspaceScope = z.infer<typeof SlackWorkspaceScopeSchema>;
+
 export const ChannelMembersRequestSchema = z
   .object({
-    kind: z.literal("channel-members"),
+    kind: z.literal("channel-members"), workspace: SlackWorkspaceScopeSchema.optional(),
     slackUserId: SlackUserIdSchema,
     channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
   })
@@ -216,7 +224,7 @@ export type ChannelMembersResponse =
 /** Internal, fresh identity and membership proof for a task person. It is never an HTTP route. */
 export const TaskPersonProofRequestSchema = z
   .object({
-    kind: z.literal("task-person-proof"),
+    kind: z.literal("task-person-proof"), workspace: SlackWorkspaceScopeSchema.optional(),
     slackUserId: SlackUserIdSchema,
     channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
   })
@@ -235,7 +243,7 @@ export type TaskPersonProofResponse = z.infer<typeof TaskPersonProofResponseSche
 
 /** Bounded internal Lambda envelope for fresh task-dispatch proof. Never an HTTP request shape. */
 export const TaskDispatchProofRequestSchema = z.object({
-  kind: z.literal("task-dispatch-person-proof"),
+  kind: z.literal("task-dispatch-person-proof"), workspace: SlackWorkspaceScopeSchema.optional(),
   request: TaskPersonProofRequestSchema,
   admission: z.object({
     version: z.literal(1),
@@ -356,7 +364,7 @@ export type TaskPersonInviteExecutionReceipt = z.infer<typeof TaskPersonInviteEx
 
 /** Internal complete fresh channel directory for Task People. It is never an HTTP route. */
 export const TaskChannelPeopleRequestSchema = z.object({
-  kind: z.literal("task-channel-people"),
+  kind: z.literal("task-channel-people"), workspace: SlackWorkspaceScopeSchema.optional(),
   channelIds: z.array(SlackChannelIdSchema).min(1).max(CHANNEL_MEMBERS_MAX_CHANNELS),
 }).strict();
 export type TaskChannelPeopleRequest = z.infer<typeof TaskChannelPeopleRequestSchema>;
@@ -398,7 +406,7 @@ export type TaskPeopleDisplayReadResponse = z.infer<typeof TaskPeopleDisplayRead
 /** R10: the names and privacy of bound channels, read by DeveloperIdentity with the bot token. */
 export const ChannelInfoRequestSchema = z
   .object({
-    kind: z.literal("channel-info"),
+    kind: z.literal("channel-info"), workspace: SlackWorkspaceScopeSchema.optional(),
     channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
   })
   .strict();
@@ -447,12 +455,12 @@ export const MemberChannelsRequestSchema = z.object({
 export type MemberChannelsRequest = z.infer<typeof MemberChannelsRequestSchema>;
 
 /** Spec 025 A12: the broker asks DeveloperIdentity which Slack user owns a verified email (FR-012's lookup). */
-export const SlackUserByEmailRequestSchema = z.object({ kind: z.literal("slack-user-by-email"), email: z.string().email().max(254) }).strict();
+export const SlackUserByEmailRequestSchema = z.object({ kind: z.literal("slack-user-by-email"), workspace: SlackWorkspaceScopeSchema.optional(), email: z.string().email().max(254) }).strict();
 export type SlackUserByEmailRequest = z.infer<typeof SlackUserByEmailRequestSchema>;
 export type SlackUserByEmailResponse = { ok: true; userId?: string } | { ok: false; error: "slack_unavailable" | "invalid_request" };
 
 /** Spec 025 A13: the health route's Slack token check (auth.test), through DeveloperIdentity. */
-export const SlackAuthCheckRequestSchema = z.object({ kind: z.literal("slack-auth-check") }).strict();
+export const SlackAuthCheckRequestSchema = z.object({ kind: z.literal("slack-auth-check"), workspace: SlackWorkspaceScopeSchema.optional() }).strict();
 export type SlackAuthCheckRequest = z.infer<typeof SlackAuthCheckRequestSchema>;
 export type SlackAuthCheckResponse = { ok: true; teamId: string } | { ok: false; error: string };
 
@@ -537,6 +545,6 @@ export type StartIdentityLinkRequest = z.infer<typeof StartIdentityLinkRequestSc
 export type StartIdentityLinkResponse = { ok: true; authorizeUrl: string } | { ok: false; error: "refused" | "reauth"; message: string } | { ok: false; error: "invalid_request" | "unavailable" };
 
 /** Spec 025 E12 (Q8): a public channel of the environment's team, by its name. */
-export const ChannelByNameRequestSchema = z.object({ kind: z.literal("channel-by-name"), name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/) }).strict();
+export const ChannelByNameRequestSchema = z.object({ kind: z.literal("channel-by-name"), workspace: SlackWorkspaceScopeSchema.optional(), name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/) }).strict();
 export type ChannelByNameRequest = z.infer<typeof ChannelByNameRequestSchema>;
 export type ChannelByNameResponse = { ok: true; channel?: { channelId: string; name: string } } | { ok: false; error: "slack_unavailable" | "invalid_request" };

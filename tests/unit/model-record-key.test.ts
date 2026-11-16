@@ -4,6 +4,7 @@ import { MODEL_RECORD_DEPTH_MAX, MODEL_RECORD_VOLATILE_FIELDS, modelPromptSegmen
 import { fakeModelEgressWorld } from "../../packages/testing/src/ports/model-egress-world.js";
 import { validFrame } from "../../packages/testing/src/ports/model-egress-conformance.js";
 import { chatFrame, geminiFrame, messagesFrame } from "./model-record-support.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const world = fakeModelEgressWorld();
 const enc = (value: unknown): Uint8Array => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
@@ -104,9 +105,11 @@ describe("modelRecordKey", () => {
   it("keys a 1 MB body quickly", () => {
     const base = chatFrame(world);
     const big = withBody(base, { model: "m", messages: [{ role: "user", content: "x".repeat(1024 * 1024) }] });
-    const started = performance.now();
     expect(keyOf(big)).toMatch(/^[a-f0-9]{64}$/u);
-    expect(performance.now() - started).toBeLessThan(1500);
+    // The cost must not grow faster than the body (32,000 -> 256,000 characters: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1 MiB body is keyed once, un-timed, above).
+    let key = "";
+    expectLinearScaling((size) => { const frame = withBody(base, { model: "m", messages: [{ role: "user", content: "x".repeat(size) }] }); return () => { key = keyOf(frame); }; }, { n: 32_000, label: "model record key of a large body" });
+    expect(key).toMatch(/^[a-f0-9]{64}$/u);
   });
 
   it("is the same function F1-c would call: it takes an unknown frame and returns the view it read", () => {

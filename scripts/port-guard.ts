@@ -1089,6 +1089,14 @@ const GUARD_FILES = [
   /^scripts\/port-guard-accepted\.json$/i,
   /^tests\/[^/]+\/port-guard[^/]*$/i,
   /^\.github\/workflows\/ci\.yml$/i,
+  // What decides what a CI run covers and whether it passed (DEC 242): the plan, the gate, and what makes a "full" run the whole suite (the test configuration, the list
+  // of native-only files it leaves out, and the shard split). On a pull request CI runs the base branch's plan and gate, but the test configuration and the shard split
+  // are the pull request's own, so a change to any of them is reviewed by hand.
+  /^scripts\/ci-plan\.ts$/i,
+  /^scripts\/ci-gate\.ts$/i,
+  /^vitest(\.[^/]+)?\.config\.ts$/i,
+  /^tests\/support\/vitest-shared-config\.ts$/i,
+  /^tests\/support\/duration-[^/]*$/i,
   /(^|\/)\.gitleaks[^/]*$/i,
   // The built-in starter list of test service images: part of the source, so Code's release is its trust anchor. A change to the list is a change to what runs with no owner approval, so it is reviewed by hand.
   /^packages\/contracts\/src\/owner-starter-images\.ts$/i,

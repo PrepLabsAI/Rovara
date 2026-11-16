@@ -7,6 +7,7 @@ import {
   usageFromBody, withheldBody, withDefaultMaxOutput, hasExternalInput, MODEL_EGRESS_OVERRUN_SENTENCE, isOverCap, maxOutputFieldOf, type ModelEgressFamily,
 } from "@agentx/contracts";
 import { fixtureKey } from "../../packages/testing/src/ports/model-egress-fixtures.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const enc = (text: string) => new TextEncoder().encode(text);
 const dec = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
@@ -100,11 +101,18 @@ describe("the key-echo scrub", () => {
   it("refuses a key too short to scan for, without echoing it", () => {
     expect(() => keyEchoNeedles("short")).toThrow("the key is too short to scan for");
   });
-  it("a 1 MB body checks in well under a second", () => {
-    const big = enc(`{"text":"${"lorem ipsum dolor ".repeat(60_000)}"}`);
-    const started = performance.now();
-    const scrubbed = scrubResponseBody({ ...body(""), body: big });
-    expect(performance.now() - started).toBeLessThan(500);
+  it("a 1 MB body checks in time that grows no faster than its size", () => {
+    let big = enc("");
+    // 1,800 repeats (about 32 KB), then 14,400 (about 260 KB, the 8N input stays at or under 256 KiB so it stays in CPU cache): linear work grows about 8x. The 1 MB body (60,000 repeats) is scrubbed once, un-timed, below.
+    const inputOf = (repeats: number) => {
+      big = enc(`{"text":"${"lorem ipsum dolor ".repeat(repeats)}"}`);
+      return { ...body(""), body: big };
+    };
+    expectLinearScaling((repeats) => {
+      const input = inputOf(repeats);
+      return () => scrubResponseBody(input);
+    }, { n: 1_800, unitBytes: 18, label: "scrubbing a large response body" });
+    const scrubbed = scrubResponseBody(inputOf(60_000));
     expect(big.byteLength).toBeGreaterThan(1_000_000);
     expect(scrubbed.replaced).toBe(false);
   });
@@ -248,14 +256,20 @@ describe("usage", () => {
     scanner.push(`data: {"choices":[{"delta":{"content":"par`);
     expect(scanner.finish()).toBeUndefined();
   });
-  it("keeps only an unfinished tail of a long stream, and a 1 MB stream checks quickly", () => {
-    const scanner = createUsageScanner("openai_compatible");
-    const started = performance.now();
+  it("keeps only an unfinished tail of a long stream, and a 1 MB stream checks in time that grows no faster than its size", () => {
     const line = `data: ${json({ choices: [{ delta: { content: "x".repeat(1000) } }] })}\n\n`;
-    for (let index = 0; index < 1000; index += 1) scanner.push(line);
-    scanner.push(`data: ${json({ usage: { prompt_tokens: 1, completion_tokens: 2 } })}\n\n`);
-    expect(scanner.finish()).toEqual({ inputTokens: 1, outputTokens: 2 });
-    expect(performance.now() - started).toBeLessThan(800);
+    const last = `data: ${json({ usage: { prompt_tokens: 1, completion_tokens: 2 } })}\n\n`;
+    let usage = undefined as ReturnType<ReturnType<typeof createUsageScanner>["finish"]>;
+    // 30 lines of 1 KB, then 240 (the 8N stream stays under 256 KiB so it stays in CPU cache): linear work grows about 8x. The 1,000-line stream is scanned once, un-timed, below.
+    const scan = (lines: number) => () => {
+      const scanner = createUsageScanner("openai_compatible");
+      for (let index = 0; index < lines; index += 1) scanner.push(line);
+      scanner.push(last);
+      usage = scanner.finish();
+    };
+    expectLinearScaling(scan, { n: 30, unitBytes: 1024, label: "scanning a long stream for usage" });
+    scan(1_000)();
+    expect(usage).toEqual({ inputTokens: 1, outputTokens: 2 });
   });
 });
 

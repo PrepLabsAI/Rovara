@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, realpath, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { TestEnvironmentBodySchema, WorkerInvocationSchema, testEnvDigest, testEnvIsProved, armCompatibilityOf, suggestMachine, TEST_ENV_PROVE_MEASURE_FEATURE } from "@agentx/contracts";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { runSetupProve, runSetupProveJob, type SetupProvePorts } from "../../packages/worker/src/setup-prove.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
@@ -164,11 +165,16 @@ it("one overall deadline aborts commands and waits for their stop before disposa
   expect((await result).ok).toBe(true); expect(events).toEqual(["stopped", "disposed"]);
 });
 it("a megabyte of hostile output stays bounded, redacted and inert in the report", async () => {
-  const b = bench(); const secret = ["sk", "proj", "a".repeat(80)].join("-");
-  const hostile = `${"x".repeat(1_000_000)} ${secret} ![a[b]c](https://bad.test) [x](https://bad.test) ![x][ref] @owner #123 <b>\n# > --- \x60\x60\x60 ~~~ \u200b\ufe0f`;
-  b.fresh.ports.runCommand = async () => ({ exitCode: 1, timedOut: false, stdout: hostile, stderr: "" });
-  const start = performance.now(); const result = await runSetupProve(b.input, b.ports);
-  expect(performance.now() - start).toBeLessThan(1000);
+  const secret = ["sk", "proj", "a".repeat(80)].join("-");
+  // 32 KB, then 256 KB of output (the 8N input stays at or under 256 KiB so it stays in CPU cache): linear work grows about 8x. The full megabyte runs once, un-timed, below and is the result asserted.
+  const runHostile = (size: number) => {
+    const b = bench();
+    const hostile = `${"x".repeat(size)} ${secret} ![a[b]c](https://bad.test) [x](https://bad.test) ![x][ref] @owner #123 <b>\n# > --- \x60\x60\x60 ~~~ \u200b\ufe0f`;
+    b.fresh.ports.runCommand = async () => ({ exitCode: 1, timedOut: false, stdout: hostile, stderr: "" });
+    return () => runSetupProve(b.input, b.ports);
+  };
+  await expectLinearScalingAsync(runHostile, { n: 32_000, label: "a megabyte of hostile command output" });
+  const result = await runHostile(1_000_000)();
   expect(result.ok).toBe(true); if (!result.ok) throw new Error("expected report");
   const tail = result.report.steps.find(step => step.step === "full_suite")!.outputTail!;
   expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(4096);
@@ -262,17 +268,24 @@ it("a disposal failure cannot silently return a successful result", async () => 
   const b = bench(); b.fresh.dispose = async () => { throw new Error("private-cause"); };
   expect(await runSetupProve(b.input, b.ports)).toEqual({ ok: false, reason: "cleanup_failed" });
 });
-it("the stated maximum of sixteen repositories and 832 commands completes within a bounded test time", async () => {
-  const b = bench();
-  b.input.job.environment.repos = Array.from({ length: 16 }, (_, i) => ({ repositoryId: `r${i}`, setupCommands: Array.from({ length: 20 }, () => command), checks: Array.from({ length: 32 }, (_, j) => ({ id: `unit-${i}-${j}`, label: "Unit", kind: "test" as const, command })) }));
-  b.input.job.proposalDigest = testEnvDigest(b.input.job.environment);
-  const commits = Object.fromEntries(b.input.job.environment.repos.map(repo => [repo.repositoryId, commit]));
-  const manifest = { repositories: b.input.job.environment.repos.map(repo => ({ ...b.input.manifest.repositories[0]!, name: repo.repositoryId, path: repo.repositoryId })) };
-  b.fresh.ports.runCommand = vi.fn(async () => ({ exitCode: 0, timedOut: false, stdout: "", stderr: "" }));
-  const started = performance.now();
-  const result = await runSetupProve({ ...b.input, job: { ...b.input.job, commits }, manifest }, b.ports);
-  expect(result.ok).toBe(true); expect(b.fresh.ports.runCommand).toHaveBeenCalledTimes(832);
-  expect(performance.now() - started).toBeLessThan(1000);
+it("the stated maximum of sixteen repositories and 832 commands completes in time that grows no faster than its size", async () => {
+  let result = undefined as Awaited<ReturnType<typeof runSetupProve>> | undefined;
+  let runCommand = vi.fn();
+  // 2 repositories (104 commands), then the stated maximum of 16 (832): linear work grows about 8x (about 6 KB a repository, so the 8N input stays well under 256 KiB).
+  await expectLinearScalingAsync((repositories) => {
+    const b = bench();
+    b.input.job.environment.repos = Array.from({ length: repositories }, (_, i) => ({ repositoryId: `r${i}`, setupCommands: Array.from({ length: 20 }, () => command), checks: Array.from({ length: 32 }, (_, j) => ({ id: `unit-${i}-${j}`, label: "Unit", kind: "test" as const, command })) }));
+    b.input.job.proposalDigest = testEnvDigest(b.input.job.environment);
+    const commits = Object.fromEntries(b.input.job.environment.repos.map(repo => [repo.repositoryId, commit]));
+    const manifest = { repositories: b.input.job.environment.repos.map(repo => ({ ...b.input.manifest.repositories[0]!, name: repo.repositoryId, path: repo.repositoryId })) };
+    return async () => {
+      runCommand = vi.fn(async () => ({ exitCode: 0, timedOut: false, stdout: "", stderr: "" }));
+      b.fresh.ports.runCommand = runCommand;
+      result = await runSetupProve({ ...b.input, job: { ...b.input.job, commits }, manifest }, b.ports);
+    };
+  }, { n: 2, unitBytes: 6_000, label: "setup proving of many repositories and commands" });
+  if (result === undefined) throw new Error("no result");
+  expect(result.ok).toBe(true); expect(runCommand).toHaveBeenCalledTimes(832);
 });
 
 it("cleanup failure is reported even when start or freshness already refused", async () => {

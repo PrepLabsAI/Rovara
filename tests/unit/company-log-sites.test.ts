@@ -26,6 +26,7 @@ it("fails closed: unusable logger company", () => {
 import ts from "typescript";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { expectLinearScaling } from "./../support/scaling.js";
 const MAX_FILES = 1600, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000; // files: 1200 -> 1600 when the batch of 2026-11-16 put 1205 sources under the roots
 const roots = ["packages/broker/src", "packages/aws-adapters/src", "packages/local-adapters/src"];
 function scan(sources: readonly { path: string; source: string }[], clock = () => performance.now(), began = clock()): Record<string, number> {
@@ -104,7 +105,11 @@ it("unparsable syntax and console aliases fail as unclassifiable", () => {
 });
 it("one total byte/file/time budget; a large input remains bounded", () => {
   const source = 'console.log("x");\n'.repeat(20_000);
-  const began = performance.now(); expect(scan([{ path: "large.ts", source }])).toEqual({ "large.ts": 20_000 }); expect(performance.now() - began).toBeLessThan(10_000);
+  expect(scan([{ path: "large.ts", source }])).toEqual({ "large.ts": 20_000 });
+  // The scan's cost must not grow faster than the source (1,500 -> 12,000 calls of 18 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 20,000 calls are scanned once above).
+  let counted: Record<string, number> = {};
+  expectLinearScaling((lines) => { const sources = [{ path: "large.ts", source: 'console.log("x");\n'.repeat(lines) }]; return () => { counted = scan(sources); }; }, { n: 1_500, unitBytes: 18, label: "company log scan by source size" });
+  expect(counted).toEqual({ "large.ts": 12_000 });
   expect(() => scan(Array.from({ length: MAX_FILES + 1 }, () => ({ path: "x.ts", source: "" })))).toThrow("unclassifiable");
   expect(() => scan([{ path: "x.ts", source: " ".repeat(MAX_BYTES / 2 + 1) }, { path: "y.ts", source: " ".repeat(MAX_BYTES / 2 + 1) }])).toThrow("unclassifiable");
   let now = 0; expect(() => scan([{ path: "x.ts", source: "" }], () => { now += MAX_MS + 1; return now; })).toThrow("unclassifiable");

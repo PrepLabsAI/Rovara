@@ -9,6 +9,7 @@ import {
   ToolPatternSchema,
   toolPatternMatches,
 } from "../../packages/contracts/src/index.js";
+import { expectLinearScaling } from "../support/scaling.js";
 import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
 
 const repository = { name: "api", url: "https://github.com/example/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "github-app" };
@@ -45,12 +46,15 @@ describe("action policy contracts", () => {
 
   it("matches a many-star pattern in linear time, with no catastrophic backtracking", () => {
     const pattern = "*a".repeat(8);
-    const name = `${"a".repeat(63)}b`;
-    const start = performance.now();
-    const result = toolPatternMatches(pattern, name);
-    const elapsed = performance.now() - start;
-    expect(result).toBe(false);
-    expect(elapsed).toBeLessThan(200);
+    const hostile = `${"*a".repeat(7)}*b*`; // every middle segment is found, then `b` is absent: the whole name is scanned
+    expect(toolPatternMatches(pattern, `${"a".repeat(63)}b`)).toBe(false);
+    let results: boolean[] = [];
+    expectLinearScaling((size) => {
+      const name = `${"a".repeat(size - 1)}b`;
+      const allA = "a".repeat(size);
+      return () => { results = [toolPatternMatches(pattern, name), toolPatternMatches(hostile, allA)]; };
+    }, { n: 12_500, unitBytes: 2, label: "toolPatternMatches many-star pattern" });
+    expect(results).toEqual([false, false]);
   });
 
   it("limits a tool pattern to at most 4 *", () => {

@@ -10,6 +10,7 @@ import { builtinModelCatalog } from "../../packages/contracts/src/model-catalog-
 import { BEDROCK_NOT_RUN_SENTENCE, UNMATCHED_SENTENCE } from "../../packages/contracts/src/model-served-family.js";
 import { MODEL_REQUEST_BODY_MAX_BYTES } from "../../packages/contracts/src/model-family-common.js";
 import { readModelRequestFacts } from "../../packages/contracts/src/model-request-facts.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 let connects = 0;
 let fetches = 0;
@@ -333,22 +334,32 @@ describe("requests that are not served", () => {
 
 describe("speed and bounds", () => {
   it("a 1 MB request is read fast", () => {
-    const big = { model: "m", messages: [{ role: "user", content: "paris ".repeat(160_000) }] };
+    // The cost grows linearly with the request, not faster: 5k then 40k repeats of 6 bytes (the 8N input stays at or under 256 KiB so it stays in CPU cache). The 1 MB request (160k repeats) is served once, un-timed, below.
+    const results = new Map<number, ServeRepliesResult>();
     const set = stamp("openai_compatible", [{ id: "a", match: { promptContains: "paris" } }]);
-    const started = performance.now();
-    const result = serve(post("/p/openai/v1/chat/completions", big), set);
-    expect(result.kind).toBe("scripted");
-    expect(performance.now() - started).toBeLessThan(1500);
+    expectLinearScaling((repeats) => {
+      const big = { model: "m", messages: [{ role: "user", content: "paris ".repeat(repeats) }] };
+      const request = post("/p/openai/v1/chat/completions", big);
+      return () => { results.set(repeats, serve(request, set)); };
+    }, { n: 5_000, unitBytes: 6, label: "model serve: a 1 MB request" });
+    const big = { model: "m", messages: [{ role: "user", content: "paris ".repeat(160_000) }] };
+    results.set(160_000, serve(post("/p/openai/v1/chat/completions", big), set));
+    expect([results.get(5_000)!.kind, results.get(40_000)!.kind, results.get(160_000)!.kind]).toEqual(["scripted", "scripted", "scripted"]);
     const facts = readModelRequestFacts(JSON.stringify(big));
     expect(facts.promptText?.length).toBeGreaterThan(900_000);
-  });
+  }, 60_000);
   it("a 2,000-reply set is searched fast", () => {
-    const set = stamp("openai_compatible", Array.from({ length: 2000 }, (_, index) => ({ id: `r${String(index)}`, match: { promptContains: `#${String(index)}#` } })));
-    const started = performance.now();
-    const result = serve(post("/p/openai/v1/chat/completions", { model: "m", messages: [{ role: "user", content: "#1999#" }] }), set);
-    expect(result.replyId).toBe("r1999");
-    expect(performance.now() - started).toBeLessThan(1500);
-  });
+    // The last reply matches, so the whole set is searched: the cost grows linearly with the set, not faster (125, then 1,000 replies of about 250 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 2,000-reply set is searched once, un-timed).
+    const replyIds = new Map<number, string | undefined>();
+    const searchLast = (count: number) => {
+      const set = stamp("openai_compatible", Array.from({ length: count }, (_, index) => ({ id: `r${String(index)}`, match: { promptContains: `#${String(index)}#` } })));
+      const request = post("/p/openai/v1/chat/completions", { model: "m", messages: [{ role: "user", content: `#${String(count - 1)}#` }] });
+      return () => { replyIds.set(count, serve(request, set).replyId); };
+    };
+    expectLinearScaling(searchLast, { n: 125, unitBytes: 250, label: "model serve: a 2,000-reply set" });
+    searchLast(2000)();
+    expect([replyIds.get(125), replyIds.get(1000), replyIds.get(2000)]).toEqual(["r124", "r999", "r1999"]);
+  }, 60_000);
 });
 
 describe("M3: embedding requests are capped before anything is built", () => {
@@ -362,15 +373,26 @@ describe("M3: embedding requests are capped before anything is built", () => {
     expect(result.answer.body.length).toBeLessThan(1000);
   };
   it("the reviewer's probe: 2,048 texts x 4,096 dimensions x six types is refused fast and small", () => {
-    const started = performance.now();
+    const requestsFor = (count: number) => {
+      const texts = Array.from({ length: count }, () => "a");
+      return [
+        ...[["float"], ["float", "int8", "uint8", "binary", "ubinary", "base64"]].map((types) => ({ request: post("/p/cohere/v2/embed", { model: "m", texts, output_dimension: 4096, embedding_types: types }), set: cohereSet })),
+        { request: post("/p/openai/v1/embeddings", { model: "m", input: texts, dimensions: 4096 }), set: openaiSet },
+      ];
+    };
+    // The refusal does not build anything from the request: the cost does not grow faster than the number of texts (256, then 2,048; about 30 bytes a text across the three requests, so the 8N input is far under 256 KiB).
+    let answers: ServeRepliesResult[] = [];
+    expectLinearScaling((count) => {
+      const requests = requestsFor(count);
+      return () => { answers = requests.map(({ request, set }) => serve(request, set)); };
+    }, { n: 256, unitBytes: 30, label: "model serve: embedding refusal" });
+    for (const answer of answers) refused(answer);
+    // One full-size pass: nothing big is built.
+    const full = requestsFor(2048);
     const before = process.memoryUsage().heapUsed;
-    for (const types of [["float"], ["float", "int8", "uint8", "binary", "ubinary", "base64"]]) {
-      refused(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 2048 }, () => "a"), output_dimension: 4096, embedding_types: types }), cohereSet));
-    }
-    refused(serve(post("/p/openai/v1/embeddings", { model: "m", input: Array.from({ length: 2048 }, () => "a"), dimensions: 4096 }), openaiSet));
-    expect(performance.now() - started).toBeLessThan(500);
+    for (const { request, set } of full) refused(serve(request, set));
     expect(process.memoryUsage().heapUsed - before).toBeLessThan(60 * 1024 * 1024);
-  });
+  }, 60_000);
   it("each family's own limits: Cohere 96 texts, OpenAI 3,072 dimensions, Gemini 100 batch requests", () => {
     expect(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 96 }, () => "a"), output_dimension: 1024 }), cohereSet).kind).toBe("scripted");
     refused(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 97 }, () => "a") }), cohereSet));

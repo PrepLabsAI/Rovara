@@ -10,6 +10,7 @@ import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-s
 import { createAdapterRegistry, loadAdapters, parsePluginConfig } from "../../packages/broker/src/ports/adapter-registry.js";
 import { secretsManagerSecretsPlugin, SecretsManagerSettingsSchema } from "../../packages/broker/src/plugins/secrets/aws-secrets-manager/plugin.js";
 import { FakeSecretsManager } from "../support/ports/aws-fakes.js";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 vi.mock("node:crypto", async (original) => ({ ...await original<typeof Crypto>(), randomBytes: () => Buffer.from("01020304", "hex") }));
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb", PREFIX = "agentx/local/";
 function world() {
@@ -57,9 +58,13 @@ describe("company adapter", () => {
     expect(service.reads).toEqual([]);
   });
   it("bounds oversized input before splitting it", async () => {
-    const {store, service} = world(); const start = performance.now();
+    const {store, service} = world();
     await expect(store.read(A, {awsSecret:"a/".repeat(500_000)})).rejects.toThrow("the secret reference is not valid");
-    expect(performance.now() - start).toBeLessThan(1000); expect(service.reads).toEqual([]);
+    // Refusing it must not cost more as the input grows (N stays small so 8N is at most 256 KiB and stays in CPU cache; the full 500,000 repeats was refused once above).
+    const refusals: unknown[] = [];
+    await expectLinearScalingAsync((repeats) => { const ref = {awsSecret:"a/".repeat(repeats)}; return async () => { try { await store.read(A, ref); refusals.push("accepted"); } catch (error) { refusals.push(error instanceof Error ? error.message : String(error)); } }; }, {n: 16_384, unitBytes: 2, label: "refusing an oversized secret reference"});
+    expect(new Set(refusals)).toEqual(new Set(["the secret reference is not valid"]));
+    expect(service.reads).toEqual([]);
   });
   it("hosted settings enforce all families and legacy ownership", async () => {
     expect(SecretsManagerSettingsSchema.safeParse({region:"us-west-2",profile:"test",namePrefix:PREFIX,hosted:"true"}).success).toBe(false);

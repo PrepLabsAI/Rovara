@@ -142,3 +142,46 @@ describe("GET /v1/admin/health, each check's other answers", () => {
     await expect(provider(Response.json({ installations: [] })).installationCount()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "RUNTIME_UNAVAILABLE: GitHub returned an invalid installations response" });
   });
 });
+
+it("health probes only the authenticated company's explicit workspaces and keeps one aggregate row", async () => {
+  const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
+  for (const companyId of [A, B]) {
+    const teamId = companyId === A ? "T0AAAAAAA" : "T0BBBBBBB";
+    const probe = vi.fn(async (workspace?: { companyId: string; teamId: string }) => ({ ok: true as const, teamId: workspace?.teamId ?? "T0INSTALL" }));
+    const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
+      companies: { companyOf: async () => companyId },
+      slackWorkspaces: { scopesForCompany: async (company: string) => company === companyId ? [{ companyId, teamId }] : [], requireCompany: async () => companyId },
+      health: { slackAuthCheck: probe },
+    } } });
+    const answer = await admin("GET", "/v1/admin/health");
+    expect(answer.body.slack).toEqual({ status: "ok", detail: "Slack works for this company." });
+    expect(probe).toHaveBeenCalledExactlyOnceWith({ companyId, teamId });
+    expect(JSON.stringify(answer.body.slack)).not.toContain(teamId);
+  }
+});
+it.each(["foreign", "missing", "over-budget", "throws"])("company health refuses %s without install fallback or partial success", async (failure) => {
+  const companyId = "org_aaaaaaaaaaaaaaaaaaaa", teamId = "T0AAAAAAA";
+  const probe = vi.fn(async () => ({ ok: true as const, teamId }));
+  const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
+    companies: { companyOf: async () => companyId },
+    slackWorkspaces: { scopesForCompany: async () => {
+      if (failure === "throws") throw Error("private marker");
+      return failure === "missing" ? [] : Array.from({ length: failure === "over-budget" ? 33 : 1 }, (_, index) => ({ companyId, teamId: failure === "over-budget" ? `T${String(index).padStart(8, "0")}` : teamId }));
+    }, requireCompany: async () => failure === "foreign" ? "org_bbbbbbbbbbbbbbbbbbbb" : companyId },
+    health: { slackAuthCheck: probe },
+  } } });
+  expect((await admin("GET", "/v1/admin/health")).body.slack).toEqual({ status: "unknown", detail: "Slack is not available for this company." });
+  expect(probe).not.toHaveBeenCalled();
+});
+
+it("company health succeeds at the total 32-workspace limit", async () => {
+  const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
+  const scopes = Array.from({ length: 32 }, (_, index) => ({ companyId, teamId: `T${String(index).padStart(8, "0")}` }));
+  const probe = vi.fn(async (workspace?: { teamId: string }) => ({ ok: true as const, teamId: workspace!.teamId }));
+  const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
+    companies: { companyOf: async () => companyId },
+    slackWorkspaces: { scopesForCompany: async () => scopes, requireCompany: async () => companyId }, health: { slackAuthCheck: probe },
+  } } });
+  expect((await admin("GET", "/v1/admin/health")).body.slack).toEqual({ status: "ok", detail: "Slack works for this company." });
+  expect(probe).toHaveBeenCalledTimes(32);
+});

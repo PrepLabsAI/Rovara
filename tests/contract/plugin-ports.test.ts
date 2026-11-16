@@ -145,12 +145,22 @@ describe("change requests", () => {
 describe("neutral events", () => {
   const base = { eventId: "d-1", host: "github" };
   it("covers the neutral event types of the design, and each parses", () => {
-    expect([...CODE_HOST_EVENT_TYPES].sort()).toEqual(["change_request.closed", "change_request.merged", "change_request.opened", "change_request.updated", "check.completed", "comment.created", "review.submitted", "revision.pushed"]);
+    expect([...CODE_HOST_EVENT_TYPES].sort()).toEqual(["change_request.closed", "change_request.merged", "change_request.opened", "change_request.updated", "check.completed", "comment.created", "deployment.status", "review.submitted", "revision.pushed"]);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "change_request.opened", ref }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "review.submitted", ref, state: "APPROVED" }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "comment.created", ref, commentId: "9" }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "check.completed", repository: ref.repository, revision: sha, name: "ci", conclusion: "failure" }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "revision.pushed", repository: ref.repository, branch: "main", revision: sha }).success).toBe(true);
+    expect(CodeHostEventSchema.safeParse({ ...base, type: "deployment.status", repository: ref.repository, revision: sha, environment: "staging", state: "success" }).success).toBe(true);
+  });
+  it("refuses a deployment event with a state, an environment or a field the port does not name (M7 slice 2)", () => {
+    const event = { ...base, type: "deployment.status", repository: ref.repository, revision: sha, environment: "staging", state: "success" };
+    expect(CodeHostEventSchema.safeParse({ ...event, state: "inactive" }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, state: "error" }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, environment: "" }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, environment: "e".repeat(65) }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, environment: undefined }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, url: "https://example.test" }).success).toBe(false);
   });
   it("refuses an event with no delivery id, an unknown type or a field it does not know", () => {
     expect(CodeHostEventSchema.safeParse({ host: "github", type: "change_request.opened", ref }).success).toBe(false);

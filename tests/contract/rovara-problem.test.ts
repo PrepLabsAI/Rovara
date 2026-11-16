@@ -7,6 +7,7 @@ import {
   ROVARA_PROBLEM_KINDS, ROVARA_PROBLEM_UNKNOWN, ROVARA_PROBLEM_WORDS, renderEvidence, renderEvidenceRead, readEvidencePack, rovaraProblem, type RovaraProblemFacts, type RovaraProblemRow, type RovaraProblemUnknownRow,
 } from "../../packages/contracts/src/index.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const HEAD = "Held back: Rovara problem, not your code: ";
 const facts = (kind: string, more: Partial<RovaraProblemFacts> = {}): RovaraProblemFacts => ({ kind, retries: 1, ...more });
@@ -198,9 +199,12 @@ describe("words from a repository, a person or a model are inert", () => {
     expect(line).toContain("did not start (s)");
   });
   it("a 1 MB input is cheap and the line stays within its bound", () => {
-    const started = Date.now();
+    // Linear work grows about 8x, quadratic about 64x. N is small (8N = 256 KiB) so the 8N input stays in CPU cache; the full 1 MB input is checked once below.
+    expectLinearScaling((repeats) => {
+      const input = facts("out_of_memory", { check: "a ".repeat(repeats) });
+      return () => rovaraProblem(input);
+    }, { n: 16_384, unitBytes: 2, label: "a problem line from a 1 MB input" });
     const line = rovaraProblem(facts("out_of_memory", { check: "a ".repeat(500_000) })).line;
-    expect(Date.now() - started).toBeLessThan(2_000);
     expect(Array.from(line).length).toBeLessThanOrEqual(300);
     expect(line).toMatch(/Next: .+\.$/u);
   });

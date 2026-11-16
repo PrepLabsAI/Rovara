@@ -423,7 +423,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
           const denied = ids.length === 0 || ids.some((id) => slackActionClass(id) !== "member");
           const text = person.kind === "unlinked" ? await slackLinkNotice(dependencies, team, user) : denied ? SLACK_WEB_SIGNIN_NOTICE : undefined;
           if (denied || person.kind === "unlinked") {
-            if (payload.type === "view_submission") return respond(200, { response_action: "errors", errors: { [firstInputBlock(asRecord(payload.view))]: text ?? "link your account: Open in Rovara" } });
+            if (payload.type === "view_submission") return respond(200, { response_action: "errors", errors: { [firstInputBlock(asRecord(payload.view)) || "form"]: text ?? "link your account: Open in Rovara" } });
             if (text !== undefined && typeof payload.response_url === "string") await dependencies.respondEphemeral?.(payload.response_url, text);
             return respond(200, { ok: true });
           }

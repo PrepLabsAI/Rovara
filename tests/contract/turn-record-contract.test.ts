@@ -17,6 +17,7 @@ import {
   type TurnRecord,
 } from "../../packages/contracts/src/turns.js";
 import { TURN_ARGUMENT_LIMIT, redactArguments } from "../../packages/contracts/src/turns.js";
+import { expectLinearScaling } from "../support/scaling.js";
 import { AiToolTurnRecordSchema, aiToolTurnRecordKeys, isSlackTurnRecord, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
 
 const record: TurnRecord = {
@@ -239,6 +240,26 @@ describe("capText and redactAndCap", () => {
   });
 });
 
+/** `unit` repeated to about `length` characters. */
+const repeatTo = (unit: string, length: number) => unit.repeat(Math.floor(length / unit.length));
+
+/**
+ * A scaling check for the redaction of one hostile shape: the cost at 8 x 20,000 characters must stay within a
+ * linear multiple of the cost at 20,000 (a regex that backtracks or rescans fails). The shape is built by `build(length)`.
+ * The output is checked as before (redacting it again leaves it as it is) on the 160,000-character input.
+ */
+function expectRedactionLinear(label: string, build: (length: number) => string): void {
+  let output = "";
+  expectLinearScaling((length) => {
+    const input = build(length);
+    return () => { output = redactOnce(input); };
+  }, { n: 20_000, label: `redactText ${label}` });
+  expect(output.length).toBeGreaterThan(0);
+  const large = build(160_000);
+  expect(large.length).toBeGreaterThanOrEqual(159_000);
+  redactText(large);
+}
+
 describe("secret redaction, fix round 2", () => {
   const expectRedacted = (input: string, secret: string) => {
     const out = redactText(input);
@@ -247,36 +268,34 @@ describe("secret redaction, fix round 2", () => {
   };
   const expectSame = (input: string) => expect(redactText(input)).toBe(input);
 
-  it.each([
-    ["letters", "a".repeat(160_000)],
-    ["token run", "token".repeat(32_000)],
-    ["eyJ run", "eyJ-".repeat(40_000)],
-    ["authorization then spaces", `authorization:${" ".repeat(159_986)}`],
-    ["scheme-like run", "a+".repeat(80_000)],
-    ["query token run", `?${"token".repeat(31_999)}`],
-    ["user-info run", `a://b:${"c".repeat(159_994)}`],
-    ["repeated user-info", "a://b:".repeat(26_666)],
-    ["password= run", "password=".repeat(17_777)],
-    ["bearer then letters", `bearer ${"a".repeat(159_993)}`],
-    ["private key headers", "-----BEGIN PRIVATE KEY-----".repeat(5_925)],
-    ["mixed", "Authorization: Bearer abc123 password=x postgres://u:p@h ?token=1 eyJabcdefghij.eyJabcdefghij.abcdefghij ".repeat(1_600)],
-  ])("redacts 160,000 characters of %s in linear time", (_name, input) => {
-    const started = performance.now();
-    redactText(input);
-    const elapsed = performance.now() - started;
-    console.log(`redactText ${_name} (${input.length} chars): ${elapsed.toFixed(1)} ms`);
-    expect(elapsed).toBeLessThan(500);
+  it.each<[string, (length: number) => string]>([
+    ["letters", (length) => "a".repeat(length)],
+    ["token run", (length) => repeatTo("token", length)],
+    ["eyJ run", (length) => repeatTo("eyJ-", length)],
+    ["authorization then spaces", (length) => `authorization:${" ".repeat(length - 14)}`],
+    ["scheme-like run", (length) => repeatTo("a+", length)],
+    ["query token run", (length) => `?${repeatTo("token", length - 5)}`],
+    ["user-info run", (length) => `a://b:${"c".repeat(length - 6)}`],
+    ["repeated user-info", (length) => repeatTo("a://b:", length)],
+    ["password= run", (length) => repeatTo("password=", length)],
+    ["bearer then letters", (length) => `bearer ${"a".repeat(length - 7)}`],
+    ["private key headers", (length) => repeatTo("-----BEGIN PRIVATE KEY-----", length)],
+    ["mixed", (length) => repeatTo("Authorization: Bearer abc123 password=x postgres://u:p@h ?token=1 eyJabcdefghij.eyJabcdefghij.abcdefghij ", length)],
+  ])("redacts 160,000 characters of %s in linear time", (name, build) => {
+    expectRedactionLinear(name, build);
   });
 
   it("bounds the work redactAndCap does on a very long input", () => {
-    const input = "a".repeat(1_000_000);
-    const started = performance.now();
-    const result = redactAndCap(input, TURN_TEXT_LIMIT);
-    const elapsed = performance.now() - started;
-    console.log(`redactAndCap 1,000,000 chars: ${elapsed.toFixed(1)} ms`);
-    expect(elapsed).toBeLessThan(500);
-    expect(result.truncated).toBe(true);
-    expect(result.text.length).toBeLessThanOrEqual(TURN_TEXT_LIMIT);
+    // Raw text past the ceiling (160,000 characters) is dropped before redacting, so the cost must not grow with the input (here 200,000 -> 1,600,000 characters, both past it). Only the first 160,000 characters are ever read, which stays in CPU cache, so the larger input adds no bytes to the work (unitBytes 0).
+    let result: ReturnType<typeof redactAndCap> | undefined;
+    const { ratio } = expectLinearScaling((length) => {
+      const input = "a".repeat(length);
+      return () => { result = redactAndCap(input, TURN_TEXT_LIMIT); };
+    }, { n: 200_000, unitBytes: 0, label: "redactAndCap on a very long input" });
+    // The work is flat above the ceiling (ratio near 1); linear growth with the input would give about 8.
+    expect(ratio).toBeLessThan(3);
+    expect(result?.truncated).toBe(true);
+    expect(result?.text.length).toBeLessThanOrEqual(TURN_TEXT_LIMIT);
   });
 
   it("drops a partial token at the redaction ceiling so a straddling secret cannot leak a prefix", () => {
@@ -531,36 +550,14 @@ describe("secret redaction, fix round 3", () => {
   });
 
   it("redactArguments scales linearly for a long argv array and many keys", () => {
-    const inputs = (scale: number) => [
-      Array.from({ length: 25_000 * scale }, () => "-p"),
-      Object.fromEntries(Array.from({ length: 10_000 * scale }, (_, i) => [`key${i}`, `password=x${i}`])),
-    ] as const;
-    const small = inputs(1);
-    const large = inputs(2);
-    const duration = (input: ReturnType<typeof inputs>) => {
-      const started = performance.now();
-      for (const value of input) redactArguments(value);
-      return performance.now() - started;
-    };
-
-    // Warm JIT paths before measuring, then alternate order so either input can encounter a pause.
-    duration(small);
-    duration(large);
-    const ratios = Array.from({ length: 5 }, (_, index) => {
-      let smallDuration: number;
-      let largeDuration: number;
-      if (index % 2 === 0) {
-        smallDuration = duration(small);
-        largeDuration = duration(large);
-      } else {
-        largeDuration = duration(large);
-        smallDuration = duration(small);
-      }
-      return largeDuration / Math.max(smallDuration, 0.1);
-    }).sort((left, right) => left - right);
-    const medianRatio = ratios[Math.floor(ratios.length / 2)]!;
-    console.log(`redactArguments median 2N/N ratio: ${medianRatio.toFixed(2)} (${ratios.map((ratio) => ratio.toFixed(2)).join(", ")})`);
-    expect(medianRatio).toBeLessThan(3.25);
+    // N = 1,000 argv items and 400 keys; 8N = 8,000 and 3,200 (about 24 bytes per unit, so 8N stays under 256 KiB and stays in CPU cache).
+    expectLinearScaling((scale) => {
+      const inputs = [
+        Array.from({ length: scale }, () => "-p"),
+        Object.fromEntries(Array.from({ length: scale * 0.4 }, (_, i) => [`key${i}`, `password=x${i}`])),
+      ] as const;
+      return () => { for (const value of inputs) redactArguments(value); };
+    }, { n: 1_000, unitBytes: 24, label: "redactArguments on a long argv array and many keys" });
   });
 
   it("redactAndCap keeps content when the text past the ceiling has no whitespace", () => {
@@ -572,23 +569,19 @@ describe("secret redaction, fix round 3", () => {
     expect(redactAndCap(b64, 100).text.length).toBe(100);
   });
 
-  it.each([
-    ["password: newline run", "password:\n".repeat(16_000)],
-    ["indented block", `password: |\n${"  x\n".repeat(40_000)}`],
-    ["xml tags", "<a key='x' ".repeat(14_545)],
-    ["long flags", "--password ".repeat(14_545)],
-    ["client flags", "mysql -p ".repeat(17_777)],
-    ["basic base64", "Basic QUJD ".repeat(14_545)],
-    ["sk dashes", "sk-".repeat(53_333)],
-    ["bare user-info", "user:pass@".repeat(16_000)],
-    ["colon runs", "a:".repeat(80_000)],
-    ["keys then spaces", `password${" ".repeat(159_990)}`],
-  ])("redacts 160,000 characters of %s in linear time", (name, input) => {
-    const started = performance.now();
-    redactText(input);
-    const elapsed = performance.now() - started;
-    console.log(`redactText ${name} (${input.length} chars): ${elapsed.toFixed(1)} ms`);
-    expect(elapsed).toBeLessThan(500);
+  it.each<[string, (length: number) => string]>([
+    ["password: newline run", (length) => repeatTo("password:\n", length)],
+    ["indented block", (length) => `password: |\n${repeatTo("  x\n", length)}`],
+    ["xml tags", (length) => repeatTo("<a key='x' ", length)],
+    ["long flags", (length) => repeatTo("--password ", length)],
+    ["client flags", (length) => repeatTo("mysql -p ", length)],
+    ["basic base64", (length) => repeatTo("Basic QUJD ", length)],
+    ["sk dashes", (length) => repeatTo("sk-", length)],
+    ["bare user-info", (length) => repeatTo("user:pass@", length)],
+    ["colon runs", (length) => repeatTo("a:", length)],
+    ["keys then spaces", (length) => `password${" ".repeat(length - 8)}`],
+  ])("redacts 160,000 characters of %s in linear time", (name, build) => {
+    expectRedactionLinear(name, build);
   });
 });
 

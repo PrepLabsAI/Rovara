@@ -1,6 +1,7 @@
 // Java reports J2: the JaCoCo XML reader (`target/site/jacoco/jacoco.xml`, `build/reports/jacoco/test/jacocoTestReport.xml`) into the same per-file line coverage the Go reader gives, and its use in the
 // format-neutral changed-line intersection. Fail closed: a report it cannot read completely is "not measured"; a file it cannot place in exactly one source root is listed, not guessed.
 import { describe, expect, it } from "vitest";
+import { expectLinearScaling } from "../support/scaling.js";
 import { EvidenceCoverageSchema } from "../../packages/contracts/src/evidence.js";
 import { changedLineCoverage, javaSourceRoots, looksLikeJacocoXml, parseJacocoXml, parseLineCoverage, JACOCO_XML_MAX_BYTES } from "../../packages/worker/src/verification/changed-coverage.js";
 
@@ -38,17 +39,30 @@ describe("looksLikeJacocoXml", () => {
     expect(looksLikeJacocoXml('<?xml version="1.0" <report>')).toBe(false);
   });
   it("answers a hostile file of empty comments in linear time (the old pattern took about 30 seconds for 30 comments)", () => {
-    for (const hostile of ["<!---->".repeat(1000) + "x", "<!---->".repeat(30) + "x", "<!-- -->".repeat(1000), `${"<!---->".repeat(500)}<report>`.slice(0, 4096) + "<!--"]) {
-      const started = performance.now();
-      looksLikeJacocoXml(hostile);
-      expect(performance.now() - started).toBeLessThan(50);
+    // Scaling checks: the reader looks at the first 4096 characters only, so what can blow up is the number of comments in them. Each shape is timed with 4 comments and with 32 (the old pattern took
+    // about 30 seconds for 30): a pattern that backtracks over the comments grows far faster than four times, and a run that never finishes hits the hang limit.
+    const shapes: Array<[string, (comments: number) => string]> = [
+      ["empty comments then text", (comments) => "<!---->".repeat(comments) + "x"],
+      ["spaced comments", (comments) => "<!-- -->".repeat(comments)],
+      ["empty comments then the root and an open comment", (comments) => `${"<!---->".repeat(comments)}<report>`.slice(0, 4096) + "<!--"],
+    ];
+    for (const [label, build] of shapes) {
+      expectLinearScaling((comments) => {
+        const hostile = build(comments);
+        return () => looksLikeJacocoXml(hostile);
+      }, { n: 4, unitBytes: 7, label: `looksLikeJacocoXml on ${label}` });
     }
     expect(looksLikeJacocoXml("<!---->".repeat(1000) + "x")).toBe(false);
+    expect(looksLikeJacocoXml("<!---->".repeat(30) + "x")).toBe(false);
+    expect(looksLikeJacocoXml("<!-- -->".repeat(1000))).toBe(false);
+    expect(looksLikeJacocoXml(`${"<!---->".repeat(500)}<report>`.slice(0, 4096) + "<!--")).toBe(true);
     expect(looksLikeJacocoXml("<!---->".repeat(500) + "<report>")).toBe(true);
     // The reader that calls it takes the same time: a coverage file made only of comments is "not measured", at once.
-    const started = performance.now();
+    expectLinearScaling((comments) => {
+      const hostile = "<!---->".repeat(comments) + "x";
+      return () => parseLineCoverage(hostile, { javaSourceRoots: ROOTS });
+    }, { n: 4, unitBytes: 7, label: "parseLineCoverage on empty comments" });
     expect(parseLineCoverage("<!---->".repeat(1000) + "x", { javaSourceRoots: ROOTS })).toBeUndefined();
-    expect(performance.now() - started).toBeLessThan(50);
   });
 });
 

@@ -1,5 +1,6 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
-import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact } from "@agentx/contracts";
+import { withEvalChangedPromptClassifier } from "./verification/eval-changed-prompt.js";
+import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact, type BrowserEvidenceSignInAnswer } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -75,11 +76,15 @@ import { currentWorkspaceSafety } from "./workspace-safety.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine.js";
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
+import type { collectBrowserEvidence} from "./browser-evidence-run.js";
+import { saveBrowserEvidence } from "./browser-evidence-run.js";
 import { runTestProof, serializeTestProof, withGeneralFakeFacts, withScriptedReplyFacts } from "./verification/test-proof.js";
 import { generalFakesFactsCollector, generalFakesPlanFor, mergeGeneralFakeFacts, withGeneralFakesRound, type GeneralFakeFacts } from "./general-fakes-round.js";
+import { hostedFakesLauncherFor } from "./general-fakes-hosted.js";
+import { checkRoundBudgetMs } from "./verification/selection.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { flakyRerunFileFor, flakyRerunFileOf, rerunFlaky, type ReportedFlaky } from "./verification/flaky-rerun.js";
-import { findBaselineAncestor } from "./verification/baseline-ancestry.js";
+import { findBaselineAncestor, findBaselineAncestors } from "./verification/baseline-ancestry.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -157,6 +162,14 @@ export interface TaskInvocationDependencies {
   workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
   workflowE2EEvidenceRoot?: string;
+  /** TE-H1 browser evidence (DEC 241b): hands the run's before and after screenshots to the broker as one chunked upload. Only the worker's own wiring sets it; without it the screenshots are taken and not kept. */
+  browserEvidenceSink?: (bytes: Uint8Array) => Promise<void>;
+  /** TE-H1 browser evidence, slice 3: asks the broker for the project's saved sign-in (see `createWorkerCallbackSinks`). Absent: a recipe with a sign-in is "Not run". */
+  browserEvidenceSignIn?: () => Promise<BrowserEvidenceSignInAnswer>;
+  /** TE-H1: tests supply a fake for the capture; default: `collectBrowserEvidence` (the app in the task sandbox, Chromium in the executor image). */
+  collectBrowserEvidence?: typeof collectBrowserEvidence;
+  /** TE-H1: the executor image the capture container is started from. Default: `EXECUTOR_IMAGE` of the worker's environment. */
+  browserEvidenceExecutorImage?: string;
   /** Fixed worker installation root that contains the pinned public E2E CLI package. */
   workflowE2ERuntimeRoot?: string;
   /** M1.4 Task 4.3a: the project's day budget callback, for a round whose admission has AI navigation steps. Only the worker's own wiring sets it. */
@@ -416,6 +429,12 @@ async function runTask(
   // R56: the agent's file tools run in the same container as its shell, never in the worker (sandbox-file-tools.ts), for every
   // Pi session of this task: the main ones, the feedback review and the critic and security reviews.
   const fileToolsDocker = dependencies.docker ?? (dependencies.taskShell?.kind === "sandbox" ? dependencies.taskShell.docker : undefined) ?? createDockerCli();
+  // General fakes, slice 2b: the hosted fake helper for a plain task sandbox, only when the operator turned it on (general-fakes-hosted.ts); otherwise undefined and nothing changes.
+  const hostedFakes = hostedFakesLauncherFor({
+    sandbox, testServices: testServices !== undefined, devcontainer: devcontainer !== undefined, requested: invocation.payload.generalFakes !== undefined,
+    docker: fileToolsDocker, rootPath: canonicalRoot, workspaceId: invocation.workspaceId, operationId: invocation.operationId,
+    roundBudgetMs: () => Math.max(CHECK_ROUND_BUDGET_MS, dependencies.checkBudgetMs?.() ?? 0, checkRoundBudgetMs(invocation.payload.testEnvironment)),
+  });
   let fileTools: FileOpsTarget | undefined;
   let fileToolsNote: string | undefined;
   if (sandbox !== undefined) {
@@ -556,6 +575,9 @@ async function runTask(
     const baselineCandidates = invocation.payload.testEnvironment?.baselineCandidates;
     const baselineClaim = baselineCandidates === undefined || repositories.length !== 1 ? undefined
       : await findBaselineAncestor({ directory: repositories[0]!.directory, baseCommit: repositories[0]!.baseCommitSha, candidates: baselineCandidates, signal: stop.signal });
+    // TE-MR2b: with two or more repositories, one claim per repository, all or none (the engine then builds ONE combined baseline, or none).
+    const baselineClaims = baselineCandidates === undefined || invocation.payload.testEnvironment?.repositoryBaselines !== true || repositories.length < 2 ? undefined
+      : await findBaselineAncestors({ repositories: repositories.map((repository) => ({ repositoryId: repository.repositoryId, directory: repository.directory, baseCommitSha: repository.baseCommitSha })), candidates: baselineCandidates, signal: stop.signal });
     try {
       await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
       // The broker authorizes the private admission read only after the operation is durably
@@ -576,7 +598,7 @@ async function runTask(
       const fakesCollector = generalFakesFactsCollector();
       let candidateFakeFactsTaken = false;
       const fakesPlan = fakesCollector.wrap(generalFakesPlanFor(invocation.payload.generalFakes, {
-        localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+        localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), ...(hostedFakes === undefined ? {} : { hosted: hostedFakes }),
         // Only the candidate round's line is posted; later rounds (the original code's) still add their facts.
         onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
       }));
@@ -650,8 +672,17 @@ async function runTask(
         const edgesStarted = Date.now();
         const repositoryEdges = await repositoryChecks.evidence({ kind: runners.kind, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs });
         const edgesSpentMs = Date.now() - edgesStarted;
-        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath), ...(flaky === undefined || flaky.size === 0 ? {} : { flaky }), ...(baselineClaim === undefined ? {} : { baselineClaim }),
+        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath), ...(flaky === undefined || flaky.size === 0 ? {} : { flaky }), ...(baselineClaim === undefined ? {} : { baselineClaim }), ...(baselineClaims === undefined ? {} : { baselineClaims }),
           baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs - edgesSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
+        // TE-H1 browser evidence (DEC 241): before and after screenshots of the changed pages, only when the broker asked (its recipe, its feature). The app starts in the task sandbox and Chromium in the executor image; informational.
+        if (invocation.payload.browserEvidence !== undefined && !stop.signal.aborted) {
+          await saveBrowserEvidence({
+            recipe: invocation.payload.browserEvidence, repositories, candidateTrees: new Map(candidateBefore.map((entry) => [entry.repositoryId, entry.treeSha])), rootPath: canonicalRoot, runners, sandboxName: sandbox?.name,
+            originalCode: dependencies.testProofOriginalCode ?? gitOriginalCode, docker: dependencies.docker ?? fileToolsDocker, executorImage: dependencies.browserEvidenceExecutorImage ?? process.env["EXECUTOR_IMAGE"], signal: stop.signal,
+            budgetMs: roundBudgetMs - (Date.now() - roundStarted), sink: dependencies.browserEvidenceSink, signIn: dependencies.browserEvidenceSignIn, progress: (message) => events.append("progress", { message }),
+            ...(dependencies.collectBrowserEvidence === undefined ? {} : { collect: dependencies.collectBrowserEvidence }),
+          });
+        }
       }
       const evidenceSpentMs = Date.now() - evidenceStarted;
       // TESTPROOF: informational only. It changes no check result and no artifact above; only a failure to put the agent's files back stops the task.
@@ -674,9 +705,12 @@ async function runTask(
         const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
         let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
         try {
-          const running = runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
+          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
             status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
-          }).then(value => { evalArtifact = value; return value; });
+          });
+          const running = (dependencies.evalFinalCheck === undefined || status !== "verified" ? evaluate()
+            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, evaluate))
+            .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
         } catch (error) {
           if (isWorkspaceUnsafe(error) || !stop.signal.aborted) throw error;
@@ -839,7 +873,7 @@ async function runTask(
   });
   // General fakes (DEC 234, slice 2): the coding run's own verification may use them, when the broker sent the payload (the project setting is on, and the run has checks). Local shell only, as in a CHECKS round, and it says so otherwise.
   const codingFakesPlan = generalFakesPlanFor(invocation.payload.generalFakes, {
-    localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+    localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), ...(hostedFakes === undefined ? {} : { hosted: hostedFakes }),
     onResult: (result) => { for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
   });
   if (invocation.payload.generalFakes !== undefined && codingFakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });

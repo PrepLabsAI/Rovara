@@ -5,6 +5,7 @@ import { modelHelperReplyCollector } from "../../packages/worker/src/model-helpe
 import { buildProofTable } from "../../packages/broker/src/core/proof/proof-table.js";
 import { loadProofContext } from "../../packages/broker/src/core/proof/proof-inputs.js";
 import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const digest = "a".repeat(64);
 const proof = (): TestProof => ({ schemaVersion: 1, candidateDigest: digest, status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, items: [0, 2].map((id) => ({ checkId: `readiness:${String(id)}`, label: "Tests", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" })), durationMs: 0 });
@@ -125,11 +126,16 @@ it("the collector preserves the required result consumer and owns its facts befo
 });
 
 it("refuses oversized or invalid runtime proof data with fixed words and no leaked label", () => {
-  const p = proof();
-  p.items[0]!.label = `${"sk"}-${"private".repeat(8)}${"x".repeat(1024 * 1024)}`;
-  const began = performance.now();
-  expect(() => withScriptedReplyFacts(p, "project", facts)).toThrow(/^unsupported scripted reply facts$/u);
-  expect(performance.now() - began).toBeLessThan(1000);
+  let failure = "";
+  // The refusal grows no faster than the label: 32,000, then 256,000 characters (the 8N input stays at or under 256 KiB so it stays in CPU cache). The 1 MiB label is refused once, un-timed.
+  const refuseLabel = (size: number) => {
+    const p = proof();
+    p.items[0]!.label = `${"sk"}-${"private".repeat(8)}${"x".repeat(size)}`;
+    return () => { try { withScriptedReplyFacts(p, "project", facts); failure = "no refusal"; } catch (error) { failure = error instanceof Error ? error.message : String(error); } };
+  };
+  expectLinearScaling(refuseLabel, { n: 32_000, label: "refusing an oversized proof label" });
+  refuseLabel(1024 * 1024)();
+  expect(failure).toMatch(/^unsupported scripted reply facts$/u);
   const tooMany = Array.from({ length: 201 }, (_, i) => ({ checkId: `readiness:${String(i)}`, taskMade: 0, counted: 0 }));
   expect(withScriptedReplyFacts(proof(), "project", tooMany).scriptedReplies?.every((entry) => entry.taskMade === 1)).toBe(true);
 });

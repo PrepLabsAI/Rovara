@@ -16,6 +16,7 @@ import {
   selectModelReply,
   stampReplyProvenance,
 } from "../../packages/contracts/src/model-reply-set.js";
+import { expectLinearScaling } from "../support/scaling.js";
 import { REPLY_PROVENANCES } from "../../packages/contracts/src/model-reply-provenance.js";
 
 const bytes = (value: unknown): Uint8Array => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
@@ -119,10 +120,15 @@ describe("the file form (what a repo file may hold)", () => {
     if (ok.ok) expect(ok.digest).toMatch(/^[0-9a-f]{64}$/u);
   });
   it("checks a 1 MB set fast", () => {
-    const started = performance.now();
-    const result = parseModelReplySetFileBytes(bytes(fileSet([fileReply("a", { response: { text: "y".repeat(1_000_000 - 200), finish: "stop" } })])));
-    expect(result.ok).toBe(true);
-    expect(performance.now() - started).toBeLessThan(1500);
+    // A scaling check, not a wall-clock bound: the same parse at about 32 KB and at about 256 KB (the 8N input stays at or under 256 KiB so it stays in CPU cache) may take about eight times as long, never sixty-four. The 1 MB set (the old input) is parsed once, un-timed, below.
+    let result: ReturnType<typeof parseModelReplySetFileBytes> | undefined;
+    const fileOf = (length: number) => bytes(fileSet([fileReply("a", { response: { text: "y".repeat(length), finish: "stop" } })]));
+    expectLinearScaling((length) => {
+      const file = fileOf(length);
+      return () => { result = parseModelReplySetFileBytes(file); };
+    }, { n: 32_000, label: "reply set parse" });
+    expect(result?.ok).toBe(true);
+    expect(parseModelReplySetFileBytes(fileOf(1_000_000 - 200)).ok).toBe(true);
   });
 });
 

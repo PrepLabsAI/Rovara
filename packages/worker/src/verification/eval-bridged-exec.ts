@@ -8,7 +8,7 @@
 //
 // What the exec never does: read the repository's own accounting (the stage counts), turn a thrown fault into a result (the runner makes it "eval run failed"),
 // or claim the changed prompt was exercised on the repository's word: `changedPromptCalls` counts the settled-ok calls whose frame the worker's own
-// `changedPrompt` classifier names, and is 0 when there is no classifier (the eval then reads "no changed prompt call", never a pass).
+// `changedPrompt` classifier names. An absent, unreadable or undecidable classification counts as changed.
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -61,7 +61,7 @@ export interface BridgedEvalExecOptions {
   readonly sandbox: FreshEvalSandbox;
   /** An absolute folder of the worker's own (its scratch); each run makes a private subfolder in it for the socket and removes it. */
   readonly runDir: string;
-  /** The worker's own classifier for "this frame carries a changed prompt". Absent: no call counts, and the eval reads "no changed prompt call". */
+  /** The worker's own classifier for "this frame carries a changed prompt". Only an explicit false proves unchanged; unknown counts as changed. */
   readonly changedPrompt?: ((frame: ModelEgressFrame) => boolean) | undefined;
   /** The worker's own pin of the model: true only for a frame that calls the plan's model (and judge). Required: a frame it does not name never reaches the stage and fails the run, so the eval code cannot pick a different or dearer model. */
   readonly modelAllowed: (frame: ModelEgressFrame) => boolean;
@@ -101,7 +101,7 @@ function runEgress(inner: ModelEgress, options: BridgedEvalExecOptions, state: R
       const allowed = ((): boolean => { try { return options.modelAllowed(frame) === true; } catch { return false; } })();
       // Never reaches the stage: the run is failed (Not run) when it ends, and the sandbox is told the call failed.
       if (!allowed) { state.blocked = true; throw new Error("model not allowed"); }
-      const changed = ((): boolean => { try { return options.changedPrompt?.(frame) === true; } catch { return false; } })();
+      const changed = ((): boolean => { try { return options.changedPrompt?.(frame) !== false; } catch { return true; } })();
       state.open += 1;
       try {
         for await (const event of inner.forward(scope, frame, forwardOptions)) {

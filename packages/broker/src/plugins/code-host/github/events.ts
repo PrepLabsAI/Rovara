@@ -14,11 +14,12 @@
 //   ... the same two, edited or deleted                -> change_request.updated (the thread changed; nothing is new)
 //   check_run / check_suite completed, status (not pending) -> check.completed
 //   push to a branch (not a delete, not a tag)         -> revision.pushed
+//   deployment_status created                          -> deployment.status (success; failure and error as failure; pending, queued and in_progress as in_progress; `inactive`, a newer deployment taking over, maps to nothing)
 // The event id is GitHub's delivery id: a redelivery is the same event, and the intake drops a repeat (plugins/events/intake.ts).
 import { z } from "zod";
 import {
-  agentXError, CodeHostEventSchema, HostScopeSchema, CHECK_CONCLUSIONS,
-  type CheckConclusion, type CodeHostEvent, type CodeHostEvents, type HostScope, type RawDelivery, type ReviewState,
+  agentXError, CodeHostEventSchema, DeploymentEnvironmentSchema, HostScopeSchema, CHECK_CONCLUSIONS,
+  type CheckConclusion, type DeploymentState, type CodeHostEvent, type CodeHostEvents, type HostScope, type RawDelivery, type ReviewState,
 } from "@agentx/contracts";
 import { verifyGithubWebhookSignature } from "./signature.js";
 
@@ -58,6 +59,11 @@ const CheckSuitePayload = z.object({
 const StatusPayload = z.object({
   ...Base, sha: z.string().regex(COMMIT), state: z.string().min(1).max(40), context: z.string().min(1).max(200).optional(),
 }).passthrough();
+const DeploymentStatusPayload = z.object({
+  ...Base, action: z.string().min(1).max(80),
+  deployment_status: z.object({ state: z.string().min(1).max(40), environment: z.string().max(400).optional() }).passthrough(),
+  deployment: z.object({ sha: z.string().regex(COMMIT), environment: z.string().max(400).optional() }).passthrough(),
+}).passthrough();
 const PushPayload = z.object({
   ...Base, ref: z.string().min(1).max(300), after: z.string().regex(COMMIT).optional(), deleted: z.boolean().optional(),
 }).passthrough();
@@ -66,6 +72,10 @@ const REVIEW_STATES: Readonly<Record<string, ReviewState>> = {
   approved: "APPROVED", changes_requested: "CHANGES_REQUESTED", commented: "COMMENTED", dismissed: "DISMISSED", pending: "PENDING",
 };
 const CONCLUSIONS: ReadonlySet<string> = new Set(CHECK_CONCLUSIONS);
+/** GitHub's deployment states in the port's three words. Own properties only: `constructor` or `__proto__` as a state is no state. */
+export const DEPLOYMENT_STATES_OF_GITHUB: Readonly<Record<string, DeploymentState | undefined>> = Object.freeze(Object.assign(Object.create(null) as Record<string, DeploymentState>, {
+  success: "success", failure: "failure", error: "failure", pending: "in_progress", queued: "in_progress", in_progress: "in_progress",
+}));
 
 function readable<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -133,6 +143,15 @@ export function neutralEventsOfGithub(eventName: string | undefined, body: unkno
       const conclusion: CheckConclusion | undefined = payload.state === "success" ? "success" : payload.state === "failure" ? "failure" : payload.state === "error" ? "error" : undefined;
       if (conclusion === undefined) return [];
       return finish({ ...base, type: "check.completed", repository: { url: repositoryUrlOf(payload.repository.full_name) }, revision: payload.sha, name: payload.context ?? "status", conclusion });
+    }
+    case "deployment_status": {
+      const payload = readable(DeploymentStatusPayload, body);
+      if (payload.action !== "created") return [];
+      const state = DEPLOYMENT_STATES_OF_GITHUB[payload.deployment_status.state];
+      // `inactive` (a newer deployment took over) and any state GitHub adds later say nothing the watcher can use. An environment that does not fit the port's bound is not one the watcher can name: nothing is said about it.
+      const environment = payload.deployment_status.environment ?? payload.deployment.environment;
+      if (state === undefined || environment === undefined || !DeploymentEnvironmentSchema.safeParse(environment).success) return [];
+      return finish({ ...base, type: "deployment.status", repository: { url: repositoryUrlOf(payload.repository.full_name) }, revision: payload.deployment.sha, environment, state });
     }
     case "push": {
       const payload = readable(PushPayload, body);

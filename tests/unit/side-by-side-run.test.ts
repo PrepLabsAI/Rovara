@@ -5,6 +5,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { withNetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 import { twoCompanyChecks, type IsolationSurface, type TwoCompanyIsolation } from "../../packages/testing/src/isolation/two-company.js";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { RUN_DEFAULTS, canary, COMPANY_A, COMPANY_B, evalCases, geminiBody, recordingJudge, reportNeeded, sbsWorld, source, verdictText } from "../support/side-by-side-world.js";
 
 const policy = { preset: "careful", aiPilot: false, optIn: false } as const;
@@ -305,15 +306,22 @@ describe("the family of a case, before any call (fix round 1, M1)", () => {
 
 describe("a total limit on what a source offers (fix round 1, M3)", () => {
   it("refuses a source that offers more cases than the limit with a fixed word, before parsing or hashing any of them and with no call", async () => {
-    const world = sbsWorld();
-    const egress = counting(world.egress);
     const [one] = await source(COMPANY_A, 1).cases();
-    const huge = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => Array.from({ length: 100_000 }, (_, index) => ({ ...one!, caseId: `many-${String(index)}` })) };
-    const started = Date.now();
-    const result = await runSideBySide(input(world, { source: huge }, egress));
-    expect(result).toEqual({ status: "refused", reason: "source_too_large" });
-    expect(egress.calls).toBe(0);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // Refused on the count alone (over the 1,000-case limit, before any case is read): the cost does not grow with what the source offers (1,100, then 8,800 cases, built before the timing; the array holds one shared case so it is 8 bytes a case and the 8N input stays far under 256 KiB, in CPU cache). The full 100,000 cases are refused once, un-timed.
+    const runs = new Map<number, { result: unknown; egress: ReturnType<typeof counting> }>();
+    const refuseOffer = (count: number) => {
+      const world = sbsWorld();
+      const egress = counting(world.egress);
+      const offered = Array.from({ length: count }, () => one!);
+      const huge = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => offered };
+      return async () => { runs.set(count, { result: await runSideBySide(input(world, { source: huge }, egress)), egress }); };
+    };
+    await expectLinearScalingAsync(refuseOffer, { n: 1_100, unitBytes: 8, label: "side by side: a source offering too many cases" });
+    await refuseOffer(100_000)();
+    for (const count of [1_100, 8_800, 100_000]) {
+      expect(runs.get(count)!.result).toEqual({ status: "refused", reason: "source_too_large" });
+      expect(runs.get(count)!.egress.calls).toBe(0);
+    }
   });
   it("accepts exactly the limit, and refuses one more", async () => {
     const world = sbsWorld();

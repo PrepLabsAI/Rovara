@@ -20,12 +20,14 @@ import type { InitSecrets } from "../init/context.js";
 import { githubAppJwt, githubAppSecretName, githubWebhookUrl, parseAppSecret, type GitHubApi } from "../init/github-app.js";
 import { plainMessage } from "../output.js";
 import { readStoredDeveloperSignIn } from "../signin/settings.js";
-import { upgradeAnswers } from "./answers.js";
+import { upgradeAnswers, writeAnswersFromDeployed } from "./answers.js";
 import { writeUpgradeBundle } from "./export.js";
 import { cdkDiffRisks, cdkReviewedDeployer, guardData, upgradeConfirm } from "./review.js";
 import { notesText, refusePrereleaseTarget, upgradeDirection, type ReleaseNotes } from "./target.js";
 
-export interface UpgradeOptions { env: string; to?: string; releaseDir?: string; source?: string; yes: boolean; allowReplace: string[]; exportDir?: string; images?: { worker?: string; slack?: string } }
+export interface UpgradeOptions { env: string; to?: string; releaseDir?: string; source?: string; yes: boolean; allowReplace: string[]; exportDir?: string; images?: { worker?: string; slack?: string };
+  /** `--answers-from-deployed <file>`: write the deploy answers read from the environment, deploy nothing. */
+  answersFile?: string }
 
 export interface UpgradeDependencies {
   store: ParameterStore;
@@ -52,7 +54,7 @@ export interface UpgradeDependencies {
   cliVersion: string | undefined;
 }
 
-export interface UpgradeResult { env: string; from: string; to: string; parts: DeployPart[]; exported?: string; doctor?: { failed: number; warned: number } }
+export interface UpgradeResult { env: string; from: string; to: string; parts: DeployPart[]; exported?: string; answers?: string; doctor?: { failed: number; warned: number } }
 
 /** Sorts object keys at every level, so two templates compare by content, not by formatting. */
 function canonical(value: unknown): unknown {
@@ -176,6 +178,14 @@ async function setUpGithubWebhook(env: string, deps: UpgradeDependencies): Promi
 export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependencies): Promise<UpgradeResult> {
   const { env } = options;
   const first = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
+  // Only reads: the settings and the deployed stacks. No release, no lock, no deploy, either engine.
+  if (options.answersFile !== undefined) {
+    if (options.exportDir !== undefined || options.to !== undefined || options.releaseDir !== undefined || options.source !== undefined || options.yes || options.allowReplace.length > 0) {
+      throw agentXError("CONFIG_INVALID", "--answers-from-deployed only writes the deployed environment's answers; pass it without --export, --to, --release, --source, --yes or --allow-replace");
+    }
+    const written = await writeAnswersFromDeployed({ file: options.answersFile, settings: first, stacks: deps.stacks, ...(options.images === undefined ? {} : { images: options.images }) });
+    return { env, from: first.version, to: first.version, parts: [], answers: written.file };
+  }
   // Ruling F19 (FR-013): the bundle holds the published templates; deploying them onto cdk-deployed
   // stacks would switch the environment's engine.
   if (options.exportDir !== undefined && first.engine === "cdk") {

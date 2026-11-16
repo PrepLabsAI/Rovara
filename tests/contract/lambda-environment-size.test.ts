@@ -7,7 +7,7 @@ import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { describe, expect, it } from "vitest";
-import { POLICY_HOOK_PARAMETER_MAX_LENGTH, PolicyHookSettingsSchema } from "@agentx/contracts";
+import { POLICY_HOOK_PARAMETER_MAX_LENGTH, HostedPolicyHookSettingsSchema } from "@agentx/contracts";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { DEPLOY_PARAMETER_VALUES, LAMBDA_ENVIRONMENT_LIMIT_BYTES, controlPlaneOf, environmentBytes, keyValueBytes, lambdaEnvironments, type Template as ResolvableTemplate } from "../support/lambda-environment-size.js";
 
@@ -61,14 +61,12 @@ describe("the measuring", () => {
     expect(environmentBytes({ H: hook })).toBe(environmentBytes({ H: "" }) + 2 * POLICY_HOOK_PARAMETER_MAX_LENGTH);
   });
 
-  it("fits one real RSA-2048 hook key under the cap; a two-key rotation waits for the keys to leave the environment (BROKER-ENV-HEADROOM)", () => {
-    const key = (kid: string) => ({ kty: "RSA" as const, n: "A".repeat(342), e: "AQAB", kid, alg: "RS256" as const, use: "sig" as const });
-    const one = { address: `https://policy-hook.example-company.com/${"a".repeat(54)}`, keys: [key("policy-2026-11")] };
-    expect(PolicyHookSettingsSchema.safeParse(one).success).toBe(true);
-    expect(JSON.stringify(one).length).toBeLessThanOrEqual(POLICY_HOOK_PARAMETER_MAX_LENGTH);
-    const smallestTwo = { address: "https://h.io", keys: [{ kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "a", alg: "RS256" }, { kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "b", alg: "RS256" }] };
-    expect(PolicyHookSettingsSchema.safeParse(smallestTwo).success).toBe(true);
-    expect(JSON.stringify(smallestTwo).length).toBeGreaterThan(POLICY_HOOK_PARAMETER_MAX_LENGTH);
+  it("fits two 200-character URLs and two thumbprints at the hosted cap (DEC 246b)", () => {
+    const url = `https://hook.example/${"a".repeat(179)}`;
+    expect(url).toHaveLength(200);
+    const rotation = { address: url, jwks: url, thumbprints: ["A".repeat(43), "B".repeat(43)] };
+    expect(HostedPolicyHookSettingsSchema.safeParse(rotation).success).toBe(true);
+    expect(JSON.stringify(rotation)).toHaveLength(POLICY_HOOK_PARAMETER_MAX_LENGTH);
   });
 
   it("counts the compact JSON of the variable map and the keys plus values, in bytes", () => {

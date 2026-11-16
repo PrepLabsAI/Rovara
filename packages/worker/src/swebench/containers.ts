@@ -14,6 +14,11 @@ export const TESTBED = "/testbed";
 /** What `execBytes` takes: bytes on stdin, and a hard cap on the bytes it keeps from stdout. */
 export interface DockerExecBytesOptions {
   stdin?: Buffer;
+  /**
+   * Environment variables for the docker CLI process itself, added to the worker's own (`docker run -e NAME` passes `NAME` on to the container from here, so the value is never an argument of the command line). Absent: the
+   * worker's environment unchanged.
+   */
+  env?: Readonly<Record<string, string>>;
   signal?: AbortSignal;
   timeoutMs?: number;
   maxStdoutBytes: number;
@@ -50,7 +55,7 @@ function dockerExecBytes(args: readonly string[], options: DockerExecBytesOption
       resolvePromise({ exitCode: null, stdout: Buffer.alloc(0), stderr: "", aborted: true });
       return;
     }
-    const child = spawn("docker", [...args], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("docker", [...args], { stdio: ["pipe", "pipe", "pipe"], ...(options.env === undefined ? {} : { env: { ...process.env, ...options.env } }) });
     const chunks: Buffer[] = [];
     let kept = 0;
     let stderr = "";

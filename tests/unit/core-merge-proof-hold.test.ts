@@ -8,6 +8,7 @@ import {
 } from "../../packages/broker/src/core/merge/index.js";
 import { PROOF_READ_MAX_MS } from "../../packages/broker/src/core/proof/proof-keep.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const DIGEST = "d".repeat(64);
 const item = (verdict: TestProofItem["verdict"], reason: TestProofItem["reason"]): TestProofItem => ({ checkId: "unit", label: "unit", granularity: "check", verdict, reason });
@@ -360,9 +361,9 @@ describe("the reason is untrusted text", () => {
     expect(plainReason(`token ${key} here`)).not.toContain(key);
   });
   it("a 1 MB reason costs about the same as a short one", () => {
-    const started = Date.now();
-    plainReason("ab ".repeat(350_000));
-    expect(Date.now() - started).toBeLessThan(500);
+    expect(plainReason("ab ".repeat(350_000))!.length).toBeLessThanOrEqual(OVERRIDE_REASON_MAX);
+    // The cost must not grow faster than the input (10,000 -> 80,000 repeats; the 8N input stays at or under 256 KiB so it stays in CPU cache). The full 350,000 repeats are checked once above.
+    expectLinearScaling((repeats) => { const reason = "ab ".repeat(repeats); return () => { plainReason(reason); }; }, { n: 10_000, unitBytes: 3, label: "plainReason on a long reason" });
   });
 });
 
