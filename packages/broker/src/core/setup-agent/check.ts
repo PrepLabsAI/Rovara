@@ -17,6 +17,7 @@ import { taskOwnerKey } from "../../developer/task-records.js";
 import { buildOperation } from "../task-flow/accept.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { workspaceKey, OPERATION_SK_PREFIX } from "../task-flow/keys.js";
+import { legacyWorkspaceKey } from "../task-flow/legacy-keys.js";
 import { fromDocument, toDocument, type WorkspaceRecord } from "../task-flow/records.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { releaseAdmission } from "../task-flow/admission.js";
@@ -137,6 +138,7 @@ export function buildSetupCheck(deps: TaskFlowDeps, input: { project: string; re
   const mark: SetupCheckMark = { workspaceId, revision: input.revision, startedAt: now, startedBy: input.startedBy };
   const items: TransactItem[] = [
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
+    { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace.companyId }, condition: when.absent() },
     ...prepare.items,
     { kind: "put", item: { ...setupCheckRecordKey(deps.companyId, workspaceId), entityType: "SETUP_CHECK", companyId: deps.companyId, project: input.project, workspaceId, revision: input.revision, candidate: input.candidate, createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + 31 * 86_400 }, condition: when.absent() },
   ];

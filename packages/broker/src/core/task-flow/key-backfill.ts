@@ -29,6 +29,7 @@ function canonical(value: unknown): string {
 }
 function hash(row: StoredDocument): string {
   const { pk: _pk, ...content } = row;
+  if (row.sk === "META" && row.entityType === "WORKSPACE" && content.companyId === undefined) content.companyId = IMPLICIT_COMPANY_ID;
   void _pk;
   return createHash("sha256").update(canonical(content)).digest("hex");
 }
@@ -119,22 +120,30 @@ export async function backfillWorkspaceKeysPage(deps: WorkspaceBackfillDeps, inp
       }
       const current = state.current;
       const legacy = legacyWorkspaceKey(current.id), scoped = workspaceKey(IMPLICIT_COMPANY_ID, current.id);
-      const meta = await get(legacy);
-      if (meta === undefined || meta.entityType === "WORKSPACE_COMPANY_POINTER") { finish(); continue; }
+      const discovery = await get(legacy);
+      if (discovery === undefined) { finish(); continue; }
+      const isPointer = discovery.entityType === "WORKSPACE_COMPANY_POINTER";
+      if (!owned(discovery) || (isPointer && discovery.companyId !== IMPLICIT_COMPANY_ID)) { report.skippedForeign++; finish(); continue; }
+      const targetMeta = await get(scoped);
+      const meta = isPointer ? targetMeta : discovery;
+      if (meta === undefined || (isPointer && (meta.companyId !== IMPLICIT_COMPANY_ID || !owned(meta)))) { report.failed++; finish(); continue; }
       if (!owned(meta)) { report.skippedForeign++; finish(); continue; }
       if (!eligible(meta, started) || hash(meta) !== current.metaHash) { report.skippedActive++; finish(); continue; }
-      const targetMeta = await get(scoped);
       if (targetMeta !== undefined && hash(targetMeta) !== current.metaHash) { report.failed++; finish(); continue; }
-      // A previous call may have crashed after publishing META. Only verified, matching remnants may be removed.
-      if (targetMeta !== undefined && current.phase !== "delete" && current.phase !== "resume") { current.phase = "resume"; delete current.after; }
+      // After an uncertain switch, verify every remaining source row before resuming cleanup.
+      if (targetMeta !== undefined && current.phase !== "delete" && current.phase !== "resume" && current.phase !== "switch") { current.phase = "resume"; delete current.after; }
+      if (isPointer && current.phase === "switch") { current.phase = "resume"; delete current.after; }
       if (current.phase === "switch") {
         calls++; rows += 2;
         const written = await store.transact([
-          { kind: "check", key: legacy, condition: when.and(when.eq("status", "CLOSED"), when.eq("activeOperationId", null),
+          { kind: "put", item: { ...legacy, entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: current.id, companyId: IMPLICIT_COMPANY_ID }, condition: when.and(when.eq("status", "CLOSED"), when.eq("activeOperationId", null),
             when.eq("updatedAt", meta.updatedAt as string), when.eq("closedAt", meta.closedAt as string),
             meta.companyId === undefined ? when.notExists("companyId") : when.eq("companyId", meta.companyId),
             meta.orgId === undefined ? when.notExists("orgId") : when.eq("orgId", meta.orgId)) },
-          { kind: "put", item: { ...meta, pk: scoped.pk }, condition: when.absent() },
+          { kind: "put", item: { ...meta, pk: scoped.pk, companyId: IMPLICIT_COMPANY_ID }, condition: targetMeta === undefined ? when.absent() : when.and(
+            when.eq("status", "CLOSED"), when.eq("activeOperationId", null), when.eq("updatedAt", meta.updatedAt as string), when.eq("closedAt", meta.closedAt as string),
+            targetMeta.companyId === undefined ? when.notExists("companyId") : when.eq("companyId", targetMeta.companyId),
+            targetMeta.orgId === undefined ? when.notExists("orgId") : when.eq("orgId", targetMeta.orgId)) },
         ]);
         if (!written.applied) { report.failed++; finish(); continue; }
         current.phase = "delete"; delete current.after; continue;
@@ -145,12 +154,11 @@ export async function backfillWorkspaceKeysPage(deps: WorkspaceBackfillDeps, inp
       const row = page.items[0]; rows += page.items.length;
       if (row === undefined) {
         if (current.phase === "delete") {
-          calls++; rows++;
-          const removed = await store.delete({ key: legacy, condition: when.and(when.eq("status", "CLOSED"), when.eq("activeOperationId", null), when.eq("updatedAt", meta.updatedAt as string)) });
-          if (removed.applied) report.moved++; else report.failed++;
+          // The switch already replaced META with the pointer. Never delete that discovery row.
+          report.moved++;
           finish(); continue;
         }
-        if (current.phase === "resume") { current.phase = "delete"; delete current.after; continue; }
+        if (current.phase === "resume") { current.phase = isPointer ? "delete" : "switch"; delete current.after; continue; }
         if (current.phase === "copy") { current.expectedCount = current.count; current.expectedHash = current.hash; current.phase = "source"; }
         else {
           if (current.count !== current.expectedCount || current.hash !== current.expectedHash) { report.failed++; finish(); continue; }

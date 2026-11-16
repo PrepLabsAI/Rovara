@@ -119,7 +119,7 @@ describe("reading the stamp", () => {
     // A legacy task pointer must never be a fallback for a company discovery pointer.
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", taskId });
     db.set({ ...engineStampKey(taskId), coreEngine: CORE });
-    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toThrow("workspace unavailable");
+    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
     expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
     integrity.mockClear();
     const scoped = { pk: workspacePartition(FAKE_COMPANY, workspaceId), sk: "META", entityType: "WORKSPACE", companyId: FAKE_COMPANY };
@@ -127,7 +127,7 @@ describe("reading the stamp", () => {
     db.set({ pk: scoped.pk, sk: "DEVELOPER_TASK", taskId });
     expect(await ownerOfWorkspace(table(db), workspaceId)).toBe("core");
     db.set({ ...scoped, companyId: OTHER });
-    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toThrow("workspace unavailable");
+    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
     expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
     integrity.mockRestore();
   });

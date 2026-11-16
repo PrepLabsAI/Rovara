@@ -972,3 +972,13 @@ it("purge scan reports a discovery pointer only as a pointer count, never a work
   expect(report.rows).toEqual({ WORKSPACE_COMPANY_POINTER: 1 });
   expect(JSON.stringify(report)).not.toContain("pointer-canary");
 });
+
+it("counts a remaining pointer to an already-drained scoped workspace as deleted, without refusal", async () => {
+  const w = world();
+  const pointer = { pk: "WORKSPACE#already-purged", sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: "already-purged", companyId: A };
+  await w.store.put({ item: pointer });
+  await scheduledAndDue(w);
+  await purgeToEnd(w, A);
+  expect(await w.store.get(pointer)).toBeUndefined();
+  expect(await companyPurgeState(w.deps, A)).toMatchObject({ status: "done", counts: { refused: 0 } });
+});

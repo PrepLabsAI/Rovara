@@ -1,3 +1,4 @@
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import {
   CreateTagsCommand,
   DeleteVolumeCommand,
@@ -596,8 +597,8 @@ export const handler = createReconcilerHandler({
   },
   failActiveOperation: (workspaceId, error) => failActiveOperation(documentClient, tableName, workspaceId, error),
   async closedAt(workspaceId) {
-    const item = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }))).Item as { status?: string; closedAt?: string } | undefined;
-    return item?.status === "CLOSED" ? item.closedAt : undefined;
+    const item = (await readWorkspaceMeta(documentClient, tableName, workspaceId))?.item;
+    return item?.["status"] === "CLOSED" && typeof item["closedAt"] === "string" ? item["closedAt"] : undefined;
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
   sweepStuckCancels: stuckCancelSweep(),

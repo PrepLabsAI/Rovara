@@ -126,14 +126,14 @@ export async function ownerOfWorkspace(table: EngineStateTable, workspaceId: str
   const discovery = await readItem(table, { pk: `WORKSPACE#${workspaceId}`, sk: "META" });
   if (discovery?.["entityType"] === "WORKSPACE_COMPANY_POINTER") {
     const company = OrgIdSchema.safeParse(discovery["companyId"]);
-    if (!company.success) { logWorkspacePointerIntegrity(); throw new Error("workspace unavailable"); }
+    if (!company.success) { logWorkspacePointerIntegrity(); throw agentXError("NOT_FOUND", "workspace unavailable"); }
     const scoped = await readItem(table, workspaceKey(company.data, workspaceId));
     if (scoped === undefined || scoped["companyId"] !== company.data || (scoped["orgId"] !== undefined && scoped["orgId"] !== company.data)) {
       logWorkspacePointerIntegrity();
-      throw new Error("workspace unavailable");
+      throw agentXError("NOT_FOUND", "workspace unavailable");
     }
     const pointer = await readItem(table, scopedTaskPointerKey(company.data, workspaceId));
-    if (typeof pointer?.taskId !== "string" || !TASK_ID.test(pointer.taskId)) throw new Error("workspace unavailable");
+    if (typeof pointer?.taskId !== "string" || !TASK_ID.test(pointer.taskId)) throw agentXError("NOT_FOUND", "workspace unavailable");
     return await ownerOfExistingTask(table, pointer.taskId);
   }
   const key = `workspace:${workspaceId}`;

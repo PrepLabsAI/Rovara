@@ -1,4 +1,6 @@
 import { STATE_TABLE_INDEXES, STATE_TABLE_PLANNED_INDEXES } from "../../packages/aws-adapters/src/dynamodb/state-table.js";
+import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, queryAll, type StoredDocument } from "@agentx/contracts";
@@ -18,7 +20,7 @@ async function world() {
   return { ...w, meta: { ...meta, id: meta.id }, deps: { companyId, store: w.store, now: () => Date.parse("2026-11-15T00:00:00Z"), continuationKey: Buffer.alloc(32, 7) } };
 }
 describe("bounded offline workspace backfill", () => {
-  it("copies closed golden rows, verifies, switches META last and deletes legacy last", async () => {
+  it("copies closed golden rows, verifies, and atomically replaces legacy META with discovery", async () => {
     const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
     const w = await world(); const before = (await w.store.query({ pk: w.meta.pk })).items;
     const queries = vi.spyOn(w.store, "query"); const puts = vi.spyOn(w.store, "put"); const transactions = vi.spyOn(w.store, "transact"); const deletes = vi.spyOn(w.store, "delete");
@@ -30,14 +32,21 @@ describe("bounded offline workspace backfill", () => {
     expect(continuation).toBeUndefined(); expect(moved).toBe(1);
     const scoped = workspaceKey(companyId, w.meta.id);
     expect((await w.store.query({ pk: scoped.pk })).items).toEqual(before.map((row) => ({ ...row, pk: scoped.pk })));
-    expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([]);
+    expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([
+      { pk: w.meta.pk, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: w.meta.id, companyId },
+    ]);
     expect(puts.mock.calls.filter(([request]) => request.item.pk === scoped.pk).every(([request]) => request.item.sk !== "META")).toBe(true);
     expect(transactions.mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...puts.mock.invocationCallOrder));
     const verified = queries.mock.calls.flatMap(([request], index) => request.pk === scoped.pk ? [queries.mock.invocationCallOrder[index]!] : []);
     expect(verified.length).toBeGreaterThan(0);
     expect(deletes.mock.invocationCallOrder[0]).toBeGreaterThan(verified[0]!);
     expect(transactions.mock.calls.at(-1)?.[0].some((item) => item.kind === "put" && item.item.sk === "META")).toBe(true);
-    expect(deletes.mock.calls.filter(([request]) => request.key.pk === w.meta.pk).at(-1)?.[0].key.sk).toBe("META");
+    expect(deletes.mock.calls.filter(([request]) => request.key.pk === w.meta.pk).every(([request]) => request.key.sk !== "META")).toBe(true);
+    const readCompany = workspaceCompanyReader({ send: async (command: unknown) => {
+      if (!(command instanceof GetCommand)) throw new Error("unexpected command");
+      return { Item: await w.store.get(command.input.Key as { pk: string; sk: string }) };
+    } } as never, "state");
+    expect(await readCompany(w.meta.id)).toBe(companyId);
     expect(await locateWorkspace(w.deps, w.meta.id)).toMatchObject({ scope: "company" });
     expect((await backfillWorkspaceKeysPage(w.deps, { limit: 25 })).moved).toBe(0);
   });
@@ -79,7 +88,9 @@ describe("bounded offline workspace backfill", () => {
       expect(result.failed).toBe(0); moved += result.moved; next = result.continuation;
     }
     expect(next).toBeUndefined(); expect(moved).toBe(1);
-    expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([]);
+    expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([
+      { pk: w.meta.pk, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: w.meta.id, companyId },
+    ]);
     const copied = await queryAll(w.store, { pk: workspaceKey(companyId, w.meta.id).pk });
     expect(copied.filter((row) => row.sk.startsWith("ROW#"))).toHaveLength(2000);
   });
@@ -118,7 +129,9 @@ it.each(["after copy", "after META", "mid delete"])("resumes a crash %s without 
   expect(armed).toBe(false); expect(failures).toBeGreaterThan(0); expect(continuation).toBeUndefined();
   const scoped = workspaceKey(companyId, w.meta.id);
   expect((await w.store.query({ pk: scoped.pk })).items).toEqual(original.map((row) => ({ ...row, pk: scoped.pk })));
-  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([]);
+  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([
+      { pk: w.meta.pk, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: w.meta.id, companyId },
+    ]);
 });
 it("conflicting scoped content is never overwritten or deleted", async () => {
   const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
@@ -258,7 +271,9 @@ it("an uncertain timed-out copy can finish late and resume without extra writers
     expect(result.failed).toBe(0); continuation = result.continuation;
   }
   expect(continuation).toBeUndefined();
-  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([]);
+  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([
+      { pk: w.meta.pk, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: w.meta.id, companyId },
+    ]);
   expect(await locateWorkspace(w.deps, w.meta.id)).toMatchObject({ scope: "company" });
 });
 it.each(["content", "count"])("verifies the destination %s before publishing META or deleting legacy", async (kind) => {
@@ -292,7 +307,9 @@ it("retries the indexed workspace after its first META read fails", async () => 
   }
   expect(continuation).toBeUndefined(); expect(moved).toBe(1);
   expect(await locateWorkspace(w.deps, w.meta.id)).toMatchObject({ scope: "company" });
-  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([]);
+  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([
+      { pk: w.meta.pk, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: w.meta.id, companyId },
+    ]);
 });
 
 it("backfill omits discovery pointers from candidates even with stale legacy workspace fields", async () => {

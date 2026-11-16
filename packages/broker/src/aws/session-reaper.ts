@@ -1,7 +1,8 @@
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import { DescribeInstancesCommand, DescribeVolumesCommand, EC2Client, TerminateInstancesCommand } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
@@ -139,7 +140,7 @@ export const handler = createReaperHandler({
     },
   }),
   async activeOperation(workspaceId) {
-    const item = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" }, ConsistentRead: true }))).Item;
+    const item = (await readWorkspaceMeta(documentClient, tableName, workspaceId))?.item;
     return typeof item?.activeOperationId === "string";
   },
   async ping(url) {

@@ -18,6 +18,7 @@ import { collectBuildSystemProfiles, detectorGlobsWithBuildSystems } from "../..
 import { buildOperation } from "../task-flow/accept.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { workspaceKey } from "../task-flow/keys.js";
+import { legacyWorkspaceKey } from "../task-flow/legacy-keys.js";
 import { taskOwnerKey } from "../../developer/task-records.js";
 import { documentOf, type TestEnvDeps } from "./deps.js";
 import { readApprovedBy, readApprovedTestEnvironment } from "./environment.js";
@@ -116,6 +117,7 @@ export async function startSavedEnvRebuild(deps: RebuildStartDeps, ids: { orgId:
     // The marker: one start per job, the ids the sweep needs to settle the end, a time to look again (the sparse index), and an expiry.
     { kind: "put", item: startMarkerItem({ orgId: ids.orgId, projectId: ids.projectId, jobId: job.jobId, workspaceId, operationId, createdAt: now, nowMs }), condition: when.absent() },
     { kind: "put", item: workspace, condition: when.absent() },
+    { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace["companyId"]! }, condition: when.absent() },
     ...prepare.items,
   ]);
   if (!written.applied) return { started: false, why: "already_started" };
