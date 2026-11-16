@@ -84,6 +84,18 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // T3: invite administration is full-access only; live company admin/owner membership is still required.
   { method: "POST", path: "/v1/dev/company/preapprovals", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/preapprovals/{emailHash}", requires: "full" },
+  // Lane LM8: the lessons API of one project of the caller's company (core-host/lessons-api.ts). Full access only, like the other company-admin routes; live membership and the project's roster still apply.
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/retire-requests", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/approve", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/reject", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire-request", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },

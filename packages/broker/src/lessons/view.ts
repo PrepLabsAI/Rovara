@@ -232,6 +232,49 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
   };
 }
 
+/** The three lists the developer API pages through (lane LM8): what waits for a person, what is used, and what was removed. */
+export const LESSON_PAGE_LISTS = ["proposed", "approved", "retired"] as const;
+export type LessonPageList = (typeof LESSON_PAGE_LISTS)[number];
+const PAGE_STATUSES: Record<LessonPageList, Lesson["status"][]> = { proposed: ["pending"], approved: ["active", "stale"], retired: ["retired", "expired", "rejected"] };
+export const LESSON_PAGE_MAX = 100;
+/** Where the next page starts: just after this lesson, in the list's order (newest change first, then id). Opaque to the caller. */
+export interface LessonPageCursor { list: LessonPageList; updatedAt: number; id: string }
+export interface LessonsPageAnswer {
+  project: string; list: LessonPageList; canDecide: boolean; lessons: LessonView[];
+  /** The cursor for the next page; absent on the last page. */
+  next?: LessonPageCursor;
+  /** The page was cut by the time limit before it was full: `next` continues after the last lesson that was checked. */
+  partial?: true;
+}
+
+/**
+ * One page of one list, newest change first. Anyone who may read the project reads `approved`; `proposed` and `retired` are for the people who decide here (as on the Lessons tab). Each lesson passes the same
+ * visibility check as the tab (`readVisibleRanked`: the frozen snapshot and the access records now), and people are named as the tab names them (an erased or unreadable person is "a former member").
+ */
+export async function buildLessonsPage(deps: LessonViewDeps, caller: LessonCaller, project: string, input: { list: LessonPageList; limit: number; after?: LessonPageCursor; /** Only lessons created at or after this time (ms): the inbox's batch since the person last looked. */ since?: number; deadlineMs?: number }): Promise<LessonsPageAnswer> {
+  const key = keyOf(caller, project);
+  const [resolved, state] = await Promise.all([resolveLearning(deps.settings, key.workspaceId, key.project), deciderState(deps, key, caller)]);
+  if (input.list !== "approved" && !state.canDecide) throw agentXError("FORBIDDEN", "Only a maintainer of this project, or an admin, can see this list.");
+  const limit = Math.max(1, Math.min(LESSON_PAGE_MAX, Math.floor(input.limit)));
+  const order = (a: Lesson, b: Lesson): number => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id);
+  const after = input.after;
+  const ranked = (await deps.store.list(key, { statuses: PAGE_STATUSES[input.list] })).sort(order)
+    .filter((lesson) => input.since === undefined || lesson.createdAt >= input.since)
+    .filter((lesson) => after === undefined || lesson.updatedAt < after.updatedAt || (lesson.updatedAt === after.updatedAt && lesson.id.localeCompare(after.id) > 0));
+  const deadlineAt = Date.now() + (input.deadlineMs ?? TAB_DEADLINE_MS);
+  const live = createLessonLiveReader({ port: deps.access.taskVisibility, key, where: "view", log: deps.log, timeoutMs: () => Math.max(1, Math.min(LESSON_LIVE_TIMEOUT_MS, deadlineAt - Date.now())) });
+  const result = await readVisibleRanked({ access: deps.access, key, viewer: state.viewer, where: "view", log: deps.log, live, ranked, pageSize: limit + 1, enough: (found) => found.length > limit, deadlineAt });
+  const shown = result.kept.slice(0, limit);
+  const person = await namePeople(deps, caller.orgId, caller.developerId, shown.flatMap(personIdsOf));
+  const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
+  const cursorAt = (lesson: Lesson): LessonPageCursor => ({ list: input.list, updatedAt: lesson.updatedAt, id: lesson.id });
+  let next: LessonPageCursor | undefined;
+  let partial = false;
+  if (result.kept.length > limit) next = cursorAt(shown[shown.length - 1]!);
+  else if (!result.complete) { next = result.checked > 0 ? cursorAt(ranked[result.checked - 1]!) : after; partial = true; }
+  return { project, list: input.list, canDecide: state.canDecide, lessons: shown.map((lesson) => toView(lesson, ctx)), ...(next === undefined ? {} : { next }), ...(partial ? { partial: true as const } : {}) };
+}
+
 /** One lesson's versions: who approved each. Only for a person who decides, and only for a lesson they may see. */
 export async function buildLessonHistory(deps: LessonViewDeps, caller: LessonCaller, project: string, lessonId: string) {
   const key = keyOf(caller, project);
