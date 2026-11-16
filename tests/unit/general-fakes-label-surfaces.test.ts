@@ -8,6 +8,7 @@ import { verificationReport } from "../../packages/broker/src/core/proof/verific
 import { workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { workflowPullRequestStatusLines as awsStatusLines } from "../../packages/broker/src/aws/developer-tasks.js";
 import { proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
+import { testingSectionLines } from "../../packages/broker/src/core/proof/testing-section.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 
 const now = "2026-11-16T12:00:00.000Z";
@@ -51,5 +52,28 @@ describe("the label wherever a check is said to have passed", () => {
     expect(workflowMessage({ taskId: "t", workflow: made })!.text).toContain(GENERAL_FAKE_MADE_NOTE);
     expect(workflowMessage({ taskId: "t", workflow: plain })!.text).not.toContain("Made by Rovara");
     expect(workflowMessage({ taskId: "t", workflow: plain })!.text).toBe("All 2 checks passed. Starting the code and security reviews.");
+  });
+
+  it("the other chat lines that say the checks passed carry it too", () => {
+    const blockedReviews = (w: WorkflowSnapshot) => ({ ...w, state: "BLOCKED" as const, blockReason: "x" });
+    expect(workflowMessage({ taskId: "t", workflow: blockedReviews(made) })!.text).toContain(`The checks passed (${GENERAL_FAKE_MADE_NOTE}`);
+    expect(workflowMessage({ taskId: "t", workflow: blockedReviews(plain) })!.text).toMatch(/^The checks passed, but the reviews couldn't finish\./u);
+    const publishing = (w: WorkflowSnapshot) => workflowMessage({ taskId: "t", workflow: { ...w, stage: "PULL_REQUEST" as const }, publishFailure: { category: "unknown" } })!.text;
+    expect(publishing(made)).toContain(`Checks and reviews passed (${GENERAL_FAKE_MADE_NOTE}`);
+    expect(publishing(plain)).toMatch(/^Checks and reviews passed, but I couldn't open/u);
+  });
+
+  it("the Testing section says it on the row, and never folds a labelled row into a plain count", () => {
+    const row = (label: string, madeByRovara?: true) => ({ label, command: "npm test", status: "passed" as const, ...(madeByRovara === true ? { madeByRovara } : {}) });
+    const view = { result: "verified" as const, rows: [row("unit", true), row("lint")] } as never;
+    for (const level of [0, 1, 2, 3, 4]) {
+      const text = testingSectionLines(view, level).join("\n");
+      expect(text, `level ${String(level)}`).toContain(`passed (${GENERAL_FAKE_MADE_NOTE})`);
+    }
+    const minimal = testingSectionLines(view, 5).join("\n");
+    expect(minimal).toContain("- 1 check passed");
+    expect(minimal).toContain(`- 1 check passed (${GENERAL_FAKE_MADE_NOTE})`);
+    // No label: exactly the old folded line.
+    expect(testingSectionLines({ result: "verified", rows: [row("unit"), row("lint")] } as never, 2).join("\n")).toContain("2 more checks passed");
   });
 });

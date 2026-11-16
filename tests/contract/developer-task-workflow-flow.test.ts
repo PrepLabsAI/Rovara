@@ -3160,9 +3160,11 @@ describe("checks AgentX proposes in the coding plan", () => {
     const entry = (index: number, after: string, output = "", exitCode?: number) => ({ id: `readiness:${index}`, label: `check ${index}`, source: "project", before: "passed", after,
       class: after === "passed" ? "passing" : "regression", output, durationMs: 5, ...(exitCode === undefined ? {} : { exitCode }) });
     /** A Quick task whose approved plan proposes `proposed`, coded, and verified from the worker's `entries`. */
+    let lastWorld: { harness: Harness; taskId: string } | undefined;
     async function verified(proposed: Array<typeof unitTests | typeof typecheck | typeof script | typeof node | { label: string; cwd: string; executable: string; args: string[]; proves: string[] }>, entries: unknown[]) {
       const harness = await createSingleAnswerPlanBroker();
       const { taskId, workspaceId, digest } = await quickPlanWaiting(harness, answerWith(rawChecks(proposed)));
+      lastWorld = { harness, taskId };
       await approve(harness, taskId, digest);
       const implementation = operations(harness, workspaceId).find((item) => item.workflowMode === "IMPLEMENT")!;
       await harness.finish(workspaceId, String(implementation.id), "SUCCEEDED", { result: { workflowCandidateRepositories: candidate.repositories, workflowCheckCandidateRepositories: candidate.repositories,
@@ -3191,6 +3193,11 @@ describe("checks AgentX proposes in the coding plan", () => {
     it("keeps a worker entry's Made by Rovara label on the recorded result, and only there (general fakes, DEC 234)", async () => {
       const recorded = await verified([unitTests, typecheck], [{ ...entry(0, "passed", "", 0), madeByRovara: true }, entry(1, "passed", "", 0)]);
       expect(recorded.verification?.results).toEqual([{ checkId: "proposed-1", status: "PASS", madeByRovara: true }, { checkId: "proposed-2", status: "PASS" }]);
+      // The task page's check list carries the label to its renderer, on that check only (review M1).
+      const { harness, taskId } = lastWorld!;
+      const view = await getTaskDocumentView({ documentClient: harness.db, tableName: "state", actions: harness.actions, checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.now() },
+        { developerId: String((harness.db.get(`DEVTASK#${taskId}`, "META") as { developerId?: unknown }).developerId) } as never, taskId);
+      expect(view.checks.map((check) => [check.passed, check.madeByRovara])).toEqual([[true, true], [true, undefined]]);
     });
 
     const inline = { label: "Inline check", cwd: "repo/demo", executable: "python3", args: ["-c", "import app"], proves: ["1"] };

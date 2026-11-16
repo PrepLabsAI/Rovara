@@ -227,7 +227,7 @@ export async function runChecks(
       options.signal.removeEventListener("abort", cancel);
     }
   }
-  if (runners.endRound === undefined) return runChecksRound(plan, runners, options);
+  if (runners.endRound === undefined && runners.markEntries === undefined) return runChecksRound(plan, runners, options);
   let round: CheckRound;
   try {
     round = await runChecksRound(plan, runners, options);

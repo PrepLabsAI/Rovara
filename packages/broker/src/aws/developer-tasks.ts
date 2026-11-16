@@ -166,10 +166,9 @@ import {
   openReviewFindings,
   resolveWorkflowReviewFindings,
   workflowFindingAccepted,
-  workflowFindingProblem,
+  workflowFindingProblem, GENERAL_FAKE_MADE_NOTE,
   type DeveloperSignInMethod,
 } from "@agentx/contracts";
-import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { z } from "zod";
 import { channelLabel, decideMode, decideShare, type BoundChannel, type ShareDecision } from "../developer/share.js";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START } from "../developer/pull-request-feedback-section.js";
@@ -4016,8 +4015,9 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   const proves = currentPlan?.format === "structured" ? currentPlan.plan.checks?.proves : undefined;
   const checks = workflowSelectedChecks(checkPolicy)
     .map((check) => {
-      const status = results.find((result) => result.checkId === check.id)?.status;
-      return { id: check.id, label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}),
+      const recorded = results.find((result) => result.checkId === check.id);
+      const status = recorded?.status;
+      return { id: check.id, label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}), ...(recorded?.madeByRovara === true ? { madeByRovara: true as const } : {}),
         ...(proposedIds.has(check.id) ? { proposed: true as const } : {}), ...(proves?.[check.id] === undefined ? {} : { proves: proves[check.id]! }) };
     });
   // Model-written: the page escapes it. Review only is said once a coding plan exists to have proposed nothing.
@@ -4390,7 +4390,7 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, proof
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const passed = (workflow.verification?.results ?? []).filter((result) => result.status === "PASS")
     // A proposed check's label is model-written: one line, redacted and made inert like a plan line, as every label is.
-    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed${result.madeByRovara === true ? ` (${GENERAL_FAKE_MADE_NOTE})` : ""}`);
+    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed${result.madeByRovara === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}`);
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
   // The issues noted are those nobody had to resolve: the findings the owner accepted are listed on their own.
   const noted = (workflow.reviews ?? []).reduce((count, review) => count + review.findings.filter((finding) => !workflowFindingAccepted(workflow, review.role, finding)).length, 0);
