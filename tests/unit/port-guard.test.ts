@@ -894,6 +894,31 @@ describe("port-guard hardening (review of lane L0)", () => {
     expect(lane.guard().filter((f) => f.rule === "guard-files").map((f) => f.file)).toEqual(["packages/contracts/src/owner-starter-images.ts"]);
   });
 
+  it("flags an edit to what decides what CI runs and whether it passed (the plan, the gate, the test configuration, the shard split) as guard files (DEC 242)", () => {
+    const decisive = [
+      "scripts/ci-plan.ts",
+      "scripts/ci-gate.ts",
+      "vitest.config.ts",
+      "vitest.native-p0.config.ts",
+      "tests/support/vitest-shared-config.ts",
+      "tests/support/duration-shards.ts",
+      "tests/support/duration-sequencer.ts",
+    ];
+    for (const path of decisive) lane.write(path, "export {};\n");
+    lane.commit();
+    expect(lane.guard().filter((f) => f.rule === "guard-files").map((f) => f.file).sort()).toEqual([...decisive].sort());
+    expect(lane.guard({ allowGuardEdits: true })).toEqual([]);
+  });
+
+  it("does not flag the neighbours of those files (other scripts and test support files)", () => {
+    lane.write("scripts/ci-planner-notes.ts", "export {};\n");
+    lane.write("scripts/lint-shards.ts", "export {};\n");
+    lane.write("tests/support/sample-helper.ts", "export {};\n");
+    lane.write("tests/.timings/vitest-durations.json", "{}\n");
+    lane.commit();
+    expect(lane.guard().filter((f) => f.rule === "guard-files")).toEqual([]);
+  });
+
   it("flags an edit to the port:guard script and a stack nested under infra/lib", () => {
     lane.write("package.json", '{ "scripts": { "port:guard": "true" } }\n');
     lane.write(`infra/lib/stacks/${AUDIT}-stack.ts`, "export {};\n");
