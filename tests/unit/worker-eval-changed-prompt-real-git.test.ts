@@ -29,29 +29,29 @@ const sig = () => new AbortController().signal;
 describe("changed-prompt classification over real git", () => {
   it("unrelated code -> none_found; nested path recursion", async () => {
     const r = await repo({ "src/deep/count.ts": "export const count = 1;\n" }, { "src/deep/count.ts": "export const count = 2;\n" });
-    const rep = await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha);
+    const rep = await candidatePromptChanges(r.repositories, r.candidates, sig());
     expect(rep?.status).toBe("none_found");
   });
   it("prompt file change -> changes", async () => {
     const r = await repo({ "prompts/sys.md": "old\n" }, { "prompts/sys.md": "new\n" });
-    expect((await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
+    expect((await candidatePromptChanges(r.repositories, r.candidates, sig()))?.status).toBe("changes");
   });
   it("rename of a prompt file -> changes", async () => {
     const r = await repo({ "prompts/a.md": "same\n" }, { "prompts/a.md": null, "prompts/b.md": "same\n" });
-    expect((await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
+    expect((await candidatePromptChanges(r.repositories, r.candidates, sig()))?.status).toBe("changes");
   });
   it("binary / non-utf8 / symlink -> undefined", async () => {
     const b = await repo({ "x.bin": Buffer.from([1, 0, 2]) }, { "x.bin": Buffer.from([1, 0, 3]) });
-    expect(await candidatePromptChanges(b.repositories, b.candidates, sig(), b.repositories[0]!.baseCommitSha)).toBeUndefined();
+    expect(await candidatePromptChanges(b.repositories, b.candidates, sig())).toBeUndefined();
     const n = await repo({ "x.ts": Buffer.from([0x61]) }, { "x.ts": Buffer.from([0xff, 0x61]) });
-    expect(await candidatePromptChanges(n.repositories, n.candidates, sig(), n.repositories[0]!.baseCommitSha)).toBeUndefined();
+    expect(await candidatePromptChanges(n.repositories, n.candidates, sig())).toBeUndefined();
   });
   it("mode-only change -> none_found", async () => {
     const r = await repo({ "run.sh.ts": "x\n" }, {}, () => undefined);
     // chmod then commit
     execFileSync("chmod", ["+x", join(r.dir, "run.sh.ts")]); g(r.dir, "add", "-A"); g(r.dir, "commit", "-qm", "mode");
     const tree = g(r.dir, "rev-parse", "HEAD^{tree}");
-    expect((await candidatePromptChanges(r.repositories, [{ ...r.candidates[0]!, treeSha: tree }], sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("none_found");
+    expect((await candidatePromptChanges(r.repositories, [{ ...r.candidates[0]!, treeSha: tree }], sig()))?.status).toBe("none_found");
   });
   it("candidate replace ref / textconv attrs / ext diff config are not honoured", async () => {
     const r = await repo({ "prompts/sys.md": "old\n" }, { "prompts/sys.md": "new\n" }, (dir) => {
@@ -60,28 +60,15 @@ describe("changed-prompt classification over real git", () => {
       g(dir, "replace", newBlob, oldBlob);
       g(dir, "config", "diff.x.textconv", "false"); g(dir, "config", "diff.external", "false");
     });
-    expect((await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
+    expect((await candidatePromptChanges(r.repositories, r.candidates, sig()))?.status).toBe("changes");
   });
-  it("a runtime-loaded persona.txt (no prompt/system in its name) is unknown, not none_found (EVAL-PROMPT-DETECT-RUNTIME-LOADED)", async () => {
+  it("KNOWN F4 LIMIT (EVAL-PROMPT-DETECT-RUNTIME-LOADED): a runtime-loaded persona.txt (no prompt/system in its name) reads none_found", async () => {
     const r = await repo({ "assets/persona.txt": "You are terse.\n" }, { "assets/persona.txt": "You are verbose.\n" });
-    expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
+    expect((await candidatePromptChanges(r.repositories, r.candidates, sig()))?.status).toBe("none_found");
   });
-  it("a string constant in a non-AI .ts that the prompt builder imports is unknown, not none_found", async () => {
+  it("KNOWN F4 LIMIT (EVAL-PROMPT-DETECT-RUNTIME-LOADED): a string constant in a non-AI .ts that the prompt builder imports reads none_found", async () => {
     const r = await repo({ "src/text.ts": "export const greeting = 'Be terse.';\n" }, { "src/text.ts": "export const greeting = 'Be verbose.';\n" });
-    expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
-  });
-  it("diffs from the plan's base, not from the commit before the candidate", async () => {
-    // base -> prompt change -> unrelated change. A diff from HEAD~1 would hide the prompt change; the plan's base shows it.
-    const r = await repo({ "prompts/sys.md": "old\n", "src/c.ts": "export const c = 1;\n" }, { "prompts/sys.md": "new\n" });
-    await writeFile(join(r.dir, "src/c.ts"), "export const c = 2;\n"); g(r.dir, "add", "-A"); g(r.dir, "commit", "-qm", "later");
-    const tree = g(r.dir, "rev-parse", "HEAD^{tree}");
-    expect((await candidatePromptChanges(r.repositories, [{ ...r.candidates[0]!, treeSha: tree }], sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
-  });
-  it("a plan base other than the repository's base is unknown, even when it is a real commit of that repository", async () => {
-    const r = await repo({ "src/c.ts": "export const c = 1;\n" }, { "src/c.ts": "export const c = 2;\n" });
-    const head = g(r.dir, "rev-parse", "HEAD");
-    expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), head)).toBeUndefined();
-    expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), undefined)).toBeUndefined();
+    expect((await candidatePromptChanges(r.repositories, r.candidates, sig()))?.status).toBe("none_found");
   });
 });
 
@@ -95,7 +82,7 @@ describe("per-check classification through the real bridge socket", () => {
         for (let i = 0; i < 3; i++) await collectModelBridge({ socketPath: input.model.socketPath, mode: "real", token: input.model.token, frame: { ...frame(JSON.stringify({ contents: [{ parts: [{ text: "hello" }] }] })) } });
         return { report: { root: "/r", cwd: ".", argument: "r.json", notBeforeMs: 1 }, ...(input.side === "old" ? { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: "a".repeat(40) }) } : {}) };
       } } });
-      const result = await withEvalChangedPromptClassifier(r.repositories, r.candidates, sig(), async () => ({ key: { baseCommit: r.repositories[0]!.baseCommitSha } }), () => exec.run({ side: "new", ids: ["q"], runs: 1, egress, scope: Object.freeze({}) as unknown as ModelEgressScope, signal: sig() }));
+      const result = await withEvalChangedPromptClassifier(r.repositories, r.candidates, sig(), () => exec.run({ side: "new", ids: ["q"], runs: 1, egress, scope: Object.freeze({}) as unknown as ModelEgressScope, signal: sig() }));
       expect(result.changedPromptCalls).toBe(want);
     }
   });

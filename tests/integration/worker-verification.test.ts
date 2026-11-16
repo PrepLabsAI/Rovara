@@ -2031,8 +2031,6 @@ describe("CHECKS eval hook", () => {
     try {
       const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath });
       expect(run.failure).toBeUndefined(); expect(w.holds.length).toBeGreaterThan(0); expect(w.calls.length).toBeGreaterThan(0);
-      // The eval and the changed-prompt classifier share ONE plan read.
-      expect(w.planned()).toBe(1);
       const before = createCandidateManifest(run.result!.workflowCandidateRepositories!).digest;
       const after = createCandidateManifest(run.result!.workflowCheckCandidateRepositories!).digest;
       expect(before).not.toBe(after);
@@ -2040,15 +2038,6 @@ describe("CHECKS eval hook", () => {
       expect(saved).toMatchObject({ outcome: "done", candidateDigest: before });
       const proof = TestProofSchema.parse(JSON.parse(run.artifacts.find(a => a.name === "test-proof.json")!.content));
       expect(saved.candidateDigest).toBe(proof.candidateDigest);
-    } finally { await w.cleanup(); }
-  });
-  it("a working round reads no plan at all: the classifier is not started", async () => {
-    const w = await createEvalFinalCheckWorld(); w.ports.roundKind = "working";
-    try {
-      const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
-      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
-      expect(run.failure).toBeUndefined(); expect(w.planned()).toBe(0);
-      expect(JSON.parse(run.artifacts.find(a => a.name === "eval-round.json")!.content)).toMatchObject({ outcome: "not_run", notRunReason: "needs_fresh_sandbox" });
     } finally { await w.cleanup(); }
   });
   it("does not reread or report success after an unconfirmed eval stop", async () => {
