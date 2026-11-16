@@ -24,6 +24,7 @@ import type {
   WorkerMachines,
   WorkflowPath,
   WorkflowIntent,
+  WorkflowOwnerAuthority,
   WorkflowReviewPhase,
   WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -57,6 +58,16 @@ export interface TaskCaller {
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
    */
   scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
+  /**
+   * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
+   * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
+   */
+  stepUp?: { at: string; method: string } | undefined;
+  /**
+   * DEC 236h: set only by the host's sign-in, from the verified client's registration, when the request comes from the Rovara web app's own sign-in client (the one the operator marked; never an administrator's
+   * registration, and never another full-access client such as an AI tool's). Only the act that is the web page's alone (accepting a security finding, `security-accept.ts`) reads it.
+   */
+  webApp?: true | undefined;
 }
 
 /** Starting work always names the trusted server surface; other task actions need no origin. */
@@ -93,6 +104,12 @@ export interface TaskAccess {
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
   /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
   checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
+  /**
+   * The owner moves that decide or start paid work on a task already running (send back, review findings, continue): who the engine records as acting when this principal is the task's owner or a co-owner.
+   * `authority` is what the workflow engine checks the actor against (a hosted product's co-owners). `items` are steps for the move's own transaction (a hosted product's live access fence, as `checkStep`'s `items`): a change of who may act between the check and the commit refuses the move. Undefined: not an owner, so the move is refused as a task they cannot see. Absent: Code's own rule,
+   * where the owner of the install, or the person the task runs for, acts as the task's owner (`ownerActingOf`).
+   */
+  ownerActing?(principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<{ actorId: string; authority?: WorkflowOwnerAuthority; items?: readonly TransactItem[] } | undefined>;
 }
 
 /**
