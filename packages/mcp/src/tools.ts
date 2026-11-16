@@ -400,8 +400,10 @@ export function nextFor(shown: DeveloperTaskClientView): string {
     if ((task.workflow.state === "RUNNING" || task.workflow.state === "READY") && task.workflow.branchSync !== undefined) return "Rovara is merging the latest base branch into the pull request's branch. Check again with agentx_get_task.";
     if (task.workflow.state === "RUNNING") return "AgentX is reviewing the feedback on the pull request and will propose a fix before changing any code. Check again with agentx_get_task.";
     // Rovara Code (version 2): merging is Rovara's Merge button, pressed by a person. No tool here merges (Plan 6: a person always presses Merge).
-    if (task.merge?.ready === true) return `${approvedChecksWords(task.mergeTracking)} A person presses Merge in Rovara (one click in the web app, after a confirm dialog; \`agentx session merge <session id>\` only gives a link to confirm in their browser); this tool can't merge. The task finishes when it's merged.`;
-    if (task.merge !== undefined) return `Waiting for the pull request to be merged. It can't be merged yet: ${task.merge.message ?? "it is not ready"} Once that is fixed, a person presses Merge in Rovara; this tool can't merge. The task finishes when it's merged.`;
+    // MR3b: a task that changes several repositories says the order its pull requests merge in; a person confirms an order that could not be found (DEC 209), and no tool does.
+    const order = task.merge?.order === undefined ? "" : ` ${task.merge.order.lines.join(" ")}${task.merge.order.needsOverride === true ? " Only a person can confirm merging them in the order listed; this tool can't." : ""}`;
+    if (task.merge?.ready === true) return `${approvedChecksWords(task.mergeTracking)} A person presses Merge in Rovara (one click in the web app, after a confirm dialog; \`agentx session merge <session id>\` only gives a link to confirm in their browser); this tool can't merge.${order} The task finishes when it's merged.`;
+    if (task.merge !== undefined) return `Waiting for the pull request to be merged. It can't be merged yet: ${task.merge.message ?? "it is not ready"} Once that is fixed, a person presses Merge in Rovara; this tool can't merge.${order} The task finishes when it's merged.`;
     return "Waiting for the pull request to be merged. Review and merge it on GitHub; the task finishes when it's merged.";
   }
   if (task.workflow?.stage === "PULL_REQUEST" && (task.workflow.state === "READY" || task.workflow.state === "RUNNING")) {

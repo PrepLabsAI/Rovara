@@ -323,6 +323,11 @@ export interface TaskFlowDeps {
    */
   lessonsUsed?: (task: { taskId: string; project: string; startingRevision: number }, repositoryId: string) => Promise<LessonsUsedSection | undefined>;
   /**
+   * MR3b: the lines about the order a task's pull requests merge in (and what happened when one was merged ahead of the one it depends on), for the pull request descriptions and the task page (`mergeOrderLinesOfTask`).
+   * `undefined`, or an empty answer: the descriptions and the page are exactly what they were. Never throws into the flow (a read that fails leaves the lines out).
+   */
+  mergeOrderLines?: (task: TaskRecord) => Promise<readonly string[]>;
+  /**
    * The lessons a step is given: asked when the step's invocation is built, only for a task step. `features` are the worker's. The answer is the worker's `learnedContext` or none; it never throws into the dispatch, and a slow
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
    */

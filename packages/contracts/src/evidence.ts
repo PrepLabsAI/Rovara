@@ -527,7 +527,7 @@ export const MULTI_REPO_FALLBACK_NOTES = [
 ] as const;
 export type MultiRepoFallbackNote = (typeof MULTI_REPO_FALLBACK_NOTES)[number];
 /** Repository facts only. MR3/MR2b must NEVER use absence from the candidate to skip or narrow tests. */
-const RepositoryEdgesSchema = z.object({
+export const RepositoryEdgesSchema = z.object({
   edges: z.array(z.object({
     consumer: line(200), provider: line(200),
     language: z.enum(["node", "go", "python", "maven", "gradle"]),

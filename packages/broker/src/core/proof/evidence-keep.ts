@@ -8,7 +8,7 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, RepositoryEdgesSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
@@ -23,6 +23,11 @@ export interface EvidenceTask { ownerKey: string; workspaceId: string; taskId: s
 
 /** The pack is kept at a key that names its task and the exact code it is for; a reader asks for the current candidate's digest only. */
 export const evidencePackKey = (task: EvidenceTask, candidateDigest: string): string => `private/${task.ownerKey}/${task.workspaceId}/evidence-pack/${task.taskId}/${candidateDigest}.json`;
+/**
+ * MR3b: the dependency facts TE-MR2 recorded for this code (`EvidenceRaw.repositoryEdges.edges`), kept beside the pack for the merge order to read. Under the task's own evidence prefix, so the task's erase takes it with the pack
+ * (`evidence-erase.ts`), bound to the candidate digest, and inside the blob store's company scope like every evidence object. Only the edges (consumer, provider, language) are kept, never the worker's notes.
+ */
+export const repositoryEdgesKey = (task: EvidenceTask, candidateDigest: string): string => `private/${task.ownerKey}/${task.workspaceId}/evidence-pack/${task.taskId}/${candidateDigest}.repository-edges.json`;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const PACK_READ_BYTES = 4 * 1_048_576;
@@ -81,6 +86,46 @@ async function readRaw(deps: KeepEvidenceDeps, input: KeepEvidenceInput): Promis
 
 const TEST_PROOF_READ_BYTES = 256 * 1024;
 
+/** The most bytes the kept edges are read from: 64 edges of two 200-character ids is under 40 KB. */
+const REPOSITORY_EDGES_READ_BYTES = 64 * 1024;
+
+/** Keeps the worker's repository edges for this code. Informational: a fault is logged by name only and leaves no facts (the merge then orders as it always did). Never throws. */
+async function keepRepositoryEdges(deps: KeepEvidenceDeps, input: KeepEvidenceInput, edges: NonNullable<EvidenceRaw["repositoryEdges"]>["edges"]): Promise<void> {
+  try {
+    if (deps.late?.() === true) return;
+    await deps.markStored?.(input.orgId);
+    const record = { schemaVersion: 1, candidateDigest: input.candidateDigest, edges };
+    await deps.store.blobs.put(repositoryEdgesKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(record), "utf8"), { contentType: "application/json", metadata: { kind: "repository-edges" }, retention: "evidence-std" }, { overwrite: true });
+  } catch (error) {
+    deps.log?.("evidence.repository_edges_not_kept", { error: error instanceof Error ? error.name : "unknown" });
+  }
+}
+
+/** What the kept dependency facts say for one task's code: `none` (nothing was recorded), the edges, or `unreadable` (something is kept that cannot be trusted, or the store could not answer). */
+export type KeptRepositoryEdges = { kind: "none" } | { kind: "edges"; edges: Array<{ consumer: string; provider: string }> } | { kind: "unreadable" };
+
+/**
+ * The dependency facts kept for exactly this code of this task (MR3b). Read as a whole: a record that is not exactly what `keepEvidence` writes (another version, other code, a self-edge, a repeated edge, more than 64 edges, an id
+ * with control characters, a size over the bound) is `unreadable`, never a partial list and never `none`, so a merge refuses its order until a person confirms (DEC 209) instead of merging in an order nobody checked. Never throws.
+ */
+export async function loadRepositoryEdges(blobs: Pick<EvidenceBlobStore, "get" | "stat">, task: EvidenceTask, candidateDigest: string): Promise<KeptRepositoryEdges> {
+  if (!DIGEST.test(candidateDigest) || !TASK_ID.test(task.taskId)) return { kind: "unreadable" };
+  try {
+    const key = repositoryEdgesKey(task, candidateDigest);
+    const bytes = await blobs.get(key, REPOSITORY_EDGES_READ_BYTES);
+    // `get` answers nothing both for an object that is not there and for one over the bound: only `stat` tells them apart.
+    if (bytes === undefined) return (await blobs.stat(key)) === undefined ? { kind: "none" } : { kind: "unreadable" };
+    const record = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+    if (typeof record !== "object" || record === null || Array.isArray(record)) return { kind: "unreadable" };
+    const { schemaVersion, candidateDigest: boundTo, edges, ...rest } = record as Record<string, unknown>;
+    if (schemaVersion !== 1 || boundTo !== candidateDigest || Object.keys(rest).length > 0) return { kind: "unreadable" };
+    const parsed = RepositoryEdgesSchema.safeParse({ edges, notes: [] });
+    return parsed.success ? { kind: "edges", edges: parsed.data.edges.map((edge) => ({ consumer: edge.consumer, provider: edge.provider })) } : { kind: "unreadable" };
+  } catch {
+    return { kind: "unreadable" };
+  }
+}
+
 /**
  * TE-B3: what the worker's run on the original code showed about each check's untouched tests (skips that rose, tests that ran before and are gone), read from the operation's `test-proof.json`: an object under the operation's own
  * key prefix, bounded, parsed against its schema and bound to this code's digest. Informational: anything else is no facts. They come from the same worker as the raw file and are as untrusted: the caller merges them into the raw
@@ -134,6 +179,8 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
       try { const parsed = EvidenceRawSchema.safeParse(JSON.parse(rawText)); parsedRaw = parsed.success ? parsed.data : undefined; } catch { parsedRaw = undefined; }
     }
     if (parsedRaw !== undefined && parsedRaw.candidateDigest !== input.candidateDigest) return { kept: false, reason: "not_bound" };
+    // MR3b: the dependency facts for this code are kept on their own, before the pack work (a pack that is withheld or fails must not take the merge order's facts with it).
+    if (parsedRaw?.repositoryEdges !== undefined && parsedRaw.repositoryEdges.edges.length > 0) await keepRepositoryEdges(deps, input, parsedRaw.repositoryEdges.edges);
     if (parsedRaw !== undefined) {
       // TE-B3: the facts from the run on the original code join the raw file first, so the data guard and the builder check them like every other test name.
       parsedRaw = withWeakeningFacts(parsedRaw, await readWeakeningFacts(deps, input));

@@ -12,6 +12,8 @@ export * from "./store.js";
 export * from "./merged.js";
 export * from "./merged-lines.js";
 export * from "./merge-order.js";
+export * from "./repository-edges.js";
+export * from "./order-watch.js";
 export * from "./defaults.js";
 export * from "./resolver.js";
 export * from "./linked.js";

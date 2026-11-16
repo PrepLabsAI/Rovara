@@ -41,6 +41,7 @@ import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
+import { orderHoldsReady } from "./order-watch.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergePassHooks, MergeTask, SessionTimeline } from "./seams.js";
 import type { MergePeople } from "./people.js";
@@ -172,6 +173,11 @@ export interface MergeTrackingDependencies {
   dispatchRow?(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem;
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
   hooks?: MergePassHooks;
+  /**
+   * MR3b: the dependency facts between the task's repositories (the merge's `repositoryEdges` seam, see `createRepositoryEdgesSeam`). With them, a pull request that depends on a repository that is still waiting stays a
+   * draft once a pull request was merged ahead of that repository (`order-watch.ts`). Absent, or with no facts that can be read: tracking is what it always was.
+   */
+  repositoryEdges?(task: TrackedTask): unknown;
 }
 
 export class TrackingRequestCapError extends Error {
@@ -643,7 +649,9 @@ async function trackOne(
     && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING";
   // A change that grew to risky stays a draft until a person keeps it and the risky reviews pass: it is not marked ready, and one a person marked ready on the code host is noted (it cannot be undone from here).
   // A task that skipped planning is also held until its tier, its reviewer's questions and any grown review are on the record for the head the host shows (never ready on a stale or untiered head).
-  const held = deps.readyHold === undefined ? false : await deps.readyHold(task, { repositoryId: pullRequest.repositoryId, headSha: status.headRevision }).catch(() => true);
+  const scopeHeld = deps.readyHold === undefined ? false : await deps.readyHold(task, { repositoryId: pullRequest.repositoryId, headSha: status.headRevision }).catch(() => true);
+  // MR3b: a pull request that depends on a repository that is still waiting, after another was merged ahead of it, stays a draft until that repository merges. Only asked of a draft that would be taken out of draft.
+  const held = scopeHeld || (wantsReadyOtherwise && await orderHoldsReady(deps, task, pullRequest.repositoryId));
   const heldKey = `${task.taskId}#${String(pullRequest.number)}#${status.headRevision}`;
   if (held && status.state === "open" && !status.draft && !heldNotDraftLogged.has(heldKey)) {
     if (heldNotDraftLogged.size > 1_000) heldNotDraftLogged.clear();

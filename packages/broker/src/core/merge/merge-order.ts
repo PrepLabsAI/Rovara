@@ -8,6 +8,8 @@
 // (DEC 209: only a person overrides the order). Never a guessed order. Rovara never merges by itself (owner decision 1): this module only orders and words the merges a person presses.
 // Absence of an edge in the candidate is never used to skip or narrow tests (TE-MR2's rule); this module reads the edges only for ordering.
 
+import { inertLine } from "../proof/inert-text.js";
+
 /** At most this many edges are read (TE-MR2 records at most 64). More is unreadable, not cut short. */
 export const MERGE_ORDER_EDGES_MAX = 64;
 /** At most this many repositories are ordered in one task (the stuck milestone lists at most 32 pull requests). */
@@ -107,6 +109,21 @@ export function partialMergeState(order: MergeOrder, mergedRepositories: readonl
 
 const list = (ids: readonly string[]): string => ids.join(", ");
 
+/**
+ * MR3b: the repositories whose pull requests Rovara keeps as drafts. Only once a consumer merged ahead of a repository it depends on (`outOfOrder`): then every repository that has not merged and depends on
+ * one of those providers waits at draft until the provider merges, so it is not merged ahead of it too. Nothing is held while the merges follow the order, or when the order is not from dependencies.
+ */
+export function heldDependents(order: MergeOrder, mergedRepositories: readonly string[]): string[] {
+  const state = partialMergeState(order, mergedRepositories);
+  if (order.kind !== "dependencies" || state.kind !== "partial" || state.outOfOrder.length === 0) return [];
+  const behind = new Set(state.outOfOrder.map((pair) => pair.provider));
+  return state.waiting.filter((repository) => (order.providersOf[repository] ?? []).some((provider) => behind.has(provider)));
+}
+
+/** A repository's name in a line shown to people (a pull request description, the task page, a chat): one inert line, at most this long, so the line stays bounded whatever the names are. */
+export const MERGE_ORDER_NAME_MAX = 40;
+const nameOf = (id: string): string => inertLine(id, MERGE_ORDER_NAME_MAX);
+
 export const MERGE_ORDER_WORDS = {
   noSafeOrder: {
     cycle: "These repositories depend on each other both ways, so Rovara can't pick a safe merge order. Merge them yourself on the code host, or confirm merging them in the order listed.",
@@ -115,6 +132,16 @@ export const MERGE_ORDER_WORDS = {
   held: (held: readonly string[], merged: readonly string[]): string =>
     `Rovara stopped there, so these were not merged: ${list(held)}. Press Merge again to finish in order, or ask for a revert of ${list(merged)}.`,
   outOfOrder: (consumer: string, provider: string): string => `${consumer} merged before ${provider}, which it depends on.`,
+  /** MR3b: what the task and its chat are told once when a pull request was merged ahead of the one it depends on (by hand, on the code host). `held` are the drafts Rovara keeps; `more` the other pairs. */
+  /** Which pull requests Rovara keeps as drafts, and until what: at most three are named. */
+  keptAsDraft: (held: readonly string[], provider: string): string => {
+    const shown = held.slice(0, 3);
+    return `Rovara keeps ${list(shown)}${held.length > shown.length ? ` and ${String(held.length - shown.length)} more` : ""} as a draft until ${provider} merges.`;
+  },
+  outOfOrderWarning: (consumer: string, provider: string, held: readonly string[], more: number): string => {
+    const holding = held.length === 0 ? "" : ` ${MERGE_ORDER_WORDS.keptAsDraft(held, provider)}`;
+    return `${consumer} merged before ${provider}, which it depends on.${holding} Merge ${provider} next, or ask for a revert of ${consumer}.${more > 0 ? ` ${String(more)} more merged out of order.` : ""}`;
+  },
 } as const;
 
 /** The sentence a half merge adds when the order came from dependencies: what was held back (the failed one and everything after it, in merge order) and the two next steps. `merged` is in the order it merged. */
@@ -130,6 +157,21 @@ export function mergeOrderLines(order: MergeOrder, pullRequests: ReadonlyArray<{
   if (order.kind === "repository") return [];
   if (order.kind === "no_safe_order") return [MERGE_ORDER_WORDS.noSafeOrder[order.reason]];
   const numbers = new Map(pullRequests.map((pr) => [pr.repositoryId, pr.number]));
-  const named = order.repositories.map((repository) => (numbers.has(repository) ? `${repository} #${String(numbers.get(repository))}` : repository));
+  const named = order.repositories.map((repository) => (numbers.has(repository) ? `${nameOf(repository)} #${String(numbers.get(repository))}` : nameOf(repository)));
   return [`Merge order: ${named.map((name, index) => (index === 0 ? `${name} first` : `then ${name}`)).join(", ")}.`];
+}
+
+/**
+ * MR3b: the lines the task page, the pull request description and the chat show about the order: the order itself (nothing when it is today's repository order), and, when a pull request was merged ahead of the one it
+ * depends on, what happened and which drafts Rovara keeps. `pullRequests` are the task's required pull requests (`state: "MERGED"` for the merged ones). Fixed words; every name is one inert line.
+ */
+export function mergeOrderStateLines(order: MergeOrder, pullRequests: ReadonlyArray<{ repositoryId: string; number: number; state?: string | undefined }>): string[] {
+  const lines = mergeOrderLines(order, pullRequests);
+  if (order.kind !== "dependencies") return lines;
+  const merged = pullRequests.filter((pr) => pr.state === "MERGED").map((pr) => pr.repositoryId);
+  const state = partialMergeState(order, merged);
+  if (state.kind !== "partial" || state.outOfOrder.length === 0) return lines;
+  const held = heldDependents(order, merged);
+  const [first, ...rest] = state.outOfOrder;
+  return [...lines, MERGE_ORDER_WORDS.outOfOrderWarning(nameOf(first!.consumer), nameOf(first!.provider), held.map(nameOf), rest.length)];
 }

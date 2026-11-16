@@ -41,7 +41,7 @@ export interface TaskAttention {
 }
 
 /** What the owner sees and answers, and the words the sessions use, for one task. */
-export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId">, task: TaskRecord, options: { ciMode?: ProjectCiMode } = {}): Promise<TaskAttention> {
+export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId" | "mergeOrderLines">, task: TaskRecord, options: { ciMode?: ProjectCiMode } = {}): Promise<TaskAttention> {
   const workflow = task.workflow;
   if (workflow === undefined) return { view: {} };
   const view: AttentionView = {};
@@ -92,6 +92,8 @@ export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId"
       if (!item.headByRovara) lines.push("Someone else pushed to it, so Rovara has stopped changing it and only watches.");
       if (record?.changedOutside !== undefined) lines.push(`${CHANGED_OUTSIDE_NOTE.charAt(0).toUpperCase()}${CHANGED_OUTSIDE_NOTE.slice(1)}.`);
     }
+    // MR3b: the order the pull requests merge in, and what Rovara does when one was merged ahead of the one it depends on (nothing for one repository or without dependency facts).
+    lines.push(...await deps.mergeOrderLines?.(task).catch(() => [] as string[]) ?? []);
     const ready = items.length > 0 && items.length === (workflow.pullRequests ?? []).length && items.every((entry) => readyToMerge(entry, options.ciMode)) && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
     if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING") {
       lines.push(ready ? "Ready to merge. Rovara never merges by itself: a person merges it on the code host." : "Rovara is watching it. It is not ready to merge yet.");
