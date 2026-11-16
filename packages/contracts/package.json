@@ -6,8 +6,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./dns-helper": "./dist/dns-helper.js",
-    "./model-helper": "./dist/model-helper-entry.js",
-    "./general-fakes-helper": "./dist/general-fakes-helper-entry.js"
+    "./model-helper": "./dist/model-helper-entry.js"
   },
   "types": "./dist/index.d.ts",
   "sideEffects": false,
