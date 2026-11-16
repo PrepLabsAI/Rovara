@@ -86,7 +86,7 @@ describe("the broker's core root, switch on", () => {
     }
   });
 
-  it("drains without reading the admission settings: allowed companies \"none\" is not a settings problem, and a new task goes the old way", async () => {
+  it("drains without the root reading the admission settings: a new task goes the old way (draining tasks are refused later, by the admission module)", async () => {
     const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, fakeTables().client));
     expect(await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" })).toBeUndefined();
   });

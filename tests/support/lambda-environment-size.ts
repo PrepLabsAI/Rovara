@@ -54,8 +54,8 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   GitHubAppCredentialRef: "github-app-example-company-engineering",
   // The core switch's longest value (CORE_ENGINE_PARAMETER_PATTERN: two companies).
   CoreEngine: `on:org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
-  // DEC 229a is scoped to the founders' company until #737/#743 are proven: one company id.
-  CoreAllowedCompanies: `org_${"a".repeat(20)}`,
+  // The parameter's longest value (two company ids), though DEC 229a uses one until #737/#743 are proven.
+  CoreAllowedCompanies: `org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
   CoreTaskCapUsd: "1000",
   CoreCompanyDayCapUsd: "1000",
   CorePolicyHook: policyHookWorstCase(),
