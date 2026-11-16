@@ -82,7 +82,8 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
     log(deps, { event: "build_step.accepted_by_unreadable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     return undefined;
   });
-  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
+  const mergeOrderLines = await deps.mergeOrderLines?.(task, repository.repositoryId).catch(() => []) ?? [];
+  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
   const operationId = newId(deps);
   const headBranch = headBranchOf(operationId);

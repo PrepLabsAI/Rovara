@@ -181,7 +181,9 @@ function slackStub(events: string[]) {
   const posts: Array<{ channelId: string; threadTs: string | undefined; text: string }> = [];
   let sequence = 0;
   const slack = {
-    post: vi.fn(async (channelId: string, threadTs: string | undefined, text: string) => {
+    post: vi.fn(async (place: typeof thread, threadTs: string | undefined, text: string) => {
+      expect(place.teamId).toBe(thread.teamId);
+      const channelId = place.channelId;
       if (threadTs?.startsWith("00")) throw new Error(`posted with the placeholder ${threadTs}`);
       sequence += 1;
       const ts = `1695700000.${String(sequence).padStart(6, "0")}`;
@@ -269,7 +271,7 @@ describe("the batch watcher's thread for a batch started from the CLI (spec 052 
     vi.mocked(w.api.recordThread).mockImplementationOnce(async () => ({ recorded: false, thread: { ...thread, threadTs: "1695600000.000100" } }));
     await w.once();
     expect(w.slack.post).toHaveBeenCalledTimes(1);
-    expect(w.slack.delete).toHaveBeenCalledWith(thread.channelId, "1695700000.000001");
+    expect(w.slack.delete).toHaveBeenCalledWith(expect.objectContaining({ teamId: thread.teamId, channelId: thread.channelId }), "1695700000.000001");
     expect(w.posts.filter((post) => post.threadTs !== undefined)).toEqual([]);
   });
 

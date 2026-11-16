@@ -60,6 +60,11 @@ export interface PullRequestBodyContext {
   proof?: ProofContext | undefined;
   /** Proof and evidence P4: a security scan's new high findings on this code (the evidence pack, only while the proof switch is on). It can only raise the risk shown. */
   evidenceRisk?: EvidenceRiskSignal | undefined;
+  /**
+   * MR3b: the lines about the order this task's pull requests merge in (`mergeOrderLinesOfTask`: the order itself, or the fixed "no safe order" words, and what happened when one was merged ahead of the one it depends
+   * on). Already inert and bounded; printed under their own heading at the top of the block, so every pull request of a multi-repository task says it. Absent or empty: no section, and the description is what it was.
+   */
+  mergeOrderLines?: readonly string[] | undefined;
   /** I3: who asked for the work and who approved its plan, built by the broker from its own records (`broker/src/attribution`). Lines outside the marked block, so a status rewrite leaves them. */
   attribution?: ActingAttribution | undefined;
   /**
@@ -278,6 +283,7 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     const block = evidenceBlock(level);
     lines = sealLinearText([
       ...(block ?? flags),
+      ...mergeOrderSection(context.mergeOrderLines),
       "## What changed", ...changedLines(context, limit), "",
       ...(testing === undefined ? ["## Tests", ...testLines(workflow, context, limit)] : testingSectionLines(testing, level, testingExtraLines(workflow, context, limit))), "",
       ...(proof === undefined ? [] : [...proof(proofLevel), ""]),
@@ -289,6 +295,13 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     if (byteLength(lines.join("\n")) <= budgetBytes) return lines;
   }
   return lines;
+}
+
+/** The "Merge order" section: at most 4 lines, each one line (the lines are made inert where they are written, and are cut here again, so nothing a caller passes can add a heading or a link). */
+export function mergeOrderSection(lines: readonly string[] | undefined): string[] {
+  // A line that begins with a Markdown marker (a heading, a quote, a list item, a table bar) would become one: a zero-width joiner in front keeps it text.
+  const shown = (lines ?? []).slice(0, 4).map((line) => inertLine(line, 600).replace(/^([#>|*+-]|\d+[.)])/u, "\u200d$1")).filter((line) => line !== "");
+  return shown.length === 0 ? [] : ["## Merge order", ...shown, ""];
 }
 
 const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];

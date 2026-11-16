@@ -298,6 +298,9 @@ export const E2EModelChannelCallSchema = z.object({
 }).strict().superRefine((call, context) => {
   const names = call.tools?.map((tool) => tool.name) ?? [];
   if (new Set(names).size !== names.length) context.addIssue({ code: "custom", path: ["tools"], message: "tool names must be unique" });
+  // Bedrock's Converse refuses tool calls and results without a tool configuration (and so does Anthropic's API): a prompt that holds either declares its tools.
+  const holdsToolBlocks = call.prompt.some((message) => message.role === "tool" || (message.role === "assistant" && message.content.some((part) => part.type === "tool-call")));
+  if (holdsToolBlocks && call.tools === undefined) context.addIssue({ code: "custom", path: ["tools"], message: "a prompt with tool calls or results must declare the tools" });
 });
 
 /**
