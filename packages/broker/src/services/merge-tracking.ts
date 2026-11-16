@@ -326,9 +326,11 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
    * The tasks the sweep found owing the lighter flow's checks are kept as rows (`TIER_CHECKS_DUE`), so a host that only sweeps (or a short-lived one) still runs the tier pass later. The pass takes them oldest
    * run first (round robin), each with its own allowance and a share of the pass's time; a row goes only once its task was checked (or owes nothing), never before a code host's pause is honoured.
    */
-  const tierDueKey = (taskId: string) => ({ pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` });
+  const tierDueKey = (taskId: string) => companyId === IMPLICIT_COMPANY_ID
+    ? { pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` }
+    : { pk: companyScoped(companyId, "TIER_CHECKS_DUE"), sk: `TASK#${taskId}` };
   const markTierDue = async (taskId: string): Promise<void> => {
-    await store.put({ item: { ...tierDueKey(taskId), entityType: "TIER_CHECKS_DUE", taskId, lastRunAt: 0, dueAt: now() }, condition: when.absent() }).catch(() => undefined);
+    await store.put({ item: { ...tierDueKey(taskId), entityType: "TIER_CHECKS_DUE", companyId, taskId, lastRunAt: 0, dueAt: now() }, condition: when.absent() }).catch(() => undefined);
     // A host that sweeps but never runs the tier pass (`tierChecks`) leaves every lighter-flow task held: say so loudly, once per task and hour.
     const row = await store.get(tierDueKey(taskId)).catch(() => undefined);
     const dueAt = typeof row?.["dueAt"] === "number" ? row["dueAt"] : now();
@@ -341,7 +343,9 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const stallLogged = new Map<string, number>();
   let tierRunning: Promise<number> | undefined;
   const runTierPass = async (): Promise<number> => {
-    const rows = (await queryAll(store, { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
+    const rows = (await queryAll(store, companyId === IMPLICIT_COMPANY_ID
+      ? { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }
+      : { pk: companyScoped(companyId, "TIER_CHECKS_DUE"), sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
       .sort((left, right) => Number(left["lastRunAt"] ?? 0) - Number(right["lastRunAt"] ?? 0));
     const passEnds = now() + TIER_PASS_MAX_MS;
     let ran = 0;
@@ -350,8 +354,14 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       const left = passEnds - now();
       if (left <= 0) break;
       const taskId = typeof row["taskId"] === "string" ? row["taskId"] : "";
+      // Fail closed on legacy, malformed, or foreign rows before reading a task or touching the queue item.
+      if (row["companyId"] !== companyId) {
+        log({ component: "merge_tracking", event: "tier_checks.unowned_item", companyId, taskId });
+        continue;
+      }
       if (taskId === "") continue;
-      const task = await readTask(flow, taskId).catch(() => undefined);
+      const taskRecord = await readTask(flow, taskId).catch(() => undefined);
+      const task = taskRecord?.companyId === companyId ? taskRecord : undefined;
       if (task === undefined || task.closedAt !== undefined) { await store.delete({ key: tierDueKey(taskId) }).catch(() => undefined); continue; }
       // Each task's share: its own requests, and at most a fixed part of the pass's time, so one slow task cannot hold the others back.
       const { budget, stop } = createReadBudget(now, { requests: TIER_CHECKS_MAX_REQUESTS, ms: Math.min(TIER_CHECKS_MAX_MS, left) });
