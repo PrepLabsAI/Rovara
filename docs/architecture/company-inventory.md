@@ -1259,8 +1259,8 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 | forwarding | packages/broker/src/aws/github-webhooks.ts:758:21:pk | z.string().regex(/^GITHUB_DELIVERY#[0-9a-f-]{36}$/i) | Runtime-validated recovery cursor schema; no stored key construction. | GITHUB_DELIVERY |
 | forwarding | packages/broker/src/aws/github-webhooks.ts:820:106:sk | input.afterCompany | Validated company id resumes the ids-only recovery registry. | GITHUB_WEBHOOK_COMPANIES |
 <<<<<<< HEAD
-| forwarding | packages/broker/src/aws/developer-routes.ts:519:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:540:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
+| forwarding | packages/broker/src/aws/developer-routes.ts:532:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
+| forwarding | packages/broker/src/aws/developer-routes.ts:553:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
 =======
 | forwarding | packages/broker/src/developer/store.ts:563:55:sk | passkey.credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
 | forwarding | packages/broker/src/developer/store.ts:574:135:sk | credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
