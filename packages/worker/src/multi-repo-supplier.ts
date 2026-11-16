@@ -1,17 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { deriveRepositoryEdges, type RepositoryEdges } from "./multi-repo-edges.js";
-import { withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
-import type { CheckRunners } from "./verification/checks.js";
-import { gitOriginalCode, type OriginalCodeRepository } from "./verification/original-code.js";
+import { forwardWorkspaceReports, MultiRepoUnavailableError, withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
+import type { MultiRepoFallbackNote } from "@agentx/contracts";
+import type { CheckPlan, CheckRound, CheckRunners } from "./verification/checks.js";
+import { gitOriginalCode } from "./verification/original-code.js";
 
 /**
  * Whether a local multi-repository task with derived edges runs its check rounds in MR1's candidate-bound check root (multi-repo-checks.ts).
- * OFF (owner decision for #640, 2026-11-15): checks run exactly as before on every path, and the derived edges are only recorded in the evidence (for MR3).
- * The MR1-LIVE lane turns this on once the check root carries the workspace's installed dependency folders (node_modules, .venv) with link safety;
- * until then the copy has none of them and ordinary Node/Python checks would fail there.
+ * ON (MR1-LIVE): the check root carries the workspace's installed dependency folders (multi-repo-dependencies.ts), and any refusal before a check runs, or a
+ * failed dependency wiring setup, falls back to today's per-repository path with a fixed "multi-repo check not run: <reason>" note in the evidence.
+ * Off (tests only, `live: false`): checks run exactly as before on every path and the derived edges are only recorded in the evidence.
  */
-export const MULTI_REPO_CHECKS_LIVE: boolean = false;
+export const MULTI_REPO_CHECKS_LIVE: boolean = true;
 
 /** The most an evidence-time derivation may take, whatever the round has left (it is informational and never changes a check). */
 export const EVIDENCE_EDGES_MAX_MS = 15_000;
@@ -65,28 +66,58 @@ export function createRepositoryCheckSupplier(input: {
         return base;
       }
       let selected: CheckRunners | undefined;
-      const phase = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
+      // MR1-LIVE: once a candidate round falls back (a refusal before any check, or a failed dependency wiring setup), every later round of this invocation takes
+      // today's per-repository path too.
+      let fallback: MultiRepoFallbackNote | undefined;
+      // The invocation's worker-owned report folder, once a round ran in MR1's check root: reportRoot() is then always defined and names the latest round's reports.
+      let reports: string | undefined;
+      // Original-code phases (TESTPROOF, SARIF baselines, measured befores) always run on today's path: the workspace itself shows the original code. MR1's check
+      // root cannot show it faithfully when installed code outside the workspace (a Poetry or pyenv venv's editable install) points at the live candidate.
+      const original = new AsyncLocalStorage<true>();
+      const ordinaryOriginalCode = base.originalCode ?? gitOriginalCode;
+      // A round on today's path while the report root is worker-owned: forward that round's own fresh reports, so no reader takes an earlier round's for it.
+      const today = async (plan: CheckPlan, run: (runners: CheckRunners) => Promise<CheckRound>): Promise<CheckRound> => {
+        if (reports === undefined) return run(base);
+        const started = Date.now();
+        const result = await run(base);
+        reports = await forwardWorkspaceReports(input.rootPath, plan, started, result.entries.some(entry => entry.after === "passed" || entry.after === "failed"), input.coveragePaths);
+        return result;
+      };
       const wrapper: CheckRunners = {
         ...base,
-        originalCode: repositories => ({ run: work => {
-          if (selected?.originalCode) return selected.originalCode(repositories).run(work);
-          if (facts?.edges.length === 0) return (base.originalCode ?? gitOriginalCode)(repositories).run(work);
-          return phase.run(repositories, work);
-        } }),
+        originalCode: repositories => ({ run: work => ordinaryOriginalCode(repositories).run(async () => {
+          // The phase's report root is restored when it ends: later readers see the candidate's reports again.
+          const candidateReports = reports;
+          try { return await original.run(true, work); } finally { reports = candidateReports; }
+        }) }),
         async scopeRound(plan, signal, run, remainingMs) {
+          if (original.getStore() === true) return today(plan, run);
           recorded = undefined;
           derivation ??= derive(signal, remainingMs);
           // Only a finished derivation is kept: one that ran out of this round's budget is derived again by the next round, under its own budget.
           try { facts = await derivation; } catch (error) { derivation = undefined; throw error; }
           notes = facts.notes;
           if (signal.aborted || remainingMs() <= 0) throw new Error("aborted");
-          const old = phase.getStore();
-          if (facts.edges.length === 0) return old === undefined ? run(base) : (base.originalCode ?? gitOriginalCode)(old).run(() => run(base));
-          selected ??= withMultiRepoChecks({ rootPath: input.rootPath, repositories: input.repositories, dependencies: facts.edges, setup: [], coveragePaths: input.coveragePaths }, base);
-          if (selected.reportRoot !== undefined) wrapper.reportRoot = selected.reportRoot.bind(selected);
-          const execute = () => selected!.scopeRound!(plan, signal, run, remainingMs);
-          const result = old === undefined ? await execute() : await selected.originalCode!(old).run(execute);
-          recorded = facts;
+          if (facts.edges.length === 0) return today(plan, run);
+          if (fallback === undefined) {
+            selected ??= withMultiRepoChecks({ rootPath: input.rootPath, repositories: input.repositories, dependencies: facts.edges, setup: [], coveragePaths: input.coveragePaths }, base, { fallBack: true });
+            try {
+              const result = await selected.scopeRound!(plan, signal, run, remainingMs);
+              reports = selected.reportRoot!();
+              wrapper.reportRoot = () => reports!;
+              recorded = facts;
+              return result;
+            } catch (error) {
+              if (!(error instanceof MultiRepoUnavailableError)) throw error;
+              fallback = error.reason;
+            }
+          }
+          // Today's path: the ordinary runners in the shared workspace, and the reason in the evidence and progress notes.
+          const found = facts;
+          const fallbackNotes = [...new Set<RepositoryEdges["notes"][number]>([...found.notes, fallback])].slice(0, 8);
+          notes = fallbackNotes;
+          const result = await today(plan, run);
+          recorded = { edges: found.edges, notes: fallbackNotes };
           return result;
         },
       };
