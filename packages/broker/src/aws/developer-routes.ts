@@ -1,4 +1,4 @@
-import { projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
+import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
@@ -1474,6 +1474,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
   const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
   if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
+  if (url.pathname === "/v1/dev/company/settings-compliance") return projectSettingsComplianceRoute(deps, caller, url);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") {
     const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
     const companyId = await resolveCompany(deps.companies, caller.developerId);

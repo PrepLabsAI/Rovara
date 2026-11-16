@@ -3,13 +3,13 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  AgentXError, AgentXNameSchema, OrgIdSchema, PolicyRowsSchema, POLICY_FIELDS, agentXError, companyScoped, policyFieldPageOnly,
+  AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, PolicyRowsSchema, POLICY_FIELDS, PROJECT_CATALOG_PK, agentXError, projectCatalogKey, companyScoped, policyFieldPageOnly,
   createRowsPolicySource, withPolicyHookValues, type PolicySource, type PolicyRows, type ResolvedPolicy,
 } from "@agentx/contracts";
 import { freshStepUp } from "../core-host/step-up.js";
 import { createPolicyHookClient, policyHookValuesAsker, type PolicyHookClientOptions } from "../core/policy-hook/index.js";
 import { projectGrant } from "./admin-actions.js";
-import { boundedCompanyReads, recordInCompany, resolveCompany } from "./company-check.js";
+import { Membership, boundedCompanyReads, membershipKey, recordInCompany, resolveCompany } from "./company-check.js";
 import type { DeveloperCaller, DeveloperRouteDependencies } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
@@ -67,14 +67,40 @@ export function createProjectSettingsPolicySource(
   return { source: policy, scope, snapshot: () => snapshot, propose: (row: SettingsRow) => { proposed = row; } };
 }
 
-function responseOf(row: SettingsRow | undefined, resolved: ResolvedPolicy) {
+/** The page's values, one per field, in the words the page shows. The project page and the company admin view both use this one function. */
+function displayValues(resolved: ResolvedPolicy) {
+  return Object.fromEntries(Object.entries(resolved.values).map(([field, entry]) => [field, { ...entry,
+    origin: entry.origin === "company_minimum" ? "company minimum" : entry.origin === "company_limit" ? "company limit" : entry.origin.replaceAll("_", " "),
+  }]));
+}
+/** Every field a company bound changed from the stored choice, with both values. A project that never set a budget is not listed under a company limit: a budget with no value hands that
+ * decision to the company's limit, as the presets always have. An explicit `null` is listed (it asked for no limit). */
+function clampedOf(resolved: ResolvedPolicy, stored: ResolvedPolicy, overrides: object) {
+  return POLICY_FIELDS.flatMap((field) => {
+    const applied = resolved.values[field.id]!;
+    const chosen = stored.values[field.id]!.value;
+    const kind = applied.companyBound?.kind;
+    if (applied.clampedBy === undefined || kind === undefined) return [];
+    if (chosen === null && kind === "limit" && !Object.hasOwn(overrides, field.id)) return [];
+    return [{ field: field.id, bound: kind, chosen, applied: applied.value, notice: kind === "minimum" ? "raised to your company's minimum" : "lowered to your company's limit" }];
+  });
+}
+function responseOf(row: SettingsRow | undefined, resolved: ResolvedPolicy, stored: ResolvedPolicy) {
   return {
     preset: row?.preset ?? null, overrides: row?.overrides ?? {}, revision: row?.revision ?? 0,
     updatedAt: row?.updatedAt ?? null, updatedBy: row?.updatedBy ?? null, resolved,
-    values: Object.fromEntries(Object.entries(resolved.values).map(([field, entry]) => [field, { ...entry,
-      origin: entry.origin === "company_minimum" ? "company minimum" : entry.origin === "company_limit" ? "company limit" : entry.origin.replaceAll("_", " "),
-    }])),
+    values: displayValues(resolved), clamped: clampedOf(resolved, stored, row?.overrides ?? {}),
   };
+}
+/** The stored choice (preset and overrides) resolved with NO company bound, so the effect of a bound can be shown and a bound cannot hide a change. */
+const storedResolution = (scope: { key: string }, value: SettingsRow | undefined) => createRowsPolicySource(async (asked) => ({ scope: asked, rows: rowsOf(value) })).resolve(scope, {});
+/** One project's settings as the page shows them: the stored row, the answer under the company's bounds, and the stored choice before any bound. Throws `policy_unavailable`. */
+async function settingsView(policy: ReturnType<typeof createProjectSettingsPolicySource>) {
+  let resolved: ResolvedPolicy;
+  try { resolved = await policy.source.resolve(policy.scope, {}); }
+  catch { throw unavailable(); }
+  const row = policy.snapshot();
+  return { row, resolved, stored: await storedResolution(policy.scope, row) };
 }
 
 async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, encodedName: string) {
@@ -104,11 +130,9 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
     } catch { throw agentXError("CONFIG_INVALID", "invalid settings request"); }
   }
   const policy = createProjectSettingsPolicySource({ ...deps, documentClient: client }, { companyId, projectName }, deps.policyHook ?? deps.developer.policyHook);
-  let before: ResolvedPolicy;
-  try { before = await policy.source.resolve(policy.scope, {}); }
-  catch { throw unavailable(); }
-  const current = policy.snapshot();
-  if (input === undefined) { budget.check(); return responseOf(current, before); }
+  const view = await settingsView(policy);
+  const { row: current, resolved: before, stored: storedBefore } = view;
+  if (input === undefined) { budget.check(); return responseOf(current, before, storedBefore); }
   if (input.expectedRevision !== (current?.revision ?? 0)) throw agentXError("PROJECT_REVISION_MISMATCH", "settings revision conflict");
   const preset = input.preset ?? current?.preset;
   const row: SettingsRow = { companyId, projectName, ...(preset === undefined ? {} : { preset }),
@@ -116,8 +140,7 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
     updatedAt: new Date(deps.now()).toISOString(), updatedBy: caller.developerId };
   // M4a slice 2: a change to a cost or approval field needs a fresh step-up. The STORED choice is compared (preset and overrides, before any company bound), so a company minimum that
   // hides the effect today cannot be used to change what would show when the minimum is lifted. A repeat of what is stored changes nothing and needs none.
-  const storedRows = (value: SettingsRow | undefined) => createRowsPolicySource(async (scope) => ({ scope, rows: rowsOf(value) })).resolve(policy.scope, {});
-  const [storedBefore, storedAfter] = await Promise.all([storedRows(current), storedRows(row)]);
+  const storedAfter = await storedResolution(policy.scope, row);
   // The chosen preset is itself a cost and approval choice: an override that pins preset_level can hide a preset change in the resolved values, so it is compared directly too.
   const pageOnlyChange = current?.preset !== row.preset || POLICY_FIELDS.some((field) => policyFieldPageOnly(field.id)
     && (storedBefore.values[field.id]!.value !== storedAfter.values[field.id]!.value
@@ -161,12 +184,153 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
     if (reasons?.[0]?.Code === "ConditionalCheckFailed") throw agentXError("PROJECT_REVISION_MISMATCH", "settings revision conflict");
     throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
   }
-  return responseOf(row, after);
+  return responseOf(row, after, storedAfter);
 }
 
 /** Fixed public failures; SDK/parser causes never leave this route. */
 export async function projectSettingsRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, encodedName: string) {
   try { return await checkedSettingsRoute(deps, caller, request, encodedName); }
+  catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+  }
+}
+
+// ---- M4a slice 3 (TE-D8): the company admin's view of every project against the company's bounds. Read-only. ----
+const COMPLIANCE_LIMIT_DEFAULT = 20;
+const COMPLIANCE_LIMIT_MAX = 50;
+/** One call looks at no more catalog names than this, whatever other companies hold, and ends with a cursor when it stops early. */
+const COMPLIANCE_EXAMINE_MAX = 200;
+const COMPLIANCE_CATALOG_PAGE = 50;
+const COMPLIANCE_READS_AT_ONCE = 8;
+const COMPLIANCE_HOOK_AT_ONCE = 4;
+/** The cursor's count of already-looked-at catalog entries after the last returned project (re-read, not re-checked, on the next call). */
+const COMPLIANCE_SKIP_MAX = 1000;
+/** No new row starts after this long (the company read budget is 10 s and one rules-service answer may take 5 s), so a slow rules service ends the page early instead of failing it. */
+const COMPLIANCE_ROW_DEADLINE_MS = 4000;
+const invalidCompliance = () => agentXError("CONFIG_INVALID", "invalid settings compliance request");
+const MembershipRole = Membership.extend({ role: z.string().max(40) });
+
+async function inBatches<T, R>(items: readonly T[], size: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
+    while (next < items.length) { const index = next++; out[index] = await work(items[index]!); }
+  }));
+  return out;
+}
+
+function complianceQuery(url: URL): { limit: number; base: string | undefined; skip: number; filter: boolean } {
+  const names = new Set<string>();
+  for (const key of url.searchParams.keys()) {
+    if ((key !== "limit" && key !== "cursor" && key !== "filter") || names.has(key)) throw invalidCompliance();
+    names.add(key);
+  }
+  const limitText = url.searchParams.get("limit");
+  const limit = limitText === null ? COMPLIANCE_LIMIT_DEFAULT : /^[1-9][0-9]{0,2}$/.test(limitText) ? Number(limitText) : 0;
+  if (limit < 1 || limit > COMPLIANCE_LIMIT_MAX) throw invalidCompliance();
+  // The cursor is a position in the install-wide catalog that never holds another company's name: "<the last name this call returned>~<how many catalog entries after it were already
+  // looked at>". The name must be one of THIS company's projects (checked below, with the same refusal for a foreign or unknown name), so a made-up cursor learns nothing beyond a count.
+  const cursorText = url.searchParams.get("cursor");
+  let base: string | undefined; let skip = 0;
+  if (cursorText !== null) {
+    const parts = /^([a-z][a-z0-9-]{0,62})?~([0-9]{1,4})$/.exec(cursorText);
+    if (parts === null || Number(parts[2]) > COMPLIANCE_SKIP_MAX) throw invalidCompliance();
+    base = parts[1]; skip = Number(parts[2]);
+  }
+  const filterText = url.searchParams.get("filter");
+  if (filterText !== null && filterText !== "below_company_bound") throw invalidCompliance();
+  return { limit, base, skip, filter: filterText !== null };
+}
+
+async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, url: URL) {
+  const startedAt = deps.now();
+  // The budget and the row deadline run on the same clock.
+  const budget = boundedCompanyReads(deps.documentClient, deps.now);
+  const client = budget.client;
+  // Live membership first, then the role: a member of the company who is not an administrator learns nothing but that.
+  const companyId = await budget.read(() => resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId));
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", "company membership required");
+  let role: string;
+  try {
+    const response = await client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true })) as { Item?: unknown };
+    const member = MembershipRole.parse(response.Item);
+    if (member.personId !== caller.developerId || member.companyId !== companyId || member.revokedAt !== undefined) throw new Error("membership unavailable");
+    role = member.role;
+  } catch { throw agentXError("AUTH_REQUIRED", "company membership required"); }
+  const checkedRole = OrgRoleSchema.safeParse(role);
+  if (!checkedRole.success || (checkedRole.data !== "admin" && checkedRole.data !== "owner")) throw agentXError("FORBIDDEN", "company administrator required");
+  const query = complianceQuery(url);
+  if (query.base !== undefined) {
+    const own = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${query.base}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
+    if (own.Items?.[0] === undefined || !recordInCompany(own.Items[0], companyId)) throw invalidCompliance();
+  }
+
+  // The install's catalog holds every company's names, so each name is kept only if its latest revision belongs to THIS company (the same check the project page makes).
+  // The scan position (`base`, `skip`) only ever names a project of this company, or counts entries; no other company's name is returned.
+  const names: string[] = [];
+  let base = query.base; let skip = query.skip; let toSkip = query.skip; let examined = 0; let exhausted = false;
+  let startKey: Record<string, unknown> | undefined = base === undefined ? undefined : projectCatalogKey(base);
+  while (names.length < query.limit && examined < COMPLIANCE_EXAMINE_MAX) {
+    const page = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": PROJECT_CATALOG_PK, ":prefix": "PROJECT#" }, ConsistentRead: true,
+      Limit: toSkip > 0 ? COMPLIANCE_CATALOG_PAGE : Math.min(COMPLIANCE_CATALOG_PAGE, COMPLIANCE_EXAMINE_MAX - examined),
+      ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }) })) as { Items?: Array<{ sk?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
+    startKey = page.LastEvaluatedKey;
+    const dropped = Math.min(toSkip, (page.Items ?? []).length);
+    toSkip -= dropped;
+    const items = (page.Items ?? []).slice(dropped);
+    // A catalog name that is not a valid project name is corrupt data: stop (fixed words) rather than skip it and cut the list silently.
+    const candidates = items.map((item) => {
+      const parsed = typeof item.sk === "string" && item.sk.startsWith("PROJECT#") ? AgentXNameSchema.safeParse(item.sk.slice("PROJECT#".length)) : undefined;
+      if (parsed?.success !== true) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+      return parsed.data;
+    });
+    const inCompany = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async (name) => {
+      const latest = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+        ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
+      return latest.Items?.[0] !== undefined && recordInCompany(latest.Items[0], companyId);
+    });
+    let stoppedAt: number | undefined;
+    for (let index = 0; index < candidates.length; index++) {
+      examined++;
+      if (inCompany[index]) { names.push(candidates[index]!); base = candidates[index]!; skip = 0; } else skip++;
+      if (names.length === query.limit) { stoppedAt = index; break; }
+    }
+    if (startKey === undefined && (stoppedAt === undefined || stoppedAt === candidates.length - 1)) { exhausted = true; break; }
+    budget.check();
+  }
+  if (!exhausted && skip > COMPLIANCE_SKIP_MAX) throw agentXError("CONFIG_INVALID", "company read limit exceeded");
+  let nextCursor: string | null = exhausted ? null : `${base ?? ""}~${skip}`;
+
+  // Each row is the project page's own answer, read through the same source. A row that cannot be read or answered says so; it is never defaulted or dropped. Rows start four at a
+  // time and stop starting once the time is nearly used up: the page then ends early with a cursor at the last row done.
+  const rowOf = async (projectName: string) => {
+    try {
+      const policy = createProjectSettingsPolicySource({ ...deps, documentClient: client }, { companyId, projectName }, deps.policyHook ?? deps.developer.policyHook);
+      const { row, resolved, stored } = await settingsView(policy);
+      const clamped = clampedOf(resolved, stored, row?.overrides ?? {});
+      return { project: projectName, status: "resolved" as const, hasSettings: row !== undefined, preset: row?.preset ?? null, revision: row?.revision ?? 0, updatedAt: row?.updatedAt ?? null,
+        changedHere: row === undefined ? [] : POLICY_FIELDS.filter((field) => Object.hasOwn(row.overrides, field.id)).map((field) => field.id),
+        values: displayValues(resolved), clamped, belowCompanyBound: clamped.length > 0 };
+    } catch (error) {
+      if (error instanceof AgentXError && error.code !== "RUNTIME_UNAVAILABLE") throw error;
+      return { project: projectName, status: "unavailable" as const, reason: "policy_unavailable" as const };
+    }
+  };
+  const rows: Array<Awaited<ReturnType<typeof rowOf>>> = [];
+  while (rows.length < names.length) {
+    if (rows.length > 0 && deps.now() - startedAt > COMPLIANCE_ROW_DEADLINE_MS) { nextCursor = `${names[rows.length - 1]!}~0`; break; }
+    rows.push(...await Promise.all(names.slice(rows.length, rows.length + COMPLIANCE_HOOK_AT_ONCE).map(rowOf)));
+  }
+  budget.check();
+  return { projects: query.filter ? rows.filter((row) => row.status === "unavailable" || row.belowCompanyBound) : rows, nextCursor };
+}
+
+/** GET /v1/dev/company/settings-compliance: fixed public failures, no cause leaves this route. */
+export async function projectSettingsComplianceRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, url: URL) {
+  try { return await checkedComplianceRoute(deps, caller, url); }
   catch (error) {
     if (error instanceof AgentXError) throw error;
     throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");

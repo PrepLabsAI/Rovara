@@ -181,3 +181,9 @@ it("classifies the M4a settings owner and both full-access company-checked metho
   expect(COMPANY_CHECKED_ROUTES).toContain("GET /v1/dev/projects/{id}/settings");
   expect(COMPANY_CHECKED_ROUTES).toContain("PUT /v1/dev/projects/{id}/settings");
 });
+
+it("classifies the M4a S3 compliance route as a company-scoped, full-access, read-only admin route", () => {
+  const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
+  expect(markdown).toContain("| route | /v1/dev/company/settings-compliance | company-scoped | State table | yes | GET |");
+  expect(COMPANY_CHECKED_ROUTES).toContain("GET /v1/dev/company/settings-compliance");
+});
