@@ -459,12 +459,12 @@ export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   /** A message to one person outside any conversation; answers where it went and its ID. */
   z.object({ ...commandBase, kind: z.literal("direct_message"), to: ActorRefSchema, message: z.object(richMessage).strict() }).strict(),
   /** Phase 7c3b: replaces a form still open, by the handle its submission gave. */
-  z.object({ ...commandBase, kind: z.literal("update_form"), handle: z.string().min(1).max(255), form: ChannelFormSchema }).strict(),
+  z.object({ ...commandBase, kind: z.literal("update_form"), tenant: ChannelOpaqueIdSchema.optional(), handle: z.string().min(1).max(255), form: ChannelFormSchema }).strict(),
   /** Replaces a message the adapter posted for the core. */
   z.object({ ...commandBase, kind: z.literal("update_message"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema, message: z.object(richMessage).strict() }).strict(),
   /** A titled Markdown document people in the space can read, such as a task's plan; answers its ID and link. */
   z.object({ ...commandBase, kind: z.literal("create_document"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, title: z.string().trim().min(1).max(150), markdown: z.string().min(1).max(100_000) }).strict(),
-  z.object({ ...commandBase, kind: z.literal("delete_document"), documentId: ChannelOpaqueIdSchema }).strict(),
+  z.object({ ...commandBase, kind: z.literal("delete_document"), tenant: ChannelOpaqueIdSchema.optional(), documentId: ChannelOpaqueIdSchema }).strict(),
   /** One page of the people in a space. */
   z.object({ ...commandBase, kind: z.literal("space_members"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, cursor: z.string().min(1).max(500).optional() }).strict(),
   z.object({ ...commandBase, kind: z.literal("user"), tenant: ChannelOpaqueIdSchema.optional(), userId: ChannelOpaqueIdSchema }).strict(),
@@ -474,7 +474,7 @@ export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   /** One page of the tenant's public, open spaces, to find one by name. */
   z.object({ ...commandBase, kind: z.literal("spaces"), tenant: ChannelOpaqueIdSchema.optional(), cursor: z.string().min(1).max(500).optional() }).strict(),
   /** Whether the adapter can reach its surface, and the tenant it serves (Rovara's health check). */
-  z.object({ ...commandBase, kind: z.literal("check") }).strict(),
+  z.object({ ...commandBase, kind: z.literal("check"), tenant: ChannelOpaqueIdSchema.optional() }).strict(),
 ]);
 export type ChannelCommand = z.infer<typeof ChannelCommandSchema>;
 

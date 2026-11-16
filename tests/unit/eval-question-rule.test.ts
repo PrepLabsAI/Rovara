@@ -12,14 +12,14 @@ describe("question-level exact rule", () => {
   it("lists one fresh broken question without turning luck into Worse", () => {
     const broken = row("one", { first: samples(false)[0]!, freshOld: samples(true, true, true), freshNew: samples(false, false, false) });
     const result = judge([broken]);
-    expect(result.label).toBe("No drop found");
+    expect(result.label).toBe("No regression measured (eval)");
     expect(result.questions).toMatchObject([{ id: "one", change: "broke", oldAnswers: ["old answer", "old answer", "old answer"], newAnswers: ["new answer", "new answer", "new answer"] }]);
     expect(result.fixRequested).toBe(true);
     expect(result.disposition).toEqual({ draft: false, check: "success", retry: false });
   });
   it("judges suspects only on fresh answers on both sides, never selected original answers", () => {
     const selected = Array.from({ length: 3 }, (_, i) => row(String(i), { first: samples(false)[0]!, freshOld: samples(false, false, false), freshNew: samples(false, false, false), moreNew: samples(true, true) }));
-    expect(judge(selected).label).toBe("No drop found");
+    expect(judge(selected).label).toBe("No regression measured (eval)");
     expect(judge(selected.map(q => ({ ...q, freshOld: samples(true, true, true) }))).label).toBe("Worse on eval");
     expect(judge(selected.map(q => ({ ...q, freshOld: undefined }))).label).toBe("Not run");
   });
@@ -37,7 +37,7 @@ describe("question-level exact rule", () => {
   it("takes one second look only when the first exact tail is between .01 and .2", () => {
     const qs = [row("a", { first: samples(false)[0]!, moreNew: samples(false, false) }), row("b", { first: samples(false)[0]!, moreNew: samples(false, false) })];
     expect(judge(qs, { subsetSupported: false }).label).toBe("Worse on eval");
-    expect(judge(qs.map(q => ({ ...q, moreNew: samples(true, true) })), { subsetSupported: false }).label).toBe("No drop found");
+    expect(judge(qs.map(q => ({ ...q, moreNew: samples(true, true) })), { subsetSupported: false }).label).toBe("No regression measured (eval)");
   });
   it("mirrors fresh checks upward, but a strict break wins over improvements", () => {
     const up = Array.from({ length: 3 }, (_, i) => row(String(i), { old: samples(false, false, false), freshOld: samples(false, false, false), freshNew: samples(true, true, true) }));
@@ -85,7 +85,7 @@ it("requires a downward second look even when fresh upward suspects improve", ()
 it("summarises stable questions without forwarding their answers", () => {
   const stable = Array.from({ length: 998 }, (_, i) => row(`stable${i}`, { old: [{ pass: true, answer: "unchanged-canary" }, ...samples(true, true)], first: { pass: true, answer: "unchanged-canary" } }));
   const result = judge([...stable, row("flaky", { old: samples(true, false, true) }), row("broke", { first: samples(false)[0]!, freshOld: samples(true, true, true), freshNew: samples(false, false, false) })]);
-  expect(result.label).toBe("No drop found");
+  expect(result.label).toBe("No regression measured (eval)");
   expect(result.questions.map(q => [q.id, q.change])).toEqual([["flaky", "flaky"], ["broke", "broke"]]);
   expect(result.summary).toContain("998 unchanged");
   expect(result.summary).toContain("A single ordinary broken question may not change the label.");

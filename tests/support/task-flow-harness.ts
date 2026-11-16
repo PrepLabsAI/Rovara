@@ -62,6 +62,8 @@ export interface HarnessOptions {
   backend?: (clock: { now: number }) => { store: DocumentStore; queues: QueueService };
   /** Records audit events as put items too, the way a transactional sink would. */
   audit?: "none" | "recording";
+  /** More of the flow's dependencies (a deployed install's money stop, ...), set before the flow is built. */
+  extra?: (clock: { now: number; advance(seconds: number): void }) => Partial<TaskFlowDeps>;
 }
 
 export function createHarness(options: HarnessOptions = {}): Harness {
@@ -98,6 +100,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     now,
     limits: options.limits ?? { member: 5, organization: 20 },
     ...(options.understandFirst === undefined ? {} : { understandFirst: options.understandFirst }),
+    ...(options.extra?.(clock) ?? {}),
   };
   // The project source is the store reader a deployment wires.
   deps.projects = createStoreProjectSource(store, COMPANY);

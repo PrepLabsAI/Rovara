@@ -491,3 +491,36 @@ describe("a claim that was refused makes no call and uses no call slot", () => {
     expect(rated).toBe(5);
   });
 });
+
+describe("the correction log (the 'same mistake twice' measure)", () => {
+  it("each reflection hands the log only a member's own corrections (not an outsider's, not code's words, not the initiator's own); Off logs nothing; a log that fails never stops the reflection", async () => {
+    const spans = [
+      span("pr_comment", "You should use the shared helper here", { authorId: "rev" }), span("pr_comment", "outsider words you should change", { trust: "outsider" }),
+      span("remembered", "fixed", { fixedText: true }), span("pr_comment", "You should rename this helper please", { authorId: "starter" }),
+    ];
+    const w = await counted(spans, new RecordingJudge("unrelated"));
+    const logged: Array<{ workspaceId: string; project: string; taskId: string; texts: string[]; authors: Array<string | undefined> }> = [];
+    w.deps.correctionLog = async (entry) => { logged.push({ workspaceId: entry.workspaceId, project: entry.project, taskId: entry.taskId, texts: entry.corrections.map((c) => c.text), authors: entry.corrections.map((c) => c.authorId) }); };
+    await learnFromEndedTask(w.deps, merged);
+    expect(logged).toEqual([{ workspaceId: WS, project: PROJECT, taskId: "task-1", texts: ["You should use the shared helper here"], authors: ["rev"] }]);
+
+    const off = await counted(spans, new RecordingJudge("unrelated"), { settings: settings({ mode: "Off" }) });
+    let offCalls = 0;
+    off.deps.correctionLog = async () => { offCalls += 1; };
+    await learnFromEndedTask(off.deps, merged);
+    expect(offCalls).toBe(0);
+
+    const failing = await counted(spans, new RecordingJudge("unrelated"));
+    failing.deps.correctionLog = async () => { throw new Error("store down"); };
+    expect(await learnFromEndedTask(failing.deps, merged)).toBe("reflected");
+  });
+
+  it("a revert logs nothing (its only correction is code's words)", async () => {
+    const w = await counted([span("pr_comment", "You should use the shared helper here")], new RecordingJudge("unrelated"));
+    w.rows.reverter = { actorDeveloperId: "rev" };
+    let calls = 0;
+    w.deps.correctionLog = async () => { calls += 1; };
+    await learnFromEndedTask(w.deps, { ...merged, outcome: "reverted" });
+    expect(calls).toBe(0);
+  });
+});

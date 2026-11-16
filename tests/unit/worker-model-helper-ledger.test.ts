@@ -20,6 +20,11 @@ describe("summarizing a ledger", () => {
     // a name with no connection row before it is not an escape that was counted: untrusted
     expect(summarizeModelLedgerBytes(bytes(HEADER, row({ kind: "escape_host", provenance: undefined, status: 0, host: "api.openai.com" })))).toEqual(UNTRUSTED_MODEL_SUMMARY);
   });
+  it("only before_task counts in the tally: the helper has no real-model result, so task_made cannot be confirmed, and independent is parked (DEC 192a)", () => {
+    const summary = summarizeModelLedgerBytes(bytes(HEADER, row(), row({ provenance: "independent" }), row({ provenance: "independent" }), row({ provenance: "task_made" })));
+    expect(summary).toMatchObject({ scripted: { before_task: 1, independent: 2, task_made: 1 }, countsTowardProof: 1 });
+    expect(summarizeModelLedgerBytes(bytes(HEADER, row({ provenance: "independent" })))).toMatchObject({ scripted: { independent: 1 }, countsTowardProof: 0 });
+  });
   it("a scripted row with no provenance is task_made and never counted", () => {
     const summary = summarizeModelLedgerBytes(bytes(HEADER, row({ provenance: undefined })));
     expect(summary).toMatchObject({ scripted: { task_made: 1, before_task: 0 }, countsTowardProof: 0 });

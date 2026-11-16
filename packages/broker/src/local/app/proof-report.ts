@@ -1,7 +1,7 @@
 // Lane L12, slice 3: the local proof page's report for a task, from what the broker itself recorded about the checked code: the verification results of the approved checks, the reviews, the risk it judged, and the
 // evidence pack kept for this very code (if one was). Every line is the broker's own words; a name from the repository or a worker is made inert (`inertPlanLine`) and redacted, and nothing here repeats a
 // claim the broker could not check (a missing pack says "no evidence was kept", it never fills the gap).
-import { redactText, workflowSelectedChecks, type EvidencePack, type WorkflowSnapshot } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE, redactText, workflowSelectedChecks, type EvidencePack, type WorkflowSnapshot } from "@agentx/contracts";
 import type { ProofReportView, ProofRowView } from "../../core/local-pages/views.js";
 import { inertPlanLine } from "../../core/proof/inert-text.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
@@ -39,7 +39,7 @@ export function proofReportOf(task: TaskRecord, workflow: WorkflowSnapshot, pack
     for (const result of verification.results) {
       rows.push({
         claim: words(labels.get(result.checkId) ?? result.checkId, 200), check: "recorded by Rovara", status: result.status === "PASS" ? "passed" : result.status === "FAILED" ? "failed" : "not_run",
-        ...(result.status === "FAILED" && result.programNotFound === true ? { detail: "the program is not installed on the worker" } : {}),
+        ...(result.status === "FAILED" && result.programNotFound === true ? { detail: "the program is not installed on the worker" } : result.madeByRovara === true ? { detail: GENERAL_FAKE_MADE_NOTE } : {}),
       });
     }
   }

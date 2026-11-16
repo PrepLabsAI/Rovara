@@ -64,7 +64,7 @@ export interface EvalQuestionResult {
   readonly oldAnswers: readonly string[];
   readonly newAnswers: readonly string[];
 }
-export type EvalLabel = "Worse on eval" | "No drop found" | "Improved on eval" | "Not run";
+export type EvalLabel = "Worse on eval" | "No regression measured (eval)" | "Improved on eval" | "Not run";
 export interface EvalCheckResult {
   readonly kind: "eval";
   readonly roundKind: EvalRoundKind;
@@ -210,12 +210,12 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
     if (change === "unchanged") { unchanged += 1; return []; }
     return [{ id: inertEvidenceText(q.id, 160), change, oldAnswers: a.map(x => inertEvidenceText(x.answer, 1_000)), newAnswers: b.map(x => inertEvidenceText(x.answer, 1_000)) }];
   });
-  const label: EvalLabel = worse ? "Worse on eval" : improved ? "Improved on eval" : "No drop found";
+  const label: EvalLabel = worse ? "Worse on eval" : improved ? "Improved on eval" : "No regression measured (eval)";
   const notices = [...(subset ? [] : ["Question re-asks skipped: the runner cannot run a subset."]), ...(input.sameJudgeFamily === true ? ["The judge and product use the same model family."] : [])];
   const brokenCount = questions.filter(q => q.change === "broke").length;
   const scope = "on questions the agent could read";
-  const summary = hidden ? `Eval: ${worse ? "Worse on eval" : "No drop found"} on private questions.` : `Eval: ${label} — ${qs.length} questions · ${brokenCount} broke · ${questions.filter(q => q.change === "newly_pass").length} newly pass · ${questions.filter(q => q.change === "flaky").length} flaky · ${unchanged} unchanged · ${scope}; on the evaluated areas. Small or noisy sets can miss changes.${label === "No drop found" ? " This check can flag repeated breaks across questions and confirmed safety or refusal breaks. A single ordinary broken question may not change the label." : ""}`;
-  return { kind: "eval", roundKind: input.roundKind, outcome: "ran", label: hidden && improved ? "No drop found" : label, usedHiddenSet: hidden, casesRun: hidden ? 0 : qs.length, casesTotal: hidden ? 0 : all.length,
+  const summary = hidden ? `Eval: ${worse ? "Worse on eval" : "No regression measured (eval)"} on private questions.` : `Eval: ${label} — ${qs.length} questions · ${brokenCount} broke · ${questions.filter(q => q.change === "newly_pass").length} newly pass · ${questions.filter(q => q.change === "flaky").length} flaky · ${unchanged} unchanged · ${scope}; on the evaluated areas. Small or noisy sets can miss changes.${label === "No regression measured (eval)" ? " This check can flag repeated breaks across questions and confirmed safety or refusal breaks. A single ordinary broken question may not change the label." : ""}`;
+  return { kind: "eval", roundKind: input.roundKind, outcome: "ran", label: hidden && improved ? "No regression measured (eval)" : label, usedHiddenSet: hidden, casesRun: hidden ? 0 : qs.length, casesTotal: hidden ? 0 : all.length,
     measures: [], verdicts: [], questions: hidden ? [] : questions, excluded: hidden ? [] : excluded, notices: hidden ? [] : notices, summary, fixRequested: worse || (!hidden && brokenCount > 0),
     disposition: { draft: false, check: worse ? "failure" : "success", retry: false } };
 }

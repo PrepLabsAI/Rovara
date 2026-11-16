@@ -78,7 +78,7 @@ describe("AI evidence projection", () => {
 describe("AI text goldens", () => {
   it("Worse, unchanged and improved labels are fixed and qualified", () => {
     expect(renderEvidence(pack(artifact())).body.slice(0, 4)).toEqual(["AI checks", "Eval: Worse on eval", "Eval counts: 1 question; 1 broke; 0 newly fail; 0 newly pass; 0 flaky; 0 unchanged; 0 excluded", "Real-model run: Not run (not available yet)"]);
-    expect(renderEvidence(pack(artifact({ questions: [question("same", "ordinary", true)] }))).text).toContain("Eval: No drop found");
+    expect(renderEvidence(pack(artifact({ questions: [question("same", "ordinary", true)] }))).text).toContain("Eval: No regression measured (eval)");
     const improved = Array.from({ length: 10 }, (_, i) => ({ id: `up${i}`, category: "ordinary", edited: false, old: [false, false, false], first: true, freshOld: [false, false, false], freshNew: [true, true, true] }));
     expect(renderEvidence(pack(artifact({ questions: improved }))).text).toContain("Eval: Improved on eval on questions the agent could read");
   });
@@ -86,7 +86,7 @@ describe("AI text goldens", () => {
     const text = renderEvidence(pack(notRun(reason))).text;
     if (reason === "no_eval_configured") expect(text).toContain("Prompt changed. No eval found, so AI quality wasn't measured.");
     else { expect(text).toContain(EVAL_NOT_RUN_SENTENCES[reason].replace(/^not run: /iu, "")); expect(text).toContain("Retry from the Rovara task page"); }
-    expect(text).not.toContain("Eval: No drop found");
+    expect(text).not.toContain("Eval: No regression measured (eval)");
   });
   it("DEC 200 requires both AI change and no eval; F10 lines are bounded and inert", () => {
     const notice = "Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below.";

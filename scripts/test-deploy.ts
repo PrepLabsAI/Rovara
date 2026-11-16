@@ -49,7 +49,8 @@ import { GetFunctionConfigurationCommand, InvokeCommand, LambdaClient } from "@a
 import { build as bundle } from "esbuild";
 import { LAMBDA_BUNDLE_OPTIONS, checkLambdaBundles, lambdaLoadError } from "./lambda-load-check.js";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
-import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import { environmentE2eFeatureRuntimeCatalogId, environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import { BROKER_NAMES_VARIABLE } from "../packages/contracts/src/broker-environment.js";
 import { E2E_AGENT_RECOMMENDED_MODELS, eligibleE2EAgentModel } from "../packages/contracts/src/e2e-agent-models.js";
 import { KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, isKeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest } from "../packages/model-runtime/src/e2e-route-derive.js";
@@ -904,6 +905,8 @@ export function liftDeclaredSettings(
     const headResource = need(logicalId, head, "head's template");
     const deployedVariables = asRecord(asRecord(deployedResource.Properties?.Environment)?.Variables) ?? {};
     const headVariables = asRecord(asRecord(headResource.Properties?.Environment)?.Variables);
+    // ENV-ROOM: a head Broker whose environment is packed derives its prefixes from AGENTX_ENV, so there is no variable to lift; that needs the control-plane stack whole.
+    if (headVariables !== undefined && !(variable in headVariables) && BROKER_NAMES_VARIABLE in headVariables) throw new Error(`head's ${logicalId} derives ${variable} from its environment's name (its environment is packed, ENV-ROOM), so it cannot be lifted alone; deploy the control-plane stack whole instead`);
     if (headVariables === undefined || !(variable in headVariables)) throw new Error(`head's ${logicalId} does not set ${variable}; stop for review`);
     const { [variable]: headValue, ...headRest } = headVariables;
     const { [variable]: deployedValue, ...deployedRest } = deployedVariables;
@@ -1925,14 +1928,25 @@ export function plannedRequalifyGrants(headWithRenewal: CfnTemplate, deployed: C
   return evaluateIamDrift(headWithRenewal, deployed).filter((finding) => finding.kind === "iam-missing-grant" && (finding.roleLogicalId ?? "").startsWith(REQUALIFY_INFRA.logicalIdPrefix));
 }
 
+/**
+ * The feature-verifier catalog ID the deployed Broker reads: its literal variable, or, for a Broker whose environment is packed (ENV-ROOM: it has AGENTX_NAMES and no literal), the
+ * ID it derives from the environment's name (the value the infrastructure checks at synthesis). Anything else is refused.
+ */
+export function deployedFeatureCatalogId(deployed: CfnTemplate, env: string): string {
+  const variables = (deployed.Resources?.[CONTROL_PLANE_LAMBDAS.broker.logicalId]?.Properties?.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables;
+  const literal = variables?.[CATALOG_ID_VARIABLE];
+  if (typeof literal === "string") return literal;
+  if (literal === undefined && variables?.[BROKER_NAMES_VARIABLE] !== undefined) return environmentE2eFeatureRuntimeCatalogId(env);
+  throw new Error(`the deployed Broker has no literal ${CATALOG_ID_VARIABLE}, so the feature-verifier catalog cannot be found`);
+}
+
 /** Everything `evaluateTestDeployCheck` needs but the time, read from the live installation and the head build. */
 export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
   const readers: CheckReaders = { ...unchecked, runner: readOnlyAws(unchecked.runner) };
   const stacks = resolveTestStacks(readers.env);
   const controlPlane = describeStack(readers.runner, readers.region, stacks["control-plane"]);
   const deployedTemplate = deployedTemplateOf(readers.runner, readers.region, stacks["control-plane"]);
-  const catalogId = (deployedTemplate.Resources?.[CONTROL_PLANE_LAMBDAS.broker.logicalId]?.Properties?.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables?.[CATALOG_ID_VARIABLE];
-  if (typeof catalogId !== "string") throw new Error(`the deployed Broker has no literal ${CATALOG_ID_VARIABLE}, so the feature-verifier catalog cannot be found`);
+  const catalogId = deployedFeatureCatalogId(deployedTemplate, readers.env);
   const catalog = readCatalogRows(readers, stackOutput(controlPlane, "StateTableName"), catalogId);
   const deployedExecutorImage = stackParameter(describeStack(readers.runner, readers.region, stacks.runtime), EXECUTOR_IMAGE_PARAMETER);
   const web = catalog.find((row) => row.sk.endsWith("#web"));

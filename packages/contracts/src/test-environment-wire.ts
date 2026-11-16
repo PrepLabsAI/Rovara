@@ -8,6 +8,7 @@
 // The feature strings are what a worker advertises on /ping: an older worker is refused the run at dispatch (a strict parse would refuse the field), never mis-run.
 import { z } from "zod";
 import { CoverageMapSchema } from "./test-env-nightly.js";
+import { BASELINE_CANDIDATES_MAX, BaselineCandidateSchema } from "./test-env-baseline.js";
 import { CheckKindSchema } from "./evidence.js";
 import { ProjectCommandSchema, RelativeWorkspacePathSchema } from "./project.js";
 import { SeedScriptLockSchema } from "./seed-script-lock.js";
@@ -24,6 +25,11 @@ export const TEST_ENV_DETECT_FEATURE = "task.testEnvDetect.v1";
 export const TEST_ENV_PLAN_FEATURE = "task.testEnvironment.v1";
 /** A worker that lists this reads `checks[].coveragePath` of the plan (the approved report to read changed-line coverage from). A worker that does not is sent the plan without that field (informational only), because its strict parse would refuse it. */
 export const TEST_ENV_COVERAGE_PATH_FEATURE = "task.testEnvCoveragePath.v1";
+/**
+ * TE-C6: a worker that lists this reads the plan's `flakyRerun: true`: a failing test of a test check that passed before is rerun once, and one that passes on the rerun is flaky (not sent to the agent as a regression, and named in the
+ * evidence). A worker that does not is never sent the flag (its strict parse would refuse it): the broker never plans the flag for it (`seam.ts` adds this feature to the step's `requires`). Off (the default) means no rerun and no evidence field.
+ */
+export const TASK_FLAKY_RERUN_FEATURE = "task.flakyRerun.v1";
 /**
  * Test services (slice 1): a worker that lists this reads `testEnvironment.dependencies` of the plan (the dependencies to start, pinned by digest) and runs the check rounds sealed. A worker that does not is never sent a plan with
  * the field (its strict parse would refuse it): the broker refuses the run to such a worker at dispatch (`ec2-delivery.ts`). Also in `WORKER_INVOCATION_FEATURES`; the worker lists it in `implemented-features.ts` when it can do both.
@@ -295,6 +301,8 @@ export const TestEnvTaskPlanSchema = z
       .superRefine((check, context) => {
         if (check.selectArgs !== undefined && check.selectArgs.filter((arg) => arg === TEST_ENV_SELECT_PLACEHOLDER).length !== 1) context.addIssue({ code: "custom", path: ["selectArgs"], message: "selectArgs holds {tests} exactly once" });
       })).min(1).max(32),
+    /** TE-C6: the worker reruns a failing test of a check that passed before, once, and reports the ones that passed on the rerun. Absent = today's behaviour, byte for byte. Sent only to a worker that lists `TASK_FLAKY_RERUN_FEATURE`. */
+    flakyRerun: z.literal(true).optional(),
     /** The tests that failed in the last nightly: they always run. */
     lastNightlyFailures: z.array(z.string().min(1).max(500)).max(TEST_ENV_PLAN_FAILURES_MAX).optional(),
     /** The nightly's coverage map, only when it fits (`TEST_ENV_PLAN_MAP_MAX_BYTES`); without it a coverage-map selection runs the whole check, with its reason. */
@@ -304,6 +312,11 @@ export const TestEnvTaskPlanSchema = z
      * refused before dispatch, never sent half a plan); absent otherwise, so a plan without test services is today's plan byte for byte. Sent only to a worker whose /ping lists `TEST_SERVICES_PLAN_FEATURE`. Never empty.
      */
     dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX).optional(),
+    /**
+     * TE-C1: the newest trusted baseline commits on the task's base branch (shas only), for the worker to find the nearest one that is an ancestor of the task's base commit. Present only when the switch `ROVARA_BASELINE_CACHE`
+     * is on and there is at least one; sent only to a worker that lists `TEST_ENV_BASELINE_FEATURE`. Absent: today's plan byte for byte. Never empty.
+     */
+    baselineCandidates: z.array(BaselineCandidateSchema).min(1).max(BASELINE_CANDIDATES_MAX).optional(),
   })
   .strict()
   .refine((plan) => plan.coverageMap === undefined || JSON.stringify(plan.coverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["coverageMap"] })

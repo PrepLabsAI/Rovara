@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { WORKER_SETTING_PARAMETERS } from "../../packages/contracts/src/session.js";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -16,7 +17,7 @@ const resourcesOf = (template: Template) => template.toJSON().Resources as Recor
 const ofType = (template: Template, type: string) => Object.entries(resourcesOf(template)).filter(([, resource]) => resource.Type === type);
 const brokerEnvironment = (template: Template) => {
   const [, broker] = ofType(template, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/.test(id))!;
-  return (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  return unpackedBrokerVariables((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables);
 };
 const statements = (template: Template): Statement[] => ofType(template, "AWS::IAM::Policy").flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement);
 

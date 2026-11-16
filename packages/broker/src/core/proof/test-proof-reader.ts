@@ -28,7 +28,7 @@ export async function loadTestProof(
       const raw: unknown = JSON.parse(await actions.readArtifact(artifact.objectKey, PROOF_READ_BYTES));
       const parsed = TestProofSchema.safeParse(raw);
       // Never revive an older proof that lacks the newest proof's unreadable reply provenance.
-      if (!parsed.success && typeof raw === "object" && raw !== null && "scriptedReplies" in raw) return undefined;
+      if (!parsed.success && typeof raw === "object" && raw !== null && ("scriptedReplies" in raw || "madeByRovara" in raw)) return undefined;
       if (parsed.success && parsed.data.candidateDigest === candidateDigest) return parsed.data;
     }
   } catch {

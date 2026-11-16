@@ -117,7 +117,9 @@ describe("v1 reply provenance", () => {
     const result = await load(value);
     expect(result.lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`, "Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)"]);
     expect(result.reads).toEqual(["private/owner/ws/new/proof"]);
-    for (const scriptedReplies of [undefined, [], facts("readiness:0", 0), facts("readiness:1")]) {
+    // an independent reply (parked by DEC 192a) never counts: the same words as replies written in this task
+    expect((await load({ ...proof([item("proves_change")]), scriptedReplies: [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: 1 }] })).lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`]);
+    for (const scriptedReplies of [undefined, [], facts("readiness:0", 0), facts("readiness:1"), [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: 0 }]]) {
       expect((await load({ ...proof([item("proves_change")]), scriptedReplies })).lines).toEqual([countLine]);
     }
     expect((await load({ ...proof([item("does_not_prove", "vacuous")]), scriptedReplies: facts() })).lines).toEqual(["Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)"]);

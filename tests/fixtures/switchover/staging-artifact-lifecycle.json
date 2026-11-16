@@ -1,0 +1,58 @@
+{
+ "_source": "agentx-staging-control-plane live template before the switch-over (0.5.18, 2026-11-15): the artifact bucket's lifecycle rules",
+ "rules": [
+  {
+   "ExpirationInDays": 30,
+   "Id": "ExpireE2EScreenshots",
+   "Status": "Enabled",
+   "TagFilters": [
+    {
+     "Key": "rovara-retention",
+     "Value": "e2e-screenshot"
+    }
+   ]
+  },
+  {
+   "ExpirationInDays": 14,
+   "Id": "ExpireEvidenceShort",
+   "Prefix": "private/",
+   "Status": "Enabled",
+   "TagFilters": [
+    {
+     "Key": "rovara-retention",
+     "Value": "evidence-short"
+    }
+   ]
+  },
+  {
+   "ExpirationInDays": 30,
+   "Id": "ExpireEvidenceStd",
+   "Prefix": "private/",
+   "Status": "Enabled",
+   "TagFilters": [
+    {
+     "Key": "rovara-retention",
+     "Value": "evidence-std"
+    }
+   ]
+  },
+  {
+   "ExpirationInDays": 365,
+   "Id": "ExpireEvidenceRecord",
+   "Prefix": "private/",
+   "Status": "Enabled",
+   "TagFilters": [
+    {
+     "Key": "rovara-retention",
+     "Value": "evidence-record"
+    }
+   ]
+  },
+  {
+   "ExpirationInDays": 30,
+   "Id": "ExpireNightlyMaps",
+   "Prefix": "nightly-maps/",
+   "Status": "Enabled"
+  }
+ ]
+}

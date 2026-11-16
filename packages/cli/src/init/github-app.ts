@@ -25,7 +25,7 @@ const API = "https://api.github.com";
 export interface GitHubManifest {
   name: string; url: string; redirect_url: string; public: false;
   hook_attributes: { url: string; active: true };
-  default_permissions: { contents: "write"; pull_requests: "write"; issues: "write"; metadata: "read" };
+  default_permissions: { contents: "write"; pull_requests: "write"; issues: "write"; metadata: "read"; checks: "write" };
   default_events: string[];
 }
 
@@ -36,7 +36,7 @@ export function githubAppManifest(input: { appName: string; redirectUrl: string;
     redirect_url: input.redirectUrl,
     public: false,
     hook_attributes: { url: input.webhookUrl, active: true },
-    default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+    default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read", checks: "write" },
     default_events: [...GITHUB_WEBHOOK_EVENTS],
   };
 }
