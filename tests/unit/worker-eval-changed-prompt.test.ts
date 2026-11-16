@@ -247,7 +247,7 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   it("a file F4 found and diffed is accounted for", async () => {
     expect(await read([["prompts/system.txt", "old", "new prompt"]])).toMatchObject({ status: "changes" });
   });
-  it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'", "from '", "import  \"a'", "\\ ", "\\ \n"])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
+  it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'", "from '", "import  \"a'", "\\ ", "\\ \n", "export from ", "const x = require ", "export "])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
     const hostile = unit.repeat(Math.ceil(1024 * 1024 / unit.length));
     const started = Date.now();
     await read([["src/hostile.ts", hostile, `${hostile}x`]]);
@@ -259,6 +259,10 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
     ["an escaped multi-word literal", "const s = \"Line one.\\nLine two\";\n", "const s = \"Line one.\\nLine 2\";\n"],
     ["a selector for an unchanged table", "const persona = \"terse\";\n", "const persona = \"verbose\";\n"],
     ["a changed load path", "const t = readFile(\"assets/a.txt\");\n", "const t = readFile(\"assets/b.txt\");\n"],
+    ["the words from-quote inside a single-quoted prompt", "const t = 'Answer only from \"the docs\" provided';\n", "const t = 'Answer only from \"memory\" provided';\n"],
+    ["the words from-quote inside a template prompt", "const t = `Answer only from \"the docs\" provided`;\n", "const t = `Answer only from \"memory\" provided`;\n"],
+    ["the words from-quote inside a Python prompt", "t = \"Use data from 'the docs' only\"\n", "t = \"Use data from 'anything' only\"\n"],
+    ["the words require-quote inside a prompt", "const t = 'Never require(\"x\") calls';\n", "const t = 'Never require(\"y\") calls';\n"],
     ["reordered prompt lines", "const p = [\n  \"Be nice\",\n  \"Be strict\",\n];\n", "const p = [\n  \"Be strict\",\n  \"Be nice\",\n];\n"],
     ["a stray backtick in a string before a template", "const k = \"`\";\nconst t = `\n  be terse\n`;\n", "const k = \"`\";\nconst t = `\n  be verbose\n`;\n"],
     ["a stray backtick in a regex before a template", "const r = /`/;\nconst t = `\n  be terse\n`;\n", "const r = /`/;\nconst t = `\n  be verbose\n`;\n"],
@@ -273,7 +277,8 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   it("JSX text in a .tsx file reads unknown", async () => {
     expect(await read([["src/view.tsx", "export const V = () => <p>Be terse</p>;\n", "export const V = () => <p>Be verbose</p>;\n"]])).toBeUndefined();
   });
-  it("a changed import specifier alone, or a moved unquoted line, still reads none_found", async () => {
+  it("a changed import, export-from or require specifier alone, or a moved unquoted line, still reads none_found", async () => {
+    expect(await read([["src/y.ts", "export { a } from './a.js';\nconst b = require('./b.js');\n", "export { a } from './c.js';\nconst b = require('./d.js');\n"]])).toMatchObject({ status: "none_found" });
     expect(await read([["src/x.ts", "import a from './a.js';\nconst n = 1;\nconst s = 'x y';\n", "import a from './b.js';\nconst s = 'x y';\nconst n = 1;\n"]])).toMatchObject({ status: "none_found" });
   });
   it("the production classifier counts every readable call as changed when coverage is unknown", async () => {
