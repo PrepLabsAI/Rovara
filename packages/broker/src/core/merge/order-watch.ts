@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import type { CodeMilestone, OrgId, TransactItem, WorkflowSnapshot } from "@agentx/contracts";
 import { inertLine } from "../proof/inert-text.js";
+import { isHostRateLimit } from "./host-port.js";
 import { heldDependents, mergeOrderOf, mergeOrderStateLines, MERGE_ORDER_NAME_MAX, MERGE_ORDER_WORDS, type MergeOrder } from "./merge-order.js";
 import type { CodeMilestones, MergeTask } from "./seams.js";
 
@@ -74,7 +75,11 @@ export async function outOfOrderMilestoneItems(
   for (const consumer of newly) {
     for (const provider of order.providersOf[consumer] ?? []) {
       if (afterMerged.has(provider)) continue;
-      const state = await deps.providerState(provider).catch((): ProviderMergeState => "unknown");
+      // A host that says "slow down" goes up to the sweep (it pauses); any other fault is "cannot tell", not a guess.
+      const state = await deps.providerState(provider).catch((error: unknown): ProviderMergeState => {
+        if (isHostRateLimit(error)) throw error;
+        return "unknown";
+      });
       if (state === "not_merged") pairs.push({ consumer, provider });
       else if (state === "unknown") deps.log?.("merge_tracking.order_provider_unreadable", { taskId: task.taskId });
     }

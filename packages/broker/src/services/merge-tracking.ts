@@ -238,15 +238,23 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       ];
       // MR3b: a pull request merged by hand ahead of the one it depends on is said once, on the session and in the chat, naming every pull request of the task.
       if (state === "MERGED") {
-        items.push(...await outOfOrderMilestoneItems({
-          milestones, repositoryEdges: options.repositoryEdges, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
-          providerState: async (repositoryId) => {
-            const provider = workflow.pullRequests?.find((entry) => entry.repositoryId === repositoryId && entry.required);
-            const providerHome = provider === undefined ? undefined : await resolver(task.project, task.startingRevision, repositoryId, companyId);
-            if (provider === undefined || providerHome?.codeHost.mergeObservation === undefined) return "unknown";
-            return (await providerHome.codeHost.mergeObservation(changeRequestRef(providerHome.url, provider.number), { orgId: companyId }, budget)).state === "merged" ? "merged" : "not_merged";
-          },
-        }, { ...task, orgId: companyId, workflow: next }, workflow, next, at));
+        // Informational: a fault while building the warning never stops the merge from being recorded (a host's "slow down" still goes up to the sweep).
+        try {
+          items.push(...await outOfOrderMilestoneItems({
+            milestones, repositoryEdges: options.repositoryEdges, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
+            providerState: async (repositoryId) => {
+              const provider = workflow.pullRequests?.find((entry) => entry.repositoryId === repositoryId && entry.required);
+              const providerHome = provider === undefined ? undefined : await resolver(task.project, task.startingRevision, repositoryId, companyId);
+              if (provider === undefined || providerHome?.codeHost.mergeObservation === undefined) return "unknown";
+              // A provider closed without merging is not "waiting to merge": it is not said about.
+              const read = (await providerHome.codeHost.mergeObservation(changeRequestRef(providerHome.url, provider.number), { orgId: companyId }, budget)).state;
+              return read === "merged" ? "merged" : read === "open" ? "not_merged" : "unknown";
+            },
+          }, { ...task, orgId: companyId, workflow: next }, workflow, next, at));
+        } catch (error) {
+          if (hostRateLimitRetryAt(error) !== undefined) throw error;
+          log({ component: "merge_tracking", event: "merge_tracking.order_warning_failed", error: error instanceof Error ? error.name : "unknown" });
+        }
       }
       const written = await store.transact(items);
       if (written.applied) await milestones.deliver(taskId).catch(() => undefined);

@@ -54,6 +54,14 @@ describe("the Merge section's view", () => {
     expect(JSON.stringify(view)).not.toContain("secret-canary");
   });
 
+  it("cuts a long order line to the view's bound, with an ellipsis, and the view still reads", async () => {
+    const names = Array.from({ length: 12 }, (_, index) => `${String(index).padStart(2, "0")}-${"r".repeat(36)}`);
+    const { view } = await viewOf([edge(names[0]!, names[1]!)], { pullRequests: names.map((repositoryId) => ({ repositoryId, number: 1 })) });
+    expect(view?.order?.lines[0]).toHaveLength(MERGE_VIEW_MESSAGE_MAX);
+    expect(view?.order?.lines[0]?.endsWith("\u2026")).toBe(true);
+    expect(MergeViewSchema.safeParse(view).success).toBe(true);
+  });
+
   it("names a pull request merged ahead of the one it depends on", async () => {
     const world = await mergeWorld({ pullRequests: PRS });
     await world.seedTracking();

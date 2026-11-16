@@ -651,7 +651,7 @@ async function trackOne(
   // A task that skipped planning is also held until its tier, its reviewer's questions and any grown review are on the record for the head the host shows (never ready on a stale or untiered head).
   const scopeHeld = deps.readyHold === undefined ? false : await deps.readyHold(task, { repositoryId: pullRequest.repositoryId, headSha: status.headRevision }).catch(() => true);
   // MR3b: a pull request that depends on a repository that is still waiting, after another was merged ahead of it, stays a draft until that repository merges. Only asked of a draft that would be taken out of draft.
-  const held = scopeHeld || (wantsReadyOtherwise && await orderHoldsReady(deps, task, pullRequest.repositoryId));
+  const held = scopeHeld || (wantsReadyOtherwise && status.draft && await orderHoldsReady(deps, task, pullRequest.repositoryId));
   const heldKey = `${task.taskId}#${String(pullRequest.number)}#${status.headRevision}`;
   if (held && status.state === "open" && !status.draft && !heldNotDraftLogged.has(heldKey)) {
     if (heldNotDraftLogged.size > 1_000) heldNotDraftLogged.clear();

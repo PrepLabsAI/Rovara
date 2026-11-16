@@ -37,11 +37,11 @@ describe("the warning", () => {
     expect(pr.model.merge(String(pr.number), { revision: pr.head, method: "squash" }).outcome).toBe("merged");
   };
   /** A host with two repositories and a tracking service that reads `facts` (the word "none": no seam at all). */
-  const withEdges = async (facts: unknown, repositories?: string[], seam?: () => unknown) => {
+  const withEdges = async (facts: unknown, repositories?: string[], seam?: () => unknown, wrap?: (milestones: ReturnType<typeof createMilestoneService>) => ReturnType<typeof createMilestoneService>) => {
     const w = await host(repositories === undefined ? { repositories: ["app", "payments-lib"] } : { repositories });
     const logged: Array<Record<string, unknown>> = [];
     const tracking = createMergeTrackingService({
-      flow: w.h.deps, registry: w.registry, companyId: ORG, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }), people: w.people,
+      flow: w.h.deps, registry: w.registry, companyId: ORG, milestones: (wrap ?? ((m) => m))(createMilestoneService({ store: w.h.store, now: () => w.clock.ms })), people: w.people,
       settings: fixedCodeSettings({ allowSelfApproval: true, mergeMethod: "squash", codeReviewers: [], revision: 1 }), now: () => w.clock.ms, log: (entry) => { logged.push(entry); },
       ...(seam !== undefined ? { repositoryEdges: seam } : facts === "none" ? {} : { repositoryEdges: async () => facts }),
     });
@@ -151,6 +151,36 @@ describe("the warning", () => {
     expect(asked).toEqual([]);
   });
 
+  it("a fault while building the warning never stops the merge from being recorded, and is logged by name", async () => {
+    const w = await withEdges([edge("app", "payments-lib")], undefined, undefined, (milestones) => ({
+      ...milestones, items: (milestone, n, options) => { if (milestone.kind === "stuck") throw new Error("secret-canary schema"); return milestones.items(milestone, n, options); },
+    }) as typeof milestones);
+    mergeByHand(w, "app");
+    await w.tracking.sweep();
+    expect((await readTask(w.h.deps, TASK_ID))!.workflow?.pullRequests?.find((entry) => entry.repositoryId === "app")?.state).toBe("MERGED");
+    expect(await stuckRows(w)).toEqual([]);
+    expect(w.logged.some((entry) => entry["event"] === "merge_tracking.order_warning_failed")).toBe(true);
+    expect(JSON.stringify(w.logged)).not.toContain("secret-canary");
+  });
+
+  it("a host that says slow down while the provider is read pauses the sweep and records nothing yet", async () => {
+    const w = await withEdges([edge("app", "payments-lib")]);
+    mergeByHand(w, "app");
+    w.world.prs.find((entry) => entry.repositoryId === "payments-lib")!.model.rateLimitedUntil = w.clock.ms + 3_600_000;
+    await w.tracking.sweep();
+    expect((await readTask(w.h.deps, TASK_ID))!.workflow?.pullRequests?.find((entry) => entry.repositoryId === "app")?.state).toBe("OPEN");
+    expect(w.tracking.pausedUntil()).toBeDefined();
+  });
+
+  it("a provider that was closed without merging is not said about as waiting", async () => {
+    const w = await withEdges([edge("app", "payments-lib")]);
+    const lib = w.world.prs.find((entry) => entry.repositoryId === "payments-lib")!;
+    lib.model.update(String(lib.number), { state: "closed" });
+    mergeByHand(w, "app");
+    await w.tracking.sweep();
+    expect(await stuckRows(w)).toEqual([]);
+  });
+
   it("keeps the words inside the milestone's 500 characters whatever the repositories are called", async () => {
     const names = ["a".repeat(200), "b".repeat(200), "c".repeat(200), "d".repeat(200), "e".repeat(200), "f".repeat(200)];
     const written: Array<{ text: string; pullRequests?: unknown[] }> = [];
@@ -228,6 +258,16 @@ describe("holding the dependents at draft", () => {
     for (const pr of w.prs) pr.model.setChecks(pr.head, [{ name: "unit", state: "completed", conclusion: "failure", required: false, url: "", runId: "11" }]);
     await trackTask({ ...deps, repositoryEdges: async () => { asked += 1; return []; } }, TASK_ID);
     expect(asked).toBe(0);
+  });
+
+  it("keeps a pull request that is not a draft as it is: nothing to hold, no reviewers withheld", async () => {
+    const { w, deps } = await world([edge("app", "payments-lib"), edge("docs", "payments-lib")]);
+    const docs = w.prs.find((pr) => pr.repositoryId === "docs")!;
+    docs.model.getChangeRequest(String(docs.number)).draft = false;
+    const logged: string[] = [];
+    await trackTask({ ...deps, log: (event: string) => { logged.push(event); } }, TASK_ID);
+    expect(logged).not.toContain("merge_tracking.held_pull_request_not_draft");
+    expect((await w.trackingOf(docs))!["readyAt"]).toBeDefined();
   });
 
   it("a seam that throws holds nothing and never fails the pass", async () => {
