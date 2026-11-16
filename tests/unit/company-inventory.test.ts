@@ -194,3 +194,11 @@ it("TE-B4: the Rovara Check record is company-scoped: the same task key in two c
   expect(summaryCheckRecordOf(row, COMPANY_A.orgId, "task-1")).toBeDefined();
   expect(summaryCheckRecordOf(row, COMPANY_B.orgId, "task-1")).toBeUndefined();
 });
+
+it("classifies the M4a settings owner and both full-access company-checked methods", () => {
+  const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
+  expect(markdown).toContain("| record | entity:PROJECT_SETTINGS | company-scoped |");
+  expect(markdown).toContain("| route | /v1/dev/projects/{id}/settings | company-scoped | State table | yes | GET, PUT |");
+  expect(COMPANY_CHECKED_ROUTES).toContain("GET /v1/dev/projects/{id}/settings");
+  expect(COMPANY_CHECKED_ROUTES).toContain("PUT /v1/dev/projects/{id}/settings");
+});

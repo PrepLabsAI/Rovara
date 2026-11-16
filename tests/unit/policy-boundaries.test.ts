@@ -42,8 +42,8 @@ function policyCallers(root: string): string[] {
       return found;
     });
 }
-it("has no production callers outside contracts/testing", () => {
-  expect(policyCallers(process.cwd())).toEqual([]);
+it("allows only the authorized M4a settings adapter outside contracts/testing", () => {
+  expect(policyCallers(process.cwd())).toEqual([join(process.cwd(), "packages/broker/src/aws/project-settings.ts")]);
 });
 it("caller guard detects scripts, infra, JS and every public policy entry", () => {
   const root = mkdtempSync(join(tmpdir(), "d1-callers-"));

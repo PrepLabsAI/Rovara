@@ -23,7 +23,7 @@ describe("policy resolver", () => {
     const got = resolvePolicy({ companyLocks: { preset_level: "careful", real_check: "sandbox_only", extra_review: false, mutation_spot_check: "off", round_time_minutes: 60 }, project: { preset_level: "lightweight", extra_review: false, round_time_minutes: 30 } });
     expect(got.status).toBe("resolved");
     for (const [id, expected] of Object.entries({ preset_level: "careful", real_check: "rovara_real_run", extra_review: true, mutation_spot_check: "on", prompt_side_by_side: "on", round_time_minutes: 60 })) {
-      expect(got.values[id], id).toEqual({ value: expected, origin: "company_lock", clampedBy: "company_lock" });
+      expect(got.values[id], id).toEqual({ value: expected, origin: "company_minimum", clampedBy: "company_minimum", companyBound: { kind: "minimum", value: expected } });
     }
   });
   it("Balanced company minimum beats lower project, branch, path and task settings", () => {
@@ -31,10 +31,10 @@ describe("policy resolver", () => {
       branch: "release/a", changedPaths: ["pay/a"], branchRules: [{ pattern: "**", values: { preset_level: "lightweight" } }],
       pathRules: [{ pattern: "**", values: { real_check: "sandbox_only" } }], taskRaises: { real_check: "their_ci_watch", extra_review: false } });
     expect(got.status).toBe("resolved");
-    for (const [id, expected] of Object.entries({ preset_level: "balanced", real_check: "their_ci_fix", extra_review: true, after_merge_revert: "offer_revert", ci_fix_rounds: 3 })) {
+    for (const [id, expected] of Object.entries({ preset_level: "balanced", real_check: "their_ci_fix", extra_review: true, after_merge_revert: "offer_revert", ci_fix_rounds: 0 })) {
       expect(got.values[id]?.value, id).toBe(expected);
     }
-    expect(got.values["real_check"]).toEqual({ value: "their_ci_fix", origin: "company_lock", clampedBy: "company_lock" });
+    expect(got.values["real_check"]).toEqual({ value: "their_ci_fix", origin: "company_minimum", clampedBy: "company_minimum", companyBound: { kind: "minimum", value: "their_ci_fix" } });
   });
   it("preserves preset origin for expanded fields and source origin for explicit fields", () => {
     expect(resolvePolicy({ project: { preset_level: "careful", extra_review: false } }).values).toMatchObject({
@@ -74,9 +74,9 @@ describe("policy resolver", () => {
     }
     expect(resolvePolicy({}, { installOff: false }).status).toBe("resolved");
   });
-  it("retains the review probes for numeric floors, zero ceilings and absent branch context", () => {
-    expect(value({ companyLocks: { model_budget_usd: 10 }, project: { model_budget_usd: 5000 } }, "model_budget_usd")?.value).toBe(5000);
-    expect(value({ companyLocks: { model_budget_usd: 10 }, pathRules: [{ pattern: "**", values: { model_budget_usd: 1 } }], changedPaths: ["a"] }, "model_budget_usd")?.value).toBe(10);
+  it("retains the review probes for numeric limits, zero ceilings and absent branch context", () => {
+    expect(value({ companyLocks: { model_budget_usd: 10 }, project: { model_budget_usd: 5000 } }, "model_budget_usd")?.value).toBe(10);
+    expect(value({ companyLocks: { model_budget_usd: 10 }, pathRules: [{ pattern: "**", values: { model_budget_usd: 1 } }], changedPaths: ["a"] }, "model_budget_usd")?.value).toBe(1);
     expect(value({ companyCeilings: { model_budget_usd: -0 }, taskRaises: { model_budget_usd: 5 }, project: { model_budget_usd: 1 } }, "model_budget_usd")?.value).toBe(-0);
     expect(value({ companyCeilings: { machine_budget_minutes: 0 }, taskRaises: { machine_budget_minutes: 5 } }, "machine_budget_minutes")?.value).toBe(0);
     expect(value({ branchOverrides: [{ branch: "main", values: { extra_review: true } }] }, "extra_review")?.value).toBe(false);
@@ -103,10 +103,10 @@ describe("policy resolver", () => {
     expect(value({ branch: "release/a", branchRules: [{ pattern: "release/*", values: { real_check: "rovara_real_run" } }] })?.origin).toBe("branch_rule");
     expect(value({ changedPaths: ["pay/a.ts"], pathRules: [{ pattern: "pay/**", values: { real_check: "rovara_real_run" } }] })?.origin).toBe("path_rule");
     expect(value({ taskRaises: { real_check: "rovara_real_run" } })?.origin).toBe("task_raise");
-    expect(value({ companyLocks: { real_check: "rovara_real_run" } })?.origin).toBe("company_lock");
-    expect(value({ project: { model_budget_usd: 9 }, companyCeilings: { model_budget_usd: 5 } }, "model_budget_usd")?.origin).toBe("company_ceiling");
+    expect(value({ companyLocks: { real_check: "rovara_real_run" } })?.origin).toBe("company_minimum");
+    expect(value({ project: { model_budget_usd: 9 }, companyCeilings: { model_budget_usd: 5 } }, "model_budget_usd")?.origin).toBe("company_limit");
     expect(resolvePolicy({}, { installOff: true }).values["real_check"]?.origin).toBe("install_off");
-    expect(new Set(POLICY_ORIGINS).size).toBe(12);
+    expect(new Set(POLICY_ORIGINS).size).toBe(14);
   });
 
   it("orders measured, project, exact branch, matched rules and raises", () => {
@@ -118,24 +118,27 @@ describe("policy resolver", () => {
     expect(value(input, "round_time_minutes")).toMatchObject({ value: 60, origin: "branch_rule" });
   });
 
-  it("floor clamps every field, including numeric budgets", () => {
+  it("uses the field table for minimums and limits", () => {
     for (const field of POLICY_FIELDS) {
       const high = field.order?.at(-1) ?? (field.kind === "boolean" ? true : field.id === "ci_fix_rounds" ? 3 : 80);
       const low = field.order?.[0] ?? (field.kind === "boolean" ? false : field.id === "round_time_minutes" ? 30 : 0);
-      const got = value({ project: { [field.id]: low }, companyLocks: { [field.id]: high } }, field.id);
-      expect(got, field.id).toMatchObject({ value: high, origin: "company_lock", clampedBy: "company_lock" });
+      const bound = field.companyBound === "limit" ? low : high;
+      const candidate = field.companyBound === "limit" ? high : low;
+      const got = value({ project: { [field.id]: candidate }, companyLocks: { [field.id]: bound } }, field.id);
+      const origin = field.companyBound === "limit" ? "company_limit" : "company_minimum";
+      expect(got, field.id).toEqual({ value: bound, origin, clampedBy: origin, companyBound: { kind: field.companyBound, value: bound } });
     }
   });
 
   it("ceiling clamps both budgets, including an absent cap", () => {
     for (const id of ["model_budget_usd", "machine_budget_minutes"]) {
-      expect(value({ taskRaises: { [id]: 99 }, project: { [id]: 1 }, companyCeilings: { [id]: 10 } }, id)).toEqual({ value: 10, origin: "company_ceiling", clampedBy: "company_ceiling" });
+      expect(value({ taskRaises: { [id]: 99 }, project: { [id]: 1 }, companyCeilings: { [id]: 10 } }, id)).toEqual({ value: 10, origin: "company_limit", clampedBy: "company_limit", companyBound: { kind: "limit", value: 10 }, reason: "raised to the company limit" });
       expect(value({ companyCeilings: { [id]: 10 } }, id)?.value).toBe(10);
     }
     const conflict = resolvePolicy({ companyLocks: { model_budget_usd: 20 }, companyCeilings: { model_budget_usd: 10 } });
-    expect(conflict.status).toBe("refused");
-    expect(conflict.values).toEqual({});
-    expect(conflict.issues).toContain("conflicting_bounds");
+    expect(conflict.status).toBe("resolved");
+    expect(conflict.values["model_budget_usd"]?.value).toBe(10);
+    expect(conflict.issues).toEqual([]);
   });
 
   it("raise direction is upward only; absent budget cannot be raised to infinity", () => {
@@ -148,7 +151,7 @@ describe("policy resolver", () => {
 
   it("absent budget is not a task raise even when a ceiling exists", () => {
     const got = resolvePolicy({ taskRaises: { model_budget_usd: 5 }, companyCeilings: { model_budget_usd: 10 } });
-    expect(got.values["model_budget_usd"]).toEqual({ value: 10, origin: "company_ceiling", clampedBy: "company_ceiling" });
+    expect(got.values["model_budget_usd"]).toEqual({ value: 10, origin: "company_limit", clampedBy: "company_limit", companyBound: { kind: "limit", value: 10 } });
     expect(got.issues).toContain("not_upward");
   });
 
