@@ -20,6 +20,7 @@ import {
   DocumentStoreError,
   change,
   when,
+  workflowFixRounds,
   type AgentXError,
   type Autonomy,
   type ChangeRequestStatus,
@@ -29,6 +30,7 @@ import {
   type HostScope,
   type MergeTrackingItem,
   type OrgId,
+  type PipelineReportParser,
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -42,6 +44,7 @@ import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } fro
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
 import { requireRepositoryKey } from "./repository-key.js";
+import { SETTINGS_UNKNOWN, ciEvidencePass, readEvidenceSettings } from "../ci-evidence/tracking.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergePassHooks, MergeTask, SessionTimeline } from "./seams.js";
 import type { MergePeople } from "./people.js";
 import { prHeadItems, publicTrackingItem, readMergeTracking, readTrackingItem, recoveryRowKey, trackingItemOf, trackingWriteItem, workflowUpdateItem } from "./store.js";
@@ -138,6 +141,13 @@ export interface MergeTrackingDependencies {
   repository: RepositoryResolver;
   /** The head Rovara last pushed to the pull request, from the pull request's record. */
   recordedHead?(workspaceId: string, repositoryId: string, number: number): Promise<string | undefined>;
+  /**
+   * TE-E0 option A: the checks the customer marked at setup as running in their test environment (Cloud stores them; read per pass). Absent, undefined, or settings that do not parse: nothing is marked and
+   * the pass is today's, byte for byte.
+   */
+  ciEvidence?(task: TrackedTask): unknown;
+  /** TE-E0 option B: the host's per-test report parser (the worker's report adapters, #529). Absent: no per-test report is read, and a red marked check with logs off asks a person. */
+  reportParser?: PipelineReportParser;
   /** The project's real-check mode (TE-B2): what "No CI" and unreadable CI mean for marking ready. `DEFAULT_CI_MODE` when not given. */
   ciMode?(task: TrackedTask): Promise<ProjectCiMode> | ProjectCiMode;
   /**
@@ -173,6 +183,9 @@ export interface MergeTrackingDependencies {
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
   hooks?: MergePassHooks;
 }
+
+/** The commit the task's change for a repository is based on (the candidate's base), for the change proof. */
+const baseCommitOf = (workflow: WorkflowSnapshot, repositoryId: string): string | undefined => workflow.candidate?.repositories.find((entry) => entry.repositoryId === repositoryId)?.baseCommitSha;
 
 export class TrackingRequestCapError extends Error {
   constructor() {
@@ -239,8 +252,11 @@ const missingNames = (entries: ReadonlyArray<{ name: string }>): string[] => [..
  * the head holds no workflow files: anything less is `pending`, so a slow start is never read as "nothing to wait for". Checks that cannot be read (`checksUnavailable`, or checks that exist but none can be
  * counted) are `pending` for `CI_UNREADABLE_AFTER_MS` from `unreadableSince` (the first time they were seen unreadable on this head; `now` when not given), then `unreadable`: never `pending` forever, never `passing`.
  */
-export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boolean; lastRovaraPushAt: number | undefined; now: number; unreadableSince?: number | undefined; headByRovara?: boolean | undefined; missingSince?: number | undefined }): CiReading {
+export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boolean; lastRovaraPushAt: number | undefined; now: number; unreadableSince?: number | undefined; headByRovara?: boolean | undefined; missingSince?: number | undefined; marked?: ReadonlyArray<{ name: string; source?: string | undefined }> | undefined }): CiReading {
   const ciBasis = status.targetHasRequiredChecks ? "required" as const : "all_checks" as const;
+  // TE-E0 option A: the checks the customer marked always count, are waited for on their own clock (never the 15-minute "not reported" one), and keep CI pending until they report. With none marked, nothing below changes.
+  const marked = input.marked ?? [];
+  const isMarkedCheck = (check: { name: string; source?: string | undefined }): boolean => marked.some((entry) => entry.name === check.name && (entry.source === undefined || check.source === entry.source));
   const unreadable = (): CiReading => {
     const since = input.unreadableSince !== undefined && input.unreadableSince <= input.now ? input.unreadableSince : input.now;
     const ends = since + CI_UNREADABLE_AFTER_MS;
@@ -248,7 +264,8 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
   };
   // Checks that could not be read are not known: nothing may say they passed.
   if (status.checksUnavailable === true) return unreadable();
-  const required = status.requiredChecks;
+  const required = status.requiredChecks.filter((entry) => !isMarkedCheck(entry));
+  const markedUnreported = marked.some((entry) => !status.checks.some((check) => isMarkedCheck(check) && check.name === entry.name && (entry.source === undefined || check.source === entry.source)));
   // TE-B5 (L1): the clock of "a required check has not reported" starts at Rovara's push of this head; for a head a PERSON pushed it starts the first time this head was seen (kept on the row), never at an older Rovara push.
   const person = input.headByRovara === false;
   const missingStart = person ? (input.missingSince !== undefined && input.missingSince <= input.now ? input.missingSince : input.now) : input.lastRovaraPushAt;
@@ -258,7 +275,7 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
     check.name === entry.name && (entry.source === undefined || check.source === entry.source);
   if (status.checks.length === 0) {
     const settled = input.lastRovaraPushAt !== undefined && input.now - input.lastRovaraPushAt >= NO_CI_GRACE_MS;
-    if (!input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && settled) return { ci: "none", ciBasis, failingChecks: [], failingDetails: [] };
+    if (!input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && settled && marked.length === 0) return { ci: "none", ciBasis, failingChecks: [], failingDetails: [] };
     const waitEnds = !input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && input.lastRovaraPushAt !== undefined ? input.lastRovaraPushAt + NO_CI_GRACE_MS : undefined;
     // TE-B5: a required check and nothing reported at all for a whole wait after Rovara's push: a workflow that never started, or a check no app runs.
     if (required.length > 0 && missingStart !== undefined) {
@@ -269,7 +286,7 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
     return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], ...(waitEnds === undefined || waitEnds <= input.now ? {} : { recheckAt: waitEnds }) };
   }
   // A check counts when the host says the target requires it for this change request, or when a protection rule names it (the name is the fallback when `isRequired` says nothing).
-  const counted = ciBasis === "required" ? status.checks.filter((check) => check.required || required.some((entry) => meets(entry, check))) : status.checks;
+  const counted = ciBasis === "required" ? status.checks.filter((check) => check.required || required.some((entry) => meets(entry, check)) || isMarkedCheck(check)) : status.checks;
   const failing = counted.filter((check) => check.state === "completed" && check.conclusion !== undefined && FAILED_CONCLUSIONS.has(check.conclusion));
   if (failing.length > 0) {
     const names = [...new Set(failing.map((check) => check.name))].slice(0, 10);
@@ -289,6 +306,12 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
       if (missingAt <= input.now) return { ci: "required_missing", ciBasis, failingChecks: [], failingDetails: [], missingChecks: missingNames(unreported), ...missingMark };
       return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], recheckAt: missingAt, ...missingMark };
     }
+    return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
+  }
+  // A marked check that has not reported yet keeps CI pending: its own clock (the marked-check entries) says when to ask a person.
+  if (markedUnreported) return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
+  // A marked check the pipeline skipped or called neutral did not run: it is never read as a pass (the marked entry says "Not run").
+  if (status.checks.some((check) => isMarkedCheck(check) && check.state === "completed" && (check.conclusion === "skipped" || check.conclusion === "neutral"))) {
     return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
   }
   // Checks are listed but none of them counts (the host says the base requires checks, yet no required check can be told from the list): the answer is not known, so it times out like unreadable checks.
@@ -371,6 +394,8 @@ export interface TrackingInputs {
   recordedHead: string | undefined;
   reviews: ReviewReading;
   now: number;
+  /** TE-E0 option A: the marked checks (none: today's reading). */
+  marked?: ReadonlyArray<{ name: string; source?: string | undefined }> | undefined;
 }
 
 /** The tracking item for what GitHub says now, without its version, digest and read time. Everything the pass does not decide (nudges, syncs, the merge claim, ...) is kept from `prior`. */
@@ -384,7 +409,7 @@ export function deriveTrackingFields(input: TrackingInputs): Omit<MergeTrackingI
     : prior?.lastRovaraPushAt === undefined ? undefined : Date.parse(prior.lastRovaraPushAt);
   const checksEverSeen = prior?.checksEverSeen === true || status.checks.length > 0;
   // The wait for unreadable checks is kept on the row, for this head only: a new head's checks are a new read.
-  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: unreadableSinceOf(prior, status.headRevision), headByRovara, missingSince: missingSinceOf(prior, status.headRevision) });
+  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: unreadableSinceOf(prior, status.headRevision), headByRovara, missingSince: missingSinceOf(prior, status.headRevision), ...(input.marked === undefined ? {} : { marked: input.marked }) });
   const today = new Date(now).toISOString().slice(0, 10);
   const reAsked = (prior?.review === "changes_requested" || prior?.review === "approved") && input.reviews.review === "requested";
   return {
@@ -621,7 +646,13 @@ async function trackOne(
     const details = await codeHost.getChangeRequest(ref, scope);
     await noteBranchHead(deps.store, { orgId: task.orgId, repositoryId: pullRequest.repositoryId, branch: details.sourceBranch }, { headIsRecordedRovaraPush: false, now: new Date(now).toISOString() });
   }
-  const reviewsOf = (reviews: ReviewReading) => deriveTrackingFields({ task, pullRequest, status, prior, recordedHead, reviews, now });
+  // TE-E0 option A: the customer's marked checks, read once a pass. Settings that cannot be read are logged and treated as none (today's behaviour), never guessed.
+  const read = await readEvidenceSettings(deps, task);
+  // Settings that could not be read are not "nothing marked": the pass is tried again rather than run as if no check were the customer's real one.
+  if (read === SETTINGS_UNKNOWN) throw agentXError("RUNTIME_UNAVAILABLE", "the project's CI evidence settings could not be read");
+  const evidence = read;
+  const marked = evidence === undefined || evidence.markedChecks.length === 0 ? undefined : evidence.markedChecks;
+  const reviewsOf = (reviews: ReviewReading) => deriveTrackingFields({ task, pullRequest, status, prior, recordedHead, reviews, now, ...(marked === undefined ? {} : { marked }) });
   // What does not depend on the reviews comes first: whether to mark ready needs only the checks and the head. The effects come before the reviews' permission lookups so
   // that a pass that runs out of requests there has already done what it could.
   const early = reviewsOf({ review: "not_requested" });
@@ -629,6 +660,7 @@ async function trackOne(
     checksEverSeen: early.checksEverSeen, lastRovaraPushAt: early.lastRovaraPushAt === undefined ? undefined : Date.parse(early.lastRovaraPushAt), now,
     unreadableSince: early.ciUnreadableSince === undefined ? undefined : Date.parse(early.ciUnreadableSince),
     headByRovara: early.headByRovara, missingSince: early.ciMissingSince === undefined ? undefined : Date.parse(early.ciMissingSince),
+    ...(marked === undefined ? {} : { marked }),
   });
   const ciMode = await (deps.ciMode?.(task) ?? DEFAULT_CI_MODE);
 
@@ -698,6 +730,17 @@ async function trackOne(
   });
   const fields = reviewsOf(reviews);
   if (markedReady) fields.draft = false;
+  // TE-E0 option A: each marked check's entry for this head, on its own clock; the decision the CI slot needs when one failed or timed out; the results that landed on this pass, told once after the commit.
+  const pipeline = evidence === undefined || marked === undefined ? undefined : await ciEvidencePass({
+    settings: evidence, status, prior, fields, now, runner: home.checkRunner, ref, repository: { url }, scope, budget, store: deps.store, task, pullRequest, host: codeHost,
+    ...(deps.reportParser === undefined ? {} : { reportParser: deps.reportParser }),
+    ...(baseCommitOf(task.workflow, pullRequest.repositoryId) === undefined ? {} : { baseCommit: baseCommitOf(task.workflow, pullRequest.repositoryId) }),
+    roundsUsed: workflowFixRounds(task.workflow).ci, ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }),
+  });
+  if (pipeline !== undefined) {
+    Object.assign(fields, pipeline.fields);
+    if (pipeline.recheckAt !== undefined) ci.recheckAt = ci.recheckAt === undefined ? pipeline.recheckAt : Math.min(ci.recheckAt, pipeline.recheckAt);
+  }
 
   // Track record (best effort, after the item is written, never changes the pass): what this pass saw of the code the candidate published (its head; its checks on that head), a person's first
   // request for changes (about the candidate whose head the review is on), and a round of fixes started from people's comments. A close is not scored here (it may be reopened), and a merge is scored
@@ -744,6 +787,8 @@ async function trackOne(
   for (let attempt = 0; attempt < COMMIT_ATTEMPTS; attempt += 1) {
     const current = attempt === 0 ? prior : trackingItemOf(await readTrackingItem(deps.store, task.taskId, pullRequest.repositoryId, pullRequest.number), task.orgId, task.taskId);
     const stamp = new Date(now).toISOString();
+    // TE-E0 option A: the results this attempt will tell are the ones the item it read does not already hold as told (a racing pass may have told them first).
+    const told = pipeline?.toTell(current) ?? [];
     const base = { ...fields, ...(readyNow && current?.readyAt === undefined ? { readyAt: stamp } : current?.readyAt === undefined ? {} : { readyAt: current.readyAt }) };
     const nextFields = asked && base.reviewersRequestedAt === undefined ? { ...base, reviewersRequestedAt: stamp } : base;
     // What the item says about the parts only other tasks' writes change is whatever is stored now.
@@ -766,7 +811,8 @@ async function trackOne(
     let ranOut = false;
     const decision = await nextMergeAction(unchanged && current !== undefined ? current : nextItem, task.workflow, bound.autonomy, now, {
       ...(deps.store.ttlAttribute === undefined ? {} : { ttlAttribute: deps.store.ttlAttribute }), orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
-      repositoryId: pullRequest.repositoryId, pullRequestNumber: pullRequest.number, pullRequestUrl: pullRequest.url, headSha: status.headRevision, failing: ci.failingDetails,
+      repositoryId: pullRequest.repositoryId, pullRequestNumber: pullRequest.number, pullRequestUrl: pullRequest.url, headSha: status.headRevision,
+      failing: pipeline === undefined ? ci.failingDetails : pipeline.failing(ci.failingDetails), ...(pipeline?.decision === undefined ? {} : { marked: pipeline.decision }),
       behindRequired: status.mergeableState === "behind",
       ...(readLog === undefined ? {} : { readJobLog: readLog }),
       ...(deps.log === undefined ? {} : { log: (event: string, fields: Record<string, unknown>) => deps.log?.(event, fields) }),
@@ -830,6 +876,8 @@ async function trackOne(
       // After the commit: the handlers are told (a failure is theirs, and the sweep tells them again).
       await deps.milestones.deliver(task.taskId).catch(() => undefined);
     }
+    // TE-E0 option A: the results that landed, told once on the pull request (the entries were written `announced` in this commit), and their durations kept for the next wait. Best effort.
+    if (pipeline !== undefined && !unchanged) await pipeline.afterCommit(told);
     await observeOutcomes();
     if (capped) throw new TrackingRequestCapError();
     return { changed: true, notOpen: status.state !== "open", acted: action !== undefined, ...(ci.recheckAt === undefined ? {} : { recheckAt: ci.recheckAt }) };

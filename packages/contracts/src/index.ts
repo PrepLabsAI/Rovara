@@ -239,6 +239,7 @@ export * from "./evidence-inert.js";
 export * from "./evidence-ai.js";
 export * from "./evidence-public.js";
 export * from "./evidence-render.js";
+export * from "./ci-evidence.js";
 export * from "./rovara-problem.js";
 export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
