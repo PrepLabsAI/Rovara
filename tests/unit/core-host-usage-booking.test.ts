@@ -7,7 +7,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { companyDayKey, costPartition, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
-import { operationKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { SPEND_UNKNOWN, UNKNOWN_MODEL_PRICE, createHostedAdmission, createHostedLedger, createHostedMetering, hostedSecurityModules } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
@@ -38,7 +38,7 @@ function world(companyId: string = ORG) {
   const ledger = createHostedLedger({ store, metering, now: () => NOW });
   const taskId = randomUUID();
   const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId };
-  return { store, booking, ledger, taskId, operation, pointer: () => store.put({ item: { ...taskPointerKey(operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } }) };
+  return { store, booking, ledger, taskId, operation, pointer: () => store.put({ item: { ...taskPointerKey(operation.companyId, operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } }) };
 }
 
 describe("reading a usage report", () => {
@@ -64,6 +64,7 @@ describe("booking a core operation's usage events", () => {
   it("books each usage into the task's cost ledger at the table price, once however often the batch is sent", async () => {
     const w = world();
     await w.pointer();
+    await w.store.put({ item: { ...workspaceKey(w.operation.companyId, w.operation.workspaceId), id: w.operation.workspaceId, companyId: w.operation.companyId } });
     const batch = [event({ type: "progress" }, NOW.toISOString(), "progress"), event(telemetry("known", 1_000_000, 0)), event(telemetry("known", 0, 1_000_000), "2026-11-15T10:00:01.000Z")];
     expect(await w.booking.bookOperationEvents(w.operation, batch)).toEqual({ booked: 2, unreadable: 0 });
     expect(await w.booking.bookOperationEvents(w.operation, batch)).toEqual({ booked: 0, unreadable: 0 });
@@ -74,6 +75,7 @@ describe("booking a core operation's usage events", () => {
   it("charges an unknown model the cautious price, and a higher reported cost over the table's; never $0", async () => {
     const w = world();
     await w.pointer();
+    await w.store.put({ item: { ...workspaceKey(w.operation.companyId, w.operation.workspaceId), id: w.operation.workspaceId, companyId: w.operation.companyId } });
     await w.booking.bookOperationEvents(w.operation, [event(telemetry("never-heard-of", 1_000, 1_000))]);
     const cautious = costMicrosOf(UNKNOWN_MODEL_PRICE, { input: 1_000, output: 1_000, cacheRead: 0, cacheWrite: 0 });
     expect(cautious).toBeGreaterThan(0);
@@ -86,6 +88,7 @@ describe("booking a core operation's usage events", () => {
   it("books an unreadable report as a usage with no dollar figure: the day's spend is then unknown and the admission refuses new spending", async () => {
     const w = world();
     await w.pointer();
+    await w.store.put({ item: { ...workspaceKey(w.operation.companyId, w.operation.workspaceId), id: w.operation.workspaceId, companyId: w.operation.companyId } });
     expect(await w.booking.bookOperationEvents(w.operation, [event({ tokens: "lots" }), event({ ...telemetry("known", 1, 0), costUsd: "free" }, "2026-11-15T10:00:01.000Z")])).toEqual({ booked: 2, unreadable: 2 });
     expect(await w.ledger.taskCost(ORG, w.taskId)).toMatchObject({ micros: 0, entries: 2, unpricedEntries: 2 });
     expect(await w.store.get(companyDayKey(ORG, DAY))).toMatchObject({ usdMicros: 0, uncountedEntries: 2 });
@@ -98,6 +101,7 @@ describe("booking a core operation's usage events", () => {
   it("charges a report with no tokens and no cost the fixed amount, and the company may go on spending", async () => {
     const w = world();
     await w.pointer();
+    await w.store.put({ item: { ...workspaceKey(w.operation.companyId, w.operation.workspaceId), id: w.operation.workspaceId, companyId: w.operation.companyId } });
     await w.booking.bookOperationEvents(w.operation, [event(telemetry("known", 0, 0, null))]);
     expect(await w.store.get(companyDayKey(ORG, DAY))).toMatchObject({ usdMicros: EMPTY_REPORT_CHARGE_MICROS, uncountedEntries: 0 });
   });
@@ -105,6 +109,7 @@ describe("booking a core operation's usage events", () => {
   it("books two different usages reported at the same moment as two", async () => {
     const w = world();
     await w.pointer();
+    await w.store.put({ item: { ...workspaceKey(w.operation.companyId, w.operation.workspaceId), id: w.operation.workspaceId, companyId: w.operation.companyId } });
     expect(await w.booking.bookOperationEvents(w.operation, [event(telemetry("known", 1_000_000, 0)), event(telemetry("known", 2_000_000, 0))])).toEqual({ booked: 2, unreadable: 0 });
     expect((await w.ledger.taskCost(ORG, w.taskId)).micros).toBe(9_000_000);
   });
@@ -131,12 +136,13 @@ describe("the callback layer books before it acknowledges", () => {
   async function callbackWorld(bookUsage?: Parameters<typeof createCallbackHandler>[0]["bookUsage"], status = "RUNNING") {
     const w = world();
     await w.pointer();
-    await w.store.put({ item: { ...operationKey(w.operation.workspaceId, w.operation.id), entityType: "OPERATION", id: w.operation.id, workspaceId: w.operation.workspaceId, companyId: ORG, kind: "task", status, fence: 1, eventSequence: 0 } });
+    await w.store.put({ item: { ...workspaceKey(w.operation.companyId, w.operation.workspaceId), id: w.operation.workspaceId, companyId: w.operation.companyId } });
+    await w.store.put({ item: { ...operationKey(w.operation.companyId, w.operation.workspaceId, w.operation.id), entityType: "OPERATION", id: w.operation.id, workspaceId: w.operation.workspaceId, companyId: ORG, kind: "task", status, fence: 1, eventSequence: 0 } });
     const flow = { store: w.store, companyId: ORG, callbackSigningKey: key, now: () => NOW, log: () => undefined } as unknown as TaskFlowDeps;
     const handler = createCallbackHandler({ flow, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } }, ...(bookUsage === undefined ? {} : { bookUsage }) });
     const token = new CallbackCapabilities(Buffer.from(key)).issue({ workspaceId: w.operation.workspaceId, operationId: w.operation.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
     const post = (events: unknown[]) => handler({ method: "POST", path: `/v1/internal/workspaces/${w.operation.workspaceId}/operations/${w.operation.id}/events`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify({ events }) });
-    const stored = async () => (await w.store.query({ pk: `WORKSPACE#${w.operation.workspaceId}`, sk: { op: "beginsWith", prefix: `EVENT#${w.operation.id}#` } })).items.length;
+    const stored = async () => (await w.store.query({ pk: operationKey(w.operation.companyId, w.operation.workspaceId, w.operation.id).pk, sk: { op: "beginsWith", prefix: `EVENT#${w.operation.id}#` } })).items.length;
     return { ...w, post, stored };
   }
 
@@ -171,7 +177,8 @@ describe("the usage of an operation that already ended (stopped or closed) is st
     for (const status of ["CANCELLED", "INTERRUPTED"]) {
       const w = world();
       await w.pointer();
-      await w.store.put({ item: { ...operationKey(w.operation.workspaceId, w.operation.id), entityType: "OPERATION", id: w.operation.id, workspaceId: w.operation.workspaceId, companyId: ORG, kind: "task", status, fence: 1, eventSequence: 0 } });
+    await w.store.put({ item: { ...workspaceKey(w.operation.companyId, w.operation.workspaceId), id: w.operation.workspaceId, companyId: w.operation.companyId } });
+      await w.store.put({ item: { ...operationKey(w.operation.companyId, w.operation.workspaceId, w.operation.id), entityType: "OPERATION", id: w.operation.id, workspaceId: w.operation.workspaceId, companyId: ORG, kind: "task", status, fence: 1, eventSequence: 0 } });
       const flow = { store: w.store, companyId: ORG, callbackSigningKey: key, now: () => NOW, log: () => undefined } as unknown as TaskFlowDeps;
       const make = (withBooking: boolean) => createCallbackHandler({ flow, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } }, ...(withBooking ? { bookUsage: (operation, events) => w.booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId: ORG }, events) } : {}) });
       const token = new CallbackCapabilities(Buffer.from(key)).issue({ workspaceId: w.operation.workspaceId, operationId: w.operation.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
@@ -185,7 +192,7 @@ describe("the usage of an operation that already ended (stopped or closed) is st
       expect(mixed.statusCode).toBe(409);
       expect((await w.ledger.taskCost(ORG, w.taskId)).micros).toBe(9_000_000);
       // Nothing of the terminal batches was stored as events.
-      expect((await w.store.query({ pk: `WORKSPACE#${w.operation.workspaceId}`, sk: { op: "beginsWith", prefix: `EVENT#${w.operation.id}#` } })).items).toEqual([]);
+      expect((await w.store.query({ pk: operationKey(w.operation.companyId, w.operation.workspaceId, w.operation.id).pk, sk: { op: "beginsWith", prefix: `EVENT#${w.operation.id}#` } })).items).toEqual([]);
     }
   });
 });
@@ -204,15 +211,20 @@ describe("the ledger without holds (the laptop) is unchanged", () => {
 });
 
 describe("the broker root's money wiring (one company's runtime)", () => {
-  it("books the usage under the runtime's own company (never the operation's word), over the registry's store and the hosted meter; and sweeps that company's holds", async () => {
+  it("refuses another company's operation, books its own over the registry's store and hosted meter, and sweeps its own holds", async () => {
     const store = new MemoryDocumentStore();
     const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: true });
     const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), ...modules], context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [] });
     const money = coreMoneyWiring(registry, COMPANY_A_ID, () => NOW);
     const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: COMPANY_B_ID } as unknown as OperationRecord;
     const taskId = randomUUID();
-    await store.put({ item: { ...taskPointerKey(operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
-    await money.bookUsage(operation, [event(telemetry("never-heard-of", 1_000, 0))]);
+    await store.put({ item: { ...taskPointerKey(operation.companyId, operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
+    await expect(money.bookUsage(operation, [event(telemetry("never-heard-of", 1_000, 0))])).rejects.toThrow("operation belongs to another company");
+    expect(await store.get(companyDayKey(COMPANY_A_ID, DAY))).toBeUndefined();
+    expect(await store.get(companyDayKey(COMPANY_B_ID, DAY))).toBeUndefined();
+    const ownOperation = { ...operation, companyId: COMPANY_A_ID };
+    await store.put({ item: { ...taskPointerKey(ownOperation.companyId, ownOperation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
+    await money.bookUsage(ownOperation, [event(telemetry("never-heard-of", 1_000, 0))]);
     expect(await store.get(companyDayKey(COMPANY_A_ID, DAY))).toMatchObject({ entries: 1, uncountedEntries: 0, usdMicros: costMicrosOf(UNKNOWN_MODEL_PRICE, { input: 1_000, output: 0, cacheRead: 0, cacheWrite: 0 }) });
     expect(await store.get(companyDayKey(COMPANY_B_ID, DAY))).toBeUndefined();
     // The admission the registry holds takes holds; the wiring's sweep gives that company's expired ones back.

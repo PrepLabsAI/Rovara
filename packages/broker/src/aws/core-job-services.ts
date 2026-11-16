@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 // Deployed job composition. No provider or policy store lives here.
-import { OrgIdSchema, POLICY_ORIGINS, policyDataObject, createDefaultPolicySource, DEFAULT_CODE_SETTINGS, type OrgId, type AdapterRegistry, type PolicySource } from "@agentx/contracts";
+import { OrgIdSchema, POLICY_ORIGINS, policyDataObject, createDefaultPolicySource, DEFAULT_CODE_SETTINGS, type OrgId, type AdapterRegistry, type PolicySource, type DocumentStore, type StoredDocument } from "@agentx/contracts";
 import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CiReporting } from "../core-host/switch-blockers.js";
 
 import type { CoreService } from "../core-host/core-runtime.js";
@@ -17,6 +18,40 @@ import type { RepositoryResolver } from "../core/merge/host-port.js";
 import type { SummaryDependencies } from "../core/sessions/summary.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
 import { boundedCorePass } from "./core-job-pass.js";
+
+// One invocation shares recovery pages and ownership reads across all company passes. No cache survives a scheduled run.
+const recoveryPass = new AsyncLocalStorage<{
+  pages: Map<string, Promise<Awaited<ReturnType<DocumentStore["query"]>>>>;
+  owners: Map<string, Promise<string | undefined>>;
+}>();
+export function withSharedMergeRecovery<T>(work: () => Promise<T>): Promise<T> {
+  return recoveryPass.run({ pages: new Map(), owners: new Map() }, work);
+}
+function recoveryStore(store: DocumentStore, companyId: string): DocumentStore {
+  return new Proxy(store, { get(target, property) {
+    if (property === "query") return async (query: Parameters<DocumentStore["query"]>[0]) => {
+      const pass = recoveryPass.getStore();
+      if (pass === undefined || query.pk !== "WORKFLOW_MERGE_RECOVERY") return await target.query(query);
+      const key = JSON.stringify(query);
+      let pending = pass.pages.get(key);
+      if (pending === undefined) { pending = target.query(query); pass.pages.set(key, pending); }
+      const page = await pending;
+      const items: StoredDocument[] = [];
+      for (const row of page.items) {
+        if (typeof row["taskId"] !== "string") continue;
+        let owner = pass.owners.get(row["taskId"]);
+        if (owner === undefined) {
+          owner = target.get({ pk: `DEVTASK#${row["taskId"]}`, sk: "META" }).then((task) => typeof task?.["companyId"] === "string" ? task["companyId"] : undefined);
+          pass.owners.set(row["taskId"], owner);
+        }
+        if (await owner === companyId) items.push(row);
+      }
+      return { ...page, items };
+    };
+    const value = Reflect.get(target, property, target) as unknown;
+    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) as unknown : value;
+  } });
+}
 
 /** PolicySource scopes are adapter-issued, unambiguous company/project pairs. No cache: policy is read live. */
 export function policyCiReporting(source: PolicySource = createDefaultPolicySource()): CiReporting {
@@ -97,11 +132,12 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         if (entry["event"] === "sweep.read_failed" || entry["event"] === "sweep.row_failed") failed += 1;
         log();
       };
-      const tracking = createMergeTrackingService({ flow: depsFor(store), registry, companyId, scan: mergeScan, people, settings, milestones: createMilestoneService({ store, now }), now, log: trackingLog,
+      const tracking = createMergeTrackingService({ flow: depsFor(recoveryStore(store, companyId)), registry, companyId, scan: mergeScan, people, settings, milestones: createMilestoneService({ store, now }), now, log: trackingLog,
         ciMode: ci.ciMode, ...(options.repository === undefined ? {} : { repository: options.repository }),
       });
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });
-      return { ...report, complete: mergeScan.complete && failed === 0, failed };
+      const tierChecked = now() < deadlineMs ? await tracking.tierChecks() : 0;
+      return { ...report, tierChecked, complete: mergeScan.complete && failed === 0, failed };
     }),
   };
 }

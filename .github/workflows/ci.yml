@@ -44,6 +44,7 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
       lint: ${{ steps.plan.outputs.lint }}
       linux: ${{ steps.plan.outputs.linux }}
+      device: ${{ steps.plan.outputs.device }}
       release: ${{ steps.plan.outputs.release }}
     steps:
       # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
@@ -308,7 +309,7 @@ jobs:
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
-        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts --exclude tests/linux/e2e-agent.test.ts --exclude tests/linux/e2e-agent-probes.test.ts --exclude tests/linux/e2e-midstep-carriers.test.ts
+        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts --exclude tests/linux/e2e-agent.test.ts --exclude tests/linux/e2e-agent-probes.test.ts --exclude tests/linux/e2e-midstep-carriers.test.ts --exclude tests/linux/device-evidence-emulator.test.ts
       # The EC2 worker runs Docker 25 (the only version Amazon Linux 2023 ships), which does not forward an internal-only container's DNS queries to a --dns server; this runner's
       # Docker is newer and does, so the step above cannot see that. This one starts Docker 25.0.5 in Docker (a privileged container with its own network namespace, no change to this
       # runner) and runs the production host against it: the app's lookup of an undeclared name must reach the sinkhole, and a mock's alias must resolve.
@@ -365,6 +366,50 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts
+
+  # Device testing slice 2 (DEC 244): a real Android emulator with Maestro, in the device executor image, with KVM. It needs an x86-64 machine (Google ships no supported Linux arm64 emulator, so this
+  # is not the ARM `linux-runtime` job) and KVM, which GitHub's standard Linux runners give public repositories once /dev/kvm is open to every user. The test checks KVM itself: with none it SKIPS with
+  # the reason on the log and as a warning annotation, never a silent pass. It builds a tiny fixture app twice with the runner's own JDK and Android SDK (tests/fixtures/device-evidence-app), starts the
+  # device executor beside a network-less container that stands in for the task sandbox, and checks the masked pictures, the arguments as Docker understood them, and the listeners in the shared loopback.
+  # Planned like `linux-runtime` (runs only when the device area changes, and always in a FULL run) and INFORMATIONAL for now: it is not in the `local` gate until its first real run has been read.
+  # It uses no secret and no permission beyond the workflow's `contents: read`: it pulls only the one image the device Dockerfile builds on (the registry fallback in scripts/ci-images.ts needs no login).
+  device-runtime:
+    needs: plan
+    if: needs.plan.outputs.device == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      # CI runner only: the kvm group is the only one that may open /dev/kvm until this rule makes the device open to every user (the container is given the device and, when it is not open to everyone, its group).
+      - name: Open /dev/kvm to every user (CI runner only)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "::warning title=No KVM on this runner::/dev/kvm is missing, so the emulator test will be SKIPPED (with its reason)"
+      # Only the base image of the device Dockerfile (node-build); it exports ROVARA_CI_IMAGE_NODE_BUILD, the local alias the build below uses.
+      - name: Pull the pinned base image
+        run: node scripts/ci-images.ts pull --github-env node-build
+      - name: Build the device executor image
+        run: |
+          node scripts/ci-images.ts verify node-build
+          node scripts/ci-images.ts dockerfile environments/device-executor/Dockerfile "$RUNNER_TEMP/device-executor.Dockerfile"
+          docker build -f "$RUNNER_TEMP/device-executor.Dockerfile" -t rovara-device-executor:ci .
+      - run: npm ci
+      # The packages import each other through their built output.
+      - run: npm run build
+      - name: Device emulator test
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_DEVICE_IMAGE: rovara-device-executor:ci
+        # The fixture apps are built with the runner's own JDK 17 and Android SDK (ANDROID_HOME is set on the runner).
+        run: JAVA_HOME="$JAVA_HOME_17_X64" npx vitest run tests/linux/device-evidence-emulator.test.ts
 
   # The Rovara Code port (docs/porting.md): nothing Cloud-only, no private name and no secret may reach code/next. The guard runs on a push to
   # code/next and on a pull request into it (not a draft), over everything code/next holds that mainline does not; mainline's own pull requests

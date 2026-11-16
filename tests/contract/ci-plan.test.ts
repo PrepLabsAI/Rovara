@@ -23,7 +23,7 @@ describe("which runs are FULL", () => {
   it("is every run that is not a pull request: a push to code/next and a manual run", () => {
     for (const event of ["push", "workflow_dispatch"]) {
       const plan = planCi(input({ event, changed: [] }));
-      expect(plan, event).toMatchObject({ mode: "full", tests: "all", lint: "all", linux: true, release: true, docsOnly: false, shards: FULL_SHARDS });
+      expect(plan, event).toMatchObject({ mode: "full", tests: "all", lint: "all", linux: true, device: true, release: true, docsOnly: false, shards: FULL_SHARDS });
     }
   });
 
@@ -42,7 +42,7 @@ describe("which runs are FULL", () => {
 
   it("runs everything even when the change is Markdown only, so a full run is never thinner than a full run", () => {
     const plan = planCi(input({ labels: ["full-ci"], changed: ["docs/sample/guide.md"] }));
-    expect(plan).toMatchObject({ mode: "full", docsOnly: false, tests: "all", lint: "all", linux: true, release: true });
+    expect(plan).toMatchObject({ mode: "full", docsOnly: false, tests: "all", lint: "all", linux: true, device: true, release: true });
   });
 });
 
@@ -99,6 +99,16 @@ describe("the affected plan of an ordinary pull request", () => {
     }
   });
 
+  it("runs the device emulator check only when its area changes: the device executor image, the device code and tests, the CI image list, the plan, the workflow", () => {
+    for (const area of ["environments/device-executor/Dockerfile", "packages/contracts/src/device-evidence.ts", "packages/verifier/src/executor/device-android.ts", "packages/verifier/src/host/device-executor.ts", "tests/linux/device-evidence-emulator.test.ts", "tests/fixtures/device-evidence-app/build.sh", "tests/support/device-kvm.ts", "scripts/ci-images.ts", "scripts/ci-plan.ts", ".github/ci-images.json", ".github/workflows/ci.yml", "package-lock.json"]) {
+      expect(planCi(input({ changed: [area] })).device, area).toBe(true);
+    }
+    for (const elsewhere of ["packages/worker/src/x.ts", "packages/verifier/src/x.ts", "packages/verifier/src/executor/browser-evidence.ts", "environments/e2e-executor/Dockerfile", "tests/linux/sample.test.ts", "tests/unit/plain.test.ts", "docs/sample/guide.md"]) {
+      expect(planCi(input({ changed: [elsewhere] })).device, elsewhere).toBe(false);
+    }
+    expect(planCi(input({ changed: [] })).device).toBe(true);
+  });
+
   it("runs the release check only when release or build files change", () => {
     for (const area of ["scripts/release/build.ts", "scripts/release-common.ts", "infra/lib/sample.ts", "environments/base/Dockerfile", "package.json", "tsconfig.base.json", ".github/workflows/ci.yml"]) {
       expect(planCi(input({ changed: [area] })).release, area).toBe(true);
@@ -110,7 +120,7 @@ describe("the affected plan of an ordinary pull request", () => {
 
   it("runs nothing but the plan for a Markdown-only change that no test reads, and runs everything else for one a test reads", () => {
     const docs = planCi(input({ changed: ["docs/sample/guide.md"] }));
-    expect(docs).toMatchObject({ mode: "affected", docsOnly: true, tests: "none", lint: "none", linux: false, release: false, shards: 1 });
+    expect(docs).toMatchObject({ mode: "affected", docsOnly: true, tests: "none", lint: "none", linux: false, device: false, release: false, shards: 1 });
     const read = planCi(input({ changed: ["docs/sample/read.md"], testSources: new Map([["tests/unit/reads-doc.test.ts", 'readFile("docs/sample/read.md")']]) }));
     expect(read.docsOnly).toBe(false);
     expect(read.tests).toBe("changed");
@@ -121,7 +131,7 @@ describe("the affected plan of an ordinary pull request", () => {
 describe("the outputs the workflow reads", () => {
   it("are strings, with a shard list that is never empty", () => {
     expect(planOutputs(planCi(input({ changed: ["packages/other-d/src/x.ts"] })))).toEqual({
-      mode: "affected", docs_only: "false", tests: "changed", shards: "[1,2]", lint: "changed", linux: "false", release: "false",
+      mode: "affected", docs_only: "false", tests: "changed", shards: "[1,2]", lint: "changed", linux: "false", device: "false", release: "false",
     });
     expect(planOutputs(planCi(input({ event: "push", changed: [] }))).shards).toBe("[1,2,3,4,5,6,7,8]");
     const docs = planOutputs(planCi(input({ changed: ["docs/sample/guide.md"] })));

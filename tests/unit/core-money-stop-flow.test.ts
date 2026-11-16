@@ -2,7 +2,7 @@
 // usage never comes keeps its task's whole hold (marked estimated), a run past a cap is stopped with a fixed reason, and each model run is admitted before it is handed to a worker that
 // reports usage while it runs. Without `moneyStop` (the laptop) every one of these paths is as before.
 import { describe, expect, it } from "vitest";
-import { USAGE_CHECKPOINTS_FEATURE, type Admission, type AdmissionRequest, type WorkerInvocation } from "@agentx/contracts";
+import { USAGE_CHECKPOINTS_FEATURE, type Admission, type AdmissionRequest, type OrgId, type WorkerInvocation } from "@agentx/contracts";
 import { cancelTask } from "../../packages/broker/src/core/task-flow/cancel.js";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { RUN_START_ACTION, SPEND_STOP_REASON, SPEND_UNKNOWN_STOP_REASON, USAGE_FLUSH_WAIT_MS, requestSpendStop, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
@@ -11,6 +11,7 @@ import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createHarness, newRequestId, type Harness, type HarnessOptions } from "../support/task-flow-harness.js";
 
+const SCOPED_COMPANY = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const FEATURES = ["task.workflowMode", "task.structuredPlans", USAGE_CHECKPOINTS_FEATURE];
 
 interface StopWorld {
@@ -21,11 +22,12 @@ interface StopWorld {
   cancels: WorkerInvocation[];
 }
 
-function world(options: { moneyStop?: boolean; features?: string[]; admission?: Admission; understandFirst?: boolean } = {}): StopWorld {
+function world(options: { companyId?: OrgId; moneyStop?: boolean; features?: string[]; admission?: Admission; understandFirst?: boolean } = {}): StopWorld {
   const kept: StopWorld["kept"] = [];
   const onWait: StopWorld["onWait"] = {};
   const dispatcher: { run?: () => Promise<unknown> } = {};
   const harness: HarnessOptions = {
+    ...(options.companyId === undefined ? {} : { companyId: options.companyId }),
     machines: { features: options.features ?? FEATURES },
     ...(options.understandFirst === undefined ? {} : { understandFirst: options.understandFirst }),
     ...(options.admission === undefined ? {} : { admission: options.admission }),
@@ -60,7 +62,7 @@ async function runningPlan(h: Harness) {
     }
   };
   await drain();
-  const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+  const workspace = (await h.store.get(workspaceKey(h.deps.companyId, started.task.workspaceId))) as unknown as WorkspaceRecord;
   const machineId = workspace.machine!.machineId;
   const prepare = h.machines.delivered(machineId).at(-1)!;
   h.machines.finish(machineId, prepare.operationId);
@@ -70,7 +72,7 @@ async function runningPlan(h: Harness) {
   return { taskId: started.task.taskId, workspaceId: workspace.id, machineId, operationId: plan.operationId, fence: plan.fence, plan, drain };
 }
 
-const operationOf = async (h: Harness, run: { workspaceId: string; operationId: string }): Promise<OperationRecord> => (await h.store.get(operationKey(run.workspaceId, run.operationId))) as unknown as OperationRecord;
+const operationOf = async (h: Harness, run: { workspaceId: string; operationId: string }): Promise<OperationRecord> => (await h.store.get(operationKey(h.deps.companyId, run.workspaceId, run.operationId))) as unknown as OperationRecord;
 const cancelsTo = (w: Pick<StopWorld, "cancels">, run: { operationId: string }) => w.cancels.filter((invocation) => invocation.kind === "cancel" && invocation.payload.targetOperationId === run.operationId);
 
 describe("Stop on a deployed install: the worker sends its usage first", () => {
@@ -108,7 +110,7 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a health endpoint", workflow: true });
     const drain = async (): Promise<void> => { for (let round = 0; round < 12; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) return; h.clock.advance(70); } };
     await drain();
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(h.deps.companyId, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const prepare = h.machines.delivered(workspace.machine!.machineId).at(-1)!;
     h.machines.finish(workspace.machine!.machineId, prepare.operationId);
     await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED", outcome: { kind: "prepared" } });
@@ -282,7 +284,7 @@ describe("dispatching a model run on a deployed install", () => {
     const asked: AdmissionRequest[] = [];
     const base = createAllowAllAdmission();
     const admission: Admission = { ...base, async admit(request) { asked.push(request); return base.admit(request); } };
-    const w = world({ admission }); const { h } = w;
+    const w = world({ admission, companyId: SCOPED_COMPANY }); const { h } = w;
     const run = await runningPlan(h);
     expect(run.plan).toMatchObject({ kind: "task", payload: { workflowMode: "PLAN", usageCheckpoints: true } });
     expect(asked.filter((request) => request.action === RUN_START_ACTION)).toEqual([expect.objectContaining({ subject: { type: "task", id: run.taskId }, idempotencyKey: `${RUN_START_ACTION}:${run.operationId}` })]);
@@ -291,11 +293,11 @@ describe("dispatching a model run on a deployed install", () => {
   it("ends a run its task's cap refuses with the fixed reason, before any worker gets it", async () => {
     const base = createAllowAllAdmission();
     const admission: Admission = { ...base, async admit(request) { return request.action === RUN_START_ACTION ? { allowed: false, code: "task_cap", message: "over" } : base.admit(request); } };
-    const w = world({ admission }); const { h } = w;
+    const w = world({ admission, companyId: SCOPED_COMPANY }); const { h } = w;
     await h.registerProject();
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Rename the flag", workflow: true, workflowPath: "FULL" });
     for (let round = 0; round < 12; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) break; h.clock.advance(70); }
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(h.deps.companyId, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const prepare = h.machines.delivered(workspace.machine!.machineId).at(-1)!;
     h.machines.finish(workspace.machine!.machineId, prepare.operationId);
     await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED", outcome: { kind: "prepared" } });
@@ -304,7 +306,7 @@ describe("dispatching a model run on a deployed install", () => {
     const view = await h.flow.get(h.owner, started.task.taskId);
     // Ended as a spend stop (CANCELLED with the reason), not as a failure a retry policy would repeat.
     expect(view.workflow).toMatchObject({ state: "BLOCKED", blockReason: SPEND_STOP_REASON });
-    const operations = (await h.store.query({ pk: `WORKSPACE#${workspace.id}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items as unknown as OperationRecord[];
+    const operations = (await h.store.query({ pk: workspaceKey(workspace.companyId, workspace.id).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items as unknown as OperationRecord[];
     expect(operations.filter((operation) => operation.kind === "task")).toEqual([expect.objectContaining({ status: "CANCELLED", stopReason: "task_cap", error: SPEND_STOP_REASON })]);
   });
 
@@ -313,7 +315,7 @@ describe("dispatching a model run on a deployed install", () => {
     await h.registerProject();
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Rename the flag", workflow: true, workflowPath: "FULL" });
     for (let round = 0; round < 12; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) break; h.clock.advance(70); }
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(h.deps.companyId, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const prepare = h.machines.delivered(workspace.machine!.machineId).at(-1)!;
     h.machines.finish(workspace.machine!.machineId, prepare.operationId);
     await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED", outcome: { kind: "prepared" } });

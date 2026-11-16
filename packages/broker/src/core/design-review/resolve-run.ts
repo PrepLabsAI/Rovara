@@ -1,3 +1,5 @@
+import { OPERATION_SK_PREFIX } from "../task-flow/keys.js";
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Design review stage: the planner's side of a round. After a round is recorded with findings to resolve, the workflow stands at PLAN/READY "resolving". This module:
 //   - says when that is due (`designResolveDue`), so the CRITIC_REPLAN dispatch row, which a plan check makes due only with `workflow.critique`, is due here too;
 //   - starts the planner (the drafter) in ITS OWN conversation, with the registered resolve prompt, the design, the open findings and the people's answers, each as data (`startDesignResolveRun`);
@@ -14,7 +16,7 @@ import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../build-step/plan-input.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
-import { workspaceKey } from "../task-flow/keys.js";
+
 import type { OperationRecord, TaskRecord as DeveloperTaskRecord } from "../task-flow/records.js";
 import { acceptStep, commitWorkflow, readWorkspace } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
@@ -148,7 +150,7 @@ export async function startDesignResolveRun(
 
 /** The pinned commits of the latest design-review round, from the BINDING the broker wrote (never the planner's, never the worker's). */
 async function bindingPins(deps: TaskFlowDeps, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }): Promise<PinnedCommits> {
-  const latest = (await queryAll(deps.store, { pk: workspaceKey(task.workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } }))
+  const latest = (await queryAll(deps.store, { pk: (await workspaceKeys(deps, task.workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX } }))
     .filter((item) => item["entityType"] === "OPERATION" && item["kind"] === "task" && item["workflowMode"] === "PLAN_CRITIQUE" && item["designReview"] !== undefined)
     .sort((left, right) => (left["createdAt"] as string).localeCompare(right["createdAt"] as string)).at(-1);
   const binding = DesignReviewBindingSchema.safeParse(latest?.["designReview"]);

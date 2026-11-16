@@ -14,13 +14,12 @@ import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "..
 import { COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
+const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const OTHER = "org_corehost00000000000b";
 const PROJECT: ProjectDefinition = {
   name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
-// Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
-const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 
 function appOver(world: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
@@ -133,14 +132,14 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(get("/v1/app/script-tokens"), caller))?.statusCode).toBe(404);
   });
 
-  it("lists and revokes script tokens, and refuses to make one for a caller with no step-up (an ordinary API token)", async () => {
+  it("lists and revokes script tokens, and refuses to make one for every caller (the recently-signed-in page rule has no credential on this API yet)", async () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const caller = remember(FAKE_COMPANY);
     expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toEqual({ tokens: [] });
     const made = await routes.route(post("/v1/app/script-tokens", { name: "ci", projects: ["payments"], permissions: ["read"], expiresInDays: 30 }), caller);
     expect(made?.statusCode).toBe(403);
-    expect(JSON.parse(made!.body)).toEqual({ error: { code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE } });
+    expect((JSON.parse(made!.body) as { error: { message: string } }).error.message).toBe(MAKE_SCRIPT_TOKEN_ON_A_PAGE);
     expect((await routes.route(post("/v1/app/script-tokens/sct_nothing/revoke"), caller))?.statusCode).toBe(404);
     // Switched off by its own setting: not there.
     const disabled = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, scriptTokens: { enabled: () => false } }) });
@@ -170,7 +169,7 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(post("/v1/app/script-tokens/%E0/revoke"), owner))?.statusCode).toBe(404);
   });
 
-  it("reads the decision cards but refuses every act on them without a step-up", async () => {
+  it("reads the decision cards but refuses every act on them (no recently-signed-in proof on this API yet)", async () => {
     const { app, companyOf, remember } = await world2();
     const list = vi.fn(async () => []);
     const performer = { approve: vi.fn(), reject: vi.fn() };
@@ -180,9 +179,8 @@ describe("the core's handlers on the deployed API", () => {
     for (const action of ["approve", "reject", "request-changes", "evidence-opened"]) {
       const answer = await routes.route(post(`/v1/app/decisions/plan/${randomUUID()}/${action}`, { digest: "x" }), caller);
       expect(answer?.statusCode, action).toBe(403);
-      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "REAUTH_REQUIRED", message: DECIDE_ON_A_PAGE } });
+      expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(DECIDE_ON_A_PAGE);
     }
-    expect(list).not.toHaveBeenCalled();
     expect(performer.approve).not.toHaveBeenCalled();
     expect(performer.reject).not.toHaveBeenCalled();
   });

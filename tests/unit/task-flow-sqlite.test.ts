@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Lane L6a: the same flow on the local adapters (L3): a SQLite document store and a SQLite queue in one file, as `rovara up` will wire them.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,7 +33,7 @@ describe("the task flow on the SQLite store and queue", () => {
     expect(await h.flow.dispatchOnce()).toMatchObject({ retried: 1 });
     h.clock.advance(70);
     expect(await h.flow.dispatchOnce()).toMatchObject({ delivered: 1 });
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const [prepare] = h.machines.delivered(workspace.machine!.machineId);
     expect(prepare).toMatchObject({ kind: "prepare" });
     await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare!.operationId, fence: 1, status: "SUCCEEDED" });

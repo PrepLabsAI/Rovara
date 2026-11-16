@@ -1,3 +1,4 @@
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import {
   GetCommand,
   QueryCommand,
@@ -318,6 +319,7 @@ export class SessionManager {
    * checked in one transaction, so a dispatch racing the reap always wins.
    */
   async claimStop(seen: WorkspaceSession): Promise<boolean> {
+    const workspace = await readWorkspaceMeta(this.dependencies.documentClient, this.dependencies.tableName, seen.workspaceId);
     const claim = this.update(seen.workspaceId, { set: { state: "STOPPING" }, when: { state: "READY", generation: seen.generation } });
     return this.conditional({ transaction: [
       { Update: {
@@ -327,7 +329,7 @@ export class SessionManager {
       } },
       { ConditionCheck: {
         TableName: this.dependencies.tableName,
-        Key: { pk: `WORKSPACE#${seen.workspaceId}`, sk: "META" },
+        Key: workspace?.key ?? { pk: `WORKSPACE#${seen.workspaceId}`, sk: "META" },
         // Terminal transitions remove activeOperationId; some records store it as null instead.
         ConditionExpression: "attribute_not_exists(activeOperationId) OR attribute_type(activeOperationId, :null)",
         ExpressionAttributeValues: { ":null": "NULL" },
@@ -594,9 +596,7 @@ export async function workspaceBinding(
 ): Promise<Ec2RuntimeBinding | undefined> {
   // Strongly consistent: a lazy Slack thread's first preparation moves the record to the latest
   // revision (#12) just before this runs, and a stale read would size and place compute from the old one.
-  const workspace = (await documentClient.send(new GetCommand({
-    TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" }, ConsistentRead: true,
-  }))).Item;
+  const workspace = (await readWorkspaceMeta(documentClient, tableName, workspaceId))?.item;
   if (workspace?.deploymentMode !== "ec2-ebs" || typeof workspace.projectName !== "string" || typeof workspace.projectRevision !== "number") return undefined;
   const project = (await documentClient.send(new GetCommand({
     TableName: tableName,

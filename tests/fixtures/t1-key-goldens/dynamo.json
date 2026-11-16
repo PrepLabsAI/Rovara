@@ -1,0 +1,1887 @@
+{
+  "base": "<hex40#1>",
+  "backend": "dynamo",
+  "snapshots": [
+    {
+      "phase": "start",
+      "nextId": 6,
+      "clock": 1794218400000,
+      "keys": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004"
+        }
+      ],
+      "rows": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER",
+          "count": 1,
+          "entityType": "DEVELOPER_LIMIT"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_LIMIT_TASK",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "memberSk": "MEMBER",
+          "chargedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_TASK_INDEX",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "orgId": "org_00000000000000000000",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "client": "an AI tool",
+          "status": "STARTING",
+          "shared": false,
+          "startingRevision": 1,
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META",
+          "entityType": "DEVELOPER_TASK",
+          "companyId": "org_00000000000000000000",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "provider": "local-owner",
+          "developerName": "Local owner",
+          "origin": "app",
+          "client": "an AI tool",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "ownerKey": "<hex64#2>",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "startingRevision": 1,
+          "charge": {
+            "member": {
+              "pk": "DEVELOPER_LIMIT#local-owner",
+              "sk": "MEMBER"
+            },
+            "organization": {
+              "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+              "sk": "ORGANIZATION"
+            }
+          },
+          "shared": false,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001",
+          "entityType": "IDEMPOTENCY",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "payloadHash": "<hex64#3>"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION",
+          "count": 1,
+          "entityType": "ORG_LIMIT"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000004",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000004"
+          },
+          "attributes": {
+            "kind": "prepare"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:00:00.000Z",
+          "expiresAt": 1794823200
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments",
+          "entityType": "PROJECT_CATALOG",
+          "latestRevision": 1
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001",
+          "entityType": "PROJECT",
+          "definition": {
+            "name": "payments",
+            "revision": 1,
+            "repositories": [
+              {
+                "name": "demo",
+                "url": "https://examplehost/example/demo.git",
+                "path": "repo/demo",
+                "defaultBranch": "main",
+                "credentialRef": "host-app"
+              }
+            ],
+            "setup": [],
+            "readiness": [],
+            "orchestratorInstructions": "Delegate work."
+          }
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003",
+          "entityType": "CONVERSATION",
+          "id": "10000000-0000-4000-8000-000000000003",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK",
+          "entityType": "DEVELOPER_TASK_POINTER",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "requester": {
+            "kind": "developer",
+            "developerId": "local-owner",
+            "provider": "local-owner"
+          },
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "firstRequestId": "10000000-0000-4000-8000-000000000006",
+          "pendingPrompt": "Add a health endpoint"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META",
+          "entityType": "WORKSPACE",
+          "id": "10000000-0000-4000-8000-000000000002",
+          "companyId": "org_00000000000000000000",
+          "orgId": "org_00000000000000000000",
+          "ownerKey": "<hex64#2>",
+          "projectName": "payments",
+          "projectRevision": 1,
+          "status": "PREPARING",
+          "activeOperationId": "10000000-0000-4000-8000-000000000004",
+          "fence": 1,
+          "workspaceProject": "ORG#org_00000000000000000000#payments",
+          "workspaceCreatedAt": "2026-11-09T10:00:00.000Z",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000004",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "prepare",
+          "requestId": "10000000-0000-4000-8000-000000000005",
+          "payloadHash": "<hex64#4>",
+          "status": "ACCEPTED",
+          "fence": 1,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z",
+          "dispatch": {
+            "kind": "prepare",
+            "projectRevision": 1,
+            "payload": {}
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          }
+        }
+      ],
+      "taskViewJson": "{\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"status\":\"STARTING\",\"closing\":false,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"startingRevision\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:00:00.000Z\",\"operations\":[{\"id\":\"10000000-0000-4000-8000-000000000004\",\"kind\":\"prepare\",\"status\":\"ACCEPTED\"}]}",
+      "listTasksJson": "{\"tasks\":[{\"pk\":\"DEVELOPER#local-owner\",\"sk\":\"TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001\",\"entityType\":\"DEVELOPER_TASK_INDEX\",\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"orgId\":\"org_00000000000000000000\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"client\":\"an AI tool\",\"status\":\"STARTING\",\"shared\":false,\"startingRevision\":1,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:00:00.000Z\"}]}",
+      "workspaceOperationsJson": "[{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000004\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"ACCEPTED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:00:00.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"}}]",
+      "workspaceOperationsWithoutKeysJson": "[{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"ACCEPTED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:00:00.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"}}]"
+    },
+    {
+      "phase": "prepare-dispatched",
+      "nextId": 6,
+      "clock": 1794218540000,
+      "keys": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#WORKFLOW_RUN_WATCH",
+          "sk": "10000000-0000-4000-8000-000000000002#10000000-0000-4000-8000-000000000004"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004"
+        }
+      ],
+      "rows": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER",
+          "count": 1,
+          "entityType": "DEVELOPER_LIMIT"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_LIMIT_TASK",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "memberSk": "MEMBER",
+          "chargedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_TASK_INDEX",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "orgId": "org_00000000000000000000",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "client": "an AI tool",
+          "status": "STARTING",
+          "shared": false,
+          "startingRevision": 1,
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META",
+          "entityType": "DEVELOPER_TASK",
+          "companyId": "org_00000000000000000000",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "provider": "local-owner",
+          "developerName": "Local owner",
+          "origin": "app",
+          "client": "an AI tool",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "ownerKey": "<hex64#2>",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "startingRevision": 1,
+          "charge": {
+            "member": {
+              "pk": "DEVELOPER_LIMIT#local-owner",
+              "sk": "MEMBER"
+            },
+            "organization": {
+              "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+              "sk": "ORGANIZATION"
+            }
+          },
+          "shared": false,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001",
+          "entityType": "IDEMPOTENCY",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "payloadHash": "<hex64#3>"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION",
+          "count": 1,
+          "entityType": "ORG_LIMIT"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000004",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000004"
+          },
+          "attributes": {
+            "kind": "prepare"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:00:00.000Z",
+          "expiresAt": 1794823200
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments",
+          "entityType": "PROJECT_CATALOG",
+          "latestRevision": 1
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001",
+          "entityType": "PROJECT",
+          "definition": {
+            "name": "payments",
+            "revision": 1,
+            "repositories": [
+              {
+                "name": "demo",
+                "url": "https://examplehost/example/demo.git",
+                "path": "repo/demo",
+                "defaultBranch": "main",
+                "credentialRef": "host-app"
+              }
+            ],
+            "setup": [],
+            "readiness": [],
+            "orchestratorInstructions": "Delegate work."
+          }
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#WORKFLOW_RUN_WATCH",
+          "sk": "10000000-0000-4000-8000-000000000002#10000000-0000-4000-8000-000000000004",
+          "entityType": "WORKFLOW_RUN_WATCH",
+          "companyId": "org_00000000000000000000",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "operationId": "10000000-0000-4000-8000-000000000004",
+          "fence": 1,
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "watchedAt": "2026-11-09T10:01:10.000Z",
+          "expiresAt": 1794823270
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003",
+          "entityType": "CONVERSATION",
+          "id": "10000000-0000-4000-8000-000000000003",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK",
+          "entityType": "DEVELOPER_TASK_POINTER",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "requester": {
+            "kind": "developer",
+            "developerId": "local-owner",
+            "provider": "local-owner"
+          },
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "firstRequestId": "10000000-0000-4000-8000-000000000006",
+          "pendingPrompt": "Add a health endpoint"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META",
+          "entityType": "WORKSPACE",
+          "id": "10000000-0000-4000-8000-000000000002",
+          "companyId": "org_00000000000000000000",
+          "orgId": "org_00000000000000000000",
+          "ownerKey": "<hex64#2>",
+          "projectName": "payments",
+          "projectRevision": 1,
+          "status": "PREPARING",
+          "activeOperationId": "10000000-0000-4000-8000-000000000004",
+          "fence": 1,
+          "workspaceProject": "ORG#org_00000000000000000000#payments",
+          "workspaceCreatedAt": "2026-11-09T10:00:00.000Z",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z",
+          "machine": {
+            "machineId": "m-00000000-0000-4000-8000-000000000004",
+            "machineKey": "10000000-0000-4000-8000-000000000002"
+          },
+          "machineGeneration": 1
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000004",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "prepare",
+          "requestId": "10000000-0000-4000-8000-000000000005",
+          "payloadHash": "<hex64#4>",
+          "status": "DISPATCHING",
+          "fence": 1,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:01:10.000Z",
+          "dispatch": {
+            "kind": "prepare",
+            "projectRevision": 1,
+            "payload": {}
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:01:10.000Z"
+        }
+      ],
+      "taskViewJson": "{\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"status\":\"STARTING\",\"closing\":false,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"startingRevision\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:00:00.000Z\",\"operations\":[{\"id\":\"10000000-0000-4000-8000-000000000004\",\"kind\":\"prepare\",\"status\":\"DISPATCHING\"}]}",
+      "listTasksJson": "{\"tasks\":[{\"pk\":\"DEVELOPER#local-owner\",\"sk\":\"TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001\",\"entityType\":\"DEVELOPER_TASK_INDEX\",\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"orgId\":\"org_00000000000000000000\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"client\":\"an AI tool\",\"status\":\"STARTING\",\"shared\":false,\"startingRevision\":1,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:00:00.000Z\"}]}",
+      "workspaceOperationsJson": "[{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000004\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"DISPATCHING\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:01:10.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"}]",
+      "workspaceOperationsWithoutKeysJson": "[{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"DISPATCHING\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:01:10.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"}]"
+    },
+    {
+      "phase": "prepare-result",
+      "nextId": 7,
+      "clock": 1794218540000,
+      "keys": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007"
+        }
+      ],
+      "rows": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER",
+          "count": 1,
+          "entityType": "DEVELOPER_LIMIT"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_LIMIT_TASK",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "memberSk": "MEMBER",
+          "chargedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_TASK_INDEX",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "orgId": "org_00000000000000000000",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "client": "an AI tool",
+          "status": "RUNNING",
+          "shared": false,
+          "startingRevision": 1,
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META",
+          "entityType": "DEVELOPER_TASK",
+          "companyId": "org_00000000000000000000",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "provider": "local-owner",
+          "developerName": "Local owner",
+          "origin": "app",
+          "client": "an AI tool",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "ownerKey": "<hex64#2>",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "startingRevision": 1,
+          "charge": {
+            "member": {
+              "pk": "DEVELOPER_LIMIT#local-owner",
+              "sk": "MEMBER"
+            },
+            "organization": {
+              "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+              "sk": "ORGANIZATION"
+            }
+          },
+          "shared": false,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006",
+          "entityType": "IDEMPOTENCY",
+          "operationId": "10000000-0000-4000-8000-000000000007",
+          "payloadHash": "<hex64#5>"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001",
+          "entityType": "IDEMPOTENCY",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "payloadHash": "<hex64#3>"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION",
+          "count": 1,
+          "entityType": "ORG_LIMIT"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000004",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000004"
+          },
+          "attributes": {
+            "kind": "prepare"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:00:00.000Z",
+          "expiresAt": 1794823200
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000007",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000007"
+          },
+          "attributes": {
+            "kind": "task"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:02:20.000Z",
+          "expiresAt": 1794823340
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments",
+          "entityType": "PROJECT_CATALOG",
+          "latestRevision": 1
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001",
+          "entityType": "PROJECT",
+          "definition": {
+            "name": "payments",
+            "revision": 1,
+            "repositories": [
+              {
+                "name": "demo",
+                "url": "https://examplehost/example/demo.git",
+                "path": "repo/demo",
+                "defaultBranch": "main",
+                "credentialRef": "host-app"
+              }
+            ],
+            "setup": [],
+            "readiness": [],
+            "orchestratorInstructions": "Delegate work."
+          }
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003",
+          "entityType": "CONVERSATION",
+          "id": "10000000-0000-4000-8000-000000000003",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK",
+          "entityType": "DEVELOPER_TASK_POINTER",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "requester": {
+            "kind": "developer",
+            "developerId": "local-owner",
+            "provider": "local-owner"
+          },
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "firstRequestId": "10000000-0000-4000-8000-000000000006"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META",
+          "entityType": "WORKSPACE",
+          "id": "10000000-0000-4000-8000-000000000002",
+          "companyId": "org_00000000000000000000",
+          "orgId": "org_00000000000000000000",
+          "ownerKey": "<hex64#2>",
+          "projectName": "payments",
+          "projectRevision": 1,
+          "status": "BUSY",
+          "activeOperationId": "10000000-0000-4000-8000-000000000007",
+          "fence": 2,
+          "workspaceProject": "ORG#org_00000000000000000000#payments",
+          "workspaceCreatedAt": "2026-11-09T10:00:00.000Z",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "machine": {
+            "machineId": "m-00000000-0000-4000-8000-000000000004",
+            "machineKey": "10000000-0000-4000-8000-000000000002"
+          },
+          "machineGeneration": 1
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000004",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "prepare",
+          "requestId": "10000000-0000-4000-8000-000000000005",
+          "payloadHash": "<hex64#4>",
+          "status": "SUCCEEDED",
+          "fence": 1,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "dispatch": {
+            "kind": "prepare",
+            "projectRevision": 1,
+            "payload": {}
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:01:10.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000007",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "task",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "requestId": "10000000-0000-4000-8000-000000000006",
+          "payloadHash": "<hex64#5>",
+          "status": "ACCEPTED",
+          "fence": 2,
+          "createdAt": "2026-11-09T10:02:20.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "dispatch": {
+            "kind": "task",
+            "projectRevision": 1,
+            "payload": {
+              "conversationId": "10000000-0000-4000-8000-000000000003",
+              "prompt": "Add a health endpoint"
+            }
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          }
+        }
+      ],
+      "taskViewJson": "{\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"status\":\"RUNNING\",\"closing\":false,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"startingRevision\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"operations\":[{\"id\":\"10000000-0000-4000-8000-000000000004\",\"kind\":\"prepare\",\"status\":\"SUCCEEDED\"},{\"id\":\"10000000-0000-4000-8000-000000000007\",\"kind\":\"task\",\"status\":\"ACCEPTED\"}]}",
+      "listTasksJson": "{\"tasks\":[{\"pk\":\"DEVELOPER#local-owner\",\"sk\":\"TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001\",\"entityType\":\"DEVELOPER_TASK_INDEX\",\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"orgId\":\"org_00000000000000000000\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"client\":\"an AI tool\",\"status\":\"RUNNING\",\"shared\":false,\"startingRevision\":1,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\"}]}",
+      "workspaceOperationsJson": "[{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000004\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000007\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"ACCEPTED\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"}}]",
+      "workspaceOperationsWithoutKeysJson": "[{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"ACCEPTED\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"}}]"
+    },
+    {
+      "phase": "second-dispatched",
+      "nextId": 7,
+      "clock": 1794218610000,
+      "keys": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#WORKFLOW_RUN_WATCH",
+          "sk": "10000000-0000-4000-8000-000000000002#10000000-0000-4000-8000-000000000007"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007"
+        }
+      ],
+      "rows": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER",
+          "count": 1,
+          "entityType": "DEVELOPER_LIMIT"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_LIMIT_TASK",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "memberSk": "MEMBER",
+          "chargedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_TASK_INDEX",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "orgId": "org_00000000000000000000",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "client": "an AI tool",
+          "status": "RUNNING",
+          "shared": false,
+          "startingRevision": 1,
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META",
+          "entityType": "DEVELOPER_TASK",
+          "companyId": "org_00000000000000000000",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "provider": "local-owner",
+          "developerName": "Local owner",
+          "origin": "app",
+          "client": "an AI tool",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "ownerKey": "<hex64#2>",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "startingRevision": 1,
+          "charge": {
+            "member": {
+              "pk": "DEVELOPER_LIMIT#local-owner",
+              "sk": "MEMBER"
+            },
+            "organization": {
+              "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+              "sk": "ORGANIZATION"
+            }
+          },
+          "shared": false,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006",
+          "entityType": "IDEMPOTENCY",
+          "operationId": "10000000-0000-4000-8000-000000000007",
+          "payloadHash": "<hex64#5>"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001",
+          "entityType": "IDEMPOTENCY",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "payloadHash": "<hex64#3>"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION",
+          "count": 1,
+          "entityType": "ORG_LIMIT"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000004",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000004"
+          },
+          "attributes": {
+            "kind": "prepare"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:00:00.000Z",
+          "expiresAt": 1794823200
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000007",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000007"
+          },
+          "attributes": {
+            "kind": "task"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:02:20.000Z",
+          "expiresAt": 1794823340
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments",
+          "entityType": "PROJECT_CATALOG",
+          "latestRevision": 1
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001",
+          "entityType": "PROJECT",
+          "definition": {
+            "name": "payments",
+            "revision": 1,
+            "repositories": [
+              {
+                "name": "demo",
+                "url": "https://examplehost/example/demo.git",
+                "path": "repo/demo",
+                "defaultBranch": "main",
+                "credentialRef": "host-app"
+              }
+            ],
+            "setup": [],
+            "readiness": [],
+            "orchestratorInstructions": "Delegate work."
+          }
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#WORKFLOW_RUN_WATCH",
+          "sk": "10000000-0000-4000-8000-000000000002#10000000-0000-4000-8000-000000000007",
+          "entityType": "WORKFLOW_RUN_WATCH",
+          "companyId": "org_00000000000000000000",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "operationId": "10000000-0000-4000-8000-000000000007",
+          "fence": 2,
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "watchedAt": "2026-11-09T10:02:20.000Z",
+          "expiresAt": 1794823340
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003",
+          "entityType": "CONVERSATION",
+          "id": "10000000-0000-4000-8000-000000000003",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK",
+          "entityType": "DEVELOPER_TASK_POINTER",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "requester": {
+            "kind": "developer",
+            "developerId": "local-owner",
+            "provider": "local-owner"
+          },
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "firstRequestId": "10000000-0000-4000-8000-000000000006"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META",
+          "entityType": "WORKSPACE",
+          "id": "10000000-0000-4000-8000-000000000002",
+          "companyId": "org_00000000000000000000",
+          "orgId": "org_00000000000000000000",
+          "ownerKey": "<hex64#2>",
+          "projectName": "payments",
+          "projectRevision": 1,
+          "status": "BUSY",
+          "activeOperationId": "10000000-0000-4000-8000-000000000007",
+          "fence": 2,
+          "workspaceProject": "ORG#org_00000000000000000000#payments",
+          "workspaceCreatedAt": "2026-11-09T10:00:00.000Z",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "machine": {
+            "machineId": "m-00000000-0000-4000-8000-000000000004",
+            "machineKey": "10000000-0000-4000-8000-000000000002"
+          },
+          "machineGeneration": 1
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000004",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "prepare",
+          "requestId": "10000000-0000-4000-8000-000000000005",
+          "payloadHash": "<hex64#4>",
+          "status": "SUCCEEDED",
+          "fence": 1,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "dispatch": {
+            "kind": "prepare",
+            "projectRevision": 1,
+            "payload": {}
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:01:10.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000007",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "task",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "requestId": "10000000-0000-4000-8000-000000000006",
+          "payloadHash": "<hex64#5>",
+          "status": "DISPATCHING",
+          "fence": 2,
+          "createdAt": "2026-11-09T10:02:20.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "dispatch": {
+            "kind": "task",
+            "projectRevision": 1,
+            "payload": {
+              "conversationId": "10000000-0000-4000-8000-000000000003",
+              "prompt": "Add a health endpoint"
+            }
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:02:20.000Z"
+        }
+      ],
+      "taskViewJson": "{\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"status\":\"RUNNING\",\"closing\":false,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"startingRevision\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"operations\":[{\"id\":\"10000000-0000-4000-8000-000000000004\",\"kind\":\"prepare\",\"status\":\"SUCCEEDED\"},{\"id\":\"10000000-0000-4000-8000-000000000007\",\"kind\":\"task\",\"status\":\"DISPATCHING\"}]}",
+      "listTasksJson": "{\"tasks\":[{\"pk\":\"DEVELOPER#local-owner\",\"sk\":\"TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001\",\"entityType\":\"DEVELOPER_TASK_INDEX\",\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"orgId\":\"org_00000000000000000000\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"client\":\"an AI tool\",\"status\":\"RUNNING\",\"shared\":false,\"startingRevision\":1,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\"}]}",
+      "workspaceOperationsJson": "[{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000004\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000007\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"DISPATCHING\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:02:20.000Z\"}]",
+      "workspaceOperationsWithoutKeysJson": "[{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"DISPATCHING\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:02:20.000Z\"}]"
+    },
+    {
+      "phase": "second-result",
+      "nextId": 7,
+      "clock": 1794218610000,
+      "keys": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007"
+        }
+      ],
+      "rows": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER",
+          "count": 1,
+          "entityType": "DEVELOPER_LIMIT"
+        },
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "TASK#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_LIMIT_TASK",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "memberSk": "MEMBER",
+          "chargedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_TASK_INDEX",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "orgId": "org_00000000000000000000",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "client": "an AI tool",
+          "status": "SUCCEEDED",
+          "shared": false,
+          "startingRevision": 1,
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:03:30.000Z"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META",
+          "entityType": "DEVELOPER_TASK",
+          "companyId": "org_00000000000000000000",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "provider": "local-owner",
+          "developerName": "Local owner",
+          "origin": "app",
+          "client": "an AI tool",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "ownerKey": "<hex64#2>",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "startingRevision": 1,
+          "charge": {
+            "member": {
+              "pk": "DEVELOPER_LIMIT#local-owner",
+              "sk": "MEMBER"
+            },
+            "organization": {
+              "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+              "sk": "ORGANIZATION"
+            }
+          },
+          "shared": false,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006",
+          "entityType": "IDEMPOTENCY",
+          "operationId": "10000000-0000-4000-8000-000000000007",
+          "payloadHash": "<hex64#5>"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001",
+          "entityType": "IDEMPOTENCY",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "payloadHash": "<hex64#3>"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION",
+          "count": 1,
+          "entityType": "ORG_LIMIT"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000004",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000004"
+          },
+          "attributes": {
+            "kind": "prepare"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:00:00.000Z",
+          "expiresAt": 1794823200
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000007",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000007"
+          },
+          "attributes": {
+            "kind": "task"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:02:20.000Z",
+          "expiresAt": 1794823340
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments",
+          "entityType": "PROJECT_CATALOG",
+          "latestRevision": 1
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001",
+          "entityType": "PROJECT",
+          "definition": {
+            "name": "payments",
+            "revision": 1,
+            "repositories": [
+              {
+                "name": "demo",
+                "url": "https://examplehost/example/demo.git",
+                "path": "repo/demo",
+                "defaultBranch": "main",
+                "credentialRef": "host-app"
+              }
+            ],
+            "setup": [],
+            "readiness": [],
+            "orchestratorInstructions": "Delegate work."
+          }
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003",
+          "entityType": "CONVERSATION",
+          "id": "10000000-0000-4000-8000-000000000003",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK",
+          "entityType": "DEVELOPER_TASK_POINTER",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "requester": {
+            "kind": "developer",
+            "developerId": "local-owner",
+            "provider": "local-owner"
+          },
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "firstRequestId": "10000000-0000-4000-8000-000000000006"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META",
+          "entityType": "WORKSPACE",
+          "id": "10000000-0000-4000-8000-000000000002",
+          "companyId": "org_00000000000000000000",
+          "orgId": "org_00000000000000000000",
+          "ownerKey": "<hex64#2>",
+          "projectName": "payments",
+          "projectRevision": 1,
+          "status": "READY",
+          "activeOperationId": null,
+          "fence": 2,
+          "workspaceProject": "ORG#org_00000000000000000000#payments",
+          "workspaceCreatedAt": "2026-11-09T10:00:00.000Z",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:03:30.000Z",
+          "machine": {
+            "machineId": "m-00000000-0000-4000-8000-000000000004",
+            "machineKey": "10000000-0000-4000-8000-000000000002"
+          },
+          "machineGeneration": 1
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000004",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "prepare",
+          "requestId": "10000000-0000-4000-8000-000000000005",
+          "payloadHash": "<hex64#4>",
+          "status": "SUCCEEDED",
+          "fence": 1,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "dispatch": {
+            "kind": "prepare",
+            "projectRevision": 1,
+            "payload": {}
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:01:10.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000007",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "task",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "requestId": "10000000-0000-4000-8000-000000000006",
+          "payloadHash": "<hex64#5>",
+          "status": "SUCCEEDED",
+          "fence": 2,
+          "createdAt": "2026-11-09T10:02:20.000Z",
+          "updatedAt": "2026-11-09T10:03:30.000Z",
+          "dispatch": {
+            "kind": "task",
+            "projectRevision": 1,
+            "payload": {
+              "conversationId": "10000000-0000-4000-8000-000000000003",
+              "prompt": "Add a health endpoint"
+            }
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:02:20.000Z",
+          "result": {
+            "outcome": {
+              "kind": "ended"
+            }
+          }
+        }
+      ],
+      "taskViewJson": "{\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"status\":\"SUCCEEDED\",\"closing\":false,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"startingRevision\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"operations\":[{\"id\":\"10000000-0000-4000-8000-000000000004\",\"kind\":\"prepare\",\"status\":\"SUCCEEDED\"},{\"id\":\"10000000-0000-4000-8000-000000000007\",\"kind\":\"task\",\"status\":\"SUCCEEDED\"}]}",
+      "listTasksJson": "{\"tasks\":[{\"pk\":\"DEVELOPER#local-owner\",\"sk\":\"TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001\",\"entityType\":\"DEVELOPER_TASK_INDEX\",\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"orgId\":\"org_00000000000000000000\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"client\":\"an AI tool\",\"status\":\"SUCCEEDED\",\"shared\":false,\"startingRevision\":1,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:03:30.000Z\"}]}",
+      "workspaceOperationsJson": "[{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000004\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000007\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"SUCCEEDED\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:03:30.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:02:20.000Z\",\"result\":{\"outcome\":{\"kind\":\"ended\"}}}]",
+      "workspaceOperationsWithoutKeysJson": "[{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"SUCCEEDED\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:03:30.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:02:20.000Z\",\"result\":{\"outcome\":{\"kind\":\"ended\"}}}]"
+    },
+    {
+      "phase": "closed",
+      "nextId": 7,
+      "clock": 1794218610000,
+      "keys": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007"
+        }
+      ],
+      "rows": [
+        {
+          "pk": "DEVELOPER_LIMIT#local-owner",
+          "sk": "MEMBER",
+          "count": 0,
+          "entityType": "DEVELOPER_LIMIT"
+        },
+        {
+          "pk": "DEVELOPER#local-owner",
+          "sk": "TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001",
+          "entityType": "DEVELOPER_TASK_INDEX",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "orgId": "org_00000000000000000000",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "client": "an AI tool",
+          "status": "CLOSED",
+          "shared": false,
+          "startingRevision": 1,
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:03:30.000Z"
+        },
+        {
+          "pk": "DEVTASK#10000000-0000-4000-8000-000000000001",
+          "sk": "META",
+          "entityType": "DEVELOPER_TASK",
+          "companyId": "org_00000000000000000000",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "provider": "local-owner",
+          "developerName": "Local owner",
+          "origin": "app",
+          "client": "an AI tool",
+          "project": "payments",
+          "title": "Add a health endpoint",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "ownerKey": "<hex64#2>",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "startingRevision": 1,
+          "charge": {
+            "member": {
+              "pk": "DEVELOPER_LIMIT#local-owner",
+              "sk": "MEMBER"
+            },
+            "organization": {
+              "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+              "sk": "ORGANIZATION"
+            }
+          },
+          "shared": false,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:03:30.000Z",
+          "closedAt": "2026-11-09T10:03:30.000Z",
+          "releasedAt": "2026-11-09T10:03:30.000Z"
+        },
+        {
+          "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
+          "sk": "REQUEST#10000000-0000-4000-8000-000000000006",
+          "entityType": "IDEMPOTENCY",
+          "operationId": "10000000-0000-4000-8000-000000000007",
+          "payloadHash": "<hex64#5>"
+        },
+        {
+          "pk": "IDEMPOTENCY#local-owner#DEVTASK",
+          "sk": "REQUEST#20000000-0000-4000-8000-000000000001",
+          "entityType": "IDEMPOTENCY",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "payloadHash": "<hex64#3>"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#DEVELOPER_LIMIT#ORGANIZATION",
+          "sk": "ORGANIZATION",
+          "count": 0,
+          "entityType": "ORG_LIMIT"
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000004",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000004",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000004"
+          },
+          "attributes": {
+            "kind": "prepare"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:00:00.000Z",
+          "expiresAt": 1794823200
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#OUTBOX#10000000-0000-4000-8000-000000000007",
+          "sk": "OUTBOX",
+          "entityType": "OUTBOX",
+          "companyId": "org_00000000000000000000",
+          "id": "10000000-0000-4000-8000-000000000007",
+          "queue": "task-dispatch",
+          "body": {
+            "v": 1,
+            "companyId": "org_00000000000000000000",
+            "workspaceId": "10000000-0000-4000-8000-000000000002",
+            "operationId": "10000000-0000-4000-8000-000000000007"
+          },
+          "attributes": {
+            "kind": "task"
+          },
+          "status": "QUEUED",
+          "attempts": 0,
+          "queuedAt": "2026-11-09T10:02:20.000Z",
+          "expiresAt": 1794823340
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT_CATALOG",
+          "sk": "PROJECT#payments",
+          "entityType": "PROJECT_CATALOG",
+          "latestRevision": 1
+        },
+        {
+          "pk": "ORG#org_00000000000000000000#PROJECT#payments",
+          "sk": "REV#000000000001",
+          "entityType": "PROJECT",
+          "definition": {
+            "name": "payments",
+            "revision": 1,
+            "repositories": [
+              {
+                "name": "demo",
+                "url": "https://examplehost/example/demo.git",
+                "path": "repo/demo",
+                "defaultBranch": "main",
+                "credentialRef": "host-app"
+              }
+            ],
+            "setup": [],
+            "readiness": [],
+            "orchestratorInstructions": "Delegate work."
+          }
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "CONVERSATION#10000000-0000-4000-8000-000000000003",
+          "entityType": "CONVERSATION",
+          "id": "10000000-0000-4000-8000-000000000003",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:00:00.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "DEVELOPER_TASK",
+          "entityType": "DEVELOPER_TASK_POINTER",
+          "taskId": "10000000-0000-4000-8000-000000000001",
+          "developerId": "local-owner",
+          "requester": {
+            "kind": "developer",
+            "developerId": "local-owner",
+            "provider": "local-owner"
+          },
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "firstRequestId": "10000000-0000-4000-8000-000000000006",
+          "cancelledAt": "2026-11-09T10:03:30.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "META",
+          "entityType": "WORKSPACE",
+          "id": "10000000-0000-4000-8000-000000000002",
+          "companyId": "org_00000000000000000000",
+          "orgId": "org_00000000000000000000",
+          "ownerKey": "<hex64#2>",
+          "projectName": "payments",
+          "projectRevision": 1,
+          "status": "CLOSED",
+          "activeOperationId": null,
+          "fence": 3,
+          "workspaceProject": "ORG#org_00000000000000000000#payments",
+          "workspaceCreatedAt": "2026-11-09T10:00:00.000Z",
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:03:30.000Z",
+          "machine": {
+            "machineId": "m-00000000-0000-4000-8000-000000000004",
+            "machineKey": "10000000-0000-4000-8000-000000000002"
+          },
+          "machineGeneration": 1,
+          "closedAt": "2026-11-09T10:03:30.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000004",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000004",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "prepare",
+          "requestId": "10000000-0000-4000-8000-000000000005",
+          "payloadHash": "<hex64#4>",
+          "status": "SUCCEEDED",
+          "fence": 1,
+          "createdAt": "2026-11-09T10:00:00.000Z",
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "dispatch": {
+            "kind": "prepare",
+            "projectRevision": 1,
+            "payload": {}
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:01:10.000Z"
+        },
+        {
+          "pk": "WORKSPACE#10000000-0000-4000-8000-000000000002",
+          "sk": "OPERATION#10000000-0000-4000-8000-000000000007",
+          "entityType": "OPERATION",
+          "companyId": "org_00000000000000000000",
+          "eventSequence": 0,
+          "id": "10000000-0000-4000-8000-000000000007",
+          "workspaceId": "10000000-0000-4000-8000-000000000002",
+          "orgId": "org_00000000000000000000",
+          "kind": "task",
+          "conversationId": "10000000-0000-4000-8000-000000000003",
+          "requestId": "10000000-0000-4000-8000-000000000006",
+          "payloadHash": "<hex64#5>",
+          "status": "SUCCEEDED",
+          "fence": 2,
+          "createdAt": "2026-11-09T10:02:20.000Z",
+          "updatedAt": "2026-11-09T10:03:30.000Z",
+          "dispatch": {
+            "kind": "task",
+            "projectRevision": 1,
+            "payload": {
+              "conversationId": "10000000-0000-4000-8000-000000000003",
+              "prompt": "Add a health endpoint"
+            }
+          },
+          "requester": {
+            "personId": "local-owner",
+            "provider": "local-owner"
+          },
+          "machineId": "m-00000000-0000-4000-8000-000000000004",
+          "deliveredAt": "2026-11-09T10:02:20.000Z",
+          "result": {
+            "outcome": {
+              "kind": "ended"
+            }
+          }
+        }
+      ],
+      "taskViewJson": "{\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"status\":\"CLOSED\",\"closing\":false,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"startingRevision\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:03:30.000Z\",\"closedAt\":\"2026-11-09T10:03:30.000Z\",\"operations\":[{\"id\":\"10000000-0000-4000-8000-000000000004\",\"kind\":\"prepare\",\"status\":\"SUCCEEDED\"},{\"id\":\"10000000-0000-4000-8000-000000000007\",\"kind\":\"task\",\"status\":\"SUCCEEDED\"}]}",
+      "listTasksJson": "{\"tasks\":[{\"pk\":\"DEVELOPER#local-owner\",\"sk\":\"TASK#2026-11-09T10:00:00.000Z#10000000-0000-4000-8000-000000000001\",\"entityType\":\"DEVELOPER_TASK_INDEX\",\"taskId\":\"10000000-0000-4000-8000-000000000001\",\"orgId\":\"org_00000000000000000000\",\"project\":\"payments\",\"title\":\"Add a health endpoint\",\"client\":\"an AI tool\",\"status\":\"CLOSED\",\"shared\":false,\"startingRevision\":1,\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:03:30.000Z\"}]}",
+      "workspaceOperationsJson": "[{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000004\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"pk\":\"WORKSPACE#10000000-0000-4000-8000-000000000002\",\"sk\":\"OPERATION#10000000-0000-4000-8000-000000000007\",\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"SUCCEEDED\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:03:30.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:02:20.000Z\",\"result\":{\"outcome\":{\"kind\":\"ended\"}}}]",
+      "workspaceOperationsWithoutKeysJson": "[{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000004\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"prepare\",\"requestId\":\"10000000-0000-4000-8000-000000000005\",\"payloadHash\":\"<hex64#4>\",\"status\":\"SUCCEEDED\",\"fence\":1,\"createdAt\":\"2026-11-09T10:00:00.000Z\",\"updatedAt\":\"2026-11-09T10:02:20.000Z\",\"dispatch\":{\"kind\":\"prepare\",\"projectRevision\":1,\"payload\":{}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:01:10.000Z\"},{\"entityType\":\"OPERATION\",\"companyId\":\"org_00000000000000000000\",\"eventSequence\":0,\"id\":\"10000000-0000-4000-8000-000000000007\",\"workspaceId\":\"10000000-0000-4000-8000-000000000002\",\"orgId\":\"org_00000000000000000000\",\"kind\":\"task\",\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"requestId\":\"10000000-0000-4000-8000-000000000006\",\"payloadHash\":\"<hex64#5>\",\"status\":\"SUCCEEDED\",\"fence\":2,\"createdAt\":\"2026-11-09T10:02:20.000Z\",\"updatedAt\":\"2026-11-09T10:03:30.000Z\",\"dispatch\":{\"kind\":\"task\",\"projectRevision\":1,\"payload\":{\"conversationId\":\"10000000-0000-4000-8000-000000000003\",\"prompt\":\"Add a health endpoint\"}},\"requester\":{\"personId\":\"local-owner\",\"provider\":\"local-owner\"},\"machineId\":\"m-00000000-0000-4000-8000-000000000004\",\"deliveredAt\":\"2026-11-09T10:02:20.000Z\",\"result\":{\"outcome\":{\"kind\":\"ended\"}}}]"
+    }
+  ]
+}

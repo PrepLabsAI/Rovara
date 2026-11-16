@@ -95,3 +95,11 @@ describe("GET /v1/admin/workspaces (FR-030, A10)", () => {
     expect(rows[0]?.owner.developerName).toContain("[REDACTED]");
   });
 });
+
+it("admin workspace lists omit discovery pointers even if a stale index carries workspace fields", async () => {
+  const h = await createAdminReadBroker();
+  await ensureWorkspace(h.handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000905`, "U0PRIYA001");
+  const [workspace] = h.db.find((row) => row.entityType === "WORKSPACE");
+  h.db.set({ ...workspace!, entityType: "WORKSPACE_COMPANY_POINTER" });
+  expect((await h.admin("GET", "/v1/admin/workspaces")).body.workspaces).toEqual([]);
+});

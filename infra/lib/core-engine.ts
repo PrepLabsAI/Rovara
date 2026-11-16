@@ -17,8 +17,7 @@
 //     the spec 056 dispatch code; its reads of this queue; and, only while the switch is not off, the deleter start (the core ends an orphan machine) and the
 //     callback signing key (the core issues a worker's capability and repository grant on the dispatcher, so they are the ones the broker verifies).
 //
-// Still not here (lane E2 step 6, the broker wiring): the broker's branch for a scheduled core job event and its start through the core. Until then the CLI accepts only `off`
-// (CORE_ENGINE_BROKER_WIRED); the schedules and the mapping stay DISABLED.
+// The broker wiring is now present (CORE_ENGINE_BROKER_WIRED): the CLI accepts the reviewed switch values, and schedules and mapping are enabled by the named switch.
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {

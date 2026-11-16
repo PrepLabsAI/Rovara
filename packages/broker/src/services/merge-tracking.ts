@@ -368,8 +368,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   let tierRunning: Promise<number> | undefined;
   const runTierPass = async (): Promise<number> => {
     const rows = (await queryAll(store, companyId === IMPLICIT_COMPANY_ID
-      ? { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }
-      : { pk: companyScoped(companyId, "TIER_CHECKS_DUE"), sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
+      ? { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" }, filter: when.or(when.eq("companyId", companyId), when.notExists("companyId")) }
+      : { pk: companyScoped(companyId, "TIER_CHECKS_DUE"), sk: { op: "beginsWith", prefix: "TASK#" }, filter: when.eq("companyId", companyId) }).catch(() => []))
       .sort((left, right) => Number(left["lastRunAt"] ?? 0) - Number(right["lastRunAt"] ?? 0));
     const passEnds = now() + TIER_PASS_MAX_MS;
     let ran = 0;

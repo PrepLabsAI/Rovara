@@ -5,6 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -564,6 +565,7 @@ describe("task-token key and membership IAM", () => {
 
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     const remainder = structuredClone(named);
+    withoutCoreModelAccessRoute(remainder);
     const [taskId] = signingKey(remainder, "DeveloperSignInTaskTokenKey");
     delete remainder.Resources[taskId];
     const aliases = ofType(remainder, "AWS::KMS::Alias").filter(([, r]) => r.Properties.AliasName === "alias/agentx/staging/task-tokens");

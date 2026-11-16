@@ -15,6 +15,7 @@ import { approvalRecordKey } from "../../packages/broker/src/core/decisions/appr
 import { designApprovalKey } from "../../packages/broker/src/core/design-review/decision.js";
 import { ROVARA_CODE_PROGRAM } from "../../packages/broker/src/core/plan/program.js";
 import { deriveKey } from "../../packages/broker/src/local/app/app.js";
+import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { CALLBACK_KEY_FILE_NAME } from "../../packages/broker/src/local/state-directory.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
@@ -58,7 +59,8 @@ async function launch() {
   const store = runtime.registry.require("storage");
   const task = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
   const workspaceId = task["workspaceId"] as string;
-  const operationId = (await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))!["activeOperationId"] as string;
+  const location = (await locateWorkspace(runtime.app.flow.deps, workspaceId))!;
+  const operationId = location.workspace["activeOperationId"] as string;
   /** The owner's "open in browser": the server opens a single-use address, which a browser follows once to land on the page. */
   const browse = async (path: string): Promise<URL> => {
     const before = opened.length;
@@ -68,7 +70,7 @@ async function launch() {
     const hop = await raw(runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } });
     return new URL(hop.headers["location"] as string, runtime.pagesUrl);
   };
-  return { root, stateDirectory, runtime, api, store, browse, taskId, workspaceId, operationId, opened };
+  return { root, stateDirectory, runtime, api, store, browse, taskId, workspaceId, operationId, location, opened };
 }
 type World = Awaited<ReturnType<typeof launch>>;
 
@@ -90,7 +92,7 @@ describe("a design-review operation's model key", () => {
   it("is never the operation's own: the same capability that gets an ordinary operation a token gets a design-review operation nothing", async () => {
     const w = await launch();
     const root = Buffer.from((await readFile(join(w.stateDirectory, CALLBACK_KEY_FILE_NAME), "utf8")).trim(), "base64url");
-    const operation = (await w.store.get({ pk: `WORKSPACE#${w.workspaceId}`, sk: `OPERATION#${w.operationId}` }))!;
+    const operation = (await w.store.get(w.location.operationKey(w.operationId)))!;
     const capability = new CallbackCapabilities(deriveKey(root, "callback-capability")).issue({
       workspaceId: w.workspaceId, operationId: w.operationId, fence: operation["fence"] as number, actions: ["artifacts", "events", "result", "model-access"], expiresInSeconds: 600,
     });
@@ -100,7 +102,7 @@ describe("a design-review operation's model key", () => {
     expect(ordinary.text).toContain("apiKey");
     // The same operation, now a design review's round (it has a stored binding): no token of its own, with or without a slot, and no slot nobody allocated.
     const binding = DesignReviewBindingSchema.parse({ version: 1, round: 1, reviewers: [{ role: "critic", keySlot: "r1-critic", packetDigest: "a".repeat(64), model: { provider: "anthropic", modelId: "m1" } }] });
-    await w.store.update({ key: { pk: `WORKSPACE#${w.workspaceId}`, sk: `OPERATION#${w.operationId}` }, ops: [{ op: "set", path: ["workflowMode"], value: "PLAN_CRITIQUE" }, { op: "set", path: ["designReview"], value: JSON.parse(JSON.stringify(binding)) as never }] });
+    await w.store.update({ key: w.location.operationKey(w.operationId), ops: [{ op: "set", path: ["workflowMode"], value: "PLAN_CRITIQUE" }, { op: "set", path: ["designReview"], value: JSON.parse(JSON.stringify(binding)) as never }] });
     const own = await modelAccess(w, capability);
     expect(own.status).toBe(403);
     expect(own.text).toContain("CALLBACK_FORBIDDEN");

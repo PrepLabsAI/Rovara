@@ -1,8 +1,9 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Lane L6a, round 1 of review: the races and refusals the reviewers named, each as a test that fails if the behaviour breaks.
 import { describe, expect, it } from "vitest";
 import { companyScoped, projectMetaKey, queryAll, type Admission, type AdmissionRequest, type TransactItem, type WorkerInvocation } from "@agentx/contracts";
 import { acceptStep, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { chargeMarkerKey, developerCharge, operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { chargeMarkerKey, developerCharge, operationKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { COMPANY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
@@ -30,8 +31,8 @@ async function drain(h: Harness, rounds = 12): Promise<void> {
     h.clock.advance(70);
   }
 }
-const workspaceOf = async (h: Harness, id: string) => (await h.store.get(workspaceKey(id))) as unknown as WorkspaceRecord;
-const operationsOf = async (h: Harness, workspaceId: string) => (await queryAll(h.store, { pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } })) as unknown as OperationRecord[];
+const workspaceOf = async (h: Harness, id: string) => (await h.store.get(workspaceKey(T1_COMPANY, id))) as unknown as WorkspaceRecord;
+const operationsOf = async (h: Harness, workspaceId: string) => (await queryAll(h.store, { pk: workspaceKey(T1_COMPANY, workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } })) as unknown as OperationRecord[];
 
 describe("a close that races a dispatch", () => {
   it("sends nothing to the worker, issues no credential, and stops the machine it could not be told about", async () => {
@@ -157,7 +158,7 @@ describe("results", () => {
 
   it("refuses a result for an operation of another company", async () => {
     const { h, workspace, understand } = await understandRunning();
-    await h.store.update({ key: operationKey(workspace.id, understand.operationId), ops: [{ op: "set", path: ["companyId"], value: "org_zzzzzzzzzzzzzzzzzzzz" }] });
+    await h.store.update({ key: operationKey(T1_COMPANY, workspace.id, understand.operationId), ops: [{ op: "set", path: ["companyId"], value: "org_zzzzzzzzzzzzzzzzzzzz" }] });
     await expect(h.flow.recordResult({ workspaceId: workspace.id, operationId: understand.operationId, fence: 2, status: "SUCCEEDED" })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });
@@ -302,7 +303,7 @@ describe("the outbox and the stored records", () => {
     const documents = [
       ...(await operationsOf(h, workspace.id)), workspace, await readTask(h.deps, started.task.taskId),
       await h.store.get({ pk: companyScoped(COMPANY, `OUTBOX#${invocation.operationId}`), sk: "OUTBOX" }),
-      await h.store.get({ pk: `WORKSPACE#${workspace.id}`, sk: "DEVELOPER_TASK" }),
+      await h.store.get(taskPointerKey(T1_COMPANY, workspace.id)),
     ];
     for (const document of documents) for (const secret of secrets) expect(JSON.stringify(document)).not.toContain(secret);
     expect(documents.filter((document) => document !== undefined)).toHaveLength(documents.length);
@@ -361,7 +362,7 @@ describe("redelivery and close, once more", () => {
     await h.flow.dispatchOnce();
     const workspace = await workspaceOf(h, started.task.workspaceId);
     const [prepare] = await operationsOf(h, workspace.id);
-    await h.store.update({ key: operationKey(workspace.id, prepare!.id), ops: [{ op: "set", path: ["status"], value: "RUNNING" }] });
+    await h.store.update({ key: operationKey(T1_COMPANY, workspace.id, prepare!.id), ops: [{ op: "set", path: ["status"], value: "RUNNING" }] });
     const queue = await h.queues.queue("task-dispatch");
     await queue.enqueue({ body: { v: 1, workspaceId: workspace.id, operationId: prepare!.id } });
     expect(await h.flow.dispatchOnce()).toMatchObject({ dropped: 1, failed: 0 });
@@ -376,7 +377,7 @@ describe("redelivery and close, once more", () => {
     const realHealth = h.machines.health.bind(h.machines);
     h.machines.health = async (machineId) => {
       const [prepare] = await operationsOf(h, started.task.workspaceId);
-      await h.store.update({ key: operationKey(started.task.workspaceId, prepare!.id), ops: [{ op: "set", path: ["status"], value: "RUNNING" }] });
+      await h.store.update({ key: operationKey(T1_COMPANY, started.task.workspaceId, prepare!.id), ops: [{ op: "set", path: ["status"], value: "RUNNING" }] });
       return realHealth(machineId);
     };
     expect(await h.flow.dispatchOnce()).toMatchObject({ dropped: 1, delivered: 0, failed: 0 });
@@ -411,7 +412,7 @@ describe("redelivery and close, once more", () => {
     await h.registerProject();
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
     // The workspace moved on (a newer fence), so the job is no longer wanted; but the store refuses every write for a while.
-    await h.store.update({ key: workspaceKey(started.task.workspaceId), ops: [{ op: "set", path: ["fence"], value: 9 }] });
+    await h.store.update({ key: workspaceKey(T1_COMPANY, started.task.workspaceId), ops: [{ op: "set", path: ["fence"], value: 9 }] });
     const realTransact = h.store.transact.bind(h.store);
     h.store.transact = async () => ({ applied: false, reason: "condition_failed", failed: [0] });
     expect(await h.flow.dispatchOnce()).toMatchObject({ retried: 1, failed: 0 });

@@ -1,21 +1,23 @@
-// Lane L6a, task flow core: the keys of the records the flow writes. They are Cloud's key forms (a Code store and a Cloud
-// table can hold the same items, decision 45.6): a record that is addressed by a random id keeps Cloud's unscoped key, and a
-// partition that gathers many tasks (the dispatch rows) carries the company scope.
-import { companyScoped, orgLimitKey, type DocumentKey, type OrgId } from "@agentx/contracts";
+// Core workspaces created now use company keys. Existing workspaces are located once before their rows are addressed.
+import { agentXError, OrgIdSchema, companyScoped, orgLimitKey, type DocumentKey, type OrgId } from "@agentx/contracts";
 
-export { taskKey, taskIndexKey, taskPointerKey, startIdempotencyKey } from "../../developer/task-records.js";
+export { taskKey, taskIndexKey, startIdempotencyKey } from "../../developer/task-records.js";
 
-export const workspaceKey = (workspaceId: string): DocumentKey => ({ pk: `WORKSPACE#${workspaceId}`, sk: "META" });
-
-export const operationKey = (workspaceId: string, operationId: string): DocumentKey => ({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` });
-
-/** The sort-key prefix of a workspace's operations, for a query on the workspace's partition. */
+export function workspacePartition(companyId: string, workspaceId: string): string {
+  if (!OrgIdSchema.safeParse(companyId).success) throw agentXError("CONFIG_INVALID", "invalid workspace company");
+  return companyScoped(companyId, `WORKSPACE#${workspaceId}`);
+}
+export const workspaceKey = (companyId: string, workspaceId: string): DocumentKey => ({ pk: workspacePartition(companyId, workspaceId), sk: "META" });
 export const OPERATION_SK_PREFIX = "OPERATION#";
-
-export const conversationKey = (workspaceId: string, conversationId: string): DocumentKey => ({ pk: `WORKSPACE#${workspaceId}`, sk: `CONVERSATION#${conversationId}` });
-
-/** One accepted request of one workspace: a repeated request id answers with the first operation (Cloud's acceptTask rule). */
-export const operationRequestKey = (ownerKey: string, workspaceId: string, requestId: string): DocumentKey => ({ pk: `IDEMPOTENCY#${ownerKey}#${workspaceId}`, sk: `REQUEST#${requestId}` });
+export const operationKey = (companyId: string, workspaceId: string, operationId: string): DocumentKey => ({ pk: workspacePartition(companyId, workspaceId), sk: `${OPERATION_SK_PREFIX}${operationId}` });
+export const conversationKey = (companyId: string, workspaceId: string, conversationId: string): DocumentKey => ({ pk: workspacePartition(companyId, workspaceId), sk: `CONVERSATION#${conversationId}` });
+export const taskPointerKey = (companyId: string, workspaceId: string): DocumentKey & { sk: "DEVELOPER_TASK" } => ({ pk: workspacePartition(companyId, workspaceId), sk: "DEVELOPER_TASK" });
+export const operationEventPrefix = (operationId: string): string => `EVENT#${operationId}#`;
+export const operationEventKey = (companyId: string, workspaceId: string, operationId: string, sequence: number): DocumentKey => ({ pk: workspacePartition(companyId, workspaceId), sk: `${operationEventPrefix(operationId)}${String(sequence).padStart(10, "0")}` });
+export function operationRequestKey(companyId: string, ownerKey: string, workspaceId: string, requestId: string): DocumentKey {
+  if (!OrgIdSchema.safeParse(companyId).success) throw agentXError("CONFIG_INVALID", "invalid workspace company");
+  return { pk: companyScoped(companyId, `IDEMPOTENCY#${ownerKey}#${workspaceId}`), sk: `REQUEST#${requestId}` };
+}
 
 /** The partition of one company's workflow dispatch rows (Cloud keeps one install-wide partition; Code scopes it, decision 45.6). */
 export const dispatchPartition = (companyId: string): string => companyScoped(companyId, "WORKFLOW_DISPATCH");

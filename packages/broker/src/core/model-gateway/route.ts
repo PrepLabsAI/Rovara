@@ -24,6 +24,7 @@ const scopeSchema = z.object({
 export async function handleModelAccess(flow: TaskFlowDeps, capabilities: CallbackCapabilities, gateway: ModelGateway, request: BrokerRequest): Promise<BrokerResponse> {
   try {
     return await withinTaskTokenDeadline(async deadline => {
+      if (new URL(request.path, "https://broker.invalid").searchParams.has("slot")) throw new Error("review slots need their own model access");
       const token = request.headers["x-agentx-callback-capability"];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
       if (token.length > 4096) throw agentXError("CALLBACK_FORBIDDEN", "invalid capability");

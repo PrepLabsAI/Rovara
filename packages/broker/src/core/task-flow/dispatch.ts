@@ -1,3 +1,4 @@
+import { workspaceKeys } from "./workspace-location.js";
 // Lane L6a, task flow core: dispatching operations to worker machines. The consumer of the dispatch queue: for each message it finds the
 // operation, makes sure the workspace's machine is running and ready, builds the worker's invocation (with a repository grant and a callback
 // capability issued now, not when the operation was accepted, so a delivery that waits for a machine never carries an expired one) and hands it to
@@ -34,7 +35,6 @@ import { admit, releaseAdmission } from "./admission.js";
 import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, taskPointerKey, workspaceKey } from "./keys.js";
 import { RUN_START_ACTION, cancelInvocation, isSpendStopCode, queuedCancelOf, spendStopReason } from "./money-stop.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { readWorkspace } from "./stage-machine.js";
@@ -176,7 +176,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
 
   // A deployed install's per-run stop (money-stop.ts): a model run is not handed to a worker when its task or the company's day is at its cap; it ends with the fixed reason.
   if (deps.moneyStop !== undefined && operation.dispatch.kind === "task") {
-    const taskId = (await deps.store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+    const taskId = (await deps.store.get((await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
     const gate = typeof taskId === "string" && taskId !== ""
       ? await deps.admission.admit({ companyId: deps.companyId, idempotencyKey: `${RUN_START_ACTION}:${operation.id}`, action: RUN_START_ACTION, projectName: workspace.projectName, subject: { type: "task", id: taskId } })
       : { allowed: false as const, code: "spend_unknown", message: "" };
@@ -185,7 +185,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
       // A run its task's or the day's cap refuses ends as a spend stop (CANCELLED with its reason, which blocks the step with the fixed words), not as a failure a retry policy would repeat.
       const now = iso(deps);
       await deps.store.update({
-        key: operationKey(operation.workspaceId, operation.id),
+        key: (await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id),
         ops: [change.set("status", "CANCEL_REQUESTED"), change.set("stopReason", gate.code), change.set("stopRequestedAt", now), change.set("updatedAt", now)],
         condition: when.and(when.eq("fence", operation.fence), when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING"))),
       });
@@ -408,7 +408,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
 async function rememberMachine(deps: TaskFlowDeps, workspace: WorkspaceRecord, handle: { machineId: string; machineKey: string }, reservationId: string | undefined): Promise<boolean> {
   if (workspace.machine?.machineId === handle.machineId) return true;
   const written = await deps.store.update({
-    key: workspaceKey(workspace.id),
+    key: (await workspaceKeys(deps, workspace.id)).workspaceKey,
     // The reservation is kept with the machine so the path that stops it can give it back.
     ops: [
       change.set("machine", { machineId: handle.machineId, machineKey: handle.machineKey }), change.set("machineGeneration", (workspace.machineGeneration ?? 0) + 1),
@@ -423,7 +423,7 @@ async function rememberMachine(deps: TaskFlowDeps, workspace: WorkspaceRecord, h
 async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, machineId: string | undefined, reservationId: string | undefined): Promise<void> {
   if (machineId === undefined) return;
   // Only the machine this handler saw is forgotten: a concurrent delivery may have recorded another since.
-  const forgotten = await deps.store.update({ key: workspaceKey(workspaceId), ops: [change.remove("machine"), change.remove("machineReservationId")], condition: when.eq(["machine", "machineId"], machineId) });
+  const forgotten = await deps.store.update({ key: (await workspaceKeys(deps, workspaceId)).workspaceKey, ops: [change.remove("machine"), change.remove("machineReservationId")], condition: when.eq(["machine", "machineId"], machineId) });
   if (forgotten.applied) await releaseAdmission(deps, reservationId);
 }
 
@@ -433,11 +433,12 @@ async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, machineId:
  */
 async function claimDispatch(deps: TaskFlowDeps, operation: OperationRecord, machineId: string, modelChoice?: OperationModelChoice): Promise<boolean> {
   const now = iso(deps);
+  const location = await workspaceKeys(deps, operation.workspaceId);
   const claimed = await deps.store.transact([
     // The operation is watched from the hand-over on (`sweepLostRuns`): the machine it runs on may be lost with no result ever coming back.
     runWatchItem(deps, operation, machineId, now),
-    { kind: "check", key: workspaceKey(operation.workspaceId), condition: when.and(when.eq("fence", operation.fence), when.eq("activeOperationId", operation.id), when.not(when.or(when.eq("status", "CLOSED"), when.eq("status", "CLOSING")))) },
-    { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now), ...(modelChoice === undefined ? [] : [change.set("modelChoice", modelChoice as unknown as JsonValue)])], condition: when.and(when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING")), ...(modelChoice === undefined ? [] : [when.notExists("modelChoice")])) },
+    { kind: "check", key: location.workspaceKey, condition: when.and(when.eq("fence", operation.fence), when.eq("activeOperationId", operation.id), when.not(when.or(when.eq("status", "CLOSED"), when.eq("status", "CLOSING")))) },
+    { kind: "update", key: location.operationKey(operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now), ...(modelChoice === undefined ? [] : [change.set("modelChoice", modelChoice as unknown as JsonValue)])], condition: when.and(when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING")), ...(modelChoice === undefined ? [] : [when.notExists("modelChoice")])) },
   ]);
   return claimed.applied;
 }

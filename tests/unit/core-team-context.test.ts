@@ -62,10 +62,11 @@ async function setup(options: { off?: boolean; teamOff?: boolean; teamCompany?: 
   for (const [companyId, developerId, marker] of [[A, "owner-a", "only-alpha"], [B, "owner-b", "only-bravo"]] as const) {
     const workspaceId = randomUUID(), operationId = randomUUID(), taskId = randomUUID();
     const put = async (item: Record<string, unknown>) => world.store.put({ item: JSON.parse(JSON.stringify(item)) as StoredDocument });
-    await put({ ...workspaceKey(workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId, orgId: companyId, projectName: "payments", activeOperationId: operationId, fence: 1 });
-    await put({ ...taskPointerKey(workspaceId), taskId });
+    await put({ pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId });
+    await put({ ...workspaceKey(companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId, orgId: companyId, projectName: "payments", activeOperationId: operationId, fence: 1 });
+    await put({ ...taskPointerKey(companyId, workspaceId), taskId });
     await put({ ...taskKey(taskId), taskId, companyId, developerId, project: "payments", workspaceId });
-    await put({ ...operationKey(workspaceId, operationId), id: operationId, workspaceId, companyId, fence: 1, status: "RUNNING", workflowMode: "PLAN" });
+    await put({ ...operationKey(companyId, workspaceId, operationId), id: operationId, workspaceId, companyId, fence: 1, status: "RUNNING", workflowMode: "PLAN" });
     await put({ ...engineStampKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: new Date(world.clock.now).toISOString() } });
     const record = createTeamRecord({ store: world.store, companyId, now: () => world.clock.now });
     await record.put({ project: "payments", taskId, authorId: developerId, kind: "decision", text: `shared query ${marker}`, sourceRef: sameSource, occurredAt: new Date(world.clock.now).toISOString() });
@@ -141,7 +142,7 @@ describe("core Team context", () => {
 it("refuses missing or contradictory workspace company, stale operations and foreign tasks", async () => {
   for (const patch of [{ companyId: undefined }, { companyId: B }, { orgId: B }, { activeOperationId: randomUUID() }, { fence: 2 }]) {
     const { root, world, a } = await setup();
-    const item = (await world.store.get(workspaceKey(a.workspaceId)))!;
+    const item = (await world.store.get(workspaceKey(a.companyId, a.workspaceId)))!;
     await a.put({ ...item, ...patch });
     const selected = vi.spyOn(root.app, "runtimeFor");
     const reply = await root.callback(a.request());
@@ -216,7 +217,11 @@ it("ends the whole call at the existing deadline and stops late authorization re
   const original = world.store.get.bind(world.store);
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
-  const spy = vi.spyOn(world.store, "get").mockImplementationOnce(async (key) => { await held; return original(key); });
+  // Hold the operation read, immediately before authorization, rather than a discovery read inside a multi-read port.
+  const spy = vi.spyOn(world.store, "get").mockImplementation(async (key) => {
+    if (key.sk.startsWith("OPERATION#")) await held;
+    return original(key);
+  });
   const request = root.callback(a.request());
   await vi.advanceTimersByTimeAsync(30_001);
   expect((await request)?.statusCode).toBe(403);
@@ -245,10 +250,20 @@ it("refuses oversized or malformed search replies and search failures without ec
 it("rejects invalid methods, stage, status, fence and operation company with no reflected data", async () => {
   for (const patch of [{ companyId: B }, { workspaceId: randomUUID() }, { id: randomUUID() }, { fence: 2 }, { status: "SUCCEEDED" }, { status: "CANCEL_REQUESTED" }, { status: "private-canary" }, { workflowMode: "IMPLEMENT" }, { workflowMode: "private-canary" }]) {
     const { root, world, a } = await setup();
-    await a.put({ ...(await world.store.get(operationKey(a.workspaceId, a.operationId)))!, ...patch });
+    await a.put({ ...(await world.store.get(operationKey(a.companyId, a.workspaceId, a.operationId)))!, ...patch });
     const result = await root.callback(a.request());
     expect(result?.body).toBe(JSON.stringify({ status: "REFUSED", text: "this operation cannot use context tools" }));
   }
   const { root, a } = await setup();
   expect((await root.callback({ ...a.request(), method: "GET" }))?.statusCode).toBe(403);
 });
+
+ it.each(["missing", "foreign"])("refuses and logs exactly one fixed integrity event for a %s scoped workspace", async (kind) => {
+  const { world, root, a } = await setup();
+  const key = workspaceKey(a.companyId, a.workspaceId);
+  if (kind === "missing") await world.store.delete({ key });
+  else await world.store.put({ item: { ...(await world.store.get(key))!, companyId: B } });
+  const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  expect((await root.callback(a.request()))?.statusCode).toBe(403);
+  expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+ });

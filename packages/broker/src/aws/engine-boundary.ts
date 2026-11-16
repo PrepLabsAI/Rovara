@@ -1,3 +1,4 @@
+import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
 // Engine boundary (migration plan v3.2 lane E2, step 6 part): every AWS entry point that reads or acts on an EXISTING task goes by the task's stored engine (its stamp,
 // core-host/engine-stamp.ts), never by the switch.
 //
@@ -14,7 +15,8 @@
 // A stamp is written once, with the core task, in the start's own transaction, and never changes; a task without one never gets one. So a verdict about a task that EXISTS is fixed for
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXErrorCodeSchema, agentXError } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, OrgIdSchema, agentXError } from "@agentx/contracts";
+import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
@@ -118,9 +120,22 @@ export async function ownerOfExistingTask(table: EngineStateTable, taskId: strin
 
 /**
  * Who owns a workspace's rows (its META, operations, artifacts, pull requests): the engine of the task whose pointer it holds. A workspace with no task pointer is no core task's
- * (every core start writes its pointer with the task), so it is the workflow's. A pointer is written once, with its task, so a verdict for a workspace with a pointer is kept.
+ * (every core start writes its pointer with the task), so it is the workflow's. Company discovery pointers require a live scoped META on every call; legacy workspace verdicts are kept.
  */
 export async function ownerOfWorkspace(table: EngineStateTable, workspaceId: string): Promise<Engine> {
+  const discovery = await readItem(table, { pk: `WORKSPACE#${workspaceId}`, sk: "META" });
+  if (discovery?.["entityType"] === "WORKSPACE_COMPANY_POINTER") {
+    const company = OrgIdSchema.safeParse(discovery["companyId"]);
+    if (!company.success) { logWorkspacePointerIntegrity(); throw agentXError("NOT_FOUND", "workspace unavailable"); }
+    const scoped = await readItem(table, workspaceKey(company.data, workspaceId));
+    if (scoped === undefined || scoped["companyId"] !== company.data || (scoped["orgId"] !== undefined && scoped["orgId"] !== company.data)) {
+      logWorkspacePointerIntegrity();
+      throw agentXError("NOT_FOUND", "workspace unavailable");
+    }
+    const pointer = await readItem(table, scopedTaskPointerKey(company.data, workspaceId));
+    if (typeof pointer?.taskId !== "string" || !TASK_ID.test(pointer.taskId)) throw agentXError("NOT_FOUND", "workspace unavailable");
+    return await ownerOfExistingTask(table, pointer.taskId);
+  }
   const key = `workspace:${workspaceId}`;
   const known = remembered(table).get(key);
   if (known !== undefined) return known;

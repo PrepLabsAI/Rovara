@@ -1,3 +1,6 @@
+import { agentModelIdentity } from "@agentx/contracts";
+import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
+import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 // Engine host (lane E2, step 4): the dispatcher Lambda as the host of the core's dispatch, over Code's EC2 session machines. Ported from the monolith's host test.
 // The core's task flow (on the in-memory store and queue) starts tasks for two companies; their dispatch messages reach the dispatcher as an SQS batch from the core queue, the core hands
 // each operation to that company's EC2 machines, and the worker (which checks each token as the real one does, and lists the real worker's features) is given each job once.
@@ -13,7 +16,9 @@ import { createAllowAllAdmission, createNoopAuditSink, localOwnerPrincipal } fro
 import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
+import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
@@ -45,8 +50,10 @@ async function createWorld(options: { enabled?: boolean } = {}) {
   const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES });
   const queues = new MemoryQueueService();
   const grants = new RepositoryGrantService(Buffer.alloc(32, 5), async () => ({ token: "unused", expiresAt: new Date(Date.now() + 3_600_000).toISOString() }) as never);
-  // The core's own records say whose a workspace is (the deployed reader reads the same field from the State table).
-  const companyOfWorkspace = async (workspaceId: string): Promise<OrgId | undefined> => ((await store.get(workspaceKey(workspaceId)))?.companyId as OrgId | undefined);
+  const companyOfWorkspace = workspaceCompanyReader({ send: async (command: unknown) => {
+    if (!(command instanceof GetCommand)) throw new Error("unexpected command");
+    return { Item: await store.get(command.input.Key as { pk: string; sk: string }) };
+  } } as never, "state");
   const fleet = machinesWorld.fleet({ companyOfWorkspace });
   const depsOf = (companyId: OrgId, dispatchQueues: QueueService = queues): TaskFlowDeps => ({
     companyId, store, queues: dispatchQueues, outbox: createTransactionalOutbox({ store, queues }),
@@ -134,17 +141,17 @@ describe("the dispatcher as the host of the core's dispatch", () => {
     const w = await createWorld();
     const taskA = await w.start(COMPANY_A);
     const [record] = await w.staged();
-    const workspace = (await w.store.get(workspaceKey(taskA.workspaceId)))!;
+    const workspace = (await w.store.get(workspaceKey(COMPANY_A, taskA.workspaceId)))!;
     await w.store.put({ item: { ...workspace, companyId: COMPANY_B } });
     expect(failures(await w.handler({ Records: [record!] }))).toEqual([record!.messageId]);
     expect(w.depsFor).not.toHaveBeenCalled();
     expect(w.changeVisibility).not.toHaveBeenCalled();
     expect(w.machinesWorld.executions).toEqual([]);
     expect(w.machinesWorld.posts).toEqual([]);
-    // A message rewritten to name the workspace's new company is then B's: B's core finds the operation is not B's and sets it aside (no dead-letter function: kept for the redrive policy).
+    // Rewriting the message cannot change the immutable pointer: A's pointer and B's corrupt scoped row disagree, so routing still refuses.
     const rewritten = { ...w.again(record!), body: JSON.stringify({ ...JSON.parse(record!.body), companyId: COMPANY_B }) };
     expect(failures(await w.handler({ Records: [rewritten] }))).toEqual([rewritten.messageId]);
-    expect(w.depsFor.mock.calls.map(([company]) => company)).toEqual([COMPANY_B]);
+    expect(w.depsFor).not.toHaveBeenCalled();
     expect(w.machinesWorld.executions).toEqual([]);
   });
 
@@ -182,7 +189,7 @@ describe("the dispatcher as the host of the core's dispatch", () => {
     w.depsFor.mockImplementationOnce((companyId, dispatchQueues) => ({ ...w.depsOf(companyId, dispatchQueues), machines: w.fleet.forCompany(COMPANY_B) }));
     expect(failures(await w.handler({ Records: [record!] }))).toEqual([record!.messageId]);
     expect(w.machinesWorld.executions).toEqual([]);
-    expect((await w.store.get(workspaceKey(task.workspaceId)))!.status).not.toBe("CLOSED");
+    expect((await w.store.get(workspaceKey(COMPANY_A, task.workspaceId)))!.status).not.toBe("CLOSED");
     // The same fault with the unbound fleet (a root that forgot to bind it): also refused before anything runs.
     w.depsFor.mockImplementationOnce((companyId, dispatchQueues) => ({ ...w.depsOf(companyId, dispatchQueues), machines: w.fleet }));
     expect(failures(await w.handler({ Records: [w.again(record!)] }))).toEqual([record!.messageId]);
@@ -206,7 +213,7 @@ describe("the dispatcher as the host of the core's dispatch", () => {
     expect(failures(await w.handler({ Records: [cancelRecord(randomUUID())] }))).toEqual([]);
     expect(w.machinesWorld.posts).toHaveLength(before);
     // Being stopped: the cancel goes to its worker, once.
-    await w.store.update({ key: { pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${operationId}` }, ops: [change.set("status", "CANCEL_REQUESTED")] });
+    await w.store.update({ key: operationKey(COMPANY_A, task.workspaceId, operationId), ops: [change.set("status", "CANCEL_REQUESTED")] });
     const cancel = randomUUID();
     expect(failures(await w.handler({ Records: [cancelRecord(cancel)] }))).toEqual([]);
     expect(w.machinesWorld.posts.slice(before)).toEqual([expect.objectContaining({ status: 200, workspaceId: task.workspaceId, operationId: cancel })]);
@@ -311,13 +318,16 @@ describe("the core on the dispatcher", () => {
   });
   const inputs = (environment: NodeJS.ProcessEnv) => {
     const world = createSessionMachinesWorld();
+    let clock = Date.now();
+    const log = vi.fn();
     return {
       world,
       inputs: {
         env: environment, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
         machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined },
-        changeVisibility: async () => undefined, log: () => undefined,
+        changeVisibility: async () => undefined, log, now: () => new Date(clock),
       } as Parameters<typeof createDispatcherCoreHost>[0],
+      advance: (milliseconds: number) => { clock += milliseconds; }, log,
     };
   };
 
@@ -387,30 +397,58 @@ describe("the core on the dispatcher", () => {
     expect(world.executions).toHaveLength(1);
   });
 
-  it("DEC 243c: with the gateway's offered-models reader each company's step rule chooses from ITS list on the gateway's agent route; without it the declared route stands byte for byte", async () => {
+  it("ANSWER-3: the dispatcher reads broker-validated stored choices only; switch off leaves the declared route unchanged", async () => {
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
     const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
     const route = { route: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" }) };
     const flow = { standingInstructions: null, modelAccess: route, learned: null };
     const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
-    // No reader: no step rule (every step runs on the declared route, as before).
+    // The dispatcher always consults stored state, and absence uses the configured default.
     const plain = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow }).app.runtimeFor(COMPANY_A);
-    expect(plain.flow.deps.stepModels).toBeUndefined();
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
     expect(plain.flow.deps.modelAccess).toBe(route);
-    // A reader, but no model route declared: nothing to choose among, so no step rule.
+    // REVIEW-2 F-1: on the default, a checking step is the same model as the work it checks when that work's model is unknown or the same; a non-checking step never is.
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "plan_check" })).toMatchObject({ ok: true, step: { sameModelAsChecked: true } });
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "code_review", reference: agentModelIdentity("claude-sonnet-5-5") })).toMatchObject({ ok: true, step: { sameModelAsChecked: true } });
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "security_review", reference: agentModelIdentity("claude-haiku-5-5") })).toMatchObject({ ok: true, step: { sameModelAsChecked: false } });
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { sameModelAsChecked: false } });
+    // Without a configured route there is no default model to use.
     const reader = createFakeOfferedModels();
     reader.set(COMPANY_A, ["claude-sonnet-5-5", "qwen.qwen3-coder-480b-a35b-v1:0"]);
     reader.set(COMPANY_B, ["claude-haiku-5-5"]);
-    const noRoute = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { ...flow, modelAccess: null }, offeredModels: reader }).app.runtimeFor(COMPANY_A);
-    expect(noRoute.flow.deps.stepModels).toBeUndefined();
-    // With both: the company's own list decides. A is offered the default and a Bedrock model; B (the default is not on its list) is refused its steps.
-    const host = createDispatcherCoreHost({ ...made.inputs, env: { ...made.inputs.env, [CORE_ENGINE_VARIABLE]: "on" }, extraModules, flow, offeredModels: reader });
+    const noRoute = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { ...flow, modelAccess: null }, env: { ...made.inputs.env, ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } }).app.runtimeFor(COMPANY_A);
+    expect(await noRoute.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    // Fresh rows are company scoped. A's missing row uses the default, even when B has a fresh choice.
+    const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow, env: { ...made.inputs.env, [CORE_ENGINE_VARIABLE]: "on", ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } });
     const a = await host.app.runtimeFor(COMPANY_A);
     const b = await host.app.runtimeFor(COMPANY_B);
     expect(a.flow.deps.modelAccess).toBe(route);
+    const registry = await host.app.registry();
+    const choice = createAgentModelChoice({ store: registry.require("storage"), companyId: COMPANY_A, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), reader, defaultModel: async () => "claude-sonnet-5-5", now: () => made.inputs.now!().getTime() });
+    await choice.service().state();
+    const otherChoice = createAgentModelChoice({ store: registry.require("storage"), companyId: COMPANY_B, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), reader, defaultModel: async () => "claude-haiku-5-5", now: () => made.inputs.now!().getTime() });
+    await otherChoice.service().state();
+    const before = reader.asked.length;
     expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-sonnet-5-5", api: "anthropic-messages" } } });
-    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
-    expect(reader.asked).toEqual(expect.arrayContaining([COMPANY_A, COMPANY_B]));
+    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-haiku-5-5" } } });
+    expect(reader.asked).toHaveLength(before);
+    expect(reader.asked).toEqual([COMPANY_A, COMPANY_B]);
+    made.advance(60_001);
+    // B's stale choice is Haiku, distinct from the install's Sonnet default: expiry must change the model.
+    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
+    expect(made.log).toHaveBeenCalledWith({ component: "dispatcher", event: "core_engine.model_choice_expired" });
+    expect(made.log).toHaveBeenCalledTimes(1);
+    const state = registry.require("storage");
+    const policyKey = modelSelectionPolicyKey(COMPANY_A);
+    const freshRow = await state.get(policyKey);
+    const validation = freshRow!["agentModelValidation"] as Record<string, unknown>;
+    await state.update({ key: policyKey, ops: [change.set("agentModelValidation", { malformed: true })] });
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    await state.update({ key: policyKey, ops: [change.set("agentModelValidation", { ...validation, choice: { ...(validation["choice"] as Record<string, unknown>), defaultModel: "claude-haiku-5-5" } })] });
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    // A company's model rule with no validated choice (the broker's model choice off, or never published) is no stored choice: the default model, not a refusal.
+    await state.update({ key: policyKey, ops: [change.remove("agentModelValidation")] });
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
   });
 
   it("builds nothing until a core record arrives, and then refuses by name while the security-list points are owed: the record comes back, no machine is started", async () => {
@@ -460,4 +498,19 @@ describe("the flow inputs the deployment declares on the dispatcher (lane E2 ste
     expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" })).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
     for (const value of ["on", `on:${COMPANY_A}`]) expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: value }), value).toBeUndefined();
   });
+});
+
+it.each(["missing", "foreign"])("dispatcher refuses and logs a %s scoped workspace behind a pointer", async (kind) => {
+  const w = await createWorld();
+  const task = await w.start(COMPANY_A);
+  const batch = await w.staged();
+  const key = workspaceKey(COMPANY_A, task.workspaceId);
+  if (kind === "missing") await w.store.delete({ key });
+  else await w.store.put({ item: { ...(await w.store.get(key))!, companyId: COMPANY_B } });
+  const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    expect(failures(await w.handler({ Records: batch }))).toEqual(batch.map((row) => row.messageId));
+    expect(w.depsFor).not.toHaveBeenCalled();
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+  } finally { integrity.mockRestore(); }
 });

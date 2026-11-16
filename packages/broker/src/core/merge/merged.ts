@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Rovara Code (Plan 6 Task 20), ported by lane L7a: the `merged` milestone and the state kept about a pull request that merged.
 //
 // The save that moves a task to MERGED adds these items to its transaction, so they exist exactly when the merge is recorded, once, whichever path recorded it (a webhook, the merge sweep, or a
@@ -64,7 +65,7 @@ export interface MergedRecordWrittenByCaller { repositoryId: string; number: num
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?$/u;
 
 /** The key of a pull request's record in its workspace (the same key the task flow keeps it under). */
-const pullRequestRecordKey = (workspaceId: string, repository: string, number: number) => ({ pk: `WORKSPACE#${workspaceId}`, sk: `PULL_REQUEST#${repository}#${String(number).padStart(12, "0")}` });
+const pullRequestRecordKey = (workspace: { pk: string }, repository: string, number: number) => ({ pk: workspace.pk, sk: `PULL_REQUEST#${repository}#${String(number).padStart(12, "0")}` });
 
 const isMerged = (workflow: WorkflowSnapshot, repositoryId: string, number: number): boolean =>
   workflow.pullRequests?.some((pullRequest) => pullRequest.repositoryId === repositoryId && pullRequest.number === number && pullRequest.state === "MERGED") === true;
@@ -101,8 +102,8 @@ export async function mergedStateItems(
       items.push(trackingWriteItem(prior, { ...fields, decisionDigest: mergeTrackingDecisionDigest(fields), version: prior.version + 1, observedAt: now }));
     }
     if (task.workspaceId !== undefined && !recordsWrittenByCaller.some((written) => written.repositoryId === pullRequest.repositoryId && written.number === pullRequest.number)) {
-      const key = pullRequestRecordKey(task.workspaceId, pullRequest.repositoryId, pullRequest.number);
       try {
+        const key = pullRequestRecordKey((await workspaceKeys({ store: deps.store, companyId: orgId }, task.workspaceId)).workspaceKey, pullRequest.repositoryId, pullRequest.number);
         const stored = await deps.store.get(key);
         if (stored !== undefined && stored["state"] !== "merged") items.push({ kind: "update", key, ops: [change.set(["state"], "merged"), change.set(["updatedAt"], now)] });
       } catch (error) {

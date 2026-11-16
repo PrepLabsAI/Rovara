@@ -7,7 +7,7 @@ export const iso = (deps: Pick<TaskFlowDeps, "now">): string => (deps.now?.() ??
 export const newId = (deps: Pick<TaskFlowDeps, "newId">): string => (deps.newId ?? randomUUID)();
 export const log = (deps: Pick<TaskFlowDeps, "log" | "companyId">, entry: Record<string, unknown>): void => companyLog(deps.companyId, deps.log ?? (() => undefined))({ component: "task-flow", ...entry });
 export const dispatchQueueName = (deps: Pick<TaskFlowDeps, "dispatchQueue">): string => deps.dispatchQueue ?? DEFAULT_DISPATCH_QUEUE;
-export const limitsOf = (deps: Pick<TaskFlowDeps, "limits">): { member: number; organization: number } => deps.limits ?? DEFAULT_LIMITS;
+export const limitsOf = async (deps: Pick<TaskFlowDeps, "limits">): Promise<{ member: number; organization: number }> => typeof deps.limits === "function" ? await deps.limits() : deps.limits ?? DEFAULT_LIMITS;
 
 /** The sha-256 of the canonical JSON of a value: the request's identity for idempotency. */
 export function hashJson(value: unknown): string {

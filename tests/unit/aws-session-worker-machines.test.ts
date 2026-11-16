@@ -3,7 +3,7 @@
 // Proves: the port's conformance suite (with a second company on the same fleet); a company's adapter never reaches another company's workspace, or a workspace without a valid company;
 // the fleet itself answers nothing; a missing placement brings the job back.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MachineError, type OrgId, type WorkerMachines } from "@agentx/contracts";
 import { runWorkerMachinesConformance } from "../support/ports/worker-machines-conformance.js";
 import { COMPANY_A, COMPANY_B, TABLE, createSessionMachinesWorld, invocationFor } from "../support/session-machines-world.js";
@@ -117,6 +117,28 @@ describe("Code's EC2 session machines, company by company", () => {
 });
 
 describe("whose a workspace is", () => {
+  it("requires the pointer's scoped workspace, with the same company on every read", async () => {
+    const world = createSessionMachinesWorld();
+    const id = randomUUID();
+    const key = { pk: `ORG#${COMPANY_A}#WORKSPACE#${id}`, sk: "META" };
+    world.db.set({ pk: `WORKSPACE#${id}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: id, companyId: COMPANY_A });
+    const companyOf = workspaceCompanyReader(world.db, TABLE);
+    const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(await companyOf(id)).toBeUndefined();
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+    integrity.mockClear();
+    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_B });
+    expect(await companyOf(id)).toBeUndefined();
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+    integrity.mockClear();
+    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_A, orgId: COMPANY_B });
+    expect(await companyOf(id)).toBeUndefined();
+    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_A, orgId: COMPANY_A });
+    expect(await companyOf(id)).toBe(COMPANY_A);
+    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_B });
+    expect(await companyOf(id)).toBeUndefined();
+    integrity.mockRestore();
+  });
   it("reads the company from the workspace record only", async () => {
     const world = createSessionMachinesWorld();
     const companyOf = workspaceCompanyReader(world.db, TABLE);

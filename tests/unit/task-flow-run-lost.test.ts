@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The run-lost watchdog (`sweepLostRuns`): a worker machine lost after the delivery of an operation must not leave the operation, and the task with it, running for ever.
 import { brokerCoreWorkerMachines } from "../../packages/broker/src/aws/worker-machines/broker-core.js";
 import { SessionWorkerFleet } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
@@ -21,7 +22,7 @@ async function runningPlan(h: Harness, instructions: string) {
     }
   };
   await drain();
-  const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+  const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
   const machineId = workspace.machine!.machineId;
   const prepare = h.machines.delivered(machineId).at(-1)!;
   h.machines.finish(machineId, prepare.operationId);
@@ -32,7 +33,7 @@ async function runningPlan(h: Harness, instructions: string) {
   return { taskId: started.task.taskId, workspaceId: workspace.id, machineId, operationId: plan.operationId, fence: plan.fence };
 }
 
-const operationOf = async (h: Harness, run: { workspaceId: string; operationId: string }): Promise<OperationRecord> => (await h.store.get(operationKey(run.workspaceId, run.operationId))) as unknown as OperationRecord;
+const operationOf = async (h: Harness, run: { workspaceId: string; operationId: string }): Promise<OperationRecord> => (await h.store.get(operationKey(T1_COMPANY, run.workspaceId, run.operationId))) as unknown as OperationRecord;
 const watchRows = async (h: Harness) => queryAll(h.store, { pk: runWatchPartition(COMPANY) });
 
 describe("an operation whose worker machine is lost", () => {
@@ -53,7 +54,7 @@ describe("an operation whose worker machine is lost", () => {
     h.clock.advance(2);
     expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 1, interrupted: 1 });
     expect(await operationOf(h, run)).toMatchObject({ status: "INTERRUPTED", error: RUN_LOST_MESSAGE });
-    expect(await h.store.get(workspaceKey(run.workspaceId))).toMatchObject({ status: "READY", activeOperationId: null });
+    expect(await h.store.get(workspaceKey(T1_COMPANY, run.workspaceId))).toMatchObject({ status: "READY", activeOperationId: null });
     expect(await h.store.get(runWatchKey(COMPANY, run.workspaceId, run.operationId))).toBeUndefined();
     // The task follows the path of any interrupted step: it stops with the cause in words, for the owner's Retry.
     const view = await h.flow.get(h.owner, run.taskId);
@@ -95,7 +96,7 @@ describe("an operation whose worker machine is lost", () => {
       expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 1, interrupted: 0, cleared: 0 });
     }
     expect((await operationOf(h, run)).status).toBe("DISPATCHING");
-    expect(await h.store.get(workspaceKey(run.workspaceId))).toMatchObject({ activeOperationId: run.operationId });
+    expect(await h.store.get(workspaceKey(T1_COMPANY, run.workspaceId))).toMatchObject({ activeOperationId: run.operationId });
   });
 
   it("never touches an operation that already finished, even when its machine is gone", async () => {
@@ -130,9 +131,9 @@ describe("an operation whose worker machine is lost", () => {
     expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 2, interrupted: 1 });
     expect((await operationOf(h, lost)).status).toBe("INTERRUPTED");
     expect((await operationOf(h, other)).status).toBe("DISPATCHING");
-    expect(await h.store.get(workspaceKey(other.workspaceId))).toMatchObject({ activeOperationId: other.operationId });
+    expect(await h.store.get(workspaceKey(T1_COMPANY, other.workspaceId))).toMatchObject({ activeOperationId: other.operationId });
     // A row whose operation has moved to a newer hold of the workspace names an old fence: it is dropped, and the newer operation is never ended through it.
-    await h.store.update({ key: operationKey(other.workspaceId, other.operationId), ops: [change.set(["fence"], other.fence + 1)] });
+    await h.store.update({ key: operationKey(T1_COMPANY, other.workspaceId, other.operationId), ops: [change.set(["fence"], other.fence + 1)] });
     await h.machines.terminate(other.machineId);
     expect(await h.flow.sweepRunsOnce()).toMatchObject({ interrupted: 0, cleared: 1 });
     h.clock.advance(RUN_LOST_GRACE_SECONDS * 2);
@@ -166,7 +167,7 @@ it("the broker watchdog waits on unavailable live health and interrupts a record
   const workspace = world.workspace(COMPANY);
   const machine = await world.machinesFor(COMPANY).start({ companyId: COMPANY, machineKey: workspace });
   await world.settle();
-  await h.store.update({ key: operationKey(run.workspaceId, run.operationId), ops: [change.set("machineId", machine.machineId)] });
+  await h.store.update({ key: operationKey(h.deps.companyId, run.workspaceId, run.operationId), ops: [change.set("machineId", machine.machineId)] });
   await h.store.update({ key: runWatchKey(COMPANY, run.workspaceId, run.operationId), ops: [change.set("machineId", machine.machineId)] });
   const fleet = new SessionWorkerFleet(brokerCoreWorkerMachines({ sessions: world.sessions, documentClient: world.db, tableName: TABLE }));
   const deps = { ...h.deps, machines: fleet.forCompany(COMPANY) };

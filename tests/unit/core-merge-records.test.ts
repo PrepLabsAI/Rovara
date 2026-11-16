@@ -1,3 +1,4 @@
+import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 // Port lane L7a: the merge core's records on the document store: the reverse link from a change request to its task, the merge-commit index (what revert detection reads), and the
 // state a merge leaves behind (tracking row, pull request record, timeline, merged milestone).
 import { describe, expect, it } from "vitest";
@@ -35,7 +36,7 @@ describe("what a merge leaves behind", () => {
     const pr = world.prs[0]!;
     await world.seedTracking(over);
     const item = (await readMergeTracking(world.store, TASK_ID, ORG))[0]!;
-    await world.store.put({ item: { pk: "WORKSPACE#ws-1", sk: `PULL_REQUEST#app#${String(pr.number).padStart(12, "0")}`, state: "open" } });
+    await world.store.put({ item: { pk: workspacePartition(ORG, "ws-1"), sk: `PULL_REQUEST#app#${String(pr.number).padStart(12, "0")}`, state: "open" } });
     return { world, pr, item };
   }
 
@@ -46,7 +47,7 @@ describe("what a merge leaves behind", () => {
     const items = await mergedStateItems({ store: world.store, timeline: world.timeline, audit: world.audit }, { taskId: TASK_ID, orgId: ORG, sessionId: SESSION_ID, workspaceId: "ws-1" }, before, after, NOW, [{ repositoryId: "app", number: pr.number, mergeCommit: SHA }]);
     expect((await world.store.transact(items)).applied).toBe(true);
     expect(((await readMergeTracking(world.store, TASK_ID, ORG))[0])!.state).toBe("merged");
-    expect((await world.store.get({ pk: "WORKSPACE#ws-1", sk: `PULL_REQUEST#app#${String(pr.number).padStart(12, "0")}` }))!["state"]).toBe("merged");
+    expect((await world.store.get({ pk: workspacePartition(ORG, "ws-1"), sk: `PULL_REQUEST#app#${String(pr.number).padStart(12, "0")}` }))!["state"]).toBe("merged");
     expect(await findMergeCommit(world.store, { orgId: ORG, repositoryFullName: "acme/app", sha: SHA })).toMatchObject({ taskId: TASK_ID });
     expect(world.timeline.lines).toEqual([]);
   });

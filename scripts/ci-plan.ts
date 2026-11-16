@@ -2,9 +2,9 @@
 // affect, while a FULL run (everything, as before) stays available and is the one a merge needs.
 //
 // FULL mode: a push to code/next, a manual run, a pull request labelled `full-ci`, or one whose title starts with "Batch " or "Sync mainline". It runs every job
-// in full: all test shards, the whole lint, the Linux runtime check and the release check. The `ci-mode (full)` check exists only then.
+// in full: all test shards, the whole lint, the Linux runtime check, the device emulator check and the release check. The `ci-mode (full)` check exists only then.
 // AFFECTED mode (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach (vitest --changed plus the tests that name a
-// changed file or one of the packages it touches), in 2 shards; lint covers the lint shards that hold changed files; the Linux runtime and release checks run only
+// changed file or one of the packages it touches), in 2 shards; lint covers the lint shards that hold changed files; the Linux runtime, device emulator and release checks run only
 // when files in their area change; a Markdown-only change that no test reads runs nothing but the plan. Anything shared (vitest config, package.json, the lockfile,
 // tests/support, the workflow) falls back to the whole test suite, and the lint settings to the whole lint.
 //
@@ -49,6 +49,8 @@ export interface Plan {
   shards: number;
   lint: Scope;
   linux: boolean;
+  /** The device emulator check (`device-runtime`), planned like `linux` but not part of the `local` gate yet. */
+  device: boolean;
   release: boolean;
   /** Test files to run in addition to vitest's own --changed selection (they name a changed file or a changed package); only when tests is "changed". */
   extraTests: string[];
@@ -132,6 +134,23 @@ export const LINUX_PATTERNS: readonly RegExp[] = [
   /^tsconfig[^/]*\.json$/,
 ];
 
+/** The device emulator check's area (device testing, DEC 244): the device executor image, the device code and tests, the CI image list, the plan and the workflow itself. */
+export const DEVICE_PATTERNS: readonly RegExp[] = [
+  /^environments\/device-executor\//,
+  /^packages\/contracts\/src\/device-/,
+  /^packages\/verifier\/src\/(executor|host)\/device-/,
+  /^tests\/linux\/device-/,
+  /^tests\/fixtures\/device-/,
+  /^tests\/support\/device-/,
+  /^scripts\/(ci-images|ci-plan|ci-gate)\.ts$/,
+  /^\.github\/ci-images\.json$/,
+  /^\.github\/workflows\/ci\.yml$/,
+  /^package\.json$/,
+  /^package-lock\.json$/,
+  /^\.node-version$/,
+  /^tsconfig[^/]*\.json$/,
+];
+
 /** The release check's area: the release scripts and the infrastructure, plus the manifests and the workflow. */
 export const RELEASE_PATTERNS: readonly RegExp[] = [
   /^scripts\/release\//,
@@ -183,12 +202,12 @@ export function relatedTests(changed: readonly string[], packages: readonly Pack
 export function planCi(input: PlanInput): Plan {
   const reason = fullReason(input);
   if (reason !== undefined) {
-    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: "all", linux: true, release: true, extraTests: [] };
+    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: "all", linux: true, device: true, release: true, extraTests: [] };
   }
   const { changed } = input;
   const docs = docsOnlyChange(changed, input.testSources);
   if (docs.docsOnly) {
-    return { mode: "affected", modeReason: "a pull request", docsOnly: true, tests: "none", testsReason: docs.reason, shards: 1, lint: "none", linux: false, release: false, extraTests: [] };
+    return { mode: "affected", modeReason: "a pull request", docsOnly: true, tests: "none", testsReason: docs.reason, shards: 1, lint: "none", linux: false, device: false, release: false, extraTests: [] };
   }
   const shared = changed.find((file) => anyMatch(file, SHARED_TEST_PATTERNS));
   const extraTests = shared === undefined && changed.length > 0 ? relatedTests(changed, input.packages, input.testSources) : [];
@@ -211,6 +230,7 @@ export function planCi(input: PlanInput): Plan {
     shards: tests === "all" ? FULL_SHARDS : AFFECTED_SHARDS,
     lint,
     linux: changed.length === 0 || changed.some((file) => anyMatch(file, LINUX_PATTERNS)),
+    device: changed.length === 0 || changed.some((file) => anyMatch(file, DEVICE_PATTERNS)),
     release: changed.length === 0 || changed.some((file) => anyMatch(file, RELEASE_PATTERNS)),
     extraTests: tests === "changed" ? extraTests : [],
   };
@@ -225,6 +245,7 @@ export function planOutputs(plan: Plan): Record<string, string> {
     shards: JSON.stringify(Array.from({ length: plan.shards }, (_, index) => index + 1)),
     lint: plan.lint,
     linux: String(plan.linux),
+    device: String(plan.device),
     release: String(plan.release),
   };
 }
@@ -268,7 +289,7 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);
   console.log(plan.docsOnly
     ? `Markdown-only change: ${plan.testsReason}; nothing but this plan runs.`
-    : `tests: ${plan.tests} (${plan.testsReason}), ${plan.shards} shard(s); lint: ${plan.lint}; linux-runtime: ${plan.linux}; release: ${plan.release}; ${plan.extraTests.length} extra test file(s).`);
+    : `tests: ${plan.tests} (${plan.testsReason}), ${plan.shards} shard(s); lint: ${plan.lint}; linux-runtime: ${plan.linux}; device-runtime: ${plan.device}; release: ${plan.release}; ${plan.extraTests.length} extra test file(s).`);
   if (process.env.GITHUB_OUTPUT !== undefined) appendFileSync(process.env.GITHUB_OUTPUT, `${Object.entries(planOutputs(plan)).map(([key, value]) => `${key}=${value}`).join("\n")}\n`);
   if (process.env.CI_EXTRA_TESTS !== undefined) writeFileSync(process.env.CI_EXTRA_TESTS, plan.extraTests.map((file) => `${file}\n`).join(""));
 }

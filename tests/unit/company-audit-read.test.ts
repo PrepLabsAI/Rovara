@@ -350,3 +350,9 @@ describe("person via caller: every engine action names the caller it came throug
     expect(records[0]).not.toHaveProperty("via");
   });
 });
+
+it("company audit lists never return a workspace discovery pointer", async () => {
+  const store = newStore();
+  await plantAuditRow(store, COMPANY_A, "pointer-canary", { companyId: COMPANY_A, entityType: "WORKSPACE_COMPANY_POINTER" });
+  expect((await readCompanyAudit(store, COMPANY_A, {})).records).toEqual([]);
+});

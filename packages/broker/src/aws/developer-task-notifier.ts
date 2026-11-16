@@ -1,3 +1,4 @@
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import { slackCallerToken, slackRecordScope, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
 import type { SlackWorkspaceScope } from "./slack-workspace-tokens.js";
 // Spec 025 FR-032, FR-034, C7 to C9: the DeveloperTaskNotifier, the only new reader of the Slack
@@ -1357,7 +1358,7 @@ async function deliverChatGptFallback(deps: NotifierDependencies, notice: Notice
   const slackUserId = task !== undefined && task.developerId === owner ? task.slackUserId
     : asker !== undefined && developerIdForSlackUser(asker) === owner ? asker : undefined;
   const scope = deps.workspaces === undefined ? {} : ownThread === undefined ? taskScope(deps, task)
-    : taskScope(deps, await getItem(deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: "META" }), ownThread.teamId);
+    : taskScope(deps, (await readWorkspaceMeta(deps.documentClient, deps.tableName, notice.workspaceId))?.item, ownThread.teamId);
   await deps.post({ ...scope, ...thread, text: chatGptFallbackText(reason, slackUserId) });
   await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) } }));
   return "posted";
