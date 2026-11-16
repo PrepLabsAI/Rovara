@@ -101,9 +101,11 @@ describe("hosted pinned JWKS resolution", () => {
     ["bad JSON", () => new Response("{")],
     ["wrong shape", () => new Response('{"keys":{}}')],
     ["null", () => new Response("null")],
-    ["redirect", () => new Response("", { status: 302, headers: { location: "https://other.example/keys" } })],
+    // Status cases carry a valid matching JWKS body, so only the status check can refuse them.
+    ["redirect", () => new Response(JSON.stringify({ keys: [key.jwk] }), { status: 302, headers: { location: "https://other.example/keys" } })],
     ["followed redirect", () => { const response = json([key.jwk]); Object.defineProperty(response, "redirected", { value: true }); return response; }],
-    ["status", () => new Response("", { status: 503 })],
+    ["status 503", () => new Response(JSON.stringify({ keys: [key.jwk] }), { status: 503 })],
+    ["status 201", () => new Response(JSON.stringify({ keys: [key.jwk] }), { status: 201 })],
     ["oversize", () => new Response(JSON.stringify({ keys: [key.jwk], extra: "x".repeat(65_536) }))],
   ])("makes %s unavailable with fixed logging and no answer request", async (_name, response) => {
     const w = world(async () => response());
