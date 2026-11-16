@@ -12,6 +12,12 @@ describe("expectLinearScaling", () => {
     expect(result.n).toBe(20_000);
     expect(result.k).toBe(8);
   });
+  it("repeats tiny work until the N sample is at least 20 ms, with the same count at N and 8N", () => {
+    const result = expectLinearScaling(linear, { n: 2000, label: "tiny linear" });
+    expect(result.ms).toBeGreaterThanOrEqual(20);
+    expect(result.batches).toBeGreaterThan(1);
+    expect(result.ratio).toBeLessThan(24);
+  });
   it("fails quadratic work", () => {
     expect(() => expectLinearScaling(quadratic, { n: 600, label: "quadratic" })).toThrow(/faster than linear/u);
   });
@@ -29,6 +35,11 @@ describe("expectLinearScalingAsync", () => {
   it("passes linear async work", async () => {
     const result = await expectLinearScalingAsync((n) => async () => { linear(n)(); }, { n: 20_000, label: "async linear" });
     expect(result.ratio).toBeLessThan(24);
+  });
+  it("repeats tiny async work until the N sample is at least 20 ms", async () => {
+    const result = await expectLinearScalingAsync((n) => async () => { linear(n)(); }, { n: 2000, label: "async tiny linear" });
+    expect(result.ms).toBeGreaterThanOrEqual(20);
+    expect(result.batches).toBeGreaterThan(1);
   });
   it("fails quadratic async work", async () => {
     await expect(expectLinearScalingAsync((n) => async () => { quadratic(n)(); }, { n: 600, label: "async quadratic" })).rejects.toThrow(/faster than linear/u);
