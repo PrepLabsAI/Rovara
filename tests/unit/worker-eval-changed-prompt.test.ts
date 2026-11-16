@@ -46,9 +46,11 @@ function store(diff: string, blobs: Map<string, Buffer>, tree: Array<[path: stri
     throw new Error("unexpected git read");
   });
 }
+// Every fake tree holds one unrelated model-call module: a repository where no model-call code is recognised at all is unknown.
+const aiOid = "f".repeat(40); const aiFile = Buffer.from("import openai\n");
 const oidOf = (i: number, side: number) => `${(i * 2 + side).toString(16).padStart(2, "0")}`.repeat(20);
 function source(before: string, after: string, path = "prompts/system.txt", mode = "100644", status = "M") {
-  store(`:${mode} ${mode} ${oldOid} ${newOid} ${status}\0${path}\0`, new Map([[oldOid, Buffer.from(before)], [newOid, Buffer.from(after)]]), [[path, newOid, mode]]);
+  store(`:${mode} ${mode} ${oldOid} ${newOid} ${status}\0${path}\0`, new Map([[oldOid, Buffer.from(before)], [newOid, Buffer.from(after)], [aiOid, aiFile]]), [[path, newOid, mode], ["llm.py", aiOid]]);
 }
 
 describe("worker F4/F8 classifier", () => {
@@ -91,7 +93,7 @@ describe("pinned source producer", () => {
     expect(git.read.mock.calls).toEqual([["/worker/repo", "read"]]);
     expect(git.bytes.mock.calls[0]![0]).toEqual(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", baseCommitSha, treeSha, "--"]);
     expect(git.bytes.mock.calls.slice(1).map((c): unknown => c[0])).toEqual([["ls-tree", "-r", "-z", "-l", "--full-tree", treeSha], ["cat-file", "--batch"]]);
-    expect(git.bytes.mock.calls[2]![1]).toMatchObject({ input: `${newOid}\n${oldOid}\n` });
+    expect(git.bytes.mock.calls[2]![1]).toMatchObject({ input: `${newOid}\n${aiOid}\n${oldOid}\n` });
     expect(git.text).not.toHaveBeenCalled();
   });
   it("a changed prompt file is AI-related, so the whole classification is unknown", async () => {
@@ -166,7 +168,8 @@ describe("source to final-check artifact (in-memory bridge transport)", () => {
     ["changed prompt ignores a false sandbox claim", "prompts/system.txt", call("new prompt", false), true],
     ["unrelated code ignores a true sandbox claim", "src/count.ts", call("new prompt", true), false],
     ["a changed dependency manifest", "package.json", call(), true],
-    ["an unrelated file of an unknown kind", "source.unsupported", call(), false],
+    ["an unrelated image", "logo.png", call(), false],
+    ["a file of a kind the walk cannot parse", "source.unsupported", call(), true],
     ["unmappable frame", "src/count.ts", modelFrame({ unknownContents: "new prompt", changedPrompt: false }), true],
     ["unreadable diff", "unreadable", call(), true],
   ] as const)("%s", async (_name, path, modelFrame, changed) => {
@@ -212,6 +215,7 @@ function sources(files: Array<[path: string, before: string | undefined, after: 
     const status = before === undefined ? "A" : after === undefined ? "D" : "M";
     lines.push(`:${before === undefined ? "000000" : "100644"} ${after === undefined ? "000000" : "100644"} ${before === undefined ? "0".repeat(40) : old} ${after === undefined ? "0".repeat(40) : next} ${status}\0${path}\0`);
   });
+  blobs.set(aiOid, aiFile); tree.push(["llm.py", aiOid]);
   Object.entries(unchanged).forEach(([path, body], i) => {
     if (files.some(([changed]) => changed === path)) return;
     const oid = oidOf(100 + i, 0); blobs.set(oid, Buffer.from(body)); tree.push([path, oid]);

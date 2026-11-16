@@ -198,6 +198,65 @@ describe("Python project: only AI-related changes count", () => {
   });
 });
 
+// ---- REVIEW-1 (Opus) false negatives, kept as tests -----------------------------------------------------------------------------------------
+describe("review-1 shapes", () => {
+  const typo = { "src/billing/errors.ts": "export const NOT_FOUND = \"Invoice not found\";\n" };
+  it("a changed source file in a language the walk cannot parse is unknown, with or without an SDK name; an image is not", async () => {
+    const base = { ...TS, "main.go": "package main\nimport \"github.com/openai/openai-go\"\nconst system = \"Be brief.\"\n", "cmd/text.go": "package cmd\nconst T = \"x\"\n", "src/pages/ask.astro": "---\nconst s = 'Be brief.';\n---\n", "logo.png": Buffer.from([1, 0, 2]) };
+    expect(await classify(base, { "main.go": (base["main.go"]).replace("brief", "very brief") })).toBeUndefined();
+    expect(await classify(base, { "cmd/text.go": "package cmd\nconst T = \"y\"\n" })).toBeUndefined();
+    expect(await classify(base, { "src/pages/ask.astro": "---\nconst s = 'Be very brief.';\n---\n" })).toBeUndefined();
+    expect(await classify(base, { "logo.png": Buffer.from([1, 0, 3]) })).toMatchObject({ status: "none_found" });
+  });
+  it("assets in a named folder that also holds code count", async () => {
+    const base = { ...TS, "src/llm.ts": `${TS["src/llm.ts"] as string}export const role = (r: string) => readFileSync(join(__dirname, "instructions", r + ".md"), "utf8");\n`,
+      "src/instructions/index.ts": "export const roles = 1;\n", "src/instructions/reviewer.md": "Review strictly.\n" };
+    expect(await classify(base, { "src/instructions/reviewer.md": "Review gently.\n" })).toBeUndefined();
+    expect(await classify(base, typo)).toMatchObject({ status: "none_found" });
+  });
+  it("a file read by a computed name next to the reader counts", async () => {
+    const base = { ...TS, "src/llm.ts": `${TS["src/llm.ts"] as string}export const role = (r: string) => readFileSync(join(__dirname, r + ".md"), "utf8");\n`, "src/reviewer.md": "Review strictly.\n" };
+    expect(await classify(base, { "src/reviewer.md": "Review gently.\n" })).toBeUndefined();
+    const py = { ...PY, "app/llm.py": `${PY["app/llm.py"] as string}\ndef role(r):\n    return (Path(__file__).parent / (r + ".txt")).read_text()\n`, "app/reviewer.txt": "Review strictly.\n" };
+    expect(await classify(py, { "app/reviewer.txt": "Review gently.\n" })).toBeUndefined();
+  });
+  it("a comment inside a parenthesised Python import list does not drop the names after it", async () => {
+    for (const comment of ["# misc", "# (old)"]) {
+      const base = { ...PY, "app/llm.py": `import anthropic\nfrom . import (\n    errors,  ${comment}\n    persona,\n)\n`, "app/persona.py": "TEXT = \"Be kind.\"\n" };
+      expect(await classify(base, { "app/persona.py": "TEXT = \"Be very kind.\"\n" })).toBeUndefined();
+      // The list parses (no fail-safe unknown), so an unrelated module still reads none_found.
+      expect(await classify({ ...base, "app/other.py": "X = 1\n" }, { "app/other.py": "X = 2\n" })).toMatchObject({ status: "none_found" });
+    }
+  });
+  it("model calls over raw HTTP to an OpenAI-compatible host are recognised", async () => {
+    const base = { "package.json": "{}", "src/llm.ts": "import { SYSTEM } from './persona.js';\nexport const ask = (q: string) => fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: q }] }) });\n", "src/persona.ts": "export const SYSTEM = 'Be kind.';\n", "src/other.ts": "export const x = 1;\n" };
+    expect(await classify(base, { "src/persona.ts": "export const SYSTEM = 'Be very kind.';\n" })).toBeUndefined();
+    expect(await classify(base, { "src/other.ts": "export const x = 2;\n" })).toMatchObject({ status: "none_found" });
+  });
+  it("a repository where no model-call code is recognised at all is unknown", async () => {
+    const base = { "src/llm.ts": "import { SYSTEM } from './persona.js';\nexport const ask = (q: string) => post(process.env.MODEL_URL!, SYSTEM + q);\ndeclare function post(u: string, b: string): void;\n", "src/persona.ts": "export const SYSTEM = 'Be kind.';\n" };
+    expect(await classify(base, { "src/persona.ts": "export const SYSTEM = 'Be very kind.';\n" })).toBeUndefined();
+  });
+  it("a symbolic link the walk reaches is unknown", async () => {
+    const r = await repo({ ...TS, "shared/persona.txt": "Shared.\n" }, {});
+    execFileSync("sh", ["-c", "rm src/assets/persona.txt && ln -s ../../shared/persona.txt src/assets/persona.txt"], { cwd: r.repositories[0]!.directory });
+    await write(r.repositories[0]!.directory, { "shared/persona.txt": "Shared, changed.\n" });
+    g(r.repositories[0]!.directory, "add", "-A"); g(r.repositories[0]!.directory, "commit", "-qm", "link");
+    const tree = g(r.repositories[0]!.directory, "rev-parse", "HEAD^{tree}");
+    // The link itself changed type in this diff, which is unknown already; the walk refuses a reached link on its own too.
+    expect(await candidatePromptChanges(r.repositories, [{ ...r.candidates[0]!, treeSha: tree }], sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
+    const set = aiRelatedSet({ paths: ["package.json", "a.ts"], links: ["assets/persona.txt"], removed: [], text: new Map([["package.json", "{\"dependencies\":{\"openai\":\"1\"}}"], ["a.ts", "import 'openai';\nconst p = 'assets/persona.txt';\n"]]) });
+    expect(set.known).toBe(false);
+  });
+  it("an unclosed Python import list stays linear", () => {
+    expectLinearScaling(n => {
+      const text = "import openai\n" + "from x import (\n".repeat(Math.ceil(n / 16));
+      const snap = { paths: ["a.py"], removed: [], text: new Map([["a.py", text]]) };
+      return () => aiRelatedSet(snap);
+    }, { n: 16_384, label: "unclosed python lists" });
+  });
+});
+
 // ---- the pure walk: bounded and linear ------------------------------------------------------------------------------------------------------
 describe("aiRelatedSet", () => {
   const DEPS = "{\"dependencies\":{\"openai\":\"1\",\"x\":\"1\"}}";

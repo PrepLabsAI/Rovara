@@ -17,7 +17,8 @@ const g = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.n
 async function repo(base: Record<string, string | Buffer>, head: Record<string, string | Buffer | null>, extra?: (dir: string) => void) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "ecp-"))); roots.push(dir);
   g(dir, "init", "-q");
-  for (const [p, c] of Object.entries(base)) { await mkdir(dirname(join(dir, p)), { recursive: true }); await writeFile(join(dir, p), c); }
+  // One unrelated model-call module: a repository where no model-call code is recognised at all is unknown.
+  for (const [p, c] of Object.entries({ "llm.py": "import openai\n", ...base })) { await mkdir(dirname(join(dir, p)), { recursive: true }); await writeFile(join(dir, p), c); }
   g(dir, "add", "-A"); g(dir, "commit", "-qm", "base"); const baseSha = g(dir, "rev-parse", "HEAD");
   for (const [p, c] of Object.entries(head)) { if (c === null) await rm(join(dir, p)); else { await mkdir(dirname(join(dir, p)), { recursive: true }); await writeFile(join(dir, p), c); } }
   g(dir, "add", "-A"); g(dir, "commit", "-qm", "head", "--allow-empty"); const tree = g(dir, "rev-parse", "HEAD^{tree}");
@@ -41,7 +42,7 @@ describe("changed-prompt classification over real git", () => {
     expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
   });
   it("an unrelated binary -> none_found; a non-UTF-8 code file -> undefined", async () => {
-    const b = await repo({ "x.bin": Buffer.from([1, 0, 2]) }, { "x.bin": Buffer.from([1, 0, 3]) });
+    const b = await repo({ "x.png": Buffer.from([1, 0, 2]) }, { "x.png": Buffer.from([1, 0, 3]) });
     expect((await candidatePromptChanges(b.repositories, b.candidates, sig(), b.repositories[0]!.baseCommitSha))?.status).toBe("none_found");
     const n = await repo({ "x.ts": Buffer.from([0x61]) }, { "x.ts": Buffer.from([0xff, 0x61]) });
     expect(await candidatePromptChanges(n.repositories, n.candidates, sig(), n.repositories[0]!.baseCommitSha)).toBeUndefined();

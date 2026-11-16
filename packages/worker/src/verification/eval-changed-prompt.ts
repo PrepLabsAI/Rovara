@@ -43,6 +43,9 @@ export function evalChangedPrompt(frame: ModelEgressFrame): boolean {
  * Anything unresolvable is unknown: an unreadable side or tree file, a non-regular mode, a limit, an import the walk cannot follow. */
 const configPath = /\.(?:json|ya?ml|toml|ini)$/iu;
 const envPath = /(?:^|\/)(?:\.env[^/]*|env(?:\.[^/]*)?|[^/]*\.env)$/iu;
+/** Changed files outside the set that can hold no program text: media, fonts, archives, documentation, styles, repository metadata.
+ * Any other file the walk cannot parse (Go, Java, Ruby, .vue, .svelte, .astro, .ipynb, HTML, shell, Dockerfile...) is unknown. */
+const INERT = /(?:\.(?:png|jpe?g|gif|webp|ico|bmp|tiff?|avif|heic|svg|woff2?|ttf|otf|eot|mp3|mp4|m4a|wav|ogg|webm|mov|avi|pdf|zip|gz|tgz|bz2|xz|7z|md|mdx|rst|adoc|txt|csv|tsv|css|scss|sass|less)|(?:^|\/)(?:LICENSE|LICENCE|COPYING|NOTICE|AUTHORS|CHANGELOG|CODEOWNERS)(?:\.[^/]*)?|(?:^|\/)\.(?:gitignore|gitattributes|gitkeep|editorconfig|dockerignore|prettierignore|npmignore|eslintignore))$/iu;
 const textNeeded = (path: string): boolean => CODE_PATH.test(path) || configPath.test(path) || envPath.test(path) || resolutionFile(path);
 interface ChangedEntry { path: string; status: "A" | "M" | "D"; oldOid: string | undefined; newOid: string | undefined }
 const CAT_FILE_HEADER = /^([a-f0-9]{40}) blob (\d+)$/u;
@@ -91,13 +94,14 @@ export async function candidatePromptChanges(
         const listing = await git.bytes(["ls-tree", "-r", "-z", "-l", "--full-tree", candidate.treeSha], { ...options, maxBuffer: 64 * 1024 * 1024 });
         const entries = new TextDecoder("utf-8", { fatal: true }).decode(listing).split("\0");
         if (entries.pop() !== "" || entries.length > limits.treeEntries) throw new Error("incomplete tree");
-        const paths: string[] = []; const treeOid = new Map<string, string>(); const wanted = new Map<string, number>();
+        const paths: string[] = []; const links: string[] = []; const treeOid = new Map<string, string>(); const wanted = new Map<string, number>();
         let wantedBytes = 0;
         for (const entry of entries) {
           const m = /^(\d{6}) (blob|tree|commit) ([a-f0-9]{40}) +(\d+|-)\t(.+)$/su.exec(entry);
           if (!m) throw new Error("unreadable tree");
           const [, mode, , oid, size, path] = m;
-          if (mode === "160000" || mode === "120000") continue; // a submodule or link holds no file of this tree
+          if (mode === "160000") continue; // a submodule holds no file of this tree
+          if (mode === "120000") { links.push(path!); continue; }
           if (mode !== "100644" && mode !== "100755") throw new Error("unreadable tree");
           paths.push(path!); treeOid.set(path!, oid!);
           if (!walkReads(path!)) continue;
@@ -132,14 +136,17 @@ export async function candidatePromptChanges(
         const text = new Map<string, string>();
         for (const [path, oid] of treeOid) if (walkReads(path)) text.set(path, texts.get(oid)!);
         const removed = changed.filter(c => c.status === "D").map(c => c.path);
-        return { changed, texts, set: aiRelatedSet({ paths, removed, text }, limits) };
+        return { changed, texts, set: aiRelatedSet({ paths, removed, text, links }, limits) };
       });
       if (!related.set.known || signal.aborted) return undefined;
       for (const entry of related.changed) {
         const before = entry.oldOid === undefined ? undefined : related.texts.get(entry.oldOid);
         const after = entry.newOid === undefined ? undefined : related.texts.get(entry.newOid);
         if (related.set.has(entry.path) || resolutionFile(entry.path) || promptFilePath(entry.path)) return undefined;
-        if (!textNeeded(entry.path)) continue; // documentation, images, scripts: not read by any AI-related file
+        if (!textNeeded(entry.path)) {
+          if (INERT.test(entry.path)) continue; // documentation, images, styles: read by no AI-related file
+          return undefined; // source the walk cannot parse
+        }
         for (const side of [before, after]) if (side !== undefined && (hasAiMarker(side) || hasDynamicLoad(entry.path, side))) return undefined;
         files.push({ path: entry.path, status: entry.status === "A" ? "added" : entry.status === "D" ? "removed" : "modified", wholeFile: true,
           ...(before === undefined ? {} : { before }), ...(after === undefined ? {} : { after }) });

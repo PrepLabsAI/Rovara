@@ -7,12 +7,14 @@
 //       file that imports one of those (the wrapper's callers, where the prompt is usually chosen);
 //   (b) prompt files by F4's path rule (setup's prompt inventory) and code under prompts/, llm/, ai/ or agents/ folders;
 //   (c) files those import, transitively, inside the repository (relative imports, tsconfig/jsconfig paths, baseUrl, workspace packages, Python packages);
-//   (d) files a set file names by a path-like string literal (prompts/system.txt, persona.md, a prompts directory), matched by path suffix.
+//   (d) files a set file names by a path-like string literal (prompts/system.txt, persona.md), matched by path suffix; the non-code files of a folder
+//       it names; and, when it reads files at all (readFile, open, read_text, importlib.resources, readdir, a template loader), every non-code file under
+//       its own folder, since the name may be computed.
 // Fail safe: anything that cannot be resolved makes the WHOLE answer unknown: a non-literal dynamic import/require/import_module/exec in a set file,
 // a relative import that names no file, an alias that maps nowhere, a bare package no package.json declares, an unclosed Python import list, and any
-// limit hit. Known limits: callers of callers are not roots (a prompt handed down two layers of plain calls whose top file imports no wrapper), and
+// limit hit, a symbolic link reached by the walk, and a repository where no model-call code is recognised at all. Known limits: callers of callers are not roots (a prompt handed down two layers of plain calls whose top file imports no wrapper), and
 // unparsed bundler aliases other than tsconfig/jsconfig paths read as bare packages (unknown in a set file, ignored elsewhere unless they look like
-// an alias: "@/", "~", "#").
+// an alias: "@/", "~", "#"); a Python import of a package mapped by setup.py package_dir that no path suffix matches reads as an installed package.
 // Linear: every file is scanned by fixed regexes once, lookups go through maps built once, and every node and edge is visited once under one total budget.
 import { builtinModules } from "node:module";
 import { promptFilePath } from "@agentx/contracts";
@@ -36,6 +38,8 @@ export const AI_MARKER = new RegExp([
   String.raw`\b(?:openai|anthropic|genai|generativeai|aiplatform|vertexai|litellm|ollama|cohere|mistralai|llama_index|llamaindex|groq|langchain\w*|langgraph\w*)\b`,
   String.raw`@anthropic-ai\/|@google\/genai|@google\/generative-ai|@google-cloud\/vertexai|@google-cloud\/aiplatform|@aws-sdk\/client-bedrock|@ai-sdk\/|@langchain\/|@mistralai\/|@azure\/openai|@huggingface\/inference`,
   String.raw`bedrock[-_](?:agent[-_])?runtime|invoke_?model|converse_?stream|\bconverse\b|api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com`,
+  // Raw HTTP to OpenAI-compatible and other provider APIs, Azure AI Inference.
+  String.raw`chat\/completions|\/v1\/messages|\/v1\/completions|\/v1\/responses|:(?:stream)?generateContent|openrouter|deepseek|api\.together|api\.mistral|api\.x\.ai|api\.groq|api\.cohere|azure\.ai\.inference|ai-inference|huggingface_hub|InferenceClient`,
   String.raw`(["'\x60])ai(?:\/[^"'\x60\s]{0,256})?\1`,
 ].join("|"), "iu");
 
@@ -51,6 +55,8 @@ export interface RepositorySnapshot {
   readonly removed: readonly string[];
   /** Text of every candidate-tree file walkReads() names. */
   readonly text: ReadonlyMap<string, string>;
+  /** Symbolic links of the candidate tree. Their target is not followed: one reached by the walk makes the answer unknown. */
+  readonly links?: readonly string[];
 }
 export type AiRelatedSet = { readonly known: true; has(path: string): boolean } | { readonly known: false };
 const UNKNOWN: AiRelatedSet = { known: false };
@@ -67,7 +73,7 @@ const LITERAL_ARG = /\s*(?:(["'])([^"'\r\n]{0,1024})\1|\x60([^\x60$\\\r\n]{0,102
 const TS_DYNAMIC = /\bcreateRequire\b|\bimport\.meta\.glob\b|\brequire\.context\b|\bnew\s+Function\b|\beval\s*\(/u;
 const TS_BARREL = /\bexport\s*(?:\*|\{|type\s*\{)/u;
 const PY_IMPORT = /(?:^|[;:])[ \t]*import[ \t]+([^\r\n#;]{1,4096})/gmu;
-const PY_FROM = /(?:^|[;:])[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import[ \t]*(\([^)]{0,65536}\)|\(|[^\r\n#;]{0,4096})/gmu;
+const PY_FROM = /(?:^|[;:])[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import[ \t]*(\(|[^\r\n#;]{0,4096})/gmu;
 const PY_CALL = /(^|[^.\w])(importlib\.import_module|import_module|__import__|exec|execfile|run_path|run_module|spec_from_file_location|SourceFileLoader|load_source)\s*\(/gmu;
 const PY_MODULE = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/u;
 const NPM_NAME = /^(?:@[a-z0-9~][\w.~-]*\/)?[a-z0-9~][\w.~-]*$/u;
@@ -86,25 +92,45 @@ function scanTs(text: string): Imports {
   }
   return found;
 }
-function pyNames(list: string): string[] {
+/** Names of an import list. A piece that is not a plain dotted name (prose, a stray token) makes the file unparsed: never silently dropped. */
+function pyNames(list: string, found: Imports): string[] {
   const names: string[] = [];
-  for (const part of list.replace(/[()]/gu, " ").split(",")) {
+  for (const part of list.split(",")) {
     const name = part.trim().split(/\s+as\s+/u)[0]!.trim();
-    if (name !== "" && name !== "*") names.push(name);
+    if (name === "" || name === "*") continue;
+    if (PY_MODULE.test(name)) names.push(name); else found.unparsed = true;
   }
   return names;
+}
+/** The body of a parenthesised import list from just after "(": comments are skipped (a ")" inside one does not close it). Undefined if unclosed. */
+function pyParenList(text: string, open: number): { body: string; end: number } | undefined {
+  let body = "";
+  for (let i = open; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === "#") { while (i < text.length && text[i] !== "\n") i++; body += " "; continue; }
+    if (c === ")") return { body, end: i };
+    if (c === "(" || c === "\"" || c === "'") return undefined;
+    body += c;
+  }
+  return undefined;
 }
 function scanPython(source: string): Imports {
   const text = source.replace(/\\\r?\n/gu, " ");
   const found: Imports = { specs: [], python: [], dynamic: false, unparsed: false, barrel: false };
   for (const m of text.matchAll(PY_IMPORT)) {
-    for (const name of pyNames(m[1]!)) if (PY_MODULE.test(name)) found.python.push({ level: 0, module: name, names: [] });
+    for (const name of pyNames(m[1]!, found)) found.python.push({ level: 0, module: name, names: [] });
   }
   for (const m of text.matchAll(PY_FROM)) {
-    if (m[3] === "(") { found.unparsed = true; continue; }
     const module = m[2]!;
-    if (module !== "" && !PY_MODULE.test(module)) continue;
-    found.python.push({ level: m[1]!.length, module, names: pyNames(m[3]!).filter(name => PY_MODULE.test(name)) });
+    if (module !== "" && !PY_MODULE.test(module)) { found.unparsed = true; continue; }
+    let list = m[3]!;
+    if (list === "(") {
+      const paren = pyParenList(text, m.index + m[0].length);
+      // An unclosed list stops the scan: the file is unparsed either way, and no later list is rescanned (linear).
+      if (paren === undefined) { found.unparsed = true; break; }
+      list = paren.body;
+    }
+    found.python.push({ level: m[1]!.length, module, names: pyNames(list, found) });
   }
   for (const m of text.matchAll(PY_CALL)) {
     const loader = m[2]!;
@@ -119,6 +145,7 @@ function scanPython(source: string): Imports {
 export function hasDynamicLoad(path: string, text: string): boolean {
   return CODE_PATH.test(path) && (PY_PATH.test(path) ? scanPython(text).dynamic : scanTs(text).dynamic);
 }
+const READ_CALL = /\b(?:readFileSync|readFile|createReadStream|readdirSync|readdir|opendir|read_text|read_bytes|open|files|resource_string|resource_stream|read_resource|listdir|scandir|iterdir|glob|rglob|FileSystemLoader|PackageLoader|load_prompt)\s*\(/u;
 const LITERAL = /"([^"\\\r\n]{1,512})"|'([^'\\\r\n]{1,512})'|\x60([^\x60\\$\r\n]{1,512})\x60/gu;
 const PATHISH = /^[\w@.\-/ ]*[A-Za-z][\w@.\-/ ]*$/u;
 function pathLiterals(text: string): string[] {
@@ -175,7 +202,8 @@ export function aiRelatedSet(snapshot: RepositorySnapshot, limits: AiWalkLimits 
 
 function walk(snapshot: RepositorySnapshot, limits: AiWalkLimits): AiRelatedSet {
   const { paths, removed, text } = snapshot;
-  if (paths.length + removed.length > limits.treeEntries) unknown();
+  const links = new Set(snapshot.links ?? []);
+  if (paths.length + removed.length + links.size > limits.treeEntries) unknown();
   let budget = limits.edges;
   const spend = (n = 1): void => { budget -= n; if (budget < 0) unknown(); };
   let readFiles = 0; let readBytes = 0;
@@ -187,7 +215,7 @@ function walk(snapshot: RepositorySnapshot, limits: AiWalkLimits): AiRelatedSet 
   const fileSuffix = new Map<string, string[]>(); const dirSuffix = new Map<string, string[]>(); const underDir = new Map<string, string[]>();
   let segments = 0;
   const push = (map: Map<string, string[]>, key: string, value: string) => { const list = map.get(key); if (list) list.push(value); else map.set(key, [value]); };
-  for (const path of [...paths, ...removed]) {
+  for (const path of [...paths, ...removed, ...links]) {
     if (universe.has(path)) continue;
     universe.add(path);
     let from = 0;
@@ -332,6 +360,8 @@ function walk(snapshot: RepositorySnapshot, limits: AiWalkLimits): AiRelatedSet 
     spend(edges.length + 1);
     nodes.set(path, { edges, unresolved, barrel: scanned.barrel || /(?:^|\/)(?:index\.[cm]?[jt]sx?|__init__\.pyi?)$/u.test(path) });
   }
+  // Calls are being evaluated, so model-call code exists. If none was recognised it is somewhere the walk cannot see: unknown.
+  if (markerSeeds.length === 0) unknown();
   // Model-call modules: marker files, then barrels/packages that re-export them. Their importers (callers) are roots too.
   const reverse = new Map<string, string[]>();
   for (const [path, node] of nodes) for (const target of node.edges) { spend(); push(reverse, target, path); }
@@ -347,6 +377,11 @@ function walk(snapshot: RepositorySnapshot, limits: AiWalkLimits): AiRelatedSet 
   }
   for (const m of modelModules) roots.add(m);
 
+  const assetDir = (dir: string): string => virtual(DIR + dir, () => {
+    const files = dir === "" ? [...universe] : underDir.get(dir) ?? [];
+    spend(files.length);
+    return files.filter(f => !CODE_PATH.test(f));
+  });
   // Forward closure from the roots, with literal path references (assets and directories) from every reached code file.
   const member = new Set<string>(); const seenLiteral = new Set<string>();
   const todo = [...roots];
@@ -355,23 +390,22 @@ function walk(snapshot: RepositorySnapshot, limits: AiWalkLimits): AiRelatedSet 
   while (todo.length > 0) {
     const path = todo.pop()!;
     spend();
+    if (links.has(path)) unknown();
     const node = nodes.get(path);
     if (node === undefined) continue;
     if (node.unresolved) unknown();
     for (const target of node.edges) { spend(); visit(target); }
     const body = path.startsWith("\0") ? undefined : text.get(path);
     if (body === undefined) continue;
+    // A file read by a computed name (join(__dirname, role + ".md"), importlib.resources): every non-code file under the reader's own folder.
+    if (READ_CALL.test(body)) { spend(); visit(assetDir(dirOf(path))); }
     for (const literal of pathLiterals(body)) {
       spend();
       if (seenLiteral.has(literal)) continue;
       seenLiteral.add(literal);
       for (const file of fileSuffix.get(literal) ?? []) { spend(); visit(file); }
-      // A directory of assets only (a prompts folder read with readdir). A directory holding code is reached through imports instead.
-      for (const dir of dirSuffix.get(literal) ?? []) {
-        spend();
-        const key = virtual(DIR + dir, () => { const files = underDir.get(dir) ?? []; spend(files.length); return files.some(f => CODE_PATH.test(f)) ? [] : files; });
-        visit(key);
-      }
+      // A named folder (a prompts folder read with readdir): its non-code files. Its code is reached through imports instead.
+      for (const dir of dirSuffix.get(literal) ?? []) { spend(); visit(assetDir(dir)); }
     }
   }
   return { known: true, has: (path: string) => member.has(path) };
