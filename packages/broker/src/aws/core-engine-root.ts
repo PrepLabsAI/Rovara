@@ -382,6 +382,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
           ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
           "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
         };
       },
@@ -492,6 +493,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     void companyId;
     return { store, audit, objects: objects as PersonEraseObjects, eraseLearning: hostedEraseLearning({ store, audit, now: () => now().getTime(), log }), now: () => now().getTime(), log };
   };
+  const resumeErases = async (companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }> => {
+    const registry = await app.registry();
+    return await resumePersonErases(eraseDepsOver(registry, companyId), companyId, budgetMs);
+  };
   const standingOf = personStandingFromDynamo(inputs.documentClient, inputs.signInTableName);
 
   async function personErase(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined> {
@@ -510,10 +515,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreApp,
     lessons,
     personErase,
-    async resumePersonErases(companyId, budgetMs) {
-      const registry = await app.registry();
-      return await resumePersonErases(eraseDepsOver(registry, companyId), companyId, budgetMs);
-    },
+    resumePersonErases: resumeErases,
     async callback(request) {
       if (coreTasks === undefined) return undefined;
       // L2b: a worker's model-access request names its workspace only inside its signed capability (checked here before any read; the handler checks it again).
