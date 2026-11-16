@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 // ANSWER-3: broker validation lives on the existing company MODEL_SELECTION_POLICY row in State.
 // No signing/HTTP capability or sign-in-table grant is needed by the dispatcher. DocumentStore.get is strongly consistent.
 import { z } from "zod";
-import { AGENT_MODEL_NAME, OfferedAgentModelsSchema, StageModelOverridesSchema, agentModelIdentity, agentModelName, when,
+import { AGENT_MODEL_NAME, OfferedAgentModelsSchema, StageModelOverridesSchema, agentModelIdentity, agentModelName, canonicalModelName, when,
   type DocumentStore, type InvocationModelRoute, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { createModelSelection, type ModelSelectionService, type StepChoice } from "../core/model-selection/service.js";
 import { modelSelectionPolicyKey, readModelSelectionPolicy } from "../core/model-selection/policy-store.js";
@@ -72,10 +72,10 @@ export function dispatcherStoredAgentModelChoice(input: { store: Pick<DocumentSt
     const row = await input.store.get(key);
     if (row === undefined || row.pk !== key.pk || row.sk !== key.sk || row["orgId"] !== input.companyId || row["entityType"] !== "MODEL_SELECTION_POLICY") {
       if (row !== undefined) return refused();
-      return dispatcherDefault(input.defaultRoute);
+      return dispatcherDefault(input.defaultRoute, request);
     }
     // A company's model rule without a validated choice (the broker's model choice is off, or never published): no stored choice, so the default model.
-    if (row["agentModelValidation"] === undefined) return dispatcherDefault(input.defaultRoute);
+    if (row["agentModelValidation"] === undefined) return dispatcherDefault(input.defaultRoute, request);
     const parsed = Validation.safeParse(row["agentModelValidation"]);
     if (!parsed.success) return refused();
     const { choice, offered, validatedAt, expiresAt } = parsed.data;
@@ -85,15 +85,22 @@ export function dispatcherStoredAgentModelChoice(input: { store: Pick<DocumentSt
       || !names.has(choice.defaultModel) || Object.values(choice.stepOverrides).some((setting) => [setting?.model, setting?.fallbackModel].some((model) => model !== undefined && !names.has(agentModelName(model) ?? "")))) return refused();
     if (expiresAt <= now && expiresAt > validatedAt && expiresAt - validatedAt <= VALIDATION_TTL_MS) {
       input.log({ component: "dispatcher", event: "core_engine.model_choice_expired" });
-      return dispatcherDefault(input.defaultRoute);
+      return dispatcherDefault(input.defaultRoute, request);
     }
     return validated.choose(request);
     } catch { return refused(); }
   } };
 }
 
-async function dispatcherDefault(defaultRoute: () => Promise<InvocationModelRoute | undefined>): Promise<StepChoice> {
+/** The checking steps (as model-selection/service.ts): they compare their model with the one whose work they check. */
+const CHECKING_STAGES: ReadonlySet<string> = new Set(["plan_check", "code_review", "security_review"]);
+
+/** The install's default model. A checking step on it is the same model as the work it checks when that work's model is unknown (it ran on the same default too) or is that model. */
+async function dispatcherDefault(defaultRoute: () => Promise<InvocationModelRoute | undefined>, request: Parameters<ModelSelectionService["choose"]>[0]): Promise<StepChoice> {
   const route = await defaultRoute();
   if (route === undefined) return refused();
-  return { ok: true, step: { model: agentModelIdentity(route.alias), thinkingLevel: null, reason: "INSTALL_MODEL", sameModelAsChecked: false, route } };
+  const model = agentModelIdentity(route.alias);
+  const reference = request.reference;
+  const sameModelAsChecked = CHECKING_STAGES.has(request.stage) && (reference === undefined || canonicalModelName(reference) === canonicalModelName(model));
+  return { ok: true, step: { model, thinkingLevel: null, reason: "INSTALL_MODEL", sameModelAsChecked, route } };
 }

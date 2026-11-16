@@ -1,3 +1,4 @@
+import { agentModelIdentity } from "@agentx/contracts";
 import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 // Engine host (lane E2, step 4): the dispatcher Lambda as the host of the core's dispatch, over Code's EC2 session machines. Ported from the monolith's host test.
@@ -402,6 +403,11 @@ describe("the core on the dispatcher", () => {
     const plain = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow }).app.runtimeFor(COMPANY_A);
     expect(await plain.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
     expect(plain.flow.deps.modelAccess).toBe(route);
+    // REVIEW-2 F-1: on the default, a checking step is the same model as the work it checks when that work's model is unknown or the same; a non-checking step never is.
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "plan_check" })).toMatchObject({ ok: true, step: { sameModelAsChecked: true } });
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "code_review", reference: agentModelIdentity("claude-sonnet-5-5") })).toMatchObject({ ok: true, step: { sameModelAsChecked: true } });
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "security_review", reference: agentModelIdentity("claude-haiku-5-5") })).toMatchObject({ ok: true, step: { sameModelAsChecked: false } });
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { sameModelAsChecked: false } });
     // Without a configured route there is no default model to use.
     const reader = createFakeOfferedModels();
     reader.set(COMPANY_A, ["claude-sonnet-5-5", "qwen.qwen3-coder-480b-a35b-v1:0"]);
