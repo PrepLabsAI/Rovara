@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OfferedAgentModelsSchema, TASK_KEY_PURPOSE, type OrgId } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
-import { OFFERED_MODELS_AUDIENCE, OFFERED_MODELS_READ_FAILED, SERVICE_TOKEN_TYP, offeredModelsReader, offeredModelsReaderFromEnvironment } from "../../packages/broker/src/core-host/offered-models-http.js";
+import { CORE_AGENT_MODEL_CHOICE_VARIABLE, OFFERED_MODELS_AUDIENCE, OFFERED_MODELS_READ_FAILED, SERVICE_TOKEN_TYP, offeredModelsReader, offeredModelsReaderFromEnvironment } from "../../packages/broker/src/core-host/offered-models-http.js";
 import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { GATEWAY_OFFERED_MODELS, offeredAnswer } from "../support/offered-models-fake.js";
@@ -156,7 +156,7 @@ describe("a read that fails offers nothing, in fixed words", () => {
     const r = recording();
     const signer = signing();
     const keyRead = vi.spyOn(signer, "publicJwk");
-    await expect(reader(r.fetchImpl, { signer, issuer: "https://x.example/".padEnd(4_000, "a") }).offered(ORG_A)).rejects.toThrow(OFFERED_MODELS_READ_FAILED);
+    for (const issuer of ["https://x.example/".padEnd(4_000, "a"), "https://x.example/".padEnd(2_049, "a")]) await expect(reader(r.fetchImpl, { signer, issuer }).offered(ORG_A)).rejects.toThrow(OFFERED_MODELS_READ_FAILED);
     expect(r.seen).toEqual([]);
     // Refused before any key is read.
     expect(keyRead).not.toHaveBeenCalled();
@@ -164,8 +164,16 @@ describe("a read that fails offers nothing, in fixed words", () => {
 });
 
 describe("the reader from the environment", () => {
-  const ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: `${GATEWAY}/`, [CORE_AGENT_MODEL_VARIABLE]: "claude-sonnet-5-5" };
+  const ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: `${GATEWAY}/`, [CORE_AGENT_MODEL_VARIABLE]: "claude-sonnet-5-5", [CORE_AGENT_MODEL_CHOICE_VARIABLE]: "on" };
   const tokens = () => ({ signer: taskKeySigner(signing({ rovara_purpose: undefined })), issuer: ISSUER });
+  it("is none unless the choice is switched on (default off), whatever else is configured", () => {
+    for (const value of [undefined, "", "off", "true", "ON", "1", " on"]) {
+      const env = { ...ENV, ...(value === undefined ? {} : { [CORE_AGENT_MODEL_CHOICE_VARIABLE]: value }) };
+      if (value === undefined) delete (env as Record<string, unknown>)[CORE_AGENT_MODEL_CHOICE_VARIABLE];
+      expect(offeredModelsReaderFromEnvironment(env, tokens), String(value)).toBeUndefined();
+    }
+    expect(offeredModelsReaderFromEnvironment(ENV, tokens)).toBeDefined();
+  });
   it("is none without the gateway settings, with a broken setting, or without the task-token signer", () => {
     expect(offeredModelsReaderFromEnvironment({}, tokens)).toBeUndefined();
     expect(offeredModelsReaderFromEnvironment({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY }, tokens)).toBeUndefined();

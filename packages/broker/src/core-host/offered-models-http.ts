@@ -23,6 +23,13 @@ export const OFFERED_MODELS_BODY_MAX_BYTES = 65_536;
 /** The longest a read may take. */
 export const OFFERED_MODELS_HTTP_TIMEOUT_MS = 4_000;
 /** The only thing a failed read says. */
+/** Cloud rejects a longer issuer in a service token. */
+export const SERVICE_TOKEN_ISSUER_MAX_CHARS = 2_048;
+/**
+ * The switch that offers companies a model choice (default off, read the same way on the broker and on the dispatcher). The dispatcher chooses every step's model, so it must be able to read the list
+ * too before this is turned on: until infrastructure lets it sign with the task key, leave it unset, or a saved choice would not be the model the steps run on.
+ */
+export const CORE_AGENT_MODEL_CHOICE_VARIABLE = "ROVARA_CORE_AGENT_MODEL_CHOICE";
 export const OFFERED_MODELS_READ_FAILED = "the gateway's offered models could not be read";
 
 const failed = (): Error => new Error(OFFERED_MODELS_READ_FAILED);
@@ -42,7 +49,8 @@ export interface OfferedModelsHttpInputs {
 
 /** A service token for one company, signed with the task key. Throws (fixed words) for anything that is not exactly what the gateway accepts. */
 async function serviceToken(input: OfferedModelsHttpInputs, companyId: string): Promise<string> {
-  if (typeof input.issuer !== "string" || Buffer.byteLength(input.issuer) > TASK_TOKEN_SIGNING_INPUT_MAX_BYTES) throw failed();
+  if (typeof input.issuer !== "string" || input.issuer.length > SERVICE_TOKEN_ISSUER_MAX_CHARS || Buffer.byteLength(input.issuer) > TASK_TOKEN_SIGNING_INPUT_MAX_BYTES) throw failed();
+  // The purpose is stamped by `taskKeySigner` (the signer is the task key's, wrapped); Cloud's pinned key ids are what decide which key is the task key.
   const key = await input.signer.publicJwk();
   if (key.rovara_purpose !== TASK_KEY_PURPOSE || key.kty !== "RSA" || key.alg !== TASK_TOKEN_ALGORITHM || key.use !== "sig" || typeof key.kid !== "string" || !/^[A-Za-z0-9_-]{16}$/u.test(key.kid)) throw failed();
   const iat = Math.floor((input.now?.() ?? Date.now()) / 1000);
@@ -101,10 +109,11 @@ export function offeredModelsReader(input: OfferedModelsHttpInputs): OfferedMode
 }
 
 /**
- * The reader of a deployment: only where the model gateway is configured (ROVARA_CORE_MODEL_GATEWAY_URL with its agent model, checked) and the install has a task-token signer and issuer. Otherwise
+ * The reader of a deployment: only where the choice is switched on (ROVARA_CORE_AGENT_MODEL_CHOICE=on), the model gateway is configured (ROVARA_CORE_MODEL_GATEWAY_URL with its agent model, checked) and the install has a task-token signer and issuer. Otherwise
  * none, and nothing offers a choice. One reader serves every company of the deployment (the company is each call's argument).
  */
 export function offeredModelsReaderFromEnvironment(env: NodeJS.ProcessEnv, taskTokens: (() => { signer: TokenSigner; issuer: string } | undefined) | undefined, fetchImpl?: typeof fetch): OfferedModelsReader | undefined {
+  if (env[CORE_AGENT_MODEL_CHOICE_VARIABLE] !== "on") return undefined;
   const settings = readGatewayModelAccess(env);
   if (settings === undefined || "problem" in settings) return undefined;
   const tokens = taskTokens?.();
