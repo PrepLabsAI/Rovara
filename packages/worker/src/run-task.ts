@@ -708,8 +708,8 @@ async function runTask(
           // One plan read serves both the eval and the changed-prompt classifier, so they share one base commit.
           const ports = dependencies.evalFinalCheck;
           let planning: ReturnType<EvalFinalCheckPorts["plan"]> | undefined;
-          const plan = ports === undefined ? undefined : () => (planning ??= ports.plan());
-          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : Object.assign(Object.create(ports) as EvalFinalCheckPorts, { plan }), {
+          const plan = ports === undefined ? undefined : () => (planning ??= (async () => ports.plan())());
+          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : Object.create(ports, { plan: { value: plan } }) as EvalFinalCheckPorts, {
             status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
           });
           // Only a fresh check round reads the plan; a working round refuses first, so the classifier has nothing to classify.

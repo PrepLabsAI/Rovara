@@ -247,7 +247,7 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   it("a file F4 found and diffed is accounted for", async () => {
     expect(await read([["prompts/system.txt", "old", "new prompt"]])).toMatchObject({ status: "changes" });
   });
-  it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'"])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
+  it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'", "from '", "import  \"a'", "\\ ", "\\ \n"])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
     const hostile = unit.repeat(Math.ceil(1024 * 1024 / unit.length));
     const started = Date.now();
     await read([["src/hostile.ts", hostile, `${hostile}x`]]);
@@ -259,9 +259,22 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
     ["an escaped multi-word literal", "const s = \"Line one.\\nLine two\";\n", "const s = \"Line one.\\nLine 2\";\n"],
     ["a selector for an unchanged table", "const persona = \"terse\";\n", "const persona = \"verbose\";\n"],
     ["a changed load path", "const t = readFile(\"assets/a.txt\");\n", "const t = readFile(\"assets/b.txt\");\n"],
+    ["reordered prompt lines", "const p = [\n  \"Be nice\",\n  \"Be strict\",\n];\n", "const p = [\n  \"Be strict\",\n  \"Be nice\",\n];\n"],
+    ["a stray backtick in a string before a template", "const k = \"`\";\nconst t = `\n  be terse\n`;\n", "const k = \"`\";\nconst t = `\n  be verbose\n`;\n"],
+    ["a stray backtick in a regex before a template", "const r = /`/;\nconst t = `\n  be terse\n`;\n", "const r = /`/;\nconst t = `\n  be verbose\n`;\n"],
+    ["a stray backtick in a comment before a template", "// use ` here\nconst t = `\n  be terse\n`;\n", "// use ` here\nconst t = `\n  be verbose\n`;\n"],
+    ["a triple quote inside a .ts string", "const q = '\"\"\"';\nconst t = `\n  be terse\n`;\n", "const q = '\"\"\"';\nconst t = `\n  be verbose\n`;\n"],
+    ["a string continued with a backslash", "const t = \"be \\\n  terse \\\n  ok\";\n", "const t = \"be \\\n  verbose \\\n  ok\";\n"],
+    ["a Python string continued with a backslash", "t = 'be \\\n  terse \\\n  ok'\n", "t = 'be \\\n  verbose \\\n  ok'\n"],
     ["an indented line inside a template literal", "const t = `\n  be terse\n`;\n", "const t = `\n  be verbose\n`;\n"],
   ])("code with %s reads unknown", async (_name, before, after) => {
     expect(await read([["src/x.ts", before, after]])).toBeUndefined();
+  });
+  it("JSX text in a .tsx file reads unknown", async () => {
+    expect(await read([["src/view.tsx", "export const V = () => <p>Be terse</p>;\n", "export const V = () => <p>Be verbose</p>;\n"]])).toBeUndefined();
+  });
+  it("a changed import specifier alone, or a moved unquoted line, still reads none_found", async () => {
+    expect(await read([["src/x.ts", "import a from './a.js';\nconst n = 1;\nconst s = 'x y';\n", "import a from './b.js';\nconst s = 'x y';\nconst n = 1;\n"]])).toMatchObject({ status: "none_found" });
   });
   it("the production classifier counts every readable call as changed when coverage is unknown", async () => {
     sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]]);
