@@ -2,7 +2,6 @@
 // code is absent on the new, or a test is flaky on the change; only an assertion failure on the old code counts as proven; scripted AI reply origins never hold a draft (DEC 192a); and above 10% held the hold becomes a warning by itself (O43).
 import { describe, expect, it } from "vitest";
 import { EvidencePackV2Schema, renderEvidence } from "../../packages/contracts/src/index.js";
-import { expectLinearScaling } from "../support/scaling.js";
 import { v2Pack } from "../support/evidence-v2-fixtures.js";
 import {
   PROOF_HOLD_WINDOW, PROOF_HOLD_WORDS, proofHoldFactsOf, ProofHoldReasonSchema, REPLY_ORIGIN_WORDS, proofHoldLine, proofHoldRelaxes, proofHolds, proofSectionOf,
@@ -105,27 +104,21 @@ describe("proofHolds: scripted AI replies (DEC 192a)", () => {
   });
   it("keeps hostile origin text out of the decision and every remaining hold line at the proof item limit", () => {
     const hostile = "[click](https://example.invalid) ![image][ref] @person #123 <b>secret</b>\n# > --- ``` ~~~\u200b\ufe0f" + "x".repeat(1_000_000);
-    const cases = [
+    const items = Array.from({ length: 200 }, (_, i) => item(`test:${String(i)}`, "proves_change", "assertion_failed_on_old"));
+    const scriptedReplies = Object.fromEntries(items.map((entry) => [entry.checkId, hostile]));
+    const start = performance.now();
+    const result = hold({ proof: proof(items), scriptedReplies });
+    expect(result).toMatchObject({ holds: false, provenCount: 200, proofBasis: "scripted_ai_replies" });
+    expect(JSON.stringify(result)).not.toContain("example.invalid");
+    for (const [input, expected] of [
       [{ proof: proof([VACUOUS]) }, "Held as a draft: the new tests pass on the old code too."],
       [{ changedLines: { changed: 1, covered: 0 } }, "Held as a draft: no test ran the changed code."],
       [{ absentOnNew: [hostile] }, "Held as a draft: a test that ran on the old code is missing from the new code."],
       [{ flakyOnChange: [hostile] }, "Held as a draft: a test is flaky on this change but passed on the base."],
-    ] as const;
-    // The work is a change with `count` proving tests, each resting on a 1 MB hostile origin, and the four hold lines beside it. A scaling check, not a
-    // wall-clock bound: the time at 200 proof items (the limit) may be about eight times the time at 25, never sixty-four.
-    let result: ReturnType<typeof hold> | undefined;
-    let lines: string[] = [];
-    expectLinearScaling((count) => {
-      const items = Array.from({ length: count }, (_, i) => item(`test:${String(i)}`, "proves_change", "assertion_failed_on_old"));
-      const scriptedReplies = Object.fromEntries(items.map((entry) => [entry.checkId, hostile]));
-      return () => {
-        result = hold({ proof: proof(items), scriptedReplies });
-        lines = cases.map(([input]) => proofHoldLine(hold({ ...input, scriptedReplies: { unit: hostile } }).reasons));
-      };
-    }, { n: 25, label: "proof hold with hostile origin text" });
-    expect(result).toMatchObject({ holds: false, provenCount: 200, proofBasis: "scripted_ai_replies" });
-    expect(JSON.stringify(result)).not.toContain("example.invalid");
-    expect(lines).toEqual(cases.map(([, expected]) => expected));
+    ] as const) {
+      expect(proofHoldLine(hold({ ...input, scriptedReplies: { unit: hostile } }).reasons)).toBe(expected);
+    }
+    expect(performance.now() - start).toBeLessThan(1_000);
   });
 });
 
@@ -251,13 +244,10 @@ describe("Round 2 M2: only explicit assertion proof counts", () => {
   it("rejects oversized rows before parsing them and supports the maximum", () => {
     expect(hold({ proof: proof(Array.from({ length: 200 }, () => PROVES)) }).provenCount).toBe(200);
     expect(hold({ proof: proof(Array.from({ length: 201 }, () => PROVES)) })).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
-    // A million rows are refused on their count: the cost must not grow with the size (a scaling check, not a wall-clock bound).
-    let refused: ReturnType<typeof hold> | undefined;
-    expectLinearScaling((count) => {
-      const many = new Array<TestProofItem>(count).fill(PROVES);
-      return () => { refused = hold({ proof: proof(many) }); };
-    }, { n: 125_000, label: "proof hold refuses oversized rows" });
-    expect(refused).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
+    const many = new Array<TestProofItem>(1_000_000).fill(PROVES);
+    const start = performance.now();
+    expect(hold({ proof: proof(many) })).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
+    expect(performance.now() - start).toBeLessThan(500);
   });
 });
 

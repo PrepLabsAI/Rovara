@@ -10,7 +10,6 @@ import {
   normalizeForMatching,
   stripMentions,
 } from "../../packages/contracts/src/index.js";
-import { expectLinearScaling } from "../support/scaling.js";
 
 const opts = { allowMentions: false, labelPaths: [] as string[] };
 const signal = (args: unknown, more: Partial<Parameters<typeof commentSignal>[1]> = {}) => commentSignal(args, { ...opts, ...more });
@@ -442,57 +441,57 @@ describe("fix round 1: object keys are scanned too", () => {
 });
 
 describe("fix round 1: matching stays linear on agent text", () => {
-  // Each case is timed at SIZE/8 and at SIZE (the original 100 KB): linear work grows about 8x, quadratic about 64x.
   const SIZE = 100_000;
-  const scaled = (label: string, build: (size: number) => () => unknown, base = SIZE / 8) => {
-    expectLinearScaling(build, { n: base, label });
+  const timed = (label: string, run: () => void) => {
+    const start = performance.now();
+    run();
+    const took = performance.now() - start;
+    expect(took, `${label} took ${Math.round(took)} ms`).toBeLessThan(200);
   };
-  const inputs: Array<[string, (size: number) => string]> = [
-    ["@a then dots then b", (size) => `@a${".".repeat(size)}b`],
-    ["many @ then a", (size) => `${"@".repeat(size)}a`],
-    ["@a repeated", (size) => "@a".repeat(size / 2)],
-    ["email-like @ run", (size) => `x${"@".repeat(size)}a`],
-    ["@name with slashes", (size) => `@a${"/a".repeat(size / 2)}`],
-    ["slashes", (size) => "/".repeat(size)],
-    ["/a repeated", (size) => "/a".repeat(size / 2)],
-    ["/a/ repeated", (size) => "/a/".repeat(size / 3)],
-    ["spaces then x", (size) => `${" ".repeat(size)}x`],
-    ["bors then spaces", (size) => `bors${" ".repeat(size)}`],
-    ["bors then punctuation", (size) => `bors${"!".repeat(size)}`],
-    ["bors repeated", (size) => "bors ".repeat(size / 5)],
-    ["bors. repeated", (size) => "bors.".repeat(size / 5)],
-    ["bors newline repeated", (size) => "bors\n".repeat(size / 5)],
-    ["newlines", (size) => "\n".repeat(size)],
-    ["short lines", (size) => "a\n".repeat(size / 2)],
-    ["zero-width", (size) => "\u200b".repeat(size)],
-    ["combining marks", (size) => `a${"\u0301".repeat(size)}`],
-    ["controls", (size) => "\u0001".repeat(size)],
-    ["tag starts", (size) => "</".repeat(size / 2)],
-    ["hyphens", (size) => "a-".repeat(size / 2)],
-    ["hyphens then @a", (size) => `${"-".repeat(size)}@a`],
-    ["atlantis spaces", (size) => `atlantis${" ".repeat(size)}`],
-    ["kodiak spaces", (size) => `kodiak${" ".repeat(size)}`],
-    ["test this", (size) => "test ".repeat(size / 5)],
-    ["non-ASCII letters", (size) => "й".repeat(size)],
-    ["lone surrogates", (size) => "\uD800".repeat(size)],
+  const inputs: Array<[string, string]> = [
+    ["@a then dots then b", `@a${".".repeat(SIZE)}b`],
+    ["many @ then a", `${"@".repeat(SIZE)}a`],
+    ["@a repeated", "@a".repeat(SIZE / 2)],
+    ["email-like @ run", `x${"@".repeat(SIZE)}a`],
+    ["@name with slashes", `@a${"/a".repeat(SIZE / 2)}`],
+    ["slashes", "/".repeat(SIZE)],
+    ["/a repeated", "/a".repeat(SIZE / 2)],
+    ["/a/ repeated", "/a/".repeat(SIZE / 3)],
+    ["spaces then x", `${" ".repeat(SIZE)}x`],
+    ["bors then spaces", `bors${" ".repeat(SIZE)}`],
+    ["bors then punctuation", `bors${"!".repeat(SIZE)}`],
+    ["bors repeated", "bors ".repeat(SIZE / 5)],
+    ["bors. repeated", "bors.".repeat(SIZE / 5)],
+    ["bors newline repeated", "bors\n".repeat(SIZE / 5)],
+    ["newlines", "\n".repeat(SIZE)],
+    ["short lines", "a\n".repeat(SIZE / 2)],
+    ["zero-width", "\u200b".repeat(SIZE)],
+    ["combining marks", `a${"\u0301".repeat(SIZE)}`],
+    ["controls", "\u0001".repeat(SIZE)],
+    ["tag starts", "</".repeat(SIZE / 2)],
+    ["hyphens", "a-".repeat(SIZE / 2)],
+    ["hyphens then @a", `${"-".repeat(SIZE)}@a`],
+    ["atlantis spaces", `atlantis${" ".repeat(SIZE)}`],
+    ["kodiak spaces", `kodiak${" ".repeat(SIZE)}`],
+    ["test this", "test ".repeat(SIZE / 5)],
+    ["non-ASCII letters", "й".repeat(SIZE)],
+    ["lone surrogates", "\uD800".repeat(SIZE)],
   ];
 
-  // One timed unit per input runs all three paths (body, label and stripMentions), so a super-linear cost in any of them shows.
-  it.each(inputs)("commentSignal and stripMentions scale linearly on up to 100 KB: %s", (label, input) => {
-    scaled(label, (size) => {
-      const text = input(size);
-      return () => {
-        signal({ body: text }, { allowMentions: true, extraCommandWords: ["deploy", "ship it", "release now"], extraTriggerLabels: ["prod-*"] });
-        signal({ labels: [text] }, { labelPaths: ["labels"] });
-        stripMentions({ body: text });
-      };
-    });
+  it.each(inputs)("commentSignal on 100 KB: %s", (label, input) => {
+    timed(label, () => signal({ body: input }, { allowMentions: true, extraCommandWords: ["deploy", "ship it", "release now"], extraTriggerLabels: ["prod-*"] }));
+    timed(`${label} (as a label)`, () => signal({ labels: [input] }, { labelPaths: ["labels"] }));
+  });
+
+  it.each(inputs)("stripMentions on 100 KB: %s", (label, input) => {
+    timed(label, () => stripMentions({ body: input }));
   });
 
   it("matches org label globs without backtracking", () => {
-    scaled("multi-star glob", (size) => { const label = `${"-".repeat(size)}x`; return () => signal({ labels: [label] }, { labelPaths: ["labels"], extraTriggerLabels: ["*-*-*-*-*-y", "*-*-*-*-*-*-*-*-*-*-*-*-z", "a*b*c*d*e*f*g*h*i*j*k"] }); }, 25); // 25 -> 200 characters: labels over 512 are refused before any glob runs
-    scaled("long label", (size) => { const label = "deploy-".repeat(size / 7); return () => signal({ labels: [label] }, { labelPaths: ["labels"], extraTriggerLabels: ["*-*-*-*-*-y"] }); });
-    scaled("many labels", (size) => { const labels = Array.from({ length: size / 50 }, (_, index) => `label-${index}`); return () => signal({ labels }, { labelPaths: ["labels"], extraTriggerLabels: ["a*-*-*-y"] }); });
+    const label = "-".repeat(200);
+    timed("multi-star glob", () => signal({ labels: [`${label}x`] }, { labelPaths: ["labels"], extraTriggerLabels: ["*-*-*-*-*-y", "*-*-*-*-*-*-*-*-*-*-*-*-z", "a*b*c*d*e*f*g*h*i*j*k"] }));
+    timed("long label", () => signal({ labels: ["deploy-".repeat(SIZE / 7)] }, { labelPaths: ["labels"], extraTriggerLabels: ["*-*-*-*-*-y"] }));
+    timed("many labels", () => signal({ labels: Array.from({ length: 2000 }, (_, index) => `label-${index}`) }, { labelPaths: ["labels"], extraTriggerLabels: ["a*-*-*-y"] }));
   });
 
   it("matches globs as prefix, suffix and ordered middle parts", () => {

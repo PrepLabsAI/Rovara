@@ -1,7 +1,6 @@
 // The build step reads a failed check's output to tell "the check's own Python could not run" from "the change broke the code". The output is shaped by
 // the customer's own tests, so a hostile repository controls it: the traceback-file pattern must stay linear, and must still name the same file.
 import { describe, expect, it } from "vitest";
-import { expectLinearScaling } from "../support/scaling.js";
 import { checkCommandCouldNotRun } from "../../packages/broker/src/core/build-step/check-results.js";
 
 const python = (args: string[]) => ({ executable: "/usr/bin/python3", args, cwd: "/work/repo" });
@@ -21,19 +20,20 @@ describe("which file a Python traceback blames", () => {
   });
 });
 
-// A regex blocks the thread, so no timeout can stop a slow one: the same scan runs at 32 KiB and at 256 KiB and its time may grow about eight times, not
-// sixty-four (the old `^\s*File` pattern took about 3 s at 64 KiB of blank lines). A scaling check, not a wall-clock bound, so a slow CI runner cannot fail it.
+// A regex blocks the thread, so no timeout can stop a slow one: sizes grow and the first over the bar fails, in seconds. Linear work at 256 KiB takes
+// a few ms; the old `^\s*File` pattern took about 3 s at 64 KiB of blank lines.
 describe("a hostile check output cannot make the traceback scan slow", () => {
+  const BAR_MS = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false" ? 1_000 : 250;
   const FILLERS: Record<string, string> = { newlines: "\n", "space-newline": " \n", "tab-newline": "\t\n", "crlf": "\r\n", spaces: " ", "open-file": "File \"", "file-lines": "  File \"a.py\", line 1\n", "unclosed-file-lines": "File \"aaaa\n" };
-  const outputOf = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + "\nSyntaxError: invalid syntax\n";
   for (const [label, unit] of Object.entries(FILLERS)) {
     it(label, () => {
-      let last: boolean | undefined;
-      expectLinearScaling((size) => {
-        const output = outputOf(unit, size);
-        return () => { last = checkCommandCouldNotRun(python(["-c", "x"]), 1, output); };
-      }, { n: 32_768, label });
-      expect(typeof last).toBe("boolean");
+      for (const size of [4_096, 16_384, 65_536, 262_144]) {
+        const output = unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + "\nSyntaxError: invalid syntax\n";
+        const started = performance.now();
+        checkCommandCouldNotRun(python(["-c", "x"]), 1, output);
+        const took = performance.now() - started;
+        expect(took, `${label} at ${String(size)} bytes`).toBeLessThan(BAR_MS);
+      }
     }, 60_000);
   }
 });

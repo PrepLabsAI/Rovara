@@ -3,7 +3,6 @@ import { mintTaskToken, type TaskTokenDescription } from "../../packages/broker/
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { issueAccessToken } from "../../packages/broker/src/developer/tokens.js";
 import { claimVector, signingWorld } from "../support/model-gateway.js";
-import { expectLinearScalingAsync } from "../support/scaling.js";
 const v = claimVector();
 const operation = { workspaceId: v.ws, operationId: v.op, fence: 1 };
 const description = (): TaskTokenDescription => ({ companyId: v.cid, project: v.pid, person: v.per!, payer: v.pay, taskId: v.tid, step: v.stp, origin: "app", models: v.mdl });
@@ -82,13 +81,9 @@ it.each([false, true])("signs the largest fitting input and refuses the next lar
 it("rejects an issuer larger than the whole byte budget before a key read", async () => {
   const w = setup(); let keys = 0; const key = w.deps.signer.publicJwk.bind(w.deps.signer);
   w.deps.signer.publicJwk = async () => { keys += 1; return key(); };
-  let message = "";
-  // The refusal must cost no more than the size of the issuer: 125 KB, then 1 MB, grows about 8x at most.
-  await expectLinearScalingAsync((size) => {
-    const issuer = "a".repeat(size);
-    return async () => { message = await mintTaskToken({ ...w.deps, issuer }, operation).then(() => "minted", (error: unknown) => (error instanceof Error ? error.message : String(error))); };
-  }, { n: 125_000, label: "refusing an oversized issuer" });
-  expect(message).toContain("invalid or expired model access"); expect(keys).toBe(0); expect(w.signs()).toBe(0);
+  const start = performance.now();
+  await expect(mintTaskToken({ ...w.deps, issuer: "a".repeat(1000000) }, operation)).rejects.toThrow("invalid or expired model access");
+  expect(performance.now() - start).toBeLessThan(1000); expect(keys).toBe(0); expect(w.signs()).toBe(0);
 });
 
 it.each(["developer", undefined, "untrusted-purpose-marker", null, 3])("refuses a signer without task purpose (%s), without a token or key diagnostics", async purpose => {

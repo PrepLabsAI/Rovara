@@ -8,7 +8,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { httpEvent, identityHarness, T0, VERIFIER, CLI_REDIRECT, authorizeQuery, OIDC_ISSUER } from "../support/developer-fakes.js";
 import { signInClientsThroughLambda } from "../../packages/broker/src/aws/developer-routes.js";
 import { createAdminChangeBroker } from "../support/admin-change-broker.js";
-import { expectLinearScaling } from "../support/scaling.js";
 import { companyRouteHarness, PERSON } from "../support/company-route-harness.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
@@ -355,10 +354,10 @@ it("normalizes opaque credentials in encoded queries, cookies, headers, keys and
 });
 
 it("handles the full byte budget promptly and refuses aggregate item, token and depth overflow", () => {
-  // A scaling check, not a wall-clock bound: the cost of the full-budget string must stay linear (8 x 131,071 = 1,048,568 bytes, the budget's own size).
-  expectLinearScaling((n) => { const part = "x".repeat(n); return () => normalizeGolden(part); }, { n: 131_071, label: "normalizeGolden on a string at the byte budget" });
+  const started = performance.now();
   const text = "x".repeat(1_048_574);
   expect(normalizeGolden(text)).toEqual({ value: text, jwts: [] });
+  expect(performance.now() - started).toBeLessThan(2_000);
   let deep: unknown = "leaf";
   for (let n = 0; n < 34; n++) deep = [deep];
   for (const value of [Array.from({ length: 20_001 }, () => 0), JSON.stringify(Array.from({ length: 20_001 }, () => 0)), JSON.stringify(deep), Array.from({ length: 513 }, (_, n) => ({ token: `runtime-${n}` })), deep, { value: Infinity }]) {

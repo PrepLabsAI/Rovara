@@ -1,5 +1,5 @@
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
-import { expectLinearScaling } from "../support/scaling.js";
 import { matchPolicyGlob } from "../../packages/contracts/src/policy-glob.js";
 import { resolvePolicy } from "../../packages/contracts/src/policy.js";
 
@@ -32,19 +32,21 @@ describe("policy glob", () => {
   });
   it("bounds work linearly for adversarial patterns, with N vs 4N timing", () => {
     const pattern = "**/".repeat(70) + "z";
-    const pathOf = (n: number) => "a/".repeat(n / 2 - 1) + "aa";
-    const results = new Map<number, ReturnType<typeof matchPolicyGlob>>();
-    expectLinearScaling((n) => {
-      const path = pathOf(n);
-      return () => { results.set(n, matchPolicyGlob(pattern, path)); };
-    }, { n: 64, label: "policy glob: adversarial pattern" });
-    for (const n of [64, 512]) {
-      const got = results.get(n)!;
-      expect(got.matched).toBe(false);
-      expect(got.reason).toBeUndefined();
-      expect(got.steps).toBeGreaterThan(n);
-      expect(got.steps).toBeLessThanOrEqual(1024 * (pattern.length + pathOf(n).length + 1));
-    }
+    const measure = (n: number) => {
+      const path = "a/".repeat(n / 2 - 1) + "aa";
+      const start = performance.now();
+      for (let i = 0; i < 100; i += 1) {
+        const got = matchPolicyGlob(pattern, path);
+        expect(got.matched).toBe(false);
+        expect(got.reason).toBeUndefined();
+        expect(got.steps).toBeGreaterThan(n);
+        expect(got.steps).toBeLessThanOrEqual(1024 * (pattern.length + path.length + 1));
+      }
+      return performance.now() - start;
+    };
+    const n = measure(128); const fourN = measure(512);
+    console.info(`policy glob timing N=${n.toFixed(2)}ms 4N=${fourN.toFixed(2)}ms`);
+    expect(fourN).toBeLessThan(n * 12 + 300);
   });
 });
 

@@ -1,6 +1,5 @@
 import { performance } from "node:perf_hooks";
 import { describe, expect, it, vi } from "vitest";
-import { expectLinearScalingAsync } from "../support/scaling.js";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { detectWorkspacePackages, detectWorkspacePackagesInThread } from "../../packages/worker/src/env-detect/packages.js";
 import { discoverWorkspaceRoots } from "../../packages/worker/src/env-detect/workspace-roots.js";
@@ -118,44 +117,30 @@ describe("workspace call limits", () => {
 
 describe("bounded workspace patterns", () => {
   it("rejects the review's 127 KiB pattern bomb quickly", async () => {
-    // A scaling check, not a wall-clock bound: the same bomb (n folders, n positive and n negative patterns) at an eighth of the review's size and at its full size
-    // (4000) may take about eight times as long to refuse, never sixty-four.
-    let outcome: unknown;
-    await expectLinearScalingAsync((count) => {
-      const files: Files = {};
-      const patterns: string[] = [];
-      for (let n = 0; n < count; n += 1) { files[`d/x${String(n)}/package.json`] = node; patterns.push(`  - 'd/x${String(n)}'`); }
-      for (let n = 0; n < count; n += 1) patterns.push(`  - '!d/zz${String(n)}/**'`);
-      files["pnpm-workspace.yaml"] = `packages:\n${patterns.join("\n")}\n`;
-      return async () => { outcome = await declaration(files).then(() => undefined, (error: unknown) => error); };
-    }, { n: 500, label: "pattern bomb refusal" });
-    expect(outcome).toBeInstanceOf(Error);
-  }, 60_000);
+    const files: Files = {};
+    const patterns: string[] = [];
+    for (let n = 0; n < 4000; n += 1) { files[`d/x${String(n)}/package.json`] = node; patterns.push(`  - 'd/x${String(n)}'`); }
+    for (let n = 0; n < 4000; n += 1) patterns.push(`  - '!d/zz${String(n)}/**'`);
+    files["pnpm-workspace.yaml"] = `packages:\n${patterns.join("\n")}\n`;
+    const started = performance.now();
+    await expect(declaration(files)).rejects.toThrow();
+    expect(performance.now() - started).toBeLessThan(2000);
+  }, 4000);
 
   it("matches 256 compiled prefix-pruned patterns against 4000 folders quickly", async () => {
-    const filesOf = (folders: number): Files => {
-      const files: Files = {};
-      const patterns: string[] = [];
-      for (let n = 0; n < folders; n += 1) files[`d/x${String(n)}/package.json`] = node;
-      for (let n = 0; n < 128; n += 1) patterns.push(`d/x${String(n)}`, `!d/z${String(n)}/**`);
-      files["pnpm-workspace.yaml"] = `packages: ${JSON.stringify(patterns)}`;
-      return files;
-    };
-    // The time must grow about eight times from 500 to 4000 folders, never sixty-four (a scaling check, not a wall-clock bound).
-    let roots: string[] | undefined;
-    await expectLinearScalingAsync((folders) => {
-      const files = filesOf(folders);
-      return async () => { roots = await declaration(files); };
-    }, { n: 500, label: "prefix-pruned patterns against folders" });
-    expect(roots).toHaveLength(128);
-    // The work counter: with the prefix seek, 4000 folders cost far fewer than 20000 pattern tests.
-    const files = filesOf(4000);
+    const files: Files = {};
+    const patterns: string[] = [];
+    for (let n = 0; n < 4000; n += 1) files[`d/x${String(n)}/package.json`] = node;
+    for (let n = 0; n < 128; n += 1) patterns.push(`d/x${String(n)}`, `!d/z${String(n)}/**`);
+    files["pnpm-workspace.yaml"] = `packages: ${JSON.stringify(patterns)}`;
+    const started = performance.now();
     const tests = vi.spyOn(RegExp.prototype, "test");
     try {
       expect(await declaration(files)).toHaveLength(128);
       expect(tests.mock.calls.length).toBeLessThan(20000);
+      expect(performance.now() - started).toBeLessThan(500);
     } finally { tests.mockRestore(); }
-  }, 60_000);
+  });
 
   it("counts exclusions and patterns across declarations in the same cap", async () => {
     const files: Files = { "package.json": JSON.stringify({ workspaces: Array(128).fill("a") }), "a/package.json": node, "pyproject.toml": `[tool.uv.workspace]\nmembers = ["a"]\nexclude = ${JSON.stringify(Array(128).fill("b"))}` };

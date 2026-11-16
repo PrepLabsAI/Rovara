@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   CHECK_KINDS, EvidencePackV2Schema, partsOutsideKind, renderSideBySide, runSideBySide, sideBySidePairsPart, SIDE_BY_SIDE_EXAMPLES_MAX, SIDE_BY_SIDE_UNREADABLE_SENTENCE, type ArtifactRef, type SideBySideCaseOutcome, type SideBySideSummary,
 } from "../../packages/contracts/src/index.js";
-import { expectLinearScaling } from "../support/scaling.js";
 import { v2Pack } from "../support/evidence-v2-fixtures.js";
 import { PIN, RUN_DEFAULTS, canary, COMPANY_A, recordingJudge, reportNeeded, sbsWorld, source, verdictText } from "../support/side-by-side-world.js";
 
@@ -101,13 +100,11 @@ describe("the full rendering", () => {
     expect(text.split("\n").filter((line) => /^\s*(?:```|~~~)|^ {4}|^\t/u.test(line))).toEqual([]);
   });
   it("cuts a long output and takes a 1 MB output fast", () => {
-    // A scaling check, not a wall-clock bound: the same render with a 125 KB and a 1 MB output may take about eight times as long, never sixty-four.
-    let text = "";
-    expectLinearScaling((words) => {
-      const huge = "word ".repeat(words);
-      const summary = summaryOf([judged("c-1", "worse", huge, huge)]);
-      return () => { text = renderSideBySide(summary, { mode: "full" }); };
-    }, { n: 25_000, label: "side-by-side render of a huge output" });
+    const huge = "word ".repeat(200_000);
+    const started = process.hrtime.bigint();
+    const text = renderSideBySide(summaryOf([judged("c-1", "worse", huge, huge)]), { mode: "full" });
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    expect(ms).toBeLessThan(2_000);
     expect(text.length).toBeLessThan(2_500);
   });
   it("shows a secret-shaped output redacted", () => {

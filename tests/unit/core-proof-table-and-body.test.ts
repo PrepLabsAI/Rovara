@@ -13,7 +13,6 @@ import { PROOF_LEVEL_LAST, proofSection } from "../../packages/broker/src/core/p
 import { proofTableView } from "../../packages/broker/src/core/proof/proof-view.js";
 import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
 import { workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
-import { expectLinearScaling } from "../support/scaling.js";
 
 /** What the worker writes for a task's checks: one item per check, `readiness:<index>`; the check at `provenIndex` is a test runner whose new test fails on the original code, the others are linters that passed. */
 function workerTestProof(candidateDigest: string, provenIndex: number, checkCount = provenIndex + 1): { proof: TestProof } {
@@ -801,16 +800,15 @@ describe("192a agent-written replies", () => {
   it("renders only fixed refusal words, never real-run fields or dependency ids, with hostile long labels inert", () => {
     const secret = `gh${"p"}_${"a".repeat(36)}`;
     const hostile = "[nested [link]](https://evil.example) ![image][ref]\n[ref]: https://evil.example\n@team #123 <img>\n# heading\n> quote\n---\n```\n~~~\n\u200b\u202e\ufe0f";
-    const build = (padding: number) => buildProofTable(input({ plan: plan({ checks: { proposed: [check("unit", hostile + "x".repeat(padding))], proves: { unit: ["1.1"] } } }), realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }));
-    const table = build(1_048_576);
+    const start = performance.now();
+    const table = buildProofTable(input({ plan: plan({ checks: { proposed: [check("unit", hostile + "x".repeat(1_048_576))], proves: { unit: ["1.1"] } } }), realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }));
     const label = rowOf(table, "1.1").evidence[0]!.label;
     expect(label).toMatch(/^proven with scripted replies written in this task: check them/u);
     expect(label).not.toMatch(/\]\(|!\[|@team|#123|<img>|[\r\n\u200b\u202e]|\ufe0f/u);
     expect(JSON.stringify(table)).not.toContain(secret);
     expect(JSON.stringify(table)).not.toContain("never-display-dependency");
     expect(Array.from(label).length).toBeLessThanOrEqual(120);
-    // The cost must not grow faster than the hostile label (131,072 -> 1,048,576 characters, the original size).
-    expectLinearScaling((padding) => { const planned = plan({ checks: { proposed: [check("unit", hostile + "x".repeat(padding))], proves: { unit: ["1.1"] } } }); const given = input({ plan: planned, realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }); return () => { buildProofTable(given); }; }, { n: 131_072, label: "proof table with a hostile long label" });
+    expect(performance.now() - start).toBeLessThan(1_000);
   });
 });
 

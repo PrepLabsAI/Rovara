@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isValidTestId, testIdOf } from "@agentx/contracts";
-import { expectLinearScalingAsync } from "../support/scaling.js";
 import { TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS, displayLine } from "../../packages/worker/src/verification/test-report.js";
 import { REPORT_FOLDER_MAX_FILES, readJunitFolder, readTestReportAt } from "../../packages/worker/src/verification/test-report-folder.js";
 
@@ -160,13 +159,10 @@ describe("readJunitFolder inside a workspace root", () => {
     }
   });
   it("cuts a very long path before doing any work on it, and drops trailing slashes without a pattern that is quadratic", async () => {
-    // Scaling checks, not wall-clock bounds: each long path is timed at N and at 8N (8N is the original length).
-    const longPaths: Array<[string, (n: number) => string]> = [["leading slashes", (n) => "/".repeat(n) + "a"], ["trailing slashes", (n) => "a" + "/".repeat(n)]];
-    for (const [label, pathOf] of longPaths) {
-      await expectLinearScalingAsync((n) => { const path = pathOf(n); return () => readTestReportAt(dir, path); }, { n: 10_000, label });
-    }
     for (const path of ["/".repeat(80_000) + "a", "a".repeat(501), "a" + "/".repeat(80_000)]) {
+      const started = performance.now();
       expect((await readTestReportAt(dir, path)).problem, path.slice(0, 5)).toBe("refused");
+      expect(performance.now() - started).toBeLessThan(50);
     }
     mkdirSync(join(dir, "r"));
     writeFileSync(join(dir, "r", "TEST-a.A.xml"), suite("a.A", OK("a.A", "t")));

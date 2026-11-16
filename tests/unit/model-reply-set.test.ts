@@ -16,7 +16,6 @@ import {
   selectModelReply,
   stampReplyProvenance,
 } from "../../packages/contracts/src/model-reply-set.js";
-import { expectLinearScaling } from "../support/scaling.js";
 import { REPLY_PROVENANCES } from "../../packages/contracts/src/model-reply-provenance.js";
 
 const bytes = (value: unknown): Uint8Array => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
@@ -120,13 +119,10 @@ describe("the file form (what a repo file may hold)", () => {
     if (ok.ok) expect(ok.digest).toMatch(/^[0-9a-f]{64}$/u);
   });
   it("checks a 1 MB set fast", () => {
-    // A scaling check, not a wall-clock bound: the same parse at about 125 KB and at about 1 MB (the old input) may take about eight times as long, never sixty-four.
-    let result: ReturnType<typeof parseModelReplySetFileBytes> | undefined;
-    expectLinearScaling((length) => {
-      const file = bytes(fileSet([fileReply("a", { response: { text: "y".repeat(length), finish: "stop" } })]));
-      return () => { result = parseModelReplySetFileBytes(file); };
-    }, { n: (1_000_000 - 200) / 8, label: "reply set parse" });
-    expect(result?.ok).toBe(true);
+    const started = performance.now();
+    const result = parseModelReplySetFileBytes(bytes(fileSet([fileReply("a", { response: { text: "y".repeat(1_000_000 - 200), finish: "stop" } })])));
+    expect(result.ok).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1500);
   });
 });
 

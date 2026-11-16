@@ -9,7 +9,6 @@ import {
   PUBLIC_RENDER_LIMITS, publicDetailsUrl, publicEvidenceView, readEvidencePack, readEvidencePackText, renderEvidence, renderEvidencePublic, type EvidencePackV2,
 } from "../../packages/contracts/src/index.js";
 import { v2Pack } from "../support/evidence-v2-fixtures.js";
-import { expectLinearScaling } from "../support/scaling.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const ZWJ = "‍";
@@ -394,48 +393,33 @@ describe("free text stays inert (and is not printed at all)", () => {
 });
 
 describe("bounded and fast", () => {
-  it("a pack of about 1 MB (thousands of checks with long labels, thousands of notes) renders in time that grows no faster than its size, in a few lines", () => {
+  it("a pack of about 1 MB (thousands of checks with long labels, thousands of notes) renders at once, in a few lines", () => {
+    const pack = clone(plantedPack()) as unknown as Record<string, any>;
     const long = "L".repeat(200);
-    const packOf = (checks: number): Record<string, any> => {
-      const pack = clone(plantedPack()) as unknown as Record<string, any>;
-      pack.checks = Array.from({ length: checks }, (_, index) => ({ id: `c${String(index)}`, kind: "test", label: long, before: "passed", after: index % 3 === 0 ? "failed" : "passed", class: "passing", durationMs: 1, tests: { total: 5, passed: 5, failed: 0, skipped: 0, errored: 0, names: [{ name: long, status: "passed" }], newTests: [long] } }));
-      pack.notTested = Array.from({ length: checks / 2 }, () => ({ what: long, reason: long }));
-      pack.weakening.absentOnNew = Array.from({ length: checks / 2 }, () => long);
-      return pack;
-    };
-    let out: ReturnType<typeof renderEvidencePublic> | undefined;
-    let largest = "";
-    // 500 checks, then 4,000 (about 1 MB): linear work grows about 8x.
-    expectLinearScaling((checks) => {
-      const pack = packOf(checks);
-      largest = JSON.stringify(pack);
-      return () => { out = renderEvidencePublic(pack as unknown as EvidencePackV2); };
-    }, { n: 500, label: "rendering a large evidence pack" });
-    expect(largest.length).toBeGreaterThan(1_000_000);
-    if (out === undefined) throw new Error("no render");
+    pack.checks = Array.from({ length: 4_000 }, (_, index) => ({ id: `c${String(index)}`, kind: "test", label: long, before: "passed", after: index % 3 === 0 ? "failed" : "passed", class: "passing", durationMs: 1, tests: { total: 5, passed: 5, failed: 0, skipped: 0, errored: 0, names: [{ name: long, status: "passed" }], newTests: [long] } }));
+    pack.notTested = Array.from({ length: 2_000 }, () => ({ what: long, reason: long }));
+    pack.weakening.absentOnNew = Array.from({ length: 2_000 }, () => long);
+    expect(JSON.stringify(pack).length).toBeGreaterThan(1_000_000);
+    const started = performance.now();
+    const out = renderEvidencePublic(pack as unknown as EvidencePackV2);
+    expect(performance.now() - started).toBeLessThan(500);
     expect(out.text.length).toBeLessThan(3_000);
     expect(out.body.length).toBeLessThan(30);
     expect(out.text).toContain("Checks: 4,000 (");
     expect(out.text).not.toContain(long);
   });
 
-  it("a 3.5 MB stored pack read as text is rendered in time that grows no faster than its size too", () => {
-    let textOf = "";
-    let out = undefined as ReturnType<typeof renderEvidencePublic> | undefined;
-    // 375 dependencies and 25 notes, then 3,000 and 200: linear work grows about 8x.
-    expectLinearScaling((dependencies) => {
-      const pack = clone(v2Pack()) as unknown as Record<string, any>;
-      pack.notTested = Array.from({ length: dependencies / 15 }, () => ({ what: "w".repeat(300), reason: "r".repeat(100) }));
-      pack.dependencies = Array.from({ length: dependencies }, (_, index) => ({ name: `dep${String(index)}`.padEnd(80, "x"), kind: "http", backing: "fake", label: "real", trust: "real" }));
-      const text = JSON.stringify(pack);
-      textOf = text;
-      return () => {
-        const read = readEvidencePackText(text);
-        out = read.status === "v2" ? renderEvidencePublic(read.pack, { newer: read.newer }) : undefined;
-      };
-    }, { n: 375, label: "reading and rendering a large stored evidence pack" });
+  it("a 3.5 MB stored pack read as text is rendered at once too", () => {
+    const pack = clone(v2Pack()) as unknown as Record<string, any>;
+    pack.notTested = Array.from({ length: 200 }, () => ({ what: "w".repeat(300), reason: "r".repeat(100) }));
+    pack.dependencies = Array.from({ length: 3_000 }, (_, index) => ({ name: `dep${String(index)}`.padEnd(80, "x"), kind: "http", backing: "fake", label: "real", trust: "real" }));
+    const textOf = JSON.stringify(pack);
     expect(textOf.length).toBeGreaterThan(300_000);
+    const started = performance.now();
+    const read = readEvidencePackText(textOf);
+    const out = read.status === "v2" ? renderEvidencePublic(read.pack, { newer: read.newer }) : undefined;
     expect(out).toBeDefined();
+    expect(performance.now() - started).toBeLessThan(2_000);
     expect(out!.text.length).toBeLessThan(3_000);
   });
 
