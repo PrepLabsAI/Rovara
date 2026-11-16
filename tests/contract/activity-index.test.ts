@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FailureIndexRecordSchema, UsageIndexRecordSchema } from "../../packages/contracts/src/index.js";
 import { IMPLICIT_COMPANY_ID } from "../../packages/contracts/src/index.js";
 import { indexActivity, type IndexStore } from "../../packages/broker/src/aws/activity-index.js";
+import { taskPointerKey as scopedTaskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 
 const WORKSPACE = "22222222-2222-4222-8222-222222222222";
@@ -130,6 +131,39 @@ describe("the usage index (A5, A9)", () => {
     ]);
     await indexActivity([usageEvent(telemetry)], index, vi.fn());
     expect(index.puts[0]).toMatchObject({ project: "core-payments", requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } });
+  });
+
+  it("follows the workspace company's task pointer and never reads another company's partition", async () => {
+    const companyA = IMPLICIT_COMPANY_ID;
+    const companyB = "org_11111111111111111111";
+    const items = [
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
+      { ...workspaceKey(companyA, WORKSPACE), entityType: "WORKSPACE", companyId: companyA, orgId: companyA, projectName: "core-payments" },
+      { ...scopedTaskPointerKey(companyA, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
+      { ...scopedTaskPointerKey(companyB, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: "44444444-4444-4444-8444-444444444444" },
+      { pk: `DEVTASK#${TASK}`, sk: "META", taskId: TASK, developerName: "Maya Chen" },
+    ];
+    const index = store(items);
+    const get = vi.spyOn(index, "get");
+    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "core-payments", origin: "ai_tool", taskId: TASK });
+    expect(get).toHaveBeenCalledWith(scopedTaskPointerKey(companyA, WORKSPACE), expect.anything());
+    expect(get).not.toHaveBeenCalledWith(scopedTaskPointerKey(companyB, WORKSPACE), expect.anything());
+  });
+
+  it("keeps a dangling workspace pointer soft and logs the fixed integrity event", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const companyId = IMPLICIT_COMPANY_ID;
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId },
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
+    ]);
+    const result = await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
+    expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack" });
+    expect(index.puts[0]).not.toHaveProperty("taskId");
+    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
+    warn.mockRestore();
   });
 
   it("fails soft on a broken company pointer without reading the legacy operation", async () => {
