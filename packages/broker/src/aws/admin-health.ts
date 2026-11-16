@@ -1,5 +1,3 @@
-import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
-import { resolveCompany } from "./company-check.js";
 // Spec 025 A13: the health answer. Every probe has a time limit and answers `unknown` with a reason
 // when it is not set up or fails, so the route itself never fails for a probe. Details carry
 // counts, names, codes and error classes only.
@@ -12,7 +10,7 @@ export interface AdminHealthProbes {
   release?: string;
   alarms?: () => Promise<Array<{ name: string; state: string }>>;
   queueDepths?: () => Promise<Array<{ name: string; depth: number | null }>>;
-  slackAuthCheck?: (workspace?: SlackWorkspaceScope) => Promise<SlackAuthCheckResponse>;
+  slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
   githubInstallations?: () => Promise<number>;
   timeoutMs?: number;
 }
@@ -86,31 +84,6 @@ export async function adminHealth(deps: AdminReadDependencies, identity: Authent
     }
   };
   const slackPart = async (): Promise<AdminHealthCheck> => {
-    if (deps.companies !== undefined || deps.slackWorkspaces !== undefined) {
-      const refusal: AdminHealthCheck = { status: "unknown", detail: "Slack is not available for this company." };
-      try {
-        return await within(ms, async () => {
-          const signal = AbortSignal.timeout(ms);
-          const companyId = await resolveCompany(deps.companies, identity.developer?.developerId ?? identity.ownerKey);
-          if (companyId === undefined || deps.slackWorkspaces === undefined || probes.slackAuthCheck === undefined || signal.aborted) return refusal;
-          const scopes = await deps.slackWorkspaces.scopesForCompany(companyId);
-          // One TOTAL budget for the aggregate, with no partial success and no customer text.
-          if (!Array.isArray(scopes) || scopes.length === 0 || scopes.length > 32 || Buffer.byteLength(JSON.stringify(scopes)) > 8192 || signal.aborted) return refusal;
-          const seen = new Set<string>();
-          for (const value of scopes) {
-            const parsed = SlackWorkspaceScopeSchema.safeParse(value);
-            if (!parsed.success || parsed.data.companyId !== companyId || seen.has(parsed.data.teamId) || signal.aborted) return refusal;
-            seen.add(parsed.data.teamId);
-          }
-          for (const scope of scopes) {
-            if (signal.aborted || await deps.slackWorkspaces.requireCompany(scope.teamId) !== companyId || signal.aborted) return refusal;
-            const answer = await probes.slackAuthCheck(scope);
-            if (signal.aborted || !answer.ok || answer.teamId !== scope.teamId) return refusal;
-          }
-          return { status: "ok", detail: "Slack works for this company." };
-        });
-      } catch { return refusal; }
-    }
     if (probes.slackAuthCheck === undefined) return NOT_SET_UP;
     try {
       const answer = await within(ms, probes.slackAuthCheck);

@@ -1,6 +1,3 @@
-import { slackRecordScope } from "./slack-workspace-tokens.js";
-import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
-import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -99,7 +96,6 @@ function identityDocumentClient(input: {
 }
 
 function identityDependencies(input: {
-  workspace?: SlackWorkspaceScope;
   task: DeveloperTaskRecord;
   developerId: string;
     stateTableName: string;
@@ -123,7 +119,6 @@ function identityDependencies(input: {
     documentClient: identityDocumentClient({ taskId: task.taskId, developerId, stateTableName: input.stateTableName, admission, ports }),
     tableName: input.stateTableName,
     slackTeamId,
-    ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
     now: () => input.now(),
     uuid: () => input.uuid(),
     taskPersonProof: async (request) => {
@@ -181,7 +176,6 @@ export interface TaskPersonRuntime {
 
 /** Creates a guard-local checker. Its injected ports expose only the bounded People read set. */
 export function createTaskPersonRuntime(input: {
-  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">;
   admission: TaskAuthorityAdmission;
   ports: TaskPersonRuntimePorts;
   stateTableName: string;
@@ -214,14 +208,10 @@ export function createTaskPersonRuntime(input: {
       witnesses.delete(witnessKey(task.taskId, developerId));
       input.admission.admitIdentity(developerId);
       input.admission.assertOpen();
-      const workspace = input.workspaces === undefined ? undefined : slackRecordScope(task, task.share?.teamId);
-      if (workspace !== undefined && await input.workspaces!.requireCompany(workspace.teamId) !== workspace.companyId) throw unavailable();
-      const teamId = workspace?.teamId ?? input.slackTeamId;
-      if (!UUID.test(task.taskId) || !SlackTeamIdSchema.safeParse(teamId).success) throw refused();
+      if (!UUID.test(task.taskId) || !SlackTeamIdSchema.safeParse(input.slackTeamId).success) throw refused();
       let projectWitness: ProjectAuthorityWitness | undefined;
       const dependencies = identityDependencies({
-        task, developerId, stateTableName: input.stateTableName, slackTeamId: teamId,
-        ...(workspace === undefined ? {} : { workspace }),
+        task, developerId, stateTableName: input.stateTableName, slackTeamId: input.slackTeamId,
         now: () => input.now(), uuid: () => input.uuid(),
         ...(input.trustedCaller === undefined ? {} : { trustedCaller: input.trustedCaller }),
         admission: input.admission,

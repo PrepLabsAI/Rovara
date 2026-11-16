@@ -2,7 +2,7 @@
 // often carries no email, so the issuer's userinfo endpoint is asked, with the admin's own token.
 // Only a verified email counts. The token is never logged, and only a hash of it is kept as a key.
 import { createHash } from "node:crypto";
-import { redactAndCap, type SlackWorkspaceScope, type AdminMeResponse, type SlackUserByEmailRequest, type SlackUserByEmailResponse } from "@agentx/contracts";
+import { redactAndCap, type AdminMeResponse, type SlackUserByEmailRequest, type SlackUserByEmailResponse } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 
 export interface AdminMeDependencies {
@@ -88,14 +88,14 @@ export function adminIdentityReader(deps: AdminMeDependencies & { now(): number;
     return found;
   }
 
-  async function me(identity: AuthenticatedIdentity, authorization: string | undefined, workspace?: SlackWorkspaceScope): Promise<AdminMeResponse> {
+  async function me(identity: AuthenticatedIdentity, authorization: string | undefined): Promise<AdminMeResponse> {
     const found = await profile(identity, authorization);
     const base = { issuer: identity.issuer, subject: identity.subject, ...found };
     if (found.email === undefined) return { ...base, slack: { linked: false, reason: "no_email" } };
     if (deps.slackUserByEmail === undefined) return { ...base, slack: { linked: false, reason: "not_set_up" } };
     let answer: SlackUserByEmailResponse;
     try {
-      answer = await deps.slackUserByEmail({ kind: "slack-user-by-email", email: found.email, ...(workspace === undefined ? {} : { workspace }) });
+      answer = await deps.slackUserByEmail({ kind: "slack-user-by-email", email: found.email });
     } catch (error) {
       // A thrown lookup is an unavailable one: the answer still says who the admin is.
       deps.log({ event: "admin.slack_user_lookup_failed", error: error instanceof Error ? error.name : "unknown" });

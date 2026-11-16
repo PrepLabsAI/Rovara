@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   UNSTAMPED_WAITER_GRACE_MS, UNWAITED_TASK_IDLE_LIMIT_MS, UNWAITED_TASK_NOTE, WAITER_SEEN_WITHIN_MS,
-  lastActivityAt, slackBotTokenFrom, sweepUnwaitedTasks, type SlackThreadPlace,
+  lastActivityAt, slackBotTokenFrom, sweepUnwaitedTasks,
 } from "../../packages/broker/src/aws/unwaited-tasks.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall,
@@ -24,7 +24,7 @@ beforeAll(async () => {
 });
 
 /** A bound thread whose workspace runs one coding task, last active `idle` milliseconds before `now`. */
-async function runningTask(options: { idle?: number; companyId?: string; teamId?: string } = {}) {
+async function runningTask(options: { idle?: number } = {}) {
   const broker = createBroker({ slackThreadsTableName: "threads" });
   await registerSlackProject(broker.handler);
   const workspaceId = (await ensureWorkspace(broker.handler, subject, pratik)).body.workspaceId as string;
@@ -49,14 +49,8 @@ async function runningTask(options: { idle?: number; companyId?: string; teamId?
   };
   const activeTurn = (turn: Record<string, unknown>) => broker.db.set({ pk: `THREAD#${subject}`, sk: "META", workspaceId, activeTurn: turn });
   const logs: Array<Record<string, unknown>> = [];
-  const postNote = vi.fn<(thread: SlackThreadPlace, text: string) => Promise<void>>(async () => undefined);
-  if (options.companyId !== undefined) {
-    broker.db.get(`WORKSPACE#${workspaceId}`, "META")!.orgId = options.companyId;
-    const record = broker.db.find((row) => row.entityType === "SLACK_THREAD" && row.workspaceId === workspaceId)[0]!;
-    record.thread = `${options.teamId}/${SLACK_CHANNEL}/${threadTs}`;
-  }
+  const postNote = vi.fn<(thread: { channelId: string; threadTs: string }, text: string) => Promise<void>>(async () => undefined);
   const sweep = (when = now) => sweepUnwaitedTasks({
-    ...(options.companyId === undefined ? {} : { workspaces: { requireCompany: async () => options.companyId! } }),
     client: broker.db, tableName: "state", threadsTableName: "threads", callbackSigningKey: "c".repeat(64),
     postNote, log: (entry) => { logs.push(entry); },
   }, [workspaceId], when);
@@ -385,11 +379,3 @@ describe("the backstop: review hardening (#173)", () => {
   });
 });
 
-
-it("carries each authoritative workspace company/team for identical raw channel and timestamps", async () => {
-  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]] as const) {
-    const h = await runningTask({ companyId, teamId });
-    await h.sweep();
-    expect(h.postNote).toHaveBeenCalledExactlyOnceWith({ ...THREAD, workspace: { companyId, teamId } }, UNWAITED_TASK_NOTE);
-  }
-});

@@ -131,15 +131,3 @@ describe("resolveTaskAccess", () => {
     expect((await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId))).code).toBe("TASK_NOT_FOUND");
   });
 });
-
-it("task-page membership carries the authoritative task workspace through the callback", async () => {
-  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]]) {
-    const fixture = pageTask();
-    const workspace = { companyId: companyId!, teamId: teamId! };
-    fixture.deps.workspaceForTask = async () => workspace;
-    const calls: unknown[] = [];
-    fixture.deps.channelMember = async (...args) => { calls.push(args); return true; };
-    await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId)).resolves.toMatchObject({ role: "commenter" });
-    expect(calls).toEqual([[SAM.slackUserId, (fixture.db.get(`DEVTASK#${fixture.taskId}`, "META")!.share as { channelId: string }).channelId, workspace]]);
-  }
-});

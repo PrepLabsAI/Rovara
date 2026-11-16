@@ -72,13 +72,3 @@ describe("task person proof transport", () => {
     }
   });
 });
-
-it("carries the validated sender scope through the proof envelope without replacing it with the install team", async () => {
-  const admission = createTaskAuthorityAdmission({ now: () => 1100, lambdaRemainingMs: 20000 });
-  const workspace = { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T123ABC" };
-  let sent: unknown;
-  const check = taskPersonProofThroughLambda({ admission, expectedTeamId: workspace.teamId, now: () => 1100,
-    invoke: async (payload) => { sent = JSON.parse(Buffer.from(payload).toString("utf8")); return response(result(admission.id, 3)); } });
-  await check({ ...request, workspace });
-  expect(sent).toMatchObject({ workspace, request: { workspace } });
-});

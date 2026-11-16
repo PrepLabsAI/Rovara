@@ -333,7 +333,6 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
  */
 export function createSlackAdapterFront(deps: {
   secrets: () => Promise<Pick<SlackSecrets, "signingSecret">>;
-  getBinding?: SlackIngressDependencies["getBinding"];
   isRovaraThread: (thread: SlackThread) => Promise<boolean>;
   /** Hands the message on; it reaches the channel API after this request is answered. Throws when it cannot. */
   handOff: (message: InboundMessage) => Promise<void>;
@@ -361,6 +360,18 @@ export function createSlackAdapterFront(deps: {
     if (payload.type !== "event_callback") return ignore(log, "not_event_callback");
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
+    if (deps.workspaces !== undefined) {
+      try {
+        await deps.workspaces.requireCompany(mention.thread.teamId);
+        const token = await slackWorkspaceToken(deps.workspaces, mention.thread.teamId);
+        const person = await slackCompanyPerson(deps, mention.thread.teamId, mention.userId);
+        if (person.kind !== "linked") {
+          const text = await slackLinkNotice(deps, mention.thread.teamId, mention.userId);
+          if (text !== undefined) await slackRequestWorkspace.run({ teamId: mention.thread.teamId, companyId: person.companyId, token }, () => deps.postEphemeral?.({ channel: mention.thread.channelId, threadTs: mention.thread.threadTs, user: mention.userId, text }));
+          return respond(200, { ok: true });
+        }
+      } catch { return ignore(log, "channel_not_bound"); }
+    }
     if (mention.kind === "message") {
       let ours: boolean;
       try {
@@ -371,20 +382,6 @@ export function createSlackAdapterFront(deps: {
         return respond(500, { error: "thread could not be checked" });
       }
       if (!ours) return ignore(log, "not_rovara_thread");
-    }
-    if (deps.workspaces !== undefined) {
-      try {
-        const binding = await deps.getBinding?.(mention.thread.teamId, mention.thread.channelId);
-        if (binding === undefined || !await slackCompanyProject(deps, mention.thread.teamId, binding.projectName)) return ignore(log, "channel_not_bound");
-        await deps.workspaces.requireCompany(mention.thread.teamId);
-        const token = await slackWorkspaceToken(deps.workspaces, mention.thread.teamId);
-        const person = await slackCompanyPerson(deps, mention.thread.teamId, mention.userId);
-        if (person.kind !== "linked") {
-          const text = await slackLinkNotice(deps, mention.thread.teamId, mention.userId);
-          if (text !== undefined) await slackRequestWorkspace.run({ teamId: mention.thread.teamId, companyId: person.companyId, token }, () => deps.postEphemeral?.({ channel: mention.thread.channelId, threadTs: mention.thread.threadTs, user: mention.userId, text }));
-          return respond(200, { ok: true });
-        }
-      } catch { return ignore(log, "channel_not_bound"); }
     }
     try {
       await deps.handOff(inboundOfSlackMention(mention, now()));
@@ -459,6 +456,17 @@ export function createSlackMentionRouter(dependencies: SlackRouterDependencies):
     const { thread } = mention;
     const binding = await dependencies.getBinding(thread.teamId, thread.channelId);
     if (binding === undefined || !await slackCompanyProject(dependencies, thread.teamId, binding.projectName)) return ignore(log, "channel_not_bound");
+    const person = await slackCompanyPerson(dependencies, thread.teamId, mention.userId);
+    if (person.kind !== "linked") {
+      const text = await slackLinkNotice(dependencies, thread.teamId, mention.userId);
+      if (text !== undefined) await dependencies.postEphemeral?.({ channel: thread.channelId, threadTs: thread.threadTs, user: mention.userId, text });
+      return respond(200, { ok: true });
+    }
+    const text = slackRequestText(mention.text, mention.botUserId);
+    if (/^use(?:\s|$)/i.test(text) || chatGptSlackCommand(text) !== undefined) {
+      await dependencies.postEphemeral?.({ channel: thread.channelId, threadTs: thread.threadTs, user: mention.userId, text: SLACK_WEB_SIGNIN_NOTICE });
+      return respond(200, { ok: true });
+    }
     return route(mention, binding);
   }
   async function route(incoming: SlackMention, checkedBinding?: SlackChannelBinding): Promise<HttpResponse> {
@@ -514,19 +522,6 @@ export function createSlackMentionRouter(dependencies: SlackRouterDependencies):
         toAssistant = addressed.assistant;
         mention = { ...mention, kind: "mention" };
         log("thread.continued", { eventId: mention.eventId });
-      }
-    }
-    if (dependencies.workspaces !== undefined) {
-      const person = await slackCompanyPerson(dependencies, thread.teamId, mention.userId);
-      if (person.kind !== "linked") {
-        const text = await slackLinkNotice(dependencies, thread.teamId, mention.userId);
-        if (text !== undefined) await dependencies.postEphemeral?.({ channel: thread.channelId, threadTs: thread.threadTs, user: mention.userId, text });
-        return respond(200, { ok: true });
-      }
-      const text = slackRequestText(mention.text, mention.botUserId);
-      if (/^use(?:\s|$)/i.test(text) || chatGptSlackCommand(text) !== undefined) {
-        await dependencies.postEphemeral?.({ channel: thread.channelId, threadTs: thread.threadTs, user: mention.userId, text: SLACK_WEB_SIGNIN_NOTICE });
-        return respond(200, { ok: true });
       }
     }
     let memberCheckError: string | undefined;
@@ -1496,7 +1491,6 @@ export function createAwsSlackAdapterFront(company: SlackCompanyDependencies = {
     ...company,
     postEphemeral: async (input) => chatPostEphemeral(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
     secrets,
-    ...(company.workspaces === undefined ? {} : { getBinding: awsSlackRouterDependencies(slackDirectTransport(secrets, company), company).getBinding }),
     isRovaraThread: (thread) => threads.has(thread.channelId, thread.threadTs),
     async handOff(message) {
       const payload: HandedOffSlackMessage = { source: "agentx.slack-adapter", kind: "forward", message };

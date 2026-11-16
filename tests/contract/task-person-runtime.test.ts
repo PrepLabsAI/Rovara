@@ -300,17 +300,3 @@ describe("task person runtime factory", () => {
     expect(admission.checkedIdentityCount()).toBe(0);
   });
 });
-
-it("derives proof scope from each task's company/team, not the installation team", async () => {
-  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]]) {
-    const task = { ...nativeTask(), companyId, share: { ...nativeTask().share!, teamId: teamId! } };
-    const testPorts = ports({ task });
-    testPorts.projectAuthorityReader.bindings.mockImplementation(async (team, _admission, signal) => ({ items: [{ pk: `SLACK_BINDING#${team}`, sk: `CHANNEL#${channelId}`, teamId: team, channelId, projectName: task.project, updatedAt: "2026-01-01T00:00:00.000Z" }], complete: !signal.aborted }));
-    testPorts.taskPersonProof.mockImplementation(async (request) => ({ result: { ok: true, user: { id: slackUserId, teamId: request.workspace?.teamId ?? "T0INSTALL", name: "Maya" }, memberOf: [channelId] }, slackCallsUsed: 1 }));
-    const admission = createTaskAuthorityAdmission({ now: () => 1000, lambdaRemainingMs: 20000 });
-    const scoped = createTaskPersonRuntime({ admission, ports: testPorts, stateTableName: "state", slackTeamId: "T0INSTALL", now: () => 1000, uuid: () => "22222222-2222-4222-8222-222222222222", workspaces: { requireCompany: async () => companyId! } });
-    await scoped.checkTaskPerson(task, nativeDeveloperId);
-    expect(testPorts.taskPersonProof.mock.calls[0]?.[0]).toMatchObject({ workspace: { companyId, teamId } });
-    expect(testPorts.projectAuthorityReader.bindings.mock.calls[0]?.[0]).toBe(teamId);
-  }
-});

@@ -410,13 +410,3 @@ describe("shared broker helpers (ruling F9)", () => {
     expect(source("broker-shared.ts")).toMatch(/export function isConditional/);
   });
 });
-
-
-it("audits a company project-access workspace refusal with fixed 503 words", async () => {
-  const h = await createDeveloperTaskBroker({ developerExtra: { companies: { companyOf: async () => "org_aaaaaaaaaaaaaaaaaaaa" } } });
-  const response = await h.dev(MAYA, "POST", "/v1/dev/tasks", start());
-  expect(response.status).toBe(503);
-  expect(response.body.error).toEqual({ code: "SLACK_UNAVAILABLE", message: "This Slack workspace is not available." });
-  expect(refusals(h.db)).toEqual([expect.objectContaining({ error: { code: "SLACK_UNAVAILABLE" }, phase: "refused" })]);
-  expect(workspaces(h.db)).toHaveLength(0);
-});

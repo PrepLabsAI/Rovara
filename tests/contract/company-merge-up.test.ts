@@ -310,8 +310,6 @@ it("merge-up 2 checks the linking deadline after the last provider read", async 
   const h = harness(COMPANY_A.orgId); h.project(COMPANY_A.orgId);
   h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
   h.db.set({ pk: "SLACK_BINDING#T0SHARED", sk: "CHANNEL#C0SHARED", teamId: "T0SHARED", channelId: "C0SHARED", projectName: "shared-project", updatedAt: TIME });
-  h.deps.workspaces = { requireCompany: async () => COMPANY_A.orgId };
-  h.db.set({ pk: `ORG#${COMPANY_A.orgId}#SLACK_WORKSPACES`, sk: "TEAM#T0SHARED", entityType: "COMPANY_SLACK_WORKSPACE_VIEW", teamId: "T0SHARED", companyId: COMPANY_A.orgId, boundAt: TIME, boundBy: "operator" });
   let elapsed = 0; let slow = false;
   const clock = vi.spyOn(Date, "now").mockImplementation(() => elapsed);
   h.deps.developer.channelInfo = vi.fn(async () => { if (slow) elapsed = 10_001; return { ok: true as const, channels: [] }; });
@@ -322,6 +320,5 @@ it("merge-up 2 checks the linking deadline after the last provider read", async 
     slow = true;
     await expect(call()).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: company read limit exceeded" });
     expect(h.deps.developer.channelInfo).toHaveBeenCalledTimes(2);
-    expect(h.deps.developer.channelInfo).toHaveBeenLastCalledWith({ kind: "channel-info", channelIds: ["C0SHARED"], workspace: { companyId: COMPANY_A.orgId, teamId: "T0SHARED" } });
   } finally { clock.mockRestore(); }
 });

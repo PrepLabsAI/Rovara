@@ -5,7 +5,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { slackThreadSubject } from "../../packages/contracts/src/index.js";
 import { finalizeBatch, withEvalBatches } from "../../packages/broker/src/aws/eval-batch.js";
-import { watchEvalBatchesOnce, type EvalBatchSlack } from "../../packages/slack-service/src/eval-batch-watcher.js";
+import { watchEvalBatchesOnce } from "../../packages/slack-service/src/eval-batch-watcher.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createEvalBatchWatchApi } from "../../packages/slack-service/src/slack-thread-api.js";
 import { brokerFetch } from "../support/broker-fetch.js";
@@ -232,7 +232,7 @@ function watcherFor(handler: H, posts: string[]) {
     }),
   });
   const slack = {
-    post: vi.fn(async (_thread: Parameters<EvalBatchSlack["post"]>[0], _threadTs: string | undefined, text: string) => { posts.push(text); return "1695800000.000009"; }),
+    post: vi.fn(async (_channel: string, _threadTs: string | undefined, text: string) => { posts.push(text); return "1695800000.000009"; }),
     delete: vi.fn(async () => undefined),
   };
   return { api, slack, logError: vi.fn(), now: () => Date.parse("2026-10-02T12:00:00.000Z") };
@@ -257,7 +257,7 @@ describe("the batch watcher against the broker (spec 052 Task 6, Ruling 19)", ()
     });
     const posts: Array<{ threadTs: string | undefined; text: string }> = [];
     const slack = {
-      post: vi.fn(async (_thread: Parameters<EvalBatchSlack["post"]>[0], threadTs: string | undefined, text: string) => {
+      post: vi.fn(async (_channel: string, threadTs: string | undefined, text: string) => {
         posts.push({ threadTs, text });
         return "1695800000.000001";
       }),

@@ -1,5 +1,4 @@
 import "./broker-environment-init.js"; import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { S3Client } from "@aws-sdk/client-s3";
@@ -444,7 +443,7 @@ function taskPersonRuntimePorts(input: {
     taskPersonProof: (request, admission) => taskPersonProofThroughLambda({
       admission,
       now: () => Date.now(),
-      expectedTeamId: request.workspace?.teamId ?? input.slackTeamId,
+      expectedTeamId: input.slackTeamId,
       async invoke(payload, options) {
         const response = await taskPersonProofLambdaClient.send(taskPersonProofInvokeCommand(input.proofArn, payload), { abortSignal: options.abortSignal });
         return { ...(response.FunctionError === undefined ? {} : { FunctionError: response.FunctionError }), ...(response.Payload === undefined ? {} : { Payload: response.Payload }) };
@@ -453,13 +452,12 @@ function taskPersonRuntimePorts(input: {
   };
 }
 
-export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">) => (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
+const taskDispatchGuard = (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
   const stateTableName = tableName ?? requiredEnvironment("STATE_TABLE_NAME");
   const admission = createTaskAuthorityAdmission({ now: () => Date.now(), lambdaRemainingMs: context?.remainingTimeMs() ?? 60_000 });
   const proofArn = process.env.TASK_PERSON_PROOF_FUNCTION_ARN;
   const slackTeamId = process.env.SLACK_TEAM_ID ?? "";
-  const personRuntime = proofArn === undefined || proofArn.trim() === "" || (workspaces === undefined && !SlackTeamIdSchema.safeParse(slackTeamId).success) ? undefined : createTaskPersonRuntime({
-    ...(workspaces === undefined ? {} : { workspaces }),
+  const personRuntime = proofArn === undefined || proofArn.trim() === "" || !SlackTeamIdSchema.safeParse(slackTeamId).success ? undefined : createTaskPersonRuntime({
     admission,
     ports: taskPersonRuntimePorts({
       admission,
@@ -483,8 +481,6 @@ export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings
     ...(personRuntime === undefined ? {} : { stateAuthorityWitnessForOwnerActor: (task, ownerActorId) => personRuntime.stateAuthorityWitnessForOwnerActor(task, ownerActorId) }),
   }, record);
 };
-const taskDispatchGuard = createTaskDispatchGuard();
-
 
 const setupDomainRow = (item: Record<string, unknown> | undefined, key: { pk: string; sk: string }, entityType: string): Record<string, unknown> | undefined => {
   if (!item || item.pk !== key.pk || item.sk !== key.sk || item.entityType !== entityType) return undefined;

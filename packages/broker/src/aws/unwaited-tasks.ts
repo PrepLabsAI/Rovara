@@ -1,6 +1,3 @@
-import { slackRecordScope } from "./slack-workspace-tokens.js";
-import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
-import type { SlackWorkspaceScope } from "./slack-workspace-tokens.js";
 // Issue 173: the reconciler backstop. Issue 167 cancels a Slack worker task when its turn gives up
 // for good, but a task can still run with nobody waiting on it when the Slack service crashes
 // first, or when a message goes to the dead-letter queue with no final attempt.
@@ -45,7 +42,7 @@ const LIVE: ReadonlySet<string> = new Set(["ACCEPTED", "DISPATCHING", "RUNNING"]
 
 type Client = { send(command: unknown): Promise<unknown> };
 
-export interface SlackThreadPlace { channelId: string; threadTs: string; workspace?: SlackWorkspaceScope }
+export interface SlackThreadPlace { channelId: string; threadTs: string }
 
 const time = (value: unknown): number | undefined => {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
@@ -64,7 +61,6 @@ export function lastActivityAt(
 }
 
 export interface UnwaitedTaskSweepDependencies {
-  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">;
   client: Client;
   tableName: string;
   /** The Slack threads table, read for the thread's activeTurn. */
@@ -190,9 +186,7 @@ export async function sweepUnwaitedTasks(
     result.cancelled.push(operationId);
     dependencies.log({ event: "unwaited_task.cancelled", ...fields, cancelOperationId: answer.operation.id });
     try {
-      const workspace = dependencies.workspaces === undefined ? undefined : slackRecordScope(found.workspace, thread.teamId);
-      if (workspace !== undefined && await dependencies.workspaces!.requireCompany(workspace.teamId) !== workspace.companyId) throw new Error("This Slack workspace is not available.");
-      await dependencies.postNote({ channelId: thread.channelId, threadTs: thread.threadTs, ...(workspace === undefined ? {} : { workspace }) }, UNWAITED_TASK_NOTE);
+      await dependencies.postNote({ channelId: thread.channelId, threadTs: thread.threadTs }, UNWAITED_TASK_NOTE);
     } catch (error) {
       result.noteFailures += 1;
       dependencies.log({ event: "unwaited_task.note_failed", ...fields, errorName: errorName(error) });

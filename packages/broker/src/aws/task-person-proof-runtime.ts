@@ -1,6 +1,5 @@
-import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { SlackTeamIdSchema, TaskDispatchProofRequestSchema, SlackWorkspaceScopeSchema, agentXError } from "@agentx/contracts";
+import { SlackTeamIdSchema, agentXError } from "@agentx/contracts";
 import { slackDirectory } from "../developer/slack-directory.js";
 import { createTaskPersonProofHandler } from "./task-person-proof-handler.js";
 
@@ -25,7 +24,7 @@ function botTokenFromSecret(secretString: string): string {
 }
 
 /** Dedicated named-TEST Lambda runtime. Credentials are read once per proof invocation and never cached across invocations. */
-async function legacyHandler(event: unknown, context: TaskPersonProofLambdaContext) {
+export async function handler(event: unknown, context: TaskPersonProofLambdaContext) {
   const env = process.env;
   const teamId = env.SLACK_TEAM_ID;
   const secretArn = env.SLACK_SECRET_ARN;
@@ -66,30 +65,3 @@ async function legacyHandler(event: unknown, context: TaskPersonProofLambdaConte
   });
   return proof(event);
 }
-
-export function createTaskPersonProofRuntime(options: { workspaces?: SlackCallerWorkspaces; fetch?: typeof fetch; env?: NodeJS.ProcessEnv } = {}) {
-  return async (event: unknown, context: TaskPersonProofLambdaContext) => {
-    if (options.workspaces === undefined) return legacyHandler(event, context);
-    const env = options.env ?? process.env;
-    if (env.AGENTX_ENV !== "agentxlivetest123" || (env.AWS_REGION ?? "us-east-1") !== "us-east-1") throw UNAVAILABLE();
-    const parsed = TaskDispatchProofRequestSchema.safeParse(event);
-    if (!parsed.success) throw UNAVAILABLE();
-    const scope = SlackWorkspaceScopeSchema.safeParse(parsed.data.workspace);
-    const nested = SlackWorkspaceScopeSchema.safeParse(parsed.data.request.workspace);
-    if (!scope.success || !nested.success || scope.data.companyId !== nested.data.companyId || scope.data.teamId !== nested.data.teamId) throw UNAVAILABLE();
-    const workspaces = options.workspaces;
-    return createTaskPersonProofHandler({ expectedTeamId: scope.data.teamId, now: Date.now, remainingTimeMs: () => context.getRemainingTimeInMillis(),
-      readProof: async (request, admission) => {
-        if (admission.abortSignal.aborted || Date.now() >= admission.deadlineAt) throw UNAVAILABLE();
-        const credential = await slackCallerToken(workspaces, scope.data);
-        const directory = slackDirectory({ teamId: scope.data.teamId, now: Date.now, fetch: options.fetch ?? fetch, maxCallsPerRequest: 100, maxInfoCallsPerRequest: 1,
-          botToken: () => {
-            if (admission.abortSignal.aborted || Date.now() >= admission.deadlineAt) throw UNAVAILABLE();
-            return Promise.resolve(credential);
-          } });
-        return directory.taskDispatchPersonProof(request, admission);
-      },
-    })(parsed.data);
-  };
-}
-export const handler = createTaskPersonProofRuntime();
