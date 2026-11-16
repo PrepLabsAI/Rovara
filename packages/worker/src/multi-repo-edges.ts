@@ -158,6 +158,18 @@ function python(files: Map<string, string>): Declaration {
 /** MR3/MR2b must NEVER use an edge's absence from the candidate to skip or narrow tests.
  * The base/candidate union is invocation-scoped fact data, not a selection decision. */
 export async function deriveRepositoryEdges(repositories: readonly EdgeRepository[], budget: { signal: AbortSignal; remainingMs(): number }): Promise<RepositoryEdges> {
+  const { edges, notes } = await deriveRepositoryFacts(repositories, budget);
+  return { edges, notes };
+}
+
+/**
+ * TE-MR2b: the edges (base and candidate union, exactly what `deriveRepositoryEdges` returns) and what selection needs to know before it may IGNORE a repository: whether the derivation finished (`complete`: no ambiguity,
+ * unreadable manifest, limit or abort) and which repositories' dependencies are not fully known (`unknown`: a Maven or Gradle manifest in either source, or no manifest of a supported language at all). A repository that is
+ * unknown may depend on anything, so nothing may be skipped because "it does not depend on that one".
+ */
+export interface RepositoryFacts extends RepositoryEdges { complete: boolean; unknown: string[] }
+export async function deriveRepositoryFacts(repositories: readonly EdgeRepository[], budget: { signal: AbortSignal; remainingMs(): number }): Promise<RepositoryFacts> {
+  const supportedIn = new Set<string>(); const unsupportedIn = new Set<string>();
   const checkTime = () => { if (budget.signal.aborted || budget.remainingMs() <= 0) throw new Error("aborted"); };
   let bytes = 0; let totalBytes = 0; let items = 0; let filesRead = 0; let entries = 0;
   const totalLimit = 2 * 1024 * 1024 + 512 * 1024;
@@ -219,6 +231,7 @@ export async function deriveRepositoryEdges(repositories: readonly EdgeRepositor
         parsed.set("python", python(files));
         for (const declaration of parsed.values()) { items += declaration.needs.length + declaration.paths.length; if (items > 32_768) return limited(); }
         declarations.set(repo.name, parsed);
+        for (const file of files.keys()) (file === "pom.xml" || file.startsWith("build.gradle") ? unsupportedIn : supportedIn).add(repo.name);
         for (const language of ["maven", "gradle"] as const) if (language === "maven" ? files.has("pom.xml") : files.has("build.gradle") || files.has("build.gradle.kts")) unsupported.set(language, (unsupported.get(language) ?? 0) + 1);
       }
       for (const language of ["node", "go", "python"] as const) {
@@ -246,9 +259,10 @@ export async function deriveRepositoryEdges(repositories: readonly EdgeRepositor
       for (const [language, count] of unsupported) if (count >= 2) notes.add(`tested separately: no cross-repo wiring for ${language}`);
     }
     checkTime();
-    return { edges: [...edges.values()].sort((a, b) => compare(a.consumer, b.consumer) || compare(a.provider, b.provider) || compare(a.language, b.language)), notes: edges.size ? [] : [...notes].sort() };
+    return { edges: [...edges.values()].sort((a, b) => compare(a.consumer, b.consumer) || compare(a.provider, b.provider) || compare(a.language, b.language)), notes: edges.size ? [] : [...notes].sort(), complete: true,
+      unknown: repositories.map(repo => repo.name).filter(name => unsupportedIn.has(name) || !supportedIn.has(name)).sort(compare) };
   } catch (error) {
     checkTime();
-    return { edges: [], notes: [error instanceof Error && (error.message === LIMIT || error.message === "ambiguous") ? error.message : UNREADABLE] };
+    return { edges: [], notes: [error instanceof Error && (error.message === LIMIT || error.message === "ambiguous") ? error.message : UNREADABLE], complete: false, unknown: [] };
   }
 }

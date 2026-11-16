@@ -1,5 +1,5 @@
 // Token material never enters an event, stored directory row or diagnostic.
-import { IMPLICIT_COMPANY_ID, OrgIdSchema } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 import { SlackWorkspaceRefused, slackWorkspaceTeam, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 
 export interface SlackWorkspaceTokens {
@@ -69,3 +69,29 @@ export async function slackWorkspaceToken(workspaces: SlackWorkspaceDelivery, te
     return found.token;
   } catch { throw new SlackWorkspaceRefused(); }
 }
+
+/** Internal senders carry record-derived scope; never derive a company from a raw channel or user. */
+export type SlackCallerWorkspaces = Pick<SlackWorkspaceBindings, "requireCompany"> & Pick<SlackWorkspaceTokens, "tokenForCompany">;
+export async function slackCallerToken(workspaces: SlackCallerWorkspaces, scope: unknown): Promise<string> {
+  try {
+    const parsed = SlackWorkspaceScopeSchema.safeParse(scope);
+    if (!parsed.success) throw new Error();
+    const { companyId, teamId } = parsed.data;
+    if (await workspaces.requireCompany(teamId) !== companyId) throw new Error();
+    const token = await workspaces.tokenForCompany(companyId, teamId);
+    if (!validToken(token)) throw new Error();
+    return token;
+  } catch { throw new SlackWorkspaceRefused(); }
+}
+
+/** Old records belong only to the implicit company. Invalid stored values never become defaults. */
+export function slackRecordScope(record: unknown, teamId: unknown): SlackWorkspaceScope {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) throw new SlackWorkspaceRefused();
+  const row = record as { companyId?: unknown; orgId?: unknown };
+  const parsed = SlackWorkspaceScopeSchema.safeParse({ companyId: row.companyId ?? row.orgId ?? IMPLICIT_COMPANY_ID, teamId });
+  if (!parsed.success || row.companyId === null || row.orgId === null) throw new SlackWorkspaceRefused();
+  return parsed.data;
+}
+
+/** Scope carried by Slack adapter callers, exported at the token adapter boundary. */
+export type { SlackWorkspaceScope } from "@agentx/contracts";

@@ -15,6 +15,7 @@ import {
 } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 
+import { readOwnerFindingNotes } from "../core/task-flow/owner-note.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { fromDocument, type TaskPointerRecord, type TaskRecord } from "../core/task-flow/records.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
@@ -82,7 +83,7 @@ export interface LessonsHost {
   noteReverted(taskId: string): Promise<void>;
   /**
    * Learn on send-back: a person just sent this task back with their words. One message of ids (`sent_back`, its round) is queued, so the correction is reflected on while the task is still open. Nothing is queued
-   * while lessons are off for the company, where the project's mode does not reflect, for another company's task, a closed task, a send-back with no words of the person's, or past
+   * while lessons are off for the company, where the project's mode does not reflect, for another company's task, a closed task, a send-back with no words of the person's (for a findings answer: no per-finding notes), or past
    * `SEND_BACK_REFLECTIONS_MAX` rounds (those are learned at the task's end). Never throws.
    */
   noteSentBack(taskId: string): Promise<void>;
@@ -275,9 +276,15 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       const round = sentBack.length;
       const latest = sentBack.at(-1);
       if (latest === undefined || round > SEND_BACK_REFLECTIONS_MAX) return;
-      // Only a person's own words are a correction: no reason, or code's fixed sentence, queues nothing.
-      const words = latest.reason.trim();
-      if (words === "" || words === NO_REASON_TEXT) return;
+      if (latest.source === "FINDINGS") {
+        // A findings answer's reason is code's own summary ("N accepted, M to fix", contracts `resolveWorkflowReviewFindings`), never the person's words. Their words are the per-finding notes kept beside the workflow
+        // (owner note): with none, the round counts but there is nothing to learn from.
+        if ((await readOwnerFindingNotes(flow.store, task.taskId, latest.requestId)).length === 0) return;
+      } else {
+        // Only a person's own words are a correction: no reason, or code's fixed sentence, queues nothing.
+        const words = latest.reason.trim();
+        if (words === "" || words === NO_REASON_TEXT) return;
+      }
       const resolved = await resolveLearning(runtime.settings, companyId, task.project);
       if (!modeAllows(resolved.mode, "reflect")) return;
       await (await sender()).send({ orgId: companyId, taskId: task.taskId, outcome: "sent_back", round, requestId: sendBackRequestId(task.taskId, round) });

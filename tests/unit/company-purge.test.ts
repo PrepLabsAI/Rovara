@@ -154,7 +154,7 @@ describe("company purge: CORE company-scoped workspaces", () => {
         pointerFirst = false;
         return { items: [(await w.store.get(pointerKey))!], cursor: "pointer-first" };
       }
-      return scan(request?.cursor === "pointer-first" ? { limit: request.limit } : request);
+      return scan(request?.cursor === "pointer-first" ? (request.limit === undefined ? {} : { limit: request.limit }) : request);
     });
     const remove = w.store.delete.bind(w.store);
     let deletedPointer = false;

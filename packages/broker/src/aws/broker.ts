@@ -1,9 +1,11 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { createBrokerCoreServices } from "./core-job-services.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
+import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
+import { refuseBrowserEvidenceOnCloud } from "./browser-evidence-seam.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
@@ -724,6 +726,11 @@ export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTask
 function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDependencies {
   const developer = dependencies.developer;
   return {
+    ...(dependencies.companies === undefined ? {} : { companies: dependencies.companies }),
+    ...(dependencies.workspaces === undefined ? {} : { slackWorkspaces: {
+      requireCompany: (teamId: string) => dependencies.workspaces!.requireCompany(teamId),
+      scopesForCompany: (companyId: string) => listSlackWorkspaceScopes({ client: dependencies.documentClient, tableName: dependencies.tableName }, companyId),
+    } }),
     documentClient: dependencies.documentClient,
     tableName: dependencies.tableName,
     ...(dependencies.turnRecordsTableName === undefined ? {} : { turnRecordsTableName: dependencies.turnRecordsTableName }),
@@ -1278,7 +1285,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (answer !== undefined) return answer;
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|browser-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -3099,8 +3106,8 @@ async function putSlackBinding(
     projectName: input.projectName,
     updatedAt: new Date().toISOString(),
   });
-  if (!await slackCompanyProject(dependencies, binding.teamId, binding.projectName)) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   await requireAdministrator(dependencies, identity, binding.projectName);
+  if (!await slackCompanyProject(dependencies, binding.teamId, binding.projectName)) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   const existing = await getSlackBinding(dependencies, binding.teamId, binding.channelId);
   if (existing && existing.projectName !== binding.projectName) {
     await requireAdministrator(dependencies, identity, existing.projectName);
@@ -6100,7 +6107,7 @@ async function handleSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks:
   const thread = SlackThreadSchema.parse(event.thread);
   const caller = await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
   const taskId = randomUUIDSchema.parse(event.taskId);
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const routeDeps = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   const access = await resolveTaskAccess(routeDeps, caller, taskId, event.action === "task-people-read" ? "read" : event.action === "task-people-change" ? "peopleManage" : "takeOwnership");
   if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) {
     throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
@@ -6127,7 +6134,7 @@ async function confirmSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks
   const caller = await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
   const taskId = randomUUIDSchema.parse(event.taskId);
   const requestId = randomUUIDSchema.parse(event.requestId);
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const routeDeps = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   const access = await resolveTaskAccess(routeDeps, caller, taskId, "read");
   if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
   return confirmTaskPeopleProposal(routeDeps, caller, taskId, requestId);
@@ -6147,7 +6154,7 @@ async function authorizeSlackTaskAction(dependencies: AwsBrokerDependencies, tas
   const caller = await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
   const taskId = randomUUIDSchema.parse(event.taskId);
   await requireSlackTaskCompany(dependencies, thread, taskId);
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const routeDeps = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   // This signed UI port reports the current lifecycle state (for example, a retired button) after
   // a fresh read+role check. The separately invoked mutation route still requires an open task.
   const access = await resolveTaskAccess(routeDeps, caller, taskId, "read");
@@ -6184,7 +6191,7 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
     throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
   }
   const developer = dependencies.workspaces === undefined ? dependencies.developer : { ...dependencies.developer, slackTeamId: thread.teamId };
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller, thread);
+  const routeDeps = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller, thread);
   const request = {
     method: "POST", path: "/v1/dev/tasks", headers: {}, requestId,
     body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath, shareToChannel: true, channel: thread.channelId }),
@@ -6436,7 +6443,7 @@ export function workflowApplicationRouteDependencies(dependencies: AwsBrokerDepe
 
 /** The route dependencies of a Slack workflow press: the same application wiring as the HTTP routes. */
 function slackWorkflowRouteDependencies(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, developer: NonNullable<AwsBrokerDependencies["developer"]>, caller: DeveloperCaller) {
-  return developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
+  return developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
     ...workflowApplicationRouteDependencies(dependencies) }, caller);
 }
 
@@ -6499,6 +6506,7 @@ async function slackTaskAccess(
   thread?: SlackThread,
 ): Promise<{ caller: DeveloperCaller; routeDeps: ReturnType<typeof developerTaskRouteDependencies>; access: TaskAccess }> {
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  if (dependencies.workspaces !== undefined && thread !== undefined) await requireSlackTaskCompany(dependencies, thread, taskId);
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) throw agentXError("FORBIDDEN", "task access could not be verified");
   // Lane E2: a task the core owns is never acted on from the workflow's Slack paths (engine-boundary.ts), not even as the legacy commenter below.
@@ -6510,7 +6518,7 @@ async function slackTaskAccess(
   const caller = dependencies.workspaces === undefined && sidecar === undefined && legacySlackOwner && task.provider === "slack" && task.slackUserId === userId
     ? { ...canonical, developerId: task.developerId, name: task.developerName }
     : canonical;
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+  const routeDeps = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     developer: dependencies.developer, now: Date.now, tasks }, caller);
   try {
     return { caller, routeDeps, access: await resolveTaskAccess(routeDeps, caller, taskId, action) };
@@ -6876,7 +6884,7 @@ async function handleCallback(
   action: string,
 ) {
   const token = request.headers["x-agentx-callback-capability"];
-  if (!token) throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
+  if (!token) throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required"); refuseBrowserEvidenceOnCloud(action); // TE-H1: browser evidence is not on Cloud yet (DEFERRED 1b-X5)
   // #201 Release A: accept the child format before any reconciler starts issuing it. The key
   // family is selected by the envelope, never by unverified claims or signature fallback.
   const cancelClaims = token.startsWith("cancel-v1.")
@@ -8534,7 +8542,7 @@ async function loadCurrentCreatorAuthority(dependencies: AwsBrokerDependencies, 
   if (creator === undefined || creator.revoked || dependencies.developer === undefined) { reject("current-creator-identity-unavailable"); return undefined; }
   let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
   try {
-    creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    creatorAccess = await checkProjectAccess({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName,
       developer: dependencies.developer, now: Date.now },
     { developerId: task.developerId, ...(creator.slackUserId === undefined ? {} : { slackUserId: creator.slackUserId }) }, task.project);
   } catch { reject("current-creator-project-access-unavailable"); return undefined; }
@@ -9330,7 +9338,7 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
   if (task === undefined || decision === undefined) {
     throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
   }
-  const accessDependencies = dependencies.developer === undefined ? undefined : developerTaskRouteDependencies({
+  const accessDependencies = dependencies.developer === undefined ? undefined : developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies),
     documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
     now: Date.now, tasks: developerTaskActions(dependencies),
   }, {
@@ -10860,7 +10868,7 @@ export async function processGithubWorkflowEvent(
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
     if (task !== undefined && dependencies.developer !== undefined) {
       const caller = { developerId: task.developerId, sessionId: "github-webhook", amr: task.provider, name: task.developerName };
-      const routeDependencies = developerTaskRouteDependencies({
+      const routeDependencies = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies),
         documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
         now: Date.now, tasks: developerTaskActions(dependencies),
       }, caller, undefined, null);
@@ -11269,7 +11277,7 @@ async function requireWorkflowE2ECreatorAuthority(dependencies: AwsBrokerDepende
   }
   let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
   try {
-    creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    creatorAccess = await checkProjectAccess({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName,
       developer: dependencies.developer, now: Date.now },
     { developerId: task.developerId, ...(creatorRecord.slackUserId === undefined ? {} : { slackUserId: creatorRecord.slackUserId }) }, task.project);
   } catch (error) {
@@ -11444,7 +11452,7 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
       return "STALE";
     }
     const caller = { developerId: task.developerId, sessionId: "workflow-dispatch", amr: task.provider, name: task.developerName };
-    const routeDependencies = developerTaskRouteDependencies({
+    const routeDependencies = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies),
       documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
       now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
       workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
@@ -11619,7 +11627,7 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
     if (config?.enabled !== true || task === undefined || dependencies.developer === undefined) { await remove(); return "STALE"; }
     const caller = { developerId: task.developerId, sessionId: "workflow-autofix", amr: task.provider, name: task.developerName };
     const tasks = developerTaskActions(dependencies);
-    const route = developerTaskRouteDependencies({
+    const route = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies),
       documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
       refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
       workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
@@ -14485,8 +14493,11 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
   };
 }
 
-function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes"> {
-  if (dependencies.workspaces !== undefined) return { channelLinkCodes: createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }) };
+function slackCallerRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "workspaces" | "companies"> {
+  return { ...(dependencies.workspaces === undefined ? {} : { workspaces: dependencies.workspaces }), ...(dependencies.companies === undefined ? {} : { companies: dependencies.companies }) };
+}
+function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes" | "workspaces" | "companies"> {
+  if (dependencies.workspaces !== undefined) return { ...slackCallerRouteDependencies(dependencies), channelLinkCodes: createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }) };
   const channelAdapters = dependencies.channelAdapters;
   return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
 }
@@ -14882,7 +14893,7 @@ async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity:
   // The route dependencies act for the task's developer (the task's owner); the request is the administrator's, and is recorded as theirs (Task FU2, REPLAYACTOR).
   const caller = { developerId: task.developerId, sessionId: "replay-admin", amr: task.provider, name: task.developerName };
   const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
-  const routeDependencies = developerTaskRouteDependencies({
+  const routeDependencies = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies),
     documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
     now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (id) => refreshTaskFeedbackForOwnerDecision(dependencies, id),
     workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),

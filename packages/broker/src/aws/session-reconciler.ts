@@ -1,4 +1,6 @@
 import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
+import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
+import { chatPostMessage } from "./slack-web.js";
 import {
   CreateTagsCommand,
   DeleteVolumeCommand,
@@ -11,7 +13,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { failActiveOperation } from "./outbox-failure.js";
@@ -470,14 +472,14 @@ const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined 
  * cancel route's own code, and its callbacks are signed with the callback signing key. Only a named
  * environment's reconciler holds that key (#173), so the legacy one logs and counts it instead.
  */
-function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
+function stuckCancelSweep(workspaces?: SlackCallerWorkspaces): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
   const retryCancel = stuckCancelRetrier(process.env, { client: documentClient, tableName });
   // Issue 202: a Slack thread whose workspace a failed cancel held is told it is free again, where
   // the reconciler holds the Slack secret (#173's backstop, named environments).
-  const postNote = backstop.state === "on" ? slackThreadPoster() : undefined;
+  const postNote = backstop.state === "on" ? slackThreadPoster(workspaces) : undefined;
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
   return (candidates, now) => sweepStuckCancels({
-    client: documentClient, tableName, ...(retryCancel === undefined ? {} : { retryCancel }), ...(postNote === undefined ? {} : { postNote }), log,
+    client: documentClient, tableName, ...(workspaces === undefined ? {} : { workspaces }), ...(retryCancel === undefined ? {} : { retryCancel }), ...(postNote === undefined ? {} : { postNote }), log,
   }, candidates, now);
 }
 
@@ -487,15 +489,16 @@ function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCance
  * thread's activeTurn (GetItem on THREAD# keys only), and posts the note with the bot token (the
  * Slack secret alone).
  */
-function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedTasks"]> {
+function unwaitedTaskSweep(workspaces?: SlackCallerWorkspaces): NonNullable<ReconcilerDependencies["sweepUnwaitedTasks"]> {
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const callbackSigningKey = requiredEnvironment("CALLBACK_SIGNING_KEY");
-  const postNote = slackThreadPoster();
+  const postNote = slackThreadPoster(workspaces);
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
   return (workspaceIds, now) => sweepUnwaitedTasks({
     client: documentClient,
     tableName,
     threadsTableName,
+    ...(workspaces === undefined ? {} : { workspaces }),
     callbackSigningKey,
     postNote,
     log,
@@ -509,22 +512,39 @@ let threadPoster: ((thread: SlackThreadPlace, text: string) => Promise<void>) | 
  * sweeps that tell a thread what they did. A bad secret fails the note as SlackSecretInvalid, the
  * name the sweeps log; never the secret's text.
  */
-function slackThreadPoster(): (thread: SlackThreadPlace, text: string) => Promise<void> {
-  if (threadPoster !== undefined) return threadPoster;
+export function createSlackThreadPoster(options: {
+  legacyToken(): Promise<string>;
+  workspaces?: SlackCallerWorkspaces;
+  fetch?: typeof fetch;
+  legacyPost?: ReturnType<typeof cachedSlackPoster> | undefined;
+}): (thread: SlackThreadPlace, text: string) => Promise<void> {
+  const legacy = options.legacyPost ?? cachedSlackPoster(() => options.legacyToken(), Date.now, options.fetch);
+  return async (thread, text) => {
+    const input = { channel: thread.channelId, threadTs: thread.threadTs, text };
+    if (options.workspaces === undefined) { await legacy(input); return; }
+    const token = await slackCallerToken(options.workspaces, thread.workspace);
+    await chatPostMessage(token, input, options.fetch);
+  };
+}
+
+function slackThreadPoster(workspaces?: SlackCallerWorkspaces): (thread: SlackThreadPlace, text: string) => Promise<void> {
+  if (workspaces === undefined && threadPoster !== undefined) return threadPoster;
   const secrets = new SecretsManagerClient(awsClientConfiguration);
-  const slackSecretArn = requiredEnvironment("SLACK_SECRET_ARN");
-  // Spec 062 Phase 7c: through the Slack adapter when Slack goes through the channel API.
-  const post = slackNoticeChannelFromEnvironment(secrets)?.post ?? cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
-    .then((secret) => slackBotTokenFrom(secret.SecretString)));
-  threadPoster = async (thread, text) => { await post({ channel: thread.channelId, threadTs: thread.threadTs, text }); };
-  return threadPoster;
+  const post = createSlackThreadPoster({
+    ...(workspaces === undefined ? { legacyPost: slackNoticeChannelFromEnvironment(secrets)?.post } : { workspaces }),
+    legacyToken: () => secrets.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+      .then((secret) => slackBotTokenFrom(secret.SecretString)),
+  });
+  if (workspaces === undefined) threadPoster = post;
+  return post;
 }
 
 // Issue 173: a half-wired environment runs without the backstop; say so once, by the missing names.
 const backstop = unwaitedTaskBackstopConfiguration(process.env);
 if (backstop.state === "partial") console.log(JSON.stringify({ component: "session-reconciler", event: "reconciler.unwaited_task_backstop_partial", missing: backstop.missing.join(",") }));
 
-export const handler = createReconcilerHandler({
+export function createAwsReconcilerHandler(workspaces?: SlackCallerWorkspaces) {
+return createReconcilerHandler({
   sessions: new SessionManager({
     documentClient,
     tableName,
@@ -608,12 +628,12 @@ export const handler = createReconcilerHandler({
     return item?.["status"] === "CLOSED" && typeof item["closedAt"] === "string" ? item["closedAt"] : undefined;
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
-  sweepStuckCancels: stuckCancelSweep(),
+  sweepStuckCancels: stuckCancelSweep(workspaces),
   sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
   // AUTOREQUALIFY AR-4: wired where the stack names the pin; a deployment without it behaves as before.
   ...(process.env.WORKER_QUALIFIED_AMI_PARAMETER === undefined ? {} : { qualifiedWorkerAmi: () => readQualifiedWorkerAmi(ssm, process.env.WORKER_QUALIFIED_AMI_PARAMETER!) }),
   renewalAgeDays: (now) => readRenewalAgeDays(documentClient, tableName, now),
-  ...(backstop.state === "on" ? { sweepUnwaitedTasks: unwaitedTaskSweep() } : {}),
+  ...(backstop.state === "on" ? { sweepUnwaitedTasks: unwaitedTaskSweep(workspaces) } : {}),
   ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
   emit(metrics) {
     console.log(JSON.stringify({
@@ -627,3 +647,5 @@ export const handler = createReconcilerHandler({
     }));
   },
 });
+}
+export const handler = createAwsReconcilerHandler();

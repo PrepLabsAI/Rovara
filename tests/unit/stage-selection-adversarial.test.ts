@@ -2814,4 +2814,22 @@ describe("T11: each unseen commit scanned on its own", () => {
     await settle(h);
     expect(changes).toBe(before);
   });
+  it("MR3b/MR4: the description carries the lines the flow gives for ITS repository when it opens, and the rewrite after the files are read from the host carries the newest", async () => {
+    const h = await launch();
+    const deps = h.runtime.app.flow.deps;
+    const asked: string[] = [];
+    let word = "first";
+    deps.mergeOrderLines = async (_task, repositoryId) => { asked.push(String(repositoryId)); return [`Merge order: ${String(repositoryId)} ${word}.`]; };
+    const t = await toAfterPlan(h);
+    const published = await buildAndPublish(h, t, SMALL, false);
+    const bodyOf = () => h.model.changeRequests.find((entry) => entry.id === published.cr.id)!.body;
+    expect(bodyOf()).toContain("## Merge order\nMerge order: demo first.");
+    word = "second";
+    h.model.setChecks(published.commit, [{ name: "unit-tests", state: "completed", conclusion: "success", required: false, url: "", runId: "run-1" }]);
+    await settle(h, 5);
+    expect(bodyOf()).toContain("Merge order: demo second.");
+    expect(bodyOf()).not.toContain("demo first");
+    // The page asks for the whole task (no repository); the descriptions ask for their own.
+    expect(asked).toContain("demo");
+  });
 });

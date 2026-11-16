@@ -1,0 +1,279 @@
+// TE-H1 browser evidence, slice 3: the saved sign-in, the saved recipe and the sign-in callback, on the real laptop secret files and the document store, for two companies. The reasons to be careful are the same everywhere:
+// a sign-in is a password, a recipe may be company A's and a project may have the same name in company B. Every guard has a test that fails without it.
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { projectBrowserEvidenceRecipeKey, type BrowserEvidenceRecipe } from "@agentx/contracts";
+import { createLocalConnectionSecrets } from "../../packages/broker/src/connections/local-secrets.js";
+import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { SIGN_IN_WORDS, browserEvidenceSignInSecretName, createBrowserEvidenceSignIn } from "../../packages/broker/src/core/proof/browser-evidence-sign-in.js";
+import { clearStoredRecipe, effectiveRecipe, readStoredRecipe, recipeFitsProject, saveStoredRecipe } from "../../packages/broker/src/core/proof/browser-evidence-recipe.js";
+import { handleBrowserEvidenceSignIn } from "../../packages/broker/src/core/proof/browser-evidence-sign-in-callback.js";
+import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
+import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
+import { operationKey, taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
+
+const A = COMPANY_A.orgId;
+const B = COMPANY_B.orgId;
+const cleanup: Array<() => Promise<void>> = [];
+afterEach(async () => { while (cleanup.length > 0) await cleanup.pop()!(); });
+/** Built at runtime: a fixture that looks like a real credential is refused by the public repository's push protection. */
+const VALUES = { username: ["tester", "example"].join("@") + ".test", password: ["pw", "Zq7", "Lm2", "Xv9"].join("-") };
+const LEAK = [VALUES.username, VALUES.password, Buffer.from(VALUES.password).toString("base64"), encodeURIComponent(VALUES.password)];
+
+async function secretsWorld() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-be-sign-in-")));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "connection-secrets");
+  const secrets = createLocalConnectionSecrets({ directory, secrets: createLocalSecretStore({ environment: {} }), companyId: A, env: "local", now: () => 1_700_000_000_000 });
+  return { root, directory, signIn: createBrowserEvidenceSignIn({ secrets, env: "local" }) };
+}
+const allFiles = async (directory: string): Promise<string[]> => {
+  const out: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+    if (entry.isDirectory()) out.push(...(await allFiles(join(directory, entry.name))).map((file) => join(entry.name, file)));
+    else out.push(entry.name);
+  }
+  return out;
+};
+
+describe("the saved sign-in", () => {
+  it("is kept under the company's own path, in a file only the owner reads, and is read back for the project's own reference", async () => {
+    const w = await secretsWorld();
+    await w.signIn.save(A, "web", VALUES);
+    expect(await w.signIn.has(A, "web")).toBe(true);
+    expect(await w.signIn.read(A, "web", "be-web-signin")).toEqual(VALUES);
+    // The name is the company's connector path and a leaf no connection or server can have.
+    expect(browserEvidenceSignInSecretName("local", A, "web")).toBe(`agentx/local/org-connectors/${A}/be-web-signin`);
+    const files = await allFiles(w.directory);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(new RegExp(`^${A}/be-web-signin\\.\\d{13}-[0-9a-f]{8}$`, "u"));
+    expect(JSON.parse(await readFile(join(w.directory, files[0]!), "utf8"))).toEqual(VALUES);
+  });
+
+  it("is company A's alone: company B's same-named project has none, and B's save does not touch A's (two-company)", async () => {
+    const w = await secretsWorld();
+    await w.signIn.save(A, "web", VALUES);
+    expect(await w.signIn.has(B, "web")).toBe(false);
+    expect(await w.signIn.read(B, "web", "be-web-signin")).toBeUndefined();
+    const other = { username: "bee@example.test", password: ["pw", "other", "Pass", "42"].join("-") };
+    await w.signIn.save(B, "web", other);
+    expect(await w.signIn.read(A, "web", "be-web-signin")).toEqual(VALUES);
+    expect(await w.signIn.read(B, "web", "be-web-signin")).toEqual(other);
+    await w.signIn.clear(B, "web");
+    expect(await w.signIn.has(B, "web")).toBe(false);
+    expect(await w.signIn.has(A, "web")).toBe(true);
+  });
+
+  it("reads nothing for a reference that is not the project's own (mutant: the reference check dropped), and never another project's", async () => {
+    const w = await secretsWorld();
+    await w.signIn.save(A, "web", VALUES);
+    await w.signIn.save(A, "api", { username: "api-user@example.test", password: ["api", "pw", "Qx81"].join("-") });
+    expect(await w.signIn.read(A, "web", "be-api-signin")).toBeUndefined();
+    expect(await w.signIn.read(A, "api", "be-web-signin")).toBeUndefined();
+    for (const ref of ["con_aaaaaaaaaaaaaaaaaaaa", "be-web", "", "../be-web-signin", "be-web-signin/x"]) expect(await w.signIn.read(A, "web", ref), ref).toBeUndefined();
+  });
+
+  it("refuses values that are not a user name and a password, with one fixed sentence that holds neither (mutant: the values check dropped)", async () => {
+    const w = await secretsWorld();
+    for (const bad of [{ username: "ab", password: VALUES.password }, { username: VALUES.username, password: "a\nb c d" }, { username: VALUES.username }, { ...VALUES, extra: "x" }, null, "text"]) {
+      const error = await w.signIn.save(A, "web", bad).then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error, JSON.stringify(bad)).toMatchObject({ code: "CONFIG_INVALID" });
+      expect(error!.message).toBe(`CONFIG_INVALID: ${SIGN_IN_WORDS.invalid}`);
+    }
+    expect(await allFiles(w.directory)).toEqual([]);
+    await expect(w.signIn.save(A, "Not A Project", VALUES)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("does not read a secret that is not a sign-in (a file that is not exactly a user name and a password is not saved)", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-be-sign-in-")));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const secrets = createLocalConnectionSecrets({ directory: join(root, "s"), secrets: createLocalSecretStore({ environment: {} }), companyId: A, env: "local", now: () => 1_700_000_000_000 });
+    const signIn = createBrowserEvidenceSignIn({ secrets, env: "local" });
+    const name = browserEvidenceSignInSecretName("local", A, "web")!;
+    for (const text of ["not json", JSON.stringify({ apiKey: "k1" }), JSON.stringify({ ...VALUES, extra: 1 }), JSON.stringify({ username: "ab", password: "cd" }), "[]", "null"]) {
+      await secrets.put(A, name, text);
+      expect(await signIn.has(A, "web"), text).toBe(false);
+      expect(await signIn.read(A, "web", "be-web-signin"), text).toBeUndefined();
+    }
+  });
+
+  it("removes every version and the file, and a sign-in that is not there is already gone", async () => {
+    const w = await secretsWorld();
+    await w.signIn.save(A, "web", VALUES);
+    await w.signIn.clear(A, "web");
+    expect(await allFiles(w.directory)).toEqual([]);
+    expect(await w.signIn.has(A, "web")).toBe(false);
+    await expect(w.signIn.clear(A, "web")).resolves.toBeUndefined();
+  });
+});
+
+const RECIPE: BrowserEvidenceRecipe = { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }] };
+const WITH_SIGN_IN = (project: string): BrowserEvidenceRecipe => ({ ...RECIPE, signIn: { path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard", credentialRef: `be-${project}-signin` } });
+
+describe("the saved recipe", () => {
+  it("is one company-scoped row per project, holds no secret, and reads back exactly what was saved", async () => {
+    const store = new MemoryDocumentStore();
+    expect(await saveStoredRecipe(store, A, "web", WITH_SIGN_IN("web"), { expectedVersion: undefined, now: () => 1_700_000_000_000 })).toEqual({ version: 1 });
+    expect(await readStoredRecipe(store, A, "web")).toEqual({ recipe: WITH_SIGN_IN("web"), version: 1, updatedAt: "2023-11-14T22:13:20.000Z" });
+    const row = await store.get(projectBrowserEvidenceRecipeKey(A, "web"));
+    expect(row?.pk).toMatch(new RegExp(`^ORG#${A}#PROJECT#web$`, "u"));
+    expect(JSON.stringify(row)).not.toMatch(/password":|username":/u);
+  });
+
+  it("is company A's alone (two-company): B's same-named project has none, B's save leaves A's, and a row moved under B's key is no recipe", async () => {
+    const store = new MemoryDocumentStore();
+    await saveStoredRecipe(store, A, "web", RECIPE, { expectedVersion: undefined, now: () => 1 });
+    expect(await readStoredRecipe(store, B, "web")).toBeUndefined();
+    await saveStoredRecipe(store, B, "web", { ...RECIPE, port: 4000 }, { expectedVersion: undefined, now: () => 2 });
+    expect((await readStoredRecipe(store, A, "web"))?.recipe.port).toBe(3000);
+    expect((await readStoredRecipe(store, B, "web"))?.recipe.port).toBe(4000);
+    // A's row written under B's key (a store fault or a hand edit) is not B's recipe: it names its own company and project.
+    const forged = { ...(await store.get(projectBrowserEvidenceRecipeKey(A, "web")))!, ...projectBrowserEvidenceRecipeKey(B, "other") };
+    await store.put({ item: forged });
+    expect(await readStoredRecipe(store, B, "other")).toBeUndefined();
+    await clearStoredRecipe(store, B, "web");
+    expect(await readStoredRecipe(store, B, "web")).toBeUndefined();
+    expect(await readStoredRecipe(store, A, "web")).toBeDefined();
+  });
+
+  it("refuses a second page's save over a recipe it did not see (mutant: the version guard dropped), and a first save over one that is there", async () => {
+    const store = new MemoryDocumentStore();
+    await saveStoredRecipe(store, A, "web", RECIPE, { expectedVersion: undefined, now: () => 1 });
+    await expect(saveStoredRecipe(store, A, "web", { ...RECIPE, port: 3001 }, { expectedVersion: undefined, now: () => 2 })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    expect(await saveStoredRecipe(store, A, "web", { ...RECIPE, port: 3001 }, { expectedVersion: 1, now: () => 3 })).toEqual({ version: 2 });
+    await expect(saveStoredRecipe(store, A, "web", { ...RECIPE, port: 3002 }, { expectedVersion: 1, now: () => 4 })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    expect((await readStoredRecipe(store, A, "web"))?.recipe.port).toBe(3001);
+    await expect(saveStoredRecipe(store, A, "web", RECIPE, { expectedVersion: 7, now: () => 5 })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+  });
+
+  it("replaces a damaged row instead of refusing every save for good, and a row that is not a recipe reads as none", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: { ...projectBrowserEvidenceRecipeKey(A, "web"), entityType: "BROWSER_EVIDENCE_RECIPE", orgId: A, project: "web", recipe: { startCommand: "x" }, version: 1, updatedAt: "2026-11-16T00:00:00.000Z" } });
+    expect(await readStoredRecipe(store, A, "web")).toBeUndefined();
+    expect(await saveStoredRecipe(store, A, "web", RECIPE, { expectedVersion: undefined, now: () => 1 })).toEqual({ version: 1 });
+    expect((await readStoredRecipe(store, A, "web"))?.recipe).toEqual(RECIPE);
+    for (const row of [{ entityType: "OTHER" }, { version: 0 }, { version: "1" }, { updatedAt: 5 }, { orgId: B }, { project: "x" }, { recipe: "yes" }]) {
+      await store.put({ item: { ...projectBrowserEvidenceRecipeKey(A, "web"), entityType: "BROWSER_EVIDENCE_RECIPE", orgId: A, project: "web", recipe: JSON.parse(JSON.stringify(RECIPE)) as never, version: 1, updatedAt: "t", ...row } });
+      expect(await readStoredRecipe(store, A, "web"), JSON.stringify(row)).toBeUndefined();
+    }
+  });
+
+  it("refuses a recipe that does not parse, or whose sign-in names another project's saved sign-in, with one fixed sentence (mutant: the project check dropped)", async () => {
+    const store = new MemoryDocumentStore();
+    for (const bad of [{ ...RECIPE, port: 80 }, { ...RECIPE, extra: 1 }, "yes", WITH_SIGN_IN("other"), { ...WITH_SIGN_IN("web"), signIn: { ...WITH_SIGN_IN("web").signIn, credentialRef: "con_aaaaaaaaaaaaaaaaaaaa" } }]) {
+      const error = await saveStoredRecipe(store, A, "web", bad, { expectedVersion: undefined, now: () => 1 }).then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error, JSON.stringify(bad)).toMatchObject({ code: "CONFIG_INVALID" });
+      expect(error!.message).not.toContain("con_aaaaaaaaaaaaaaaaaaaa");
+    }
+    expect(await readStoredRecipe(store, A, "web")).toBeUndefined();
+    expect(recipeFitsProject("web", WITH_SIGN_IN("web"))).toBe(true);
+    expect(recipeFitsProject("web", WITH_SIGN_IN("other"))).toBe(false);
+  });
+});
+
+describe("which recipe a run uses", () => {
+  it("is the owner's config file's when it has one, else the page's, else none; a config recipe that does not fit is never replaced by the page's", async () => {
+    const store = new MemoryDocumentStore();
+    expect(await effectiveRecipe({ store, orgId: A, project: "web", fromConfig: undefined })).toBeUndefined();
+    await saveStoredRecipe(store, A, "web", RECIPE, { expectedVersion: undefined, now: () => 1 });
+    expect(await effectiveRecipe({ store, orgId: A, project: "web", fromConfig: undefined })).toEqual({ source: "page", recipe: RECIPE, version: 1 });
+    const config = { ...RECIPE, port: 4000 };
+    expect(await effectiveRecipe({ store, orgId: A, project: "web", fromConfig: () => config })).toEqual({ source: "config", recipe: config });
+    // A config recipe naming another project's sign-in is not usable; the stronger source said something unreadable, so browser evidence is off.
+    expect(await effectiveRecipe({ store, orgId: A, project: "web", fromConfig: WITH_SIGN_IN("other") })).toBeUndefined();
+    // The page's recipe of company A is no recipe of company B.
+    expect(await effectiveRecipe({ store, orgId: B, project: "web", fromConfig: undefined })).toBeUndefined();
+  });
+});
+
+describe("the sign-in callback", () => {
+  const workspaceId = randomUUID();
+  const operationId = randomUUID();
+  const taskId = randomUUID();
+  const KEY = Buffer.alloc(32, 7);
+
+  async function world(options: { operation?: Record<string, unknown>; project?: string; taskCompany?: string; recipe?: unknown } = {}) {
+    const w = await secretsWorld();
+    const store = new MemoryDocumentStore();
+    const recipe = options.recipe ?? WITH_SIGN_IN("web");
+    await store.put({ item: { pk: `ORG#${A}#WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE", companyId: A } });
+    await store.put({ item: { pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", companyId: A, workspaceId } });
+    await store.put({ item: { ...operationKey(A, workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS", status: "RUNNING", fence: 1, companyId: A,
+      dispatch: { kind: "task", payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe as never } }, ...options.operation } });
+    await store.put({ item: { ...taskPointerKey(A, workspaceId), taskId } });
+    await store.put({ item: { ...taskKey(taskId), taskId, project: options.project ?? "web", companyId: options.taskCompany ?? A } });
+    const operation = async () => (await store.get(operationKey(A, workspaceId, operationId))) as never;
+    const deps = (companyId = A) => ({ signIn: w.signIn, companyId, async projectOf() { return (await store.get(taskKey(taskId)))?.["project"] as string | undefined; } });
+    return { ...w, store, operation, deps };
+  }
+
+  it("answers the saved values to the live CHECKS run whose own recipe has a sign-in, and `not_set` when none is saved", async () => {
+    const w = await world();
+    expect(await handleBrowserEvidenceSignIn(w.deps(), await w.operation())).toEqual({ status: "not_set" });
+    await w.signIn.save(A, "web", VALUES);
+    expect(await handleBrowserEvidenceSignIn(w.deps(), await w.operation())).toEqual({ status: "ready", values: VALUES });
+  });
+
+  it("is refused for any run that was not sent a recipe with a sign-in, and for one that is not live (mutants: each check dropped)", async () => {
+    const forbidden = async (options: Parameters<typeof world>[0]) => {
+      const w = await world(options);
+      await w.signIn.save(A, "web", VALUES);
+      const error = await handleBrowserEvidenceSignIn(w.deps(), await w.operation()).then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error, JSON.stringify(options)).toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+      for (const text of LEAK) expect(error!.message).not.toContain(text);
+    };
+    await forbidden({ operation: { workflowMode: "IMPLEMENT" } });
+    await forbidden({ operation: { workflowMode: "REVIEW" } });
+    await forbidden({ operation: { kind: "publish" } });
+    await forbidden({ operation: { status: "SUCCEEDED" } });
+    await forbidden({ operation: { status: "FAILED" } });
+    await forbidden({ operation: { dispatch: { kind: "task" } } });
+    await forbidden({ recipe: RECIPE });
+    await forbidden({ recipe: "yes" });
+    await forbidden({ recipe: { ...WITH_SIGN_IN("web"), port: 80 } });
+  });
+
+  it("reads nothing when the recipe's reference is another project's, even a project of this company that has a saved sign-in (mutant: the project check dropped)", async () => {
+    const w = await world({ recipe: WITH_SIGN_IN("api") });
+    await w.signIn.save(A, "api", { username: "api-user@example.test", password: ["api", "pw", "Qx81"].join("-") });
+    await w.signIn.save(A, "web", VALUES);
+    // The run belongs to the project `web`, its stored invocation names `api`'s sign-in: it is not answered.
+    expect(await handleBrowserEvidenceSignIn(w.deps(), await w.operation())).toEqual({ status: "not_set" });
+  });
+
+  it("answers only for the company that runs the operation (two-company)", async () => {
+    const w = await world();
+    await w.signIn.save(A, "web", VALUES);
+    expect(await handleBrowserEvidenceSignIn(w.deps(B), await w.operation())).toEqual({ status: "not_set" });
+    const none = await handleBrowserEvidenceSignIn({ ...w.deps(), projectOf: async () => undefined }, await w.operation()).then(() => undefined, (caught: unknown) => caught as Error);
+    expect(none).toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+  });
+
+  it("is served by the callback route only with its own capability, says `no-store`, reads nothing from the request and answers `not available` where no sign-ins are kept", async () => {
+    const w = await world();
+    await w.signIn.save(A, "web", VALUES);
+    const capabilities = new CallbackCapabilities(KEY);
+    const token = (actions: string[]) => capabilities.issue({ workspaceId, operationId, fence: 1, actions: actions as never, expiresInSeconds: 60 });
+    const handler = createCallbackHandler({ flow: { store: w.store, companyId: A, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never, browserEvidenceSignIn: w.signIn });
+    const call = (capability: string | undefined, body = "{}") => handler({ method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/browser-evidence-sign-in`, headers: capability === undefined ? {} : { "x-agentx-callback-capability": capability }, body });
+    // No capability, a capability for another action: refused with the capability sentences and never the values.
+    for (const reply of [await call(undefined), await call(token(["browser-evidence"]))]) {
+      expect(reply.statusCode).toBeGreaterThanOrEqual(400);
+      for (const text of LEAK) expect(reply.body).not.toContain(text);
+    }
+    const ok = await call(token(["browser-evidence-sign-in"]), JSON.stringify({ project: "api", ref: "be-api-signin", companyId: B }));
+    expect(ok.statusCode).toBe(200);
+    expect(ok.headers["cache-control"]).toBe("no-store");
+    expect(JSON.parse(ok.body ?? "{}")).toEqual({ status: "ready", values: VALUES });
+    // A broker with no sign-ins (Cloud) does not serve the action at all, and says nothing about a value.
+    const bare = createCallbackHandler({ flow: { store: w.store, companyId: A, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never });
+    const refused = await bare({ method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/browser-evidence-sign-in`, headers: { "x-agentx-callback-capability": token(["browser-evidence-sign-in"]) }, body: "{}" });
+    expect(refused.statusCode).toBe(404);
+    for (const text of LEAK) expect(refused.body).not.toContain(text);
+  });
+});

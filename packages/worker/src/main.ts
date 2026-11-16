@@ -19,6 +19,7 @@ import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
 import { installBuildSystemProfiles } from "./build-systems.js";
 import { modelFallbackReporter, resolveTaskSessionModel, secondReviewerRuntimes, taskMissingKeyAuthorizer } from "./task-model.js";
 import { createDefaultPiSessionAdapter } from "./pi-session.js";
+import { evalFinalCheckForTask, evalHostSourcesFor } from "./verification/eval-wiring.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
 import { agentSkillsSource } from "./agent-step.js";
 import { brokerContextCall, contextToolsCatalogSource } from "./context-sources/bridge.js";
@@ -181,9 +182,13 @@ const state = createWorkerServerState(
         const session = await resolveTaskSessionModel(invocation.payload,
           invocation.payload.chatgpt === undefined ? undefined : chatGptTokenSource(chatGptToken), process.env, chatGptFallback, proxy, taskFallbackAuthorizer(invocation.payload,authorizeModelFallback));
         const missingKeyAuthority=taskMissingKeyAuthorizer(invocation.payload,authorizeModelFallback,proxy,process.env);
+        // Plan v3.2 row 20.2: the final-check eval's ports, for a task that asks for it, only when the host switched it on (ROVARA_EVAL_GATEWAY_URL) and the trusted sources are delivered. Otherwise none: the request reads "not connected" with zero calls.
+        const evalRequested = invocation.payload.evalRequest !== undefined;
+        const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: process.env, controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation) : undefined });
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,
+          ...(evalFinalCheck === undefined ? {} : { evalFinalCheck }),
           // SR-1: the second reviewer's models, each with its own session (and proxy route).
           ...(invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: { candidates: secondReviewerRuntimes(invocation.payload, proxy, process.env) ?? [], ...(invocation.payload.workflowSecondReviewer.context === undefined ? {} : { context: invocation.payload.workflowSecondReviewer.context }) } }),
           // DR5: a design review's packet source and per-reviewer model keys (only an operation that carries the binding).

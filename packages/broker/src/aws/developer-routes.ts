@@ -1,4 +1,7 @@
-import { projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
+import { slackRecordScope } from "./slack-workspace-tokens.js";
+import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
+import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
+import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
@@ -115,6 +118,11 @@ import type { BrokerResponse } from "../handler.js";
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
   policyHook?: ProjectSettingsHook;
+  /**
+   * Host-owned: the company's step-up window in seconds (the policy hook's answer). It may only SHORTEN the ten-minute default; an answer that is not a whole number from 0 to 86400,
+   * or a throw, refuses the press (`freshStepUp`). Absent: the default.
+   */
+  stepUpWindowSeconds?: (companyId: string) => Promise<unknown>;
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
   /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
   since?: Partial<Record<DeveloperSignInMethod, number>>;
@@ -142,7 +150,7 @@ export interface DeveloperApiConfiguration {
   /** Spec 025 A12: FR-012's email lookup, for an admin's Slack link. */
   slackUserByEmail?: (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse>;
   /** Spec 025 A13: the health route's Slack token check. */
-  slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
+  slackAuthCheck?: (workspace?: SlackWorkspaceScope) => Promise<SlackAuthCheckResponse>;
   /** Spec 025 E9: an admin ends a developer's sign-in sessions, through DeveloperIdentity (the broker only reads the sign-in table). */
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
   /** #634: a person sets their own name, through DeveloperIdentity (the broker only reads the sign-in table). */
@@ -171,6 +179,8 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
+  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany"> & { getProject?(name: string): Promise<unknown> };
+  workspace?: SlackWorkspaceScope;
   channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
   policyHook?: ProjectSettingsHook;
   companies?: CompanyMembershipReader;
@@ -364,10 +374,11 @@ export function slackUserByEmailThroughLambda(invoke: (payload: Uint8Array) => P
 }
 
 /** A13: the bot token's auth.test, through DeveloperIdentity. Slack's refusal code passes through. */
-export function slackAuthCheckThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): () => Promise<SlackAuthCheckResponse> {
-  return async () => {
+export function slackAuthCheckThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (workspace?: SlackWorkspaceScope) => Promise<SlackAuthCheckResponse> {
+  return async (workspace) => {
+    if (workspace !== undefined && !SlackWorkspaceScopeSchema.safeParse(workspace).success) return { ok: false, error: "slack_unavailable" };
     let refusal: string | undefined;
-    const answer = await identityInvoke(invoke, { kind: "slack-auth-check" }, (reply) => {
+    const answer = await identityInvoke(invoke, { kind: "slack-auth-check", ...(workspace === undefined ? {} : { workspace }) }, (reply) => {
       if (reply.ok === true && typeof reply.teamId === "string") return { ok: true as const, teamId: reply.teamId };
       if (reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) && reply.error !== "invalid_request") refusal = reply.error;
       return undefined;
@@ -679,18 +690,26 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
 
 /** The latest revision's number and task policy: the only fields read, so only they are fetched. */
 async function latestDefinition(deps: DeveloperRouteDependencies, project: string, companyId?: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+  // T4a's project provider owns company identity; the legacy policy projection may be unstamped.
+  let storageCompanyId = companyId;
+  if (companyId !== undefined && deps.workspaces?.getProject !== undefined) {
+    try {
+      if (!recordInCompany(await deps.workspaces.getProject(project), companyId)) return undefined;
+      storageCompanyId = undefined;
+    } catch { throw new SlackWorkspaceRefused(); }
+  }
   const response = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
-    ProjectionExpression: "#definition.#revision, #definition.#developerTasks" + (companyId === undefined ? "" : ", #companyId"),
-    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks", ...(companyId === undefined ? {} : { "#companyId": "companyId" }) },
+    ProjectionExpression: "#definition.#revision, #definition.#developerTasks" + (storageCompanyId === undefined ? "" : ", #companyId"),
+    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks", ...(storageCompanyId === undefined ? {} : { "#companyId": "companyId" }) },
     ScanIndexForward: false,
     Limit: 1,
     ConsistentRead: true,
   })) as { Items?: Array<{ definition: { revision: number; developerTasks?: unknown } }> };
   const row = response.Items?.[0];
-  return recordInCompany(row, companyId) ? row?.definition : undefined;
+  return recordInCompany(row, storageCompanyId) ? row?.definition : undefined;
 }
 
 /** Each named project's latest revision and task policy; projects with no revision are left out. */
@@ -706,10 +725,19 @@ export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names
   return found;
 }
 
+function companySlackMode(deps: DeveloperRouteDependencies): boolean {
+  return deps.workspaces !== undefined || deps.companies !== undefined || deps.developer.companies !== undefined;
+}
+
 /** The channel-members check, failing closed (and logged by error name) when it throws. */
 function safeChannelMembers(deps: DeveloperRouteDependencies): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
   return async (request) => {
     try {
+      // Without the workspace service only the install's own team is ever asked about (bindingsOf gives it to the implicit company alone), as before company mode.
+      if (companySlackMode(deps) && deps.workspaces !== undefined) {
+        const scope = SlackWorkspaceScopeSchema.safeParse(request.workspace);
+        if (!scope.success || deps.workspaces === undefined || await deps.workspaces.requireCompany(scope.data.teamId) !== scope.data.companyId) return SLACK_UNAVAILABLE;
+      }
       return await deps.developer.channelMembers(request);
     } catch (error) {
       logDeveloperEvent({ event: "developer.channel_members_failed", reason: "threw", error: errorName(error) });
@@ -722,8 +750,9 @@ function safeChannelMembers(deps: DeveloperRouteDependencies): (request: Channel
  * Channel names and privacy, best effort: without them the channels are listed by ID (R10).
  * Privacy comes from DeveloperIdentity's 10-minute cache. The whole lookup has one deadline.
  */
-async function channelNames(deps: DeveloperRouteDependencies, channelIds: readonly string[]): Promise<Map<string, { name: string; isPrivate: boolean }>> {
+async function channelNames(deps: DeveloperRouteDependencies, channelIds: readonly string[], workspace?: SlackWorkspaceScope): Promise<Map<string, { name: string; isPrivate: boolean }>> {
   const names = new Map<string, { name: string; isPrivate: boolean }>();
+  if (companySlackMode(deps) && (workspace === undefined || deps.workspaces === undefined || await deps.workspaces.requireCompany(workspace.teamId) !== workspace.companyId)) throw new SlackWorkspaceRefused();
   const channelInfo = deps.developer.channelInfo;
   if (channelInfo === undefined || channelIds.length === 0) return names;
   const unique = [...new Set(channelIds)].sort();
@@ -735,16 +764,16 @@ async function channelNames(deps: DeveloperRouteDependencies, channelIds: readon
     for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
       let answer: ChannelInfoResponse | "deadline";
       try {
-        answer = await Promise.race([channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) }), expired]);
+        answer = await Promise.race([channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), ...(workspace === undefined ? {} : { workspace }) }), expired]);
       } catch (error) {
         logDeveloperEvent({ event: "developer.channel_info_failed", reason: "threw", error: errorName(error) });
-        return names;
+        return workspace === undefined ? names : new Map();
       }
       if (answer === "deadline") {
         logDeveloperEvent({ event: "developer.channel_info_failed", reason: "deadline" });
-        return names;
+        return workspace === undefined ? names : new Map();
       }
-      if (!answer.ok) return names;
+      if (!answer.ok) return workspace === undefined ? names : new Map();
       for (const channel of answer.channels) names.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
     }
     return names;
@@ -771,8 +800,45 @@ async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessS
     .map((membership) => membership.projectName);
 }
 
-async function bindingsOf(deps: DeveloperRouteDependencies): Promise<SlackChannelBinding[]> {
-  return deps.developer.slackTeamId === undefined ? [] : queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, deps.developer.slackTeamId), channelBindingSortPrefix(SLACK_CHANNEL));
+async function bindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWorkspaceScope, companyId?: string): Promise<SlackChannelBinding[]> {
+  // The install's own Slack team (the deployment's SlackTeamId) belongs to the implicit company until the workspace backfill binds it: the implicit company keeps
+  // seeing its channel projects exactly as before company mode (the company-check goldens), and no other company ever does.
+  const legacyTeam = deps.developer.slackTeamId;
+  if (deps.workspaces === undefined) {
+    const legacyApplies = legacyTeam !== undefined && (!companySlackMode(deps) || (workspace === undefined && companyId === IMPLICIT_COMPANY_ID));
+    return legacyApplies ? queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, legacyTeam), channelBindingSortPrefix(SLACK_CHANNEL)) : [];
+  }
+  if (workspace === undefined && companyId === undefined) throw new SlackWorkspaceRefused();
+  const budget = boundedCompanyReads(deps.documentClient, deps.now);
+  const scopes = workspace === undefined ? await listSlackWorkspaceScopes({ client: budget.client, tableName: deps.tableName }, companyId!) : [workspace];
+  if (workspace === undefined && companyId === IMPLICIT_COMPANY_ID && legacyTeam !== undefined && !scopes.some((scope) => scope.teamId === legacyTeam)) {
+    let legacyCompany: string | undefined;
+    try { legacyCompany = await deps.workspaces.requireCompany(legacyTeam); } catch { legacyCompany = undefined; }
+    if (legacyCompany === IMPLICIT_COMPANY_ID) scopes.push({ companyId: IMPLICIT_COMPANY_ID, teamId: legacyTeam });
+  }
+  const bindings: SlackChannelBinding[] = [];
+  for (const scope of scopes) {
+    if (!SlackWorkspaceScopeSchema.safeParse(scope).success || await deps.workspaces.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
+    const rows = await queryAll<SlackChannelBinding>({ ...deps, documentClient: budget.client }, channelBindingPartition(SLACK_CHANNEL, scope.teamId), channelBindingSortPrefix(SLACK_CHANNEL));
+    if (rows.some((row) => row.teamId !== scope.teamId)) throw new SlackWorkspaceRefused();
+    bindings.push(...rows);
+  }
+  return bindings;
+}
+
+async function callerWorkspace(deps: DeveloperRouteDependencies, caller: ProjectAccessSubject, record: unknown, teamId: unknown): Promise<SlackWorkspaceScope | undefined> {
+  if (!companySlackMode(deps)) return undefined;
+  try {
+    // Without the workspace service only the install's own team exists, and it is the implicit company's: the legacy path answers (no scope), any other team or company is refused.
+    if (deps.workspaces === undefined) {
+      if (teamId === deps.developer.slackTeamId && await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) === IMPLICIT_COMPANY_ID) return undefined;
+      throw new SlackWorkspaceRefused();
+    }
+    const scope = slackRecordScope(record, teamId);
+    const company = await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
+    if (company !== scope.companyId || await deps.workspaces.requireCompany(scope.teamId) !== company) throw new SlackWorkspaceRefused();
+    return scope;
+  } catch { throw new SlackWorkspaceRefused(); }
 }
 
 /** One answer for every refusal at the access check, so it tells a caller nothing about why. */
@@ -1170,10 +1236,13 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
+  // Company mode, with or without the workspace service: the caller's company filters every project the list shows (the install's own team is the implicit company's).
+  companyId ??= companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
   const grants = await grantsOf(deps, caller);
-  const bindings = await bindingsOf(deps);
+  const bindings = await bindingsOf(deps, undefined, companyId);
   const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)], companyId);
   const access = await resolveDeveloperAccess({
+    ...(deps.workspaces === undefined || companyId === undefined ? {} : { companyId }),
     grants: companyId === undefined ? grants : grants.filter((name) => policies.has(name)),
     bindings: companyId === undefined ? bindings : bindings.filter((binding) => policies.has(binding.projectName)),
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
@@ -1183,10 +1252,15 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
   });
   const listed = [...access.projects].filter(([name]) => policies.has(name));
   // Like checkProjectAccess: a caller with no Slack link is never shown channel names.
-  const names = caller.slackUserId === undefined ? new Map<string, { name: string; isPrivate: boolean }>() : await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
+  const names = caller.slackUserId === undefined || companySlackMode(deps) ? new Map<string, { name: string; isPrivate: boolean }>() : await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
   const projects: DeveloperProjectsResponse["projects"] = [];
   for (const [name, entry] of listed) {
     const known = policies.get(name)!;
+    if (deps.workspaces !== undefined && caller.slackUserId !== undefined) {
+      names.clear();
+      const teams = [...new Set(bindings.filter((row) => row.projectName === name).map((row) => row.teamId))];
+      if (teams.length === 1 && companyId !== undefined) for (const [id, label] of await channelNames(deps, entry.channels, { companyId, teamId: teams[0]! })) names.set(id, label);
+    }
     projects.push({ name, latestRevision: known.revision, access: entry.access, channels: entry.channels.map((channelId) => describeChannel(channelId, names)), tasks: known.policy });
   }
   return {
@@ -1215,10 +1289,15 @@ export async function checkProjectAccess(
 ): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
   // A name that is not a project name is never echoed back: it could be long or carry markup.
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
-  const known = (await projectsWithPolicy(deps, [project])).get(project);
+  const companyId = companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
+  const known = (await projectsWithPolicy(deps, [project], companyId)).get(project);
   if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
   const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
-  const bindings = (await bindingsOf(deps)).filter((binding) => binding.projectName === project);
+  const requestedWorkspace = deps.workspace === undefined ? undefined : await callerWorkspace(deps, caller, { companyId: deps.workspace.companyId }, deps.workspace.teamId);
+  const bindings = (await bindingsOf(deps, requestedWorkspace, companyId)).filter((binding) => binding.projectName === project);
+  const teams = [...new Set(bindings.map((binding) => binding.teamId))];
+  if (deps.workspaces !== undefined && teams.length > 1) throw new SlackWorkspaceRefused();
+  const workspace = deps.workspaces === undefined || teams.length === 0 ? undefined : await callerWorkspace(deps, caller, { companyId }, teams[0]);
   const projectMemberships = grants.map((projectName) => ({ projectName, role: "developer" }));
   const evaluate = (freshMemberOf?: readonly string[]) => evaluateProjectAuthority({
     project,
@@ -1233,7 +1312,7 @@ export async function checkProjectAccess(
     const memberOf = new Set<string>();
     for (let start = 0; start < result.channelIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
       const response = await safeChannelMembers(deps)({
-        kind: "channel-members", slackUserId: caller.slackUserId!, channelIds: result.channelIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS),
+        kind: "channel-members", slackUserId: caller.slackUserId!, channelIds: result.channelIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), ...(workspace === undefined ? {} : { workspace }),
       });
       if (!response.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
       for (const channelId of response.memberOf) memberOf.add(channelId);
@@ -1248,7 +1327,7 @@ export async function checkProjectAccess(
     // Only a channel that would give access is worth naming, and only a public one (R10).
     const visible = caller.slackUserId === undefined || !known.policy.channelMembersMayUse
       ? []
-      : [...(await channelNames(deps, result.visibleChannelIds)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
+      : [...(await channelNames(deps, result.visibleChannelIds, workspace)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
     throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
   }
   return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds };
@@ -1321,27 +1400,45 @@ export function developerTaskRouteDependencies(
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string },
   trustedCaller: DeveloperCaller | null = caller,
 ): DeveloperTaskRouteDependencies {
-  const projectChannelIds = async (project: string) => (await bindingsOf(deps))
+  const taskWorkspace = (task: DeveloperTaskRecord) => callerWorkspace(deps, caller, task, task.share?.teamId);
+  const workspaceForProject = async (project: string): Promise<SlackWorkspaceScope | undefined> => {
+    if (!companySlackMode(deps)) return undefined;
+    if (deps.workspaces === undefined) throw new SlackWorkspaceRefused();
+    const companyId = await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
+    if (companyId === undefined || await latestDefinition(deps, project, companyId) === undefined) throw new SlackWorkspaceRefused();
+    if (initialSlackThread !== undefined) {
+      const candidate = await callerWorkspace(deps, caller, { companyId }, initialSlackThread.teamId);
+      const binding = (await bindingsOf(deps, candidate)).find((row) => row.projectName === project && row.channelId === initialSlackThread.channelId);
+      if (binding === undefined) throw new SlackWorkspaceRefused();
+      return callerWorkspace(deps, caller, { companyId }, binding.teamId);
+    }
+    const teams = [...new Set((await bindingsOf(deps, undefined, companyId)).filter((row) => row.projectName === project).map((row) => row.teamId))];
+    if (teams.length !== 1) throw new SlackWorkspaceRefused();
+    return callerWorkspace(deps, caller, { companyId }, teams[0]);
+  };
+  const projectChannelIds = async (project: string, workspace?: SlackWorkspaceScope) => (await bindingsOf(deps, workspace ?? await workspaceForProject(project)))
     .filter((binding) => binding.projectName === project)
     .map((binding) => binding.channelId)
     .sort();
-  const identityDependencies = (admission?: TaskPeopleDisplayAdmission): TaskPersonIdentityDependencies => {
-    const slackTeamId = deps.developer.slackTeamId;
+  const identityDependencies = async (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonIdentityDependencies> => {
+    const workspace = await taskWorkspace(task);
+    const slackTeamId = workspace?.teamId ?? deps.developer.slackTeamId;
     const taskPersonProof = admission?.proof.bind(admission) ?? deps.developer.taskPersonProof;
     if (slackTeamId === undefined || taskPersonProof === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
     return {
       documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId, now: deps.now, uuid: randomUUID, taskPersonProof,
+      ...(workspace === undefined ? {} : { workspace }),
       developerRecord: async (targetDeveloperId) => {
         const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
         return response.Item;
       },
-      projectChannelIds,
+      projectChannelIds: (project) => projectChannelIds(project, workspace),
       targetProjectAccess: async (subject, project, freshMemberOf) => {
-        const revision = await latestDefinition(deps, project);
+        const revision = await latestDefinition(deps, project, workspace?.companyId);
         if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
         const [memberships, allBindings] = await Promise.all([
           queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${subject.developerId}`, "PROJECT#"),
-          bindingsOf(deps),
+          bindingsOf(deps, workspace),
         ]);
         const result = evaluateProjectAuthority({
           project,
@@ -1382,13 +1479,13 @@ export function developerTaskRouteDependencies(
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
     ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
     checkTaskPerson: async (task, developerId, admission) => {
-      return checkTaskPersonIdentity(identityDependencies(admission), task, developerId);
+      return checkTaskPersonIdentity(await identityDependencies(task, admission), task, developerId);
     },
     resolveTaskPickerPerson: async (taskId, slackUserId) => {
-      const dependencies = identityDependencies();
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
       if (response.Item === undefined) throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
       const task = response.Item;
+      const dependencies = await identityDependencies(task);
       const resolved = await resolveTaskPickerPersonWithId(dependencies, task, slackUserId);
       const proof = await checkTaskPersonIdentity(dependencies, task, resolved.identity.developerId);
       if (!proof.eligible || proof.identity.developerId !== resolved.identity.developerId || proof.identity.slackUserId !== resolved.identity.slackUserId) {
@@ -1408,12 +1505,14 @@ export function developerTaskRouteDependencies(
     ...(deps.developer.taskPeopleDisplayRead === undefined ? {} : {
       createTaskPeopleDisplayAdmission: () => taskPeopleDisplayAdmission({ now: deps.now, read: deps.developer.taskPeopleDisplayRead! }),
       listTaskPeople: async (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => {
-      const channels = [...new Set([...(await projectChannelIds(task.project)), ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
+      const identity = await identityDependencies(task, admission);
+      const workspace = identity.workspace;
+      const channels = [...new Set([...(await projectChannelIds(task.project, workspace)), ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
       admission.assertOpen();
-      const answer = await admission.directory({ kind: "task-channel-people", channelIds: channels });
+      const answer = await admission.directory({ kind: "task-channel-people", channelIds: channels, ...(workspace === undefined ? {} : { workspace }) });
       if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
       admission.assertOpen();
-      const identities = await registerTaskChannelPeople(identityDependencies(admission), task, answer.users, () => admission.assertOpen());
+      const identities = await registerTaskChannelPeople(identity, task, answer.users, () => admission.assertOpen());
       admission.assertOpen();
       const bySlack = new Map(answer.users.map((user) => [user.id, user]));
       return identities.map((identity) => {
@@ -1426,18 +1525,29 @@ export function developerTaskRouteDependencies(
     }),
     ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
-    checkAccess: (project) => checkProjectAccess(deps, caller, project),
+    checkAccess: async (project) => {
+      try {
+        const workspace = await workspaceForProject(project);
+        return await checkProjectAccess(workspace === undefined ? deps : { ...deps, workspace }, caller, project);
+      } catch (error) {
+        // startTask audits AgentXError refusals; never expose a directory cause as an unaudited 500.
+        if (error instanceof SlackWorkspaceRefused) throw agentXError("SLACK_UNAVAILABLE", "This Slack workspace is not available.");
+        throw error;
+      }
+    },
     taskReaderPerson: (developerId, project) => taskReaderPerson(deps, developerId, project),
-    channelMember: async (slackUserId, channelId) => {
-      const answer = await safeChannelMembers(deps)({ kind: "channel-members", slackUserId, channelIds: [channelId] });
+    ...(!companySlackMode(deps) ? {} : { workspaceForTask: taskWorkspace, workspaceForProject }),
+    channelMember: async (slackUserId, channelId, workspace) => {
+      if (companySlackMode(deps) && (workspace === undefined || await callerWorkspace(deps, caller, { companyId: workspace.companyId }, workspace.teamId) === undefined)) throw new SlackWorkspaceRefused();
+      const answer = await safeChannelMembers(deps)({ kind: "channel-members", slackUserId, channelIds: [channelId], ...(workspace === undefined ? {} : { workspace }) });
       if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your membership of that channel; try again shortly");
       return answer.memberOf.includes(channelId);
     },
     projectChannelIds,
     ...(deps.developer.slackRequestQueue === undefined ? {} : { slackRequestQueue: deps.developer.slackRequestQueue }),
     ...(deps.developer.channelInfo === undefined ? {} : {
-      boundChannels: async (channelIds: readonly string[]) => {
-        const known = await channelNames(deps, channelIds);
+      boundChannels: async (channelIds: readonly string[], workspace?: SlackWorkspaceScope) => {
+        const known = await channelNames(deps, channelIds, workspace);
         return channelIds.map((channelId) => {
           const channel = known.get(channelId);
           return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
@@ -1579,6 +1689,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
   const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
   if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
+  if (url.pathname === "/v1/dev/company/settings-compliance") return projectSettingsComplianceRoute(deps, caller, url);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") {
     const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
     const companyId = await resolveCompany(deps.companies, caller.developerId);
