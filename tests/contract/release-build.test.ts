@@ -24,10 +24,11 @@ describe("release builder", () => {
       "legal/LICENSE-APACHE",
       "legal/RELICENSED.md",
     ]);
-    expect(manifest.templates.map((t) => t.part)).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);
+    // Every supported region's six parts, region by region (SUPPORTED_REGIONS order).
+    const parts = ["access", "foundation", "identity", "runtime", "control-plane", "slack"];
+    expect(manifest.templates.map((t) => [t.region, t.part])).toEqual(["us-east-1", "us-west-2"].flatMap((region) => parts.map((part) => [region, part])));
     for (const t of manifest.templates) {
-      expect(t.region).toBe("us-east-1");
-      expect(t.file).toBe(`templates/us-east-1/${t.part}.template.json`);
+      expect(t.file).toBe(`templates/${t.region}/${t.part}.template.json`);
       expect(sha(await readFile(join(out, t.file)))).toBe(t.sha256);
     }
     for (const p of manifest.packages) {

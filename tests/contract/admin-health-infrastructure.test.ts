@@ -46,7 +46,13 @@ describe("the health route's grants (A13)", () => {
   it("names every alarm a named app creates in the probe's list, and lists no alarm the app never creates (issue 206)", () => {
     const alarmNamesOf = (context: Record<string, unknown>) => buildAgentXApp({ agentxEnv: "live25d", ...context }).node.children.filter((child): child is Stack => Stack.isStack(child))
       .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>))
-      .map((alarm) => alarm.Properties.AlarmName);
+      .map((alarm) => alarm.Properties.AlarmName)
+      // The foundation's egress alarms keep their live hyphenated names and are not on the health route (control-plane.ts unlistedAlarms); pinned here exactly.
+      .filter((name) => !egressAlarmNames.includes(name as string));
+    const egressAlarmNames = ["agentx-live25d-blocked-dns-spike", "agentx-live25d-nat-egress-spike-use1-az1", "agentx-live25d-nat-egress-spike-use1-az2"];
+    const allNames = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child))
+      .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>)).map((alarm) => alarm.Properties.AlarmName);
+    expect(egressAlarmNames.every((name) => allNames.includes(name))).toBe(true);
     const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
     // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
     expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
@@ -136,6 +142,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/workflow-e2e-replay.ts",
       // The marker a project setup run leaves for the test machine renewal's drain (AUTOREQUALIFY AR-3) ends at the run's deadline and expires on it a day later.
       "packages/broker/src/e2e/requalify-hold.ts",
+      // TE-C3: the full-suite follow-up, its task pointer (30 days) and the project's day count (3 days) expire on it.
+      "packages/broker/src/core/proof/full-suite-followup.ts",
       // Spec 062 FR-031: a channel link code, one-time and dead after 10 minutes.
       "packages/broker/src/aws/channel-links.ts",
       // The Code port lanes' core (packages/broker/src/core, on the document store port). Each file was read for it: every one writes a row that is meant to expire after a named retention, none a durable record.
@@ -192,10 +200,20 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
       // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
       "packages/broker/src/core/work-events/work-events.ts",
+      // Spend holds (switch-on lane L8): a hold's row and its open-hold index row expire 30 days after the hold's own expiry (the sweep gives an open one back first). The day row and the task
+      // total carry no expiry.
+      "packages/broker/src/core/cost/holds.ts",
       // Engine host (E2): the State table's TTL attribute is named to strip the core's expiries (retention.ts) and to tell the deployed store which attribute it is (code-modules.ts). Neither writes one.
       "packages/broker/src/core-host/retention.ts", "packages/broker/src/core-host/code-modules.ts",
       // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item core/sessions/notes.ts writes, with the same 400-day expiry; it reads that item back too.
       "packages/broker/src/developer/task-code-routes.ts",
+      // Task actions (decision 198): the owner's own words for a round they sent back, one OWNER_NOTE row per decision, kept 400 days (KEEP_SECONDS) and then expired. Not a durable record: the decision itself is.
+      "packages/broker/src/core/task-flow/owner-note.ts",
+      // Task actions (decision 201): who accepted a review finding and by what way (one FINDING_ACCEPT row per decision, read when the pull request description is made), kept 400 days like the decision records and then expired.
+      "packages/broker/src/core/task-flow/finding-accept.ts",
+      // Batch merge (#733 L2a, #754 M7): a step-up claim row expires after its token's own expiry plus a short keep (hosted-approvers.ts); the after-merge watcher's watch and action rows
+      // expire after their kept days (after-merge/watch.ts names the store's TTL attribute, defaulting to this one). Neither is a durable record.
+      "packages/broker/src/core-host/hosted-approvers.ts", "packages/broker/src/core/after-merge/watch.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

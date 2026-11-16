@@ -19,6 +19,11 @@ export interface GitHubAppCredentials {
    * picked up without a redeploy.
    */
   webhookSecret: (options?: { refresh?: boolean }) => Promise<string>;
+  /**
+   * Core switch-on lane L1b: the same App's settings for the full App client the core's code host is built on (aws/core-code-host.ts), reading the same secret through the same
+   * loaders (one read per container, re-read after a failure), so the core and the broker never hold two copies of the App.
+   */
+  clientOptions: { credentialRef: string; appId: string | (() => Promise<string>); getPrivateKey: () => Promise<string>; getAppSecret: (options?: { refresh?: boolean }) => Promise<string> };
 }
 
 const REREAD_INTERVAL_MS = 30_000;
@@ -70,10 +75,16 @@ export function createGitHubAppCredentials(secretsManager: Pick<SecretsManagerCl
     }
     return loadSecret();
   };
-  const provider = new GitHubAppCredentialProvider({
+  const clientOptions: GitHubAppCredentials["clientOptions"] = {
     credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
     appId: appIdSetting !== "" ? appIdSetting : async () => (await loadApp()).appId,
     getPrivateKey: () => loadSecret().then(privateKeyFromSecret),
+    getAppSecret: (options) => (options?.refresh === true ? reread() : loadSecret()),
+  };
+  const provider = new GitHubAppCredentialProvider({
+    credentialRef: clientOptions.credentialRef,
+    appId: clientOptions.appId,
+    getPrivateKey: clientOptions.getPrivateKey,
   });
   const webhookSecret = async (options?: { refresh?: boolean }): Promise<string> => {
     if (options?.refresh === true) return webhookSecretFromSecret(await reread());
@@ -84,7 +95,7 @@ export function createGitHubAppCredentials(secretsManager: Pick<SecretsManagerCl
       throw error;
     }
   };
-  return { provider, privateKeySecretArn, webhookSecret };
+  return { provider, privateKeySecretArn, webhookSecret, clientOptions };
 }
 
 

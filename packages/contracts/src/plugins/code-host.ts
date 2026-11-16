@@ -1,6 +1,7 @@
 // The CodeHost port: where the code lives and where change requests are opened, reviewed and merged. GitHub is the first adapter.
 // Grouped from the methods the broker already uses of `GitHubAppCredentialProvider` (broker.ts `githubPullRequests`, about 40 of them).
 import { z } from "zod";
+import type { RovaraCheckPayload } from "../rovara-check.js";
 import {
   BranchNameSchema, ExternalIdSchema, HostAccountSchema, HttpsUrlOrEmptySchema, ISO_TIME, PluginKindSchema, RepositoryRefSchema, RevisionSchema,
   type HostAccount, type HostScope, type PluginKind, type ReadBudget, type RepositoryRef, type UntrustedText,
@@ -292,6 +293,16 @@ export const ChangeRequestStatusSchema = z.object({
   reviews: z.array(ReviewSchema).max(500),
 }).strict();
 export type ChangeRequestStatus = z.infer<typeof ChangeRequestStatusSchema>;
+
+/** TE-B4: one write of the "Rovara" Check on a head (see `CodeHost.upsertSummaryCheck`). */
+export interface SummaryCheckPost {
+  headRevision: string;
+  payload: RovaraCheckPayload;
+  /** The run to update, when Rovara knows it. */
+  runId?: string | undefined;
+  /** Where "Details" opens: Rovara's signed-in task page (https only). */
+  detailsUrl?: string | undefined;
+}
 
 export const FILE_ENTRY_TYPES = ["file", "executable", "symlink", "submodule"] as const;
 export const FileEntryTypeSchema = z.enum(FILE_ENTRY_TYPES);
@@ -590,6 +601,16 @@ export interface CodeHost {
    */
   postComment?(ref: ChangeRequestRef, text: string, scope: HostScope, budget?: ReadBudget): Promise<"posted" | "gone">;
   markReady?(ref: ChangeRequestRef, scope: HostScope, budget?: ReadBudget): Promise<"ready" | "already_ready">;
+  /**
+   * Optional (TE-B4): the source word Rovara's own checks carry in `ChangeRequestStatus.checks[].source` on this host (GitHub: the App's id), so the core can tell its own "Rovara" Check from the
+   * customer's CI. Undefined when it cannot be told; then no Check is posted.
+   */
+  summaryCheckSource?(scope: HostScope): Promise<string | undefined>;
+  /**
+   * Optional (TE-B4): creates or updates the one "Rovara" Check on a head. With `runId` that run is updated; without, the host first looks for Rovara's own "Rovara" Check on the head and updates it,
+   * else creates one (idempotent by head). The write uses its own narrow permission; a host install that has not granted it answers `no_permission` (the pull request body stays the only summary).
+   */
+  upsertSummaryCheck?(repository: RepositoryRef, post: SummaryCheckPost, scope: HostScope, budget?: ReadBudget): Promise<{ runId: string } | "no_permission">;
   requestReviewers?(ref: ChangeRequestRef, reviewers: readonly string[], scope: HostScope, budget?: ReadBudget): Promise<"requested" | "refused">;
   /** Only after a person approves and presses Merge. Rovara never merges by itself. */
   merge?(ref: ChangeRequestRef, input: { revision: string; method: MergeMethod }, scope: HostScope): Promise<MergeResult>;

@@ -88,7 +88,7 @@ describe("Code's AWS adapter modules", () => {
     await store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
     await store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
     const runtime = await app.runtimeFor(FAKE_COMPANY);
-    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test", origin: "app" as const };
+    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), origin: "app" as const, client: "test" };
     const { task } = await runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     expect(stampOf(await store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core" });
     expect((await runtime.flow.list(owner)).tasks.map((row) => row.taskId)).toEqual([task.taskId]);

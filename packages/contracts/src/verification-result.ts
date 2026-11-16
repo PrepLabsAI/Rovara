@@ -117,6 +117,8 @@ export const TestingRowSchema = z
     reason: TestingReasonSchema.optional(),
     /** Tests that passed in a passed row, for the one-line summary ("37 passed"). */
     passedTests: z.number().int().min(0).max(TESTING_PASSED_DETAIL_MAX).optional(),
+    /** General fakes: a Rovara-made fake answered this check, so its result is said with the Made by Rovara words and is never folded into a plain count. */
+    madeByRovara: z.literal(true).optional(),
   })
   .strict()
   .superRefine((row, context) => {

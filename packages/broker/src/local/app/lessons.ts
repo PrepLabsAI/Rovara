@@ -112,6 +112,8 @@ export interface LocalLessons {
   tick(): Promise<void>;
   /** A pull request of the task was reverted: the task is reflected on again, as a reverted one. */
   noteReverted(taskId: string): Promise<void>;
+  /** The owner sent the task back with their words: its correction is queued for reflection now (learn on send-back; `LessonsHost.noteSentBack`). */
+  noteSentBack(taskId: string): Promise<void>;
 }
 
 const jsonHash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -410,6 +412,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   }
 
   const noteReverted: LocalLessons["noteReverted"] = (taskId) => host.noteReverted(taskId);
+  const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
 
-  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted };
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteSentBack };
 }

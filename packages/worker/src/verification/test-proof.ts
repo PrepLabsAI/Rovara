@@ -19,6 +19,7 @@ import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/prom
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { TestProofWriteSchema, isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofNotComparedReason, type TestProofWeakening } from "@agentx/contracts";
 import type { ScriptedReplyFacts } from "../model-helper-round.js";
+import type { GeneralFakeFacts } from "../general-fakes-round.js";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { testIdResolver, withTestIds, type TestIdContext } from "./test-ids.js";
@@ -255,6 +256,21 @@ export function withScriptedReplyFacts(proof: TestProof, source: CheckPlan["sour
   if (scriptedReplies.length === 0) return proof;
   const written = { ...proof, scriptedReplies };
   if (!TestProofWriteSchema.safeParse(written).success) throw new Error("unsupported scripted reply facts");
+  return written;
+}
+
+/**
+ * General fakes (DEC 234): the checks a Rovara-made fake answered, so the broker never counts them as change proof. Absent facts preserve the legacy bytes exactly. `unknown` (a call no check could be blamed for)
+ * marks every check the proof lists as fake-answered too. Facts that cannot be written throw, so the proof is not saved at all rather than saved without them.
+ */
+export function withGeneralFakeFacts(proof: TestProof, facts: GeneralFakeFacts | undefined): TestProof {
+  if (facts === undefined) return proof;
+  const served = new Map(facts.checks.map((entry) => [entry.checkId, entry.served]));
+  const ids = new Set(served.keys());
+  if (facts.unknown) for (const item of proof.items) ids.add(item.checkId);
+  if (ids.size === 0) return proof;
+  const written = { ...proof, madeByRovara: [...ids].map((checkId) => ({ checkId, served: Math.max(1, served.get(checkId) ?? 1) })) };
+  if (!TestProofWriteSchema.safeParse(written).success) throw new Error("unsupported general fake facts");
   return written;
 }
 

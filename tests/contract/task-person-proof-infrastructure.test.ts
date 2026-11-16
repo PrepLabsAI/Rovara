@@ -6,6 +6,7 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
@@ -64,8 +65,11 @@ function parentRemainderDigest(template: TemplateJson): string {
   const remainder = structuredClone(template);
   // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
   // the legacy template must carry none of it, so legacy stays byte-identical.
-  if (remainder.Parameters?.CoreEngine !== undefined) withoutCoreEngine(remainder);
-  else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
+  if (remainder.Parameters?.CoreEngine !== undefined) {
+    withoutCoreEngine(remainder);
+    // The switch-over parity additions of a named control plane (switchover-parity-infrastructure.test.ts); shape asserted, then taken out.
+    withoutSwitchoverControlPlaneParity(remainder);
+  } else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
   // named parameter and its corresponding Broker environment reference from the proof-only hash.
@@ -213,14 +217,14 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "c9a3d0a6e6dc1a9e1468b4953742785d30549e1e33d0b4a7ee6bafca5912b4bd",
-        withoutRoute: "dfde6fd9fe990a8b986bc5e56a80b3bfb984dbe7e3c2fe477fe7fa2da7b254f0",
+        withRoute: "247547c3e6e1808ffdd553bcc9dc88b9a4da453675e23ce4bfc9704255c0e3c4",
+        withoutRoute: "a008009d43061070d530d5863c29af3e9ca10a17be0a0c25952cd5383c5dbf7d",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "e55075dcd808d9f695937d8b3b98b4410094146e454c2825ae8bd1ce7661cbf6",
-        withoutRoute: "2f9e966d536cd6a54b636dd48cd690534c88ed57b98d88fce06a73a9c5d2c0ea",
+        withRoute: "95bdece8683dbde3bbd98c6a59f9e312073a30a2fc52bdf76cf062dc7d60ff26",
+        withoutRoute: "d432d6d13e81fb7ef768947ff355c7f5b703783ed7e3fed2a0c06b20530a28da",
       },
       {
         label: "legacy",

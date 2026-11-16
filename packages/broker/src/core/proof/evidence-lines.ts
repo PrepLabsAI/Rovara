@@ -4,7 +4,7 @@
 //
 // What stays at every shrink level: the Environment line, the not-run line and the mocked or not-tested bullets (a reader must not miss what was not proved), and the link. The counts per kind and the
 // changed-line coverage go first, from level 2.
-import { evidenceIsFor, type EvidenceMode, type EvidencePack, type EvidencePackRead } from "@agentx/contracts";
+import { evidenceIsFor, flakyRerunLine, baselineWords, type EvidenceMode, type EvidencePack, type EvidencePackRead, type EvidenceBaseline } from "@agentx/contracts";
 import { AWS_PERMISSIONS_ITEM_ID } from "./dependency-evidence.js";
 import { packDependencyLines } from "./dependency-lines.js";
 import { inertLine } from "./inert-text.js";
@@ -24,6 +24,8 @@ export interface ProofEvidenceContext {
   taskUrl?: string | undefined;
   /** Rovara's own https origin, as configured (`https://host`, no path). Without it no address is shown: the link line still says where to look. */
   origin?: string | undefined;
+  /** TE-C1: the words of the baseline this code's checks were compared with (`loadEvidenceBaseline`, bound to the same candidate as the pack). Absent: the lines are exactly what they were. */
+  baseline?: EvidenceBaseline | undefined;
 }
 
 /** The tests the change added or changed that the broker's own TestProof (bound to this code's digest) says fail on the original code, by name. Undefined when the proof has no per-test verdicts. */
@@ -92,6 +94,12 @@ export function testsLine(pack: EvidencePack, proven?: ProvenTestNames, proofQua
   }
   if (pack.selection.selected < pack.selection.total) parts.push(`${number(pack.selection.selected)} of ${number(pack.selection.total)} tests selected (${SELECTION_WORDS[pack.selection.method]})`);
   return parts.length === 0 ? undefined : cutLine(`${proofQualifier}Checks by kind: ${parts.slice(0, 12).join(" · ")}${parts.length > 12 ? ` · and ${parts.length - 12} more` : ""}`);
+}
+
+/** TE-C6: the one line about tests that failed once and passed on the round's rerun: a count in fixed words, never a test's name (those are in the check's `tests` part). Undefined when none were. Kept at every shrink level: a reader must not miss a failure that was set aside. */
+export function flakyLine(pack: EvidencePack): string | undefined {
+  const count = pack.checks.reduce((sum, check) => sum + (check.tests?.flakyOnRerunCount ?? 0), 0);
+  return flakyRerunLine(count);
 }
 
 /**
@@ -180,7 +188,10 @@ export function evidenceLines(context: ProofEvidenceContext | undefined, candida
     ...(full ? [testsLine(pack, extra.proven, extra.testProofQualifier), coverageLine(pack)] : []),
     environmentLine(pack, level),
     ...dependencies.lines,
+    flakyLine(pack),
     notRunLine(pack),
+    // TE-C1: which run "already failing" came from (never dropped, like the not-run line it sits after; the words are counts and fixed words, the branch name goes through the inert-text function).
+    context.baseline === undefined ? undefined : baselineWords(context.baseline),
     evidenceLinkLine(context),
   ].filter((line): line is string => line !== undefined);
   return { lines, notTested: [...evidenceNotTestedLines(pack, level, extra.alreadyListed), ...dependencies.notTested] };

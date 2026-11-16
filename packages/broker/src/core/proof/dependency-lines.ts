@@ -97,6 +97,9 @@ function notCheckedLines(dependency: EvidenceDependency, name: string, level: nu
     case "hand_written_fake":
       lines.push(compact ? `${name}: written by hand` : `${name}: answers were written by hand, not recorded`);
       break;
+    case "rovara_made_fake":
+      lines.push(compact ? `${name}: made by Rovara` : `${name}: answers were made by Rovara, not recorded from the real service`);
+      break;
     case "not_available": {
       const fallback = fallbackWords(dependency);
       const suffix = fallback === undefined ? "" : ` (${fallback})`;
@@ -109,11 +112,12 @@ function notCheckedLines(dependency: EvidenceDependency, name: string, level: nu
     case "real":
     case "real_project_image":
     case "test_account":
+    case "vendor_test":
     case "faked_by_tests":
       break;
   }
   const made = dependency.madeUpAnswers ?? 0;
-  if (made > 0 && (dependency.label === "recorded_fake" || dependency.label === "hand_written_fake")) {
+  if (made > 0 && (dependency.label === "recorded_fake" || dependency.label === "hand_written_fake" || dependency.label === "rovara_made_fake")) {
     lines.push(compact ? `${name}: ${number(made)} made-up answers` : `${name}: ${number(made)} ${made === 1 ? "request" : "requests"} had no recording and got a made-up answer`);
   }
   return lines;

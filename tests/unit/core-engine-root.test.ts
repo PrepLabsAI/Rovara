@@ -4,10 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { CORE_APP_UNAVAILABLE } from "../../packages/broker/src/aws/core-app-routes.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
@@ -49,10 +50,11 @@ describe("the broker's core root, switch off (the default)", () => {
     for (const env of [{}, { ROVARA_CORE_ENGINE: "off" }, { ROVARA_CORE_ENGINE: "typo" }]) {
       const root = createBrokerCoreRoot(rootInputs(env, tables.client, { codeModules }));
       expect(root.coreTasks).toBeUndefined();
+      expect(root.coreApp).toBeUndefined();
       expect(root.app.serving).toBe(false);
       expect(await root.callback({ method: "POST", path: `/v1/internal/workspaces/${"a".repeat(8)}-aaaa-4aaa-8aaa-${"a".repeat(12)}/operations/${"b".repeat(8)}-bbbb-4bbb-8bbb-${"b".repeat(12)}/result`, headers: {} })).toBeUndefined();
       expect(await root.handleEvent({ source: "agentx.core-job", job: "dispatch-sweep" })).toEqual({ skipped: "off" });
-      expect(await root.handleEvent({ Records: [{ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { NewImage: { pk: { S: `ORG#${ORG}#OUTBOX` }, outboxState: { S: "pending" } } } }] })).toEqual({ relayed: [] });
+      expect(await root.handleEvent({ Records: [{ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { NewImage: { pk: { S: `ORG#${ORG}#OUTBOX` }, outboxState: { S: "pending" } } } }] })).toEqual({ batchItemFailures: [] });
       expect(await root.handleEvent({ source: "something-else" })).toBeUndefined();
     }
     expect(tables.reads).toEqual([]);
@@ -71,7 +73,8 @@ describe("the broker's core root, switch on", () => {
       [{ ROVARA_CORE_ENGINE: "on" }, "ROVARA_CORE_ALLOWED_COMPANIES"],
     ] as const;
     for (const [env, privateValue] of cases) {
-      const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client));
+      const tables = fakeTables([member("dev-a", ORG, "owner")]);
+      const root = createBrokerCoreRoot(rootInputs(env, tables.client));
       const answer = await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" });
       expect(answer?.statusCode).toBe(503);
       expect(answer?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
@@ -84,6 +87,30 @@ describe("the broker's core root, switch on", () => {
       expect(job.statusCode).toBe(503);
       expect(job.body).toContain("The core engine settings are not readable.");
     }
+  });
+
+  it("blocks only members covered by the core switch when settings are unreadable", async () => {
+    const request = (method: string, path: string) => ({ method, path, headers: {}, ...(method === "POST" ? { body: "{}" } : {}) });
+    const caller = (developerId: string) => ({ developerId, sessionId: "s", name: "Ada" });
+    const tables = fakeTables([member("covered", ORG), member("uncovered", OTHER)]);
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: "none" }, tables.client));
+    for (const methodPath of [["POST", "/v1/dev/tasks"], ["GET", "/v1/dev/tasks/task-a"]] as const) {
+      const [method, path] = methodPath;
+      const blocked = await root.coreTasks?.route(request(method, path), caller("covered"));
+      expect(blocked?.statusCode).toBe(503);
+      expect(blocked?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
+      expect(await root.coreTasks?.route(request(method, path), caller("uncovered"))).toBeUndefined();
+      expect(await root.coreTasks?.route(request(method, path), caller("no-membership"))).toBeUndefined();
+    }
+
+    const onRoot = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, tables.client));
+    const onAnswer = await onRoot.coreTasks?.route(request("POST", "/v1/dev/tasks"), caller("uncovered"));
+    expect(onAnswer?.statusCode).toBe(503);
+
+    const unreadableMembership = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: "none" }, { send: async () => { throw new Error("dynamo down"); } }));
+    const failedRead = await unreadableMembership.coreTasks?.route(request("POST", "/v1/dev/tasks"), caller("covered"));
+    expect(failedRead?.statusCode).toBe(503);
+    expect(failedRead?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
   });
 
   it("drains without the root reading the admission settings: a new task goes the old way (draining tasks are refused later, by the admission module)", async () => {
@@ -110,6 +137,47 @@ describe("the broker's core root, switch on", () => {
     // A start by a non-member is not the core's: the old start answers it.
     expect(await root.coreTasks!.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-b", sessionId: "s", name: "Bo" })).toBeUndefined();
     void seen;
+  });
+
+  it("gives the HTTP API its /v1/app entry (lane L12): a non-member is asked to sign in again, and a core that cannot be built answers fixed words, never the registry's", async () => {
+    const tables = fakeTables([member("dev-a", ORG, "owner")]);
+    const lines: Array<Record<string, unknown>> = [];
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client, { log: (entry) => lines.push(entry) }));
+    expect(root.coreApp).toBeDefined();
+    expect((await root.coreApp!.route({ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { developerId: "dev-b", sessionId: "s", name: "Bo" }))?.statusCode).toBe(401);
+    for (const request of [{ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { method: "POST", path: "/v1/app/people/dev-c/erase", headers: {}, body: "{}" }]) {
+      const answer = await root.coreApp!.route(request, { developerId: "dev-a", sessionId: "s", name: "Ada" });
+      expect(answer?.statusCode, request.path).toBe(503);
+      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: CORE_APP_UNAVAILABLE } });
+      expect(answer!.body).not.toContain("adapters");
+    }
+    expect(lines.filter((line) => line.event === "core_engine.app_route_unavailable")).toHaveLength(2);
+    // Not a /v1/app path: not this entry's.
+    expect(await root.coreApp!.route({ method: "GET", path: "/v1/dev/projects", headers: {} }, { developerId: "dev-a", sessionId: "s", name: "Ada" })).toBeUndefined();
+  });
+
+  it("maps the caller from live membership for /v1/app too, and reads a person's standing in a company from the company's own record", async () => {
+    const tables = fakeTables([member("dev-a", ORG, "admin"), member("dev-gone", ORG, "member", { revokedAt: "2026-11-10T00:00:00.000Z" }), member("dev-x", OTHER, "member")]);
+    const mapped = await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-a", sessionId: "s", name: "Ada", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" }, clientId: "web-app" });
+    expect(mapped).toEqual({ principal: { companyId: ORG, personId: "dev-a", displayName: "Ada", roles: ["admin"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web-app", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" } });
+    expect(await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-gone", sessionId: "s", name: "Gone" })).toBeUndefined();
+    const standing = personStandingFromDynamo(tables.client, SIGN_IN);
+    expect(await standing(ORG, "dev-a")).toBe("member");
+    expect(await standing(ORG, "dev-gone")).toBe("former");
+    // Another company's person, and nobody, are unknown here.
+    expect(await standing(ORG, "dev-x")).toBe("unknown");
+    expect(await standing(ORG, "dev-none")).toBe("unknown");
+    await expect(personStandingFromDynamo(tables.client, undefined)(ORG, "dev-a")).rejects.toThrow();
+  });
+
+  it("gives the developer API its core entries only while the switch serves; off, the configuration is the very same object", () => {
+    const config = { issuer: "https://api.example" };
+    const off = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    expect(withCoreRoutes(config, off)).toBe(config);
+    const on = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, fakeTables().client));
+    expect(withCoreRoutes(config, on)).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks, coreApp: on.coreApp });
+    expect(withCoreRoutes(config, { coreTasks: on.coreTasks, coreApp: undefined })).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks });
+    expect(config).toEqual({ issuer: "https://api.example" });
   });
 
   it("refuses a start, rather than falling back, when membership cannot be read", async () => {
@@ -218,6 +286,59 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
     expect(projectRoleOf("developer")).toBe("contributor");
     expect(projectRoleOf(undefined)).toBeUndefined();
   });
+});
+
+
+describe("core outbox stream partial failures", () => {
+  const record = (company: string, sequence: string) => ({ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { SequenceNumber: sequence, NewImage: { pk: { S: `ORG#${company}#OUTBOX` }, outboxState: { S: "pending" } } } });
+  it("relays each company separately and reports only failed company sequence numbers", async () => {
+    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    const seen: string[][] = [];
+    vi.spyOn(root.app, "relayOutbox").mockImplementation(async (companies) => {
+      seen.push([...companies]);
+      return companies.map((companyId) => ({ companyId, outcome: companyId === ORG ? "failed" as const : "ran" as const }));
+    });
+    const answer = await root.handleEvent({ Records: [record(ORG, "11"), record(OTHER, "12"), record(ORG, "13")] });
+    expect(seen).toEqual([[ORG, OTHER]]);
+    expect(answer).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "13" }] });
+    expect(JSON.stringify(answer)).not.toContain("private failure detail");
+  });
+  it("reports deferred companies and whole-call failures without exposing causes", async () => {
+    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    const relay = vi.spyOn(root.app, "relayOutbox").mockResolvedValue([{ companyId: OTHER, outcome: "deferred" }]);
+    const batch = { Records: [record(ORG, "11"), record(OTHER, "12")] };
+    expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "12" }] });
+    relay.mockResolvedValue([{ companyId: ORG, outcome: "ran", report: { delivered: 0, failed: 1, dead: 0 } }]);
+    expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }] });
+    relay.mockRejectedValue(new Error("private cause"));
+    expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "12" }] });
+  });
+  it("acknowledges a successful two-company batch and leaves unrelated changes alone", async () => {
+    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    const relay = vi.spyOn(root.app, "relayOutbox").mockResolvedValue([]);
+    expect(await root.handleEvent({ Records: [record(ORG, "11"), record(OTHER, "12"), { ...record(ORG, "13"), eventName: "MODIFY" }] })).toEqual({ batchItemFailures: [] });
+    expect(relay.mock.calls).toEqual([[[ORG, OTHER]]]);
+  });
+});
+
+it("keeps the off root's serialized answers byte identical with policy and service inputs supplied", async () => {
+  const tables = fakeTables();
+  const resolve = vi.fn(async () => { throw new Error("must not read policy off"); });
+  const services = vi.fn(() => { throw new Error("must not build services off"); });
+  const plain = createBrokerCoreRoot(rootInputs({}, tables.client));
+  const supplied = createBrokerCoreRoot(rootInputs({}, tables.client, { policySource: { resolve }, services }));
+  const answers = async (root: ReturnType<typeof createBrokerCoreRoot>) => JSON.stringify([
+    await root.handleEvent({ source: "agentx.core-job", job: "merge-tracking" }),
+    await root.handleEvent({ source: "agentx.core-job", job: "session-sweep" }),
+    await root.handleEvent({ source: "agentx.core-job", job: "notify-deliver" }),
+    await root.handleEvent({ source: "agentx.core-job", job: "admission-hold-sweep" }),
+  ]);
+  const golden = '[{"skipped":"off"},{"skipped":"off"},{"skipped":"off"},{"skipped":"off"}]';
+  expect(await answers(plain)).toBe(golden);
+  expect(await answers(supplied)).toBe(golden);
+  expect(resolve).not.toHaveBeenCalled();
+  expect(services).not.toHaveBeenCalled();
+  expect(tables.reads).toEqual([]);
 });
 
 describe("the broker core dispatch queue piece (L1a)", () => {

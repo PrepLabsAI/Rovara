@@ -1,12 +1,12 @@
 // Engine host (lane E2, step 5): the security-list points for the first staging run. Admission: an allow-list and two dollar caps read from the core's cost ledger (the task's total and the
-// company's UTC day), as start gates checked again in the start's own transaction (nothing reserved); metering: list prices, an unknown model at a cautious price (never $0); identity: membership only; audit: Code's audit rows.
+// company's UTC day), checked again in the start's own transaction (the held day is lane L8's, core-host-spend-holds.test.ts); metering: list prices, an unknown model at a cautious price (never $0); identity: membership only; audit: Code's audit rows.
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type AdmissionRequest, type MeterEntry, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { companyDayKey, createCostLedger, utcDayOf } from "../../packages/broker/src/core/cost/ledger.js";
+import { companyDayKey, utcDayOf } from "../../packages/broker/src/core/cost/ledger.js";
 import {
   COMPANY_DAY_CAP_REACHED, COMPANY_NOT_ALLOWED, HOSTED_IDENTITY_PROVIDER, SPEND_UNKNOWN, TASK_CAP_REACHED, UNKNOWN_MODEL_PRICE,
-  createHostedAdmission, createHostedIdentity, createHostedMetering, hostedSecurityModules, readHostedAdmissionSettings,
+  createHostedAdmission, createHostedIdentity, createHostedLedger, createHostedMetering, hostedSecurityModules, readHostedAdmissionSettings,
 } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry } from "../../packages/broker/src/core-host/registry.js";
 import { costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
@@ -31,8 +31,8 @@ const exactMeter = {
 
 function setup() {
   const store = new MemoryDocumentStore();
-  const ledger = createCostLedger({ store, metering: exactMeter, now: () => NOW });
-  const admission = createHostedAdmission({ settings: SETTINGS, ledger, now: () => NOW });
+  const ledger = createHostedLedger({ store, metering: exactMeter, now: () => NOW });
+  const admission = createHostedAdmission({ settings: SETTINGS, store, ledger, now: () => NOW });
   return { store, ledger, admission };
 }
 const start = (overrides: Partial<AdmissionRequest> = {}): AdmissionRequest => ({ companyId: ORG, idempotencyKey: "k", action: "task.start", subject: { type: "task", id: TASK }, ...overrides });
@@ -67,8 +67,10 @@ describe("the cost ledger's company day", () => {
 });
 
 describe("the staging admission", () => {
-  it("does not declare a held dollar cap: nothing is reserved and nothing on AWS books usage yet, so no unattended paid work starts on it", () => {
+  it("declares a held dollar cap only where the per-run stop is wired (lane L8 holds the day and books usage; core-money-stop stops a run at its cap)", () => {
     expect(setup().admission.enforcesCost).toBe(false);
+    const store = new MemoryDocumentStore();
+    expect(createHostedAdmission({ settings: SETTINGS, store, ledger: createHostedLedger({ store, metering: createHostedMetering(), now: () => NOW }), now: () => NOW, runStopWired: true }).enforcesCost).toBe(true);
   });
 
   it("refuses any company not on the list, in fixed words, before reading any spend", async () => {
@@ -79,12 +81,12 @@ describe("the staging admission", () => {
     }
   });
 
-  it("lets a listed company start below both caps, and the start's transaction holds the day and the task under their caps", async () => {
+  it("lets a listed company start below both caps, and the start's transaction takes its hold and holds the day and the task under their caps", async () => {
     const { admission } = setup();
     const staged = await admission.stage(start());
-    expect(staged.decision).toEqual({ allowed: true });
-    expect(staged.items).toHaveLength(2);
-    expect(staged.items.every((item) => item.kind === "check")).toBe(true);
+    expect(staged.decision.allowed && staged.decision.reservationId).toMatch(/^hold:org_/u);
+    expect(staged.items.map((item) => item.kind)).toEqual(["put", "put", "update", "update"]);
+    expect(staged.items.every((item) => item.kind === "put" || item.condition !== undefined)).toBe(true);
   });
 
   it("refuses at the company's daily cap, and a start staged before the day filled up does not commit after it", async () => {
@@ -100,11 +102,12 @@ describe("the staging admission", () => {
   it("refuses a task at its own cap, and an estimate that would take it past the cap", async () => {
     const { ledger, admission } = setup();
     await ledger.recordUsage(entry("t1", 4_000_000));
-    expect((await admission.admit(start({ action: "model.call" }))).allowed).toBe(true);
-    expect(await admission.admit(start({ action: "model.call", estimate: { cost: { micros: 1_000_001, currency: "USD" } } }))).toEqual({ allowed: false, code: "task_cap", message: TASK_CAP_REACHED });
-    expect((await admission.admit(start({ action: "model.call", estimate: { cost: { micros: 1_000_000, currency: "USD" } } }))).allowed).toBe(true);
+    // Each ask has its own key: one key asked again is the same decision (lane L8).
+    expect((await admission.admit(start({ action: "model.call", idempotencyKey: "c1" }))).allowed).toBe(true);
+    expect(await admission.admit(start({ action: "model.call", idempotencyKey: "c2", estimate: { cost: { micros: 1_000_001, currency: "USD" } } }))).toEqual({ allowed: false, code: "task_cap", message: TASK_CAP_REACHED });
+    expect((await admission.admit(start({ action: "model.call", idempotencyKey: "c3", estimate: { cost: { micros: 1_000_000, currency: "USD" } } }))).allowed).toBe(true);
     await ledger.recordUsage(entry("t2", 1_000_000));
-    expect(await admission.admit(start({ action: "model.call" }))).toEqual({ allowed: false, code: "task_cap", message: TASK_CAP_REACHED });
+    expect(await admission.admit(start({ action: "model.call", idempotencyKey: "c4" }))).toEqual({ allowed: false, code: "task_cap", message: TASK_CAP_REACHED });
   });
 
   it("refuses when the spend cannot be read as dollars: an unpriced usage today, a non-dollar task, or an estimate that is not dollars", async () => {
@@ -118,7 +121,7 @@ describe("the staging admission", () => {
     }
   });
 
-  it("holds no reservation: settle and release do nothing", async () => {
+  it("settles and releases nothing for an id it never gave", async () => {
     const { admission, store } = setup();
     await admission.settle("x", { tokens: 1 });
     await admission.release("x");
@@ -132,13 +135,13 @@ describe("the admission for every company (DEC 229a)", () => {
     expect(read).toEqual({ settings: { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 1_000_000 } });
     if (!("settings" in read)) throw new Error("unreachable");
     const store = new MemoryDocumentStore();
-    const ledger = createCostLedger({ store, metering: exactMeter, now: () => NOW });
-    const admission = createHostedAdmission({ settings: read.settings, ledger, now: () => NOW });
+    const ledger = createHostedLedger({ store, metering: exactMeter, now: () => NOW });
+    const admission = createHostedAdmission({ settings: read.settings, store, ledger, now: () => NOW });
     for (const companyId of [ORG, OTHER]) expect((await admission.admit(start({ companyId }))).allowed, companyId).toBe(true);
     for (const companyId of [IMPLICIT_COMPANY_ID, "org_short", "", "ORG_STAGING0000000000001"]) expect(await admission.admit(start({ companyId })), companyId).toEqual({ allowed: false, code: "company_not_allowed", message: COMPANY_NOT_ALLOWED });
     // The caps still hold for every company.
     await ledger.recordUsage(entry("d", 1_000_000, { companyId: OTHER, taskId: "11111111-2222-4333-8444-555555555555" }));
-    expect(await admission.admit(start({ companyId: OTHER }))).toEqual({ allowed: false, code: "company_day_cap", message: COMPANY_DAY_CAP_REACHED });
+    expect(await admission.admit(start({ companyId: OTHER, idempotencyKey: "second" }))).toEqual({ allowed: false, code: "company_day_cap", message: COMPANY_DAY_CAP_REACHED });
     expect(readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_TASK_CAP_USD: "0" })).toHaveProperty("problem");
     expect(readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "ALL" })).toHaveProperty("problem");
   });
@@ -197,12 +200,14 @@ describe("the step 5 modules", () => {
   const storage = coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => new MemoryDocumentStore() });
   const context = { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined };
 
-  it("fill metering, admission, identity and the audit sink, none as Code's laptop default", async () => {
+  it("fill metering, admission, identity, approvers (lane L2a) and the audit sink, none as Code's laptop default", async () => {
     const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: ORG }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } });
-    expect(modules.map((module) => module.point)).toEqual(["metering", "admission", "identity", "audit-sink"]);
+    expect(modules.map((module) => module.point)).toEqual(["metering", "admission", "identity", "approvers", "audit-sink"]);
     expect(modules.some((module) => module.isDefault === true)).toBe(false);
-    // The merge area needs storage, code host, approvers and audit: approvers stays owed, so it is named.
-    await expect(buildCoreRegistry({ modules: [storage, ...modules], context, areas: ["merge"] })).rejects.toThrow(/approvers/u);
+    // The merge area needs storage, code host, approvers and audit: the code host is the broker's own lane (L1b), so it is named, and approvers no longer is.
+    const refused = await buildCoreRegistry({ modules: [storage, ...modules], context, areas: ["merge"] }).then(() => undefined, (error: unknown) => error as Error);
+    expect(refused?.message).toMatch(/code-host/u);
+    expect(refused?.message).not.toMatch(/approvers/u);
   });
 
   it("refuse the registry when no company is allowed, rather than let every company in", async () => {

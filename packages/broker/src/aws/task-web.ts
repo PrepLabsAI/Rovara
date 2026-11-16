@@ -3,7 +3,7 @@
 // requests and its history. GET only, no forms, and one small script (by nonce) that opens and scrolls to a deep
 // link and, while the page is open, asks this origin's `/task/status` whether the task moved on. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
-import { redactText, taskGraphDigest, type E2EScenarioResults, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion, type WorkItemProgressV1 } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE, redactText, taskGraphDigest, type E2EScenarioResults, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion, type WorkItemProgressV1 } from "@agentx/contracts";
 import { renderE2EScenarioRowsHtml } from "../e2e-presentation.js";
 import type { TaskRole } from "../developer/task-access.js";
 import type { TaskPeopleView } from "../developer/task-people.js";
@@ -49,7 +49,7 @@ export interface TaskDocumentView {
   /** Documents whose saved copy failed its check: named, never shown. */
   unverified?: TaskDocumentKind[];
   /** `unclear`: the check ran but its result couldn't be told; `proposed`: AgentX proposed it in the coding plan; `proves`: the claims a structured coding plan says it proves. */
-  checks: Array<{ /** The check's ID, so comments can name it. */ id?: string; label: string; passed: boolean | undefined; unclear?: true; proposed?: true; proves?: string[] }>;
+  checks: Array<{ /** The check's ID, so comments can name it. */ id?: string; label: string; passed: boolean | undefined; unclear?: true; proposed?: true; proves?: string[]; /** General fakes: a Rovara-made fake answered it, so "passed" is never said alone. */ madeByRovara?: true }>;
   /** One plain sentence about the checks: that none apply (review only), or that the proposed ones could not be read. */
   checksNote?: string;
   /** Whether the checks have run on the current code. When left out, the page reads it from the checks' own results. */
@@ -144,7 +144,7 @@ export function safeFindingPath(file: string | undefined): string | undefined {
 }
 
 const PULL_REQUEST_STATES: Record<string, string> = { OPEN: "open", CLOSED: "closed", MERGED: "merged" };
-const checkWords = (check: TaskDocumentView["checks"][number]) => (check.passed === true ? "Passed" : check.passed === false ? "Didn't pass" : check.unclear === true ? "Couldn't tell" : "Not run yet");
+const checkWords = (check: TaskDocumentView["checks"][number]) => (check.passed === true ? (check.madeByRovara === true ? "Passed (" + GENERAL_FAKE_MADE_NOTE + ")" : "Passed") : check.passed === false ? "Didn't pass" : check.unclear === true ? "Couldn't tell" : "Not run yet");
 
 function findingItem(finding: TaskDocumentView["findings"][number]): string {
   const file = safeFindingPath(finding.file);

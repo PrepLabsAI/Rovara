@@ -36,7 +36,10 @@ describe("the retention of workflow screenshots is a rule on the bucket the brok
 
   it("expires an object that carries the screenshot tag after 30 days on the bucket the broker is configured with, and only such an object", () => {
     expect(brokerBucketId, "the broker names its artifact bucket").toBeDefined();
-    const rules = buckets[brokerBucketId!]?.Properties.LifecycleConfiguration?.Rules ?? [];
+    const all = buckets[brokerBucketId!]?.Properties.LifecycleConfiguration?.Rules ?? [];
+    // The other rules are the evidence and nightly-map expiry rules (switchover-parity-infrastructure.test.ts pins them to the live staging rules).
+    expect(all.map((rule) => rule.Id)).toEqual(["ExpireE2EScreenshots", "ExpireEvidenceShort", "ExpireEvidenceStd", "ExpireEvidenceRecord", "ExpireNightlyMaps"]);
+    const rules = all.filter((rule) => rule.TagFilters?.some((tag) => tag.Value === E2E_ARTIFACT_RETENTION_TAG_VALUE));
     expect(rules).toHaveLength(1);
     expect(rules[0]).toMatchObject({ Status: "Enabled", ExpirationInDays: E2E_ARTIFACT_RETENTION_DAYS,
       TagFilters: [{ Key: E2E_ARTIFACT_RETENTION_TAG_KEY, Value: E2E_ARTIFACT_RETENTION_TAG_VALUE }] });

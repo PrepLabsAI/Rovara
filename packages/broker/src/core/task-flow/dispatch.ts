@@ -14,6 +14,7 @@ import {
   AgentXError,
   MachineError,
   STANDING_INSTRUCTIONS_FEATURE,
+  USAGE_CHECKPOINTS_FEATURE,
   WorkerInvocationSchema,
   change,
   when,
@@ -33,7 +34,8 @@ import { admit, releaseAdmission } from "./admission.js";
 import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, workspaceKey } from "./keys.js";
+import { operationKey, taskPointerKey, workspaceKey } from "./keys.js";
+import { RUN_START_ACTION, cancelInvocation, isSpendStopCode, queuedCancelOf, spendStopReason } from "./money-stop.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { readWorkspace } from "./stage-machine.js";
 import { dispatchQueueName, iso, log } from "./support.js";
@@ -43,6 +45,8 @@ import { chooseStepModel, heldStepModel, type OperationModelChoice, type StepMod
 
 /** How long a capability the worker is given lives: nine hours, as Cloud's. */
 const CAPABILITY_SECONDS = 32_400;
+/** A queued cancel is tried this many times on a machine that is not ready. */
+const CANCEL_DELIVERY_ATTEMPTS = 5;
 /** After this many deliveries of one message the operation is given up on: the machine never became usable. */
 export const DISPATCH_ATTEMPTS_MAX = 20;
 /** The reason a run is ended with when its machine never became usable (merge of "the start was tried until its budget ran out"). */
@@ -110,6 +114,23 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     await queue.deadLetter(message.receiptHandle, "operation_missing");
     return "dropped";
   }
+  // A queued cancel (money-stop.ts: a Stop, a close or a spend stop on a deployed install, whose broker never reaches a worker itself): handed to the worker that runs the operation, while it
+  // is still being stopped. A machine not ready is tried again a few times; anything else drops the message (the broker's wait then ends the run, keeping its hold).
+  const cancelId = queuedCancelOf(message.body);
+  if (cancelId !== undefined) {
+    const workspace = operation.status === "CANCEL_REQUESTED" && operation.machineId !== undefined ? await readWorkspace(deps, operation.workspaceId) : undefined;
+    if (workspace === undefined || operation.machineId === undefined) { await queue.ack(message.receiptHandle); return "dropped"; }
+    try {
+      await deps.machines.deliver(operation.machineId, cancelInvocation(deps, workspace, operation, cancelId));
+    } catch (error) {
+      if (error instanceof MachineError && error.retryable && message.receiveCount < CANCEL_DELIVERY_ATTEMPTS) { await queue.changeVisibility(message.receiptHandle, 1); return "retried"; }
+      log(deps, { event: "task_flow.cancel_not_delivered", error: error instanceof MachineError ? error.code : error instanceof Error ? error.name : "unknown" });
+      await queue.ack(message.receiptHandle);
+      return "failed";
+    }
+    await queue.ack(message.receiptHandle);
+    return "delivered";
+  }
   // Already ended, or a cancel is in flight: nothing to deliver.
   // A redelivered message for a job the worker already reports running is a repeat: the worker has it.
   if (isTerminalStatus(operation.status) || operation.status === "CANCEL_REQUESTED" || operation.status === "RUNNING") {
@@ -153,6 +174,32 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
   const stepModel = await chooseStepModel(deps, operation);
   if (stepModel?.ok === false) return endAndAck("FAILED", stepModel.sentence);
 
+  // A deployed install's per-run stop (money-stop.ts): a model run is not handed to a worker when its task or the company's day is at its cap; it ends with the fixed reason.
+  if (deps.moneyStop !== undefined && operation.dispatch.kind === "task") {
+    const taskId = (await deps.store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+    const gate = typeof taskId === "string" && taskId !== ""
+      ? await deps.admission.admit({ companyId: deps.companyId, idempotencyKey: `${RUN_START_ACTION}:${operation.id}`, action: RUN_START_ACTION, projectName: workspace.projectName, subject: { type: "task", id: taskId } })
+      : { allowed: false as const, code: "spend_unknown", message: "" };
+    if (!gate.allowed) {
+      if (!isSpendStopCode(gate.code)) return endAndAck("FAILED", gate.message);
+      // A run its task's or the day's cap refuses ends as a spend stop (CANCELLED with its reason, which blocks the step with the fixed words), not as a failure a retry policy would repeat.
+      const now = iso(deps);
+      await deps.store.update({
+        key: operationKey(operation.workspaceId, operation.id),
+        ops: [change.set("status", "CANCEL_REQUESTED"), change.set("stopReason", gate.code), change.set("stopRequestedAt", now), change.set("updatedAt", now)],
+        condition: when.and(when.eq("fence", operation.fence), when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING"))),
+      });
+      try {
+        await recordOperationResult(deps, { workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: "CANCELLED", error: spendStopReason(gate.code) });
+      } catch (error) {
+        if (!(error instanceof AgentXError)) throw error;
+        return retryLater();
+      }
+      await queue.ack(message.receiptHandle);
+      return "failed";
+    }
+  }
+
   let reservationId: string | undefined;
   // A machine that does not exist yet is new spend: ask admission once for it (each machine of the workspace has its own key), before it starts.
   if (workspace.machine === undefined) {
@@ -189,7 +236,9 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // A step whose tool boundary the worker cannot enforce is refused, never sent without it: a read-only step must stay read-only.
     // A model route is never dropped: a worker that cannot take one is refused the step rather than sent it without.
     const routed = operation.dispatch.kind === "task" && (stepModel?.ok === true || (await deps.modelAccess?.route()) !== undefined);
-    const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : [])].filter((feature) => !health.features.includes(feature));
+    // With the per-run stop, a model run goes only to a worker that reports its usage while it runs (never dropped: the stop would not see the run's spend until it ended).
+    const checkpoints = deps.moneyStop !== undefined && operation.dispatch.kind === "task";
+    const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : []), ...(checkpoints ? [USAGE_CHECKPOINTS_FEATURE] : [])].filter((feature) => !health.features.includes(feature));
     if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
@@ -269,7 +318,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
     actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
-  let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
+  let payload: Record<string, unknown> = { ...spec.payload, ...(spec.kind === "task" && deps.moneyStop !== undefined ? { usageCheckpoints: true } : {}), ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE)) {
     delete payload["evalRequest"];
     log(deps, { event: "eval_request_dropped_unsupported_worker" });

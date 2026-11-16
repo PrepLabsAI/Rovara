@@ -1,7 +1,11 @@
 // Person erase (row 13.1): the engine erase is company-scoped, records its receipt and audit event together, removes the person's chat links and learning data, and erases EVERY version of the
 // evidence of the person's tasks in the company (DEC 212), bounded and resumable.
-import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, orgChannelLinkKey, orgDeveloperChannelLinkKey, orgScoped, when, type AuditEvent, type AuditSink, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as codeModules from "../../packages/broker/src/core-host/code-modules.js";
+import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
+import { createFakeWorld } from "../support/core-host-fakes.js";
+import { IMPLICIT_COMPANY_ID, orgChannelLinkKey, orgDeveloperChannelLinkKey, orgProjectCatalogKey, orgScoped, when, type AuditEvent, type AuditSink, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { S3ObjectStorage } from "../../packages/aws-adapters/src/s3/index.js";
 import { evidencePrefixesOf } from "../../packages/broker/src/core/proof/evidence-erase.js";
@@ -33,7 +37,7 @@ function recordingAudit(): AuditSink & { staged: AuditEvent[] } {
 interface World { store: MemoryDocumentStore; bucket: VersionedBucket; audit: ReturnType<typeof recordingAudit>; clock: { now: number }; deps: PersonEraseDeps; learning: string[]; logs: Record<string, unknown>[] }
 
 function world(overrides: Partial<PersonEraseDeps> = {}): World {
-  const store = new MemoryDocumentStore();
+  const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES });
   const bucket = new VersionedBucket();
   const audit = recordingAudit();
   const clock = { now: Date.parse("2026-11-15T10:00:00.000Z") };
@@ -385,5 +389,109 @@ describe("person erase: bounded and resumable", () => {
     await w.store.put({ item: { pk: personErasePendingPartition(B), sk: MALLORY, entityType: "PERSON_ERASE_PENDING" } });
     expect(await resumePersonErases(w.deps, A, 5_000)).toEqual({ finished: 0, owed: 0 });
     expect(left(w, theirs.prefixes)).toBe(10);
+  });
+});
+
+describe("scheduled person erase resume (L13)", () => {
+  function scheduled(w: World, switchValue = `on:${A}`) {
+    const fakes = createFakeWorld();
+    const modules = fakes.modules.filter((module) => !["identity", "admission", "metering", "audit-sink", "approvers"].includes(module.point)).map((module) => {
+      if (module.point === "storage") return { ...module, create: () => w.store };
+      if (module.point === "object-storage") return { ...module, create: () => Object.assign(new S3ObjectStorage({ client: w.bucket.client, bucket: "artifacts-a", now: () => w.clock.now }), w.deps.objects) };
+      return module;
+    });
+    const adapterModules = vi.spyOn(codeModules, "codeAdapterModules").mockReturnValue(modules);
+    try {
+      return createBrokerCoreRoot({
+        env: { ROVARA_CORE_ENGINE: switchValue, ROVARA_CORE_ALLOWED_COMPANIES: "all" },
+        documentClient: { send: async () => { throw new Error("unexpected sign-in read"); } }, stateTableName: "state", signInTableName: "signin",
+        codeModules: () => ({} as codeModules.CodeModuleDeps),
+        callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1), repositoryCredential: async () => { throw new Error("unused"); },
+        origin: () => "https://example.invalid", now: () => new Date(w.clock.now), log: (entry) => w.logs.push(entry),
+        services: () => Object.fromEntries(["merge-tracking", "session-sweep", "notify-deliver", "admission-hold-sweep"].map((name) => [name, { pass: async () => ({}) }])),
+        ciReporting: { honest: true, ciMode: () => "their_ci_fix" },
+      });
+    } finally {
+      // Registry construction is lazy; restore only after each test's job has run.
+      restores.push(() => adapterModules.mockRestore());
+    }
+  }
+  const restores: Array<() => void> = [];
+  afterEach(() => { for (const restore of restores.splice(0)) restore(); });
+  const event = { source: "agentx.core-job", job: "person-erase-resume" };
+  const pending = (company: string, person = MALLORY) => ({ pk: personErasePendingPartition(company), sk: person, entityType: "PERSON_ERASE_PENDING" });
+
+  it("a scheduled A pass erases A evidence but preserves B's pending row and evidence for the same raw person id", async () => {
+    const w = world();
+    const ours = await task(w, MALLORY, A);
+    const theirs = await task(w, MALLORY, B);
+    await w.store.put({ item: pending(A) });
+    await w.store.put({ item: pending(B) });
+    const before = JSON.stringify(await w.store.get(pending(B)));
+    const root = scheduled(w);
+    expect(await root.app.handleScheduledJob(event)).toMatchObject({ job: event.job, companies: [{ companyId: A, outcome: "ran", report: { finished: 1, owed: 0 } }] });
+    expect(left(w, ours.prefixes)).toBe(0);
+    expect(left(w, theirs.prefixes)).toBe(10);
+    expect(await w.store.get(pending(A))).toBeUndefined();
+    expect(JSON.stringify(await w.store.get(pending(B)))).toBe(before);
+  });
+
+  it("a failed real learning step preserves the pending row and evidence, leaks no cause, and retries next scheduled pass", async () => {
+    const w = world();
+    const ours = await task(w, MALLORY, A);
+    await w.store.put({ item: pending(A) });
+    const query = w.store.query.bind(w.store);
+    let fail = true;
+    const evidenceReads: string[] = [];
+    w.store.query = async (request) => {
+      if (request.pk.startsWith("DEVELOPER#")) evidenceReads.push(request.pk);
+      if (fail && request.pk === orgProjectCatalogKey(A, "x").pk) throw new Error("confidential-learning-canary");
+      return await query(request);
+    };
+    const root = scheduled(w);
+    expect(await root.app.handleScheduledJob(event)).toMatchObject({ companies: [{ outcome: "ran", report: { finished: 0, owed: 1 } }] });
+    expect(await w.store.get(pending(A))).toBeDefined();
+    expect(left(w, ours.prefixes)).toBe(10);
+    expect(evidenceReads).toEqual([]);
+    expect(JSON.stringify(w.logs)).not.toContain("confidential-learning-canary");
+    fail = false;
+    expect(await root.app.handleScheduledJob(event)).toMatchObject({ companies: [{ report: { finished: 1, owed: 0 } }] });
+    expect(await w.store.get(pending(A))).toBeUndefined();
+    expect(left(w, ours.prefixes)).toBe(0);
+    expect(evidenceReads.length).toBeGreaterThan(0);
+  });
+
+  it("caps a pass by the Lambda's remaining time and stops before the next pending person", async () => {
+    const w = world();
+    const first = await task(w, MALLORY, A);
+    const second = await task(w, OTHER, A);
+    await w.store.put({ item: pending(A) });
+    await w.store.put({ item: pending(A, OTHER) });
+    const real = w.deps.objects;
+    const deadline = w.clock.now + 100;
+    const stops: Array<number | undefined> = [];
+    w.deps.objects = { deleteEveryVersion: async (prefix, options) => {
+      stops.push(options.stopAt);
+      const result = await real.deleteEveryVersion(prefix, options);
+      w.clock.now += 100;
+      return result;
+    } };
+    const root = scheduled(w);
+    expect(await root.app.handleScheduledJob(event, { remainingMs: 20_100 })).toMatchObject({ companies: [{ report: { owed: 2 } }] });
+    expect(stops.length).toBeGreaterThan(0);
+    for (const stop of stops) expect(stop).toBeLessThanOrEqual(deadline);
+    expect(left(w, first.prefixes)).toBe(0);
+    expect(left(w, second.prefixes)).toBe(10);
+    expect(await w.store.get(pending(A, OTHER))).toBeDefined();
+  });
+
+  it("off jobs are byte-identical and leave seeded erases and evidence untouched", async () => {
+    const w = world();
+    const ours = await task(w, MALLORY, A);
+    await w.store.put({ item: pending(A) });
+    const root = scheduled(w, "off");
+    expect(JSON.stringify(await root.app.handleScheduledJob(event))).toBe('{"skipped":"off"}');
+    expect(await w.store.get(pending(A))).toEqual(pending(A));
+    expect(left(w, ours.prefixes)).toBe(10);
   });
 });

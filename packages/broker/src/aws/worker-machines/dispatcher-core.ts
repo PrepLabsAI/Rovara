@@ -19,7 +19,7 @@
 // refuses by name and every core record comes back (the intended fail-closed state; the CLI accepts only `off` meanwhile, CORE_ENGINE_BROKER_WIRED).
 import { createHmac } from "node:crypto";
 import {
-  CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type DocumentStore, type OrgId,
+  CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type DocumentStore, type OrgId,
 } from "@agentx/contracts";
 import type { TaskAccess } from "../../core/task-flow/deps.js";
 import type { GitHubCodeHostProvider } from "../../plugins/code-host/github/index.js";
@@ -35,6 +35,8 @@ import type { SessionWorkerMachinesDependencies } from "./session-worker-machine
 import { workspaceCompanyReader } from "./workspace-company.js";
 import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
+import type { MoneyStop } from "../../core/task-flow/money-stop.js";
+import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
 export interface DispatcherRecord extends CoreDispatchRecord {
@@ -123,7 +125,11 @@ export const DISPATCHER_FLOW_NOT_DECLARED = "the dispatcher's flow inputs are no
  */
 export function hostedDispatcherFlow(env: NodeJS.ProcessEnv): DispatcherFlowWiring | undefined {
   if (readCoreLessonsSwitch(env).value.mode !== "off") return undefined;
-  return { standingInstructions: null, modelAccess: null, learned: null };
+  // L2b (DEC 236): where the model gateway is configured, every core step goes to the gateway's agent model with a task token (the model-access capability).
+  // A broken gateway setting declares nothing (every core record comes back) rather than a job without its model.
+  let gateway: ReturnType<typeof gatewayModelAccessFromEnvironment>;
+  try { gateway = gatewayModelAccessFromEnvironment(env); } catch { return undefined; }
+  return { standingInstructions: null, modelAccess: gateway === undefined ? null : gatewayModelRoute(gateway), learned: null };
 }
 
 /** The words a code host call says on the dispatcher. */
@@ -186,6 +192,11 @@ export interface DispatcherCoreInputs {
   extraModules?: readonly CoreAdapterModule[];
   /** Wraps the registry's store (the deployment's retention rule, core-host/retention.ts, is applied by the storage module itself). */
   wrapStorage?: (store: DocumentStore) => DocumentStore;
+  /**
+   * The per-run dollar stop's dispatch side (core/task-flow/money-stop.ts): each model run is admitted (`run.start`) before it is handed over, goes only to a worker that reports its usage
+   * while it runs, and is told to. Built over the registry's store. Absent: dispatch as before.
+   */
+  moneyStop?: (registry: AdapterRegistry, companyId: OrgId) => MoneyStop;
   log: (entry: Record<string, unknown>) => void;
   now?: () => Date;
 }
@@ -238,7 +249,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     // The dispatcher runs no scheduled job and relays no outbox (the broker does): its runtimes are built for the dispatch consumer alone.
     dispatchOnly: true,
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
-    runtime: () => {
+    runtime: (registry, companyId) => {
       const flow = inputs.flow;
       // Declared means present AND `null` (an explicit none) or a value: a key that is there with `undefined` in it is not a declaration.
       if (flow === undefined || flow === null || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name) || flow[name] === undefined)) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
@@ -247,6 +258,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
         ...(learned === null || learned === undefined ? {} : { learned }),
+        ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
       };
       return {
       callbackSigningKey,

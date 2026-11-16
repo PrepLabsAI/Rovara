@@ -844,11 +844,13 @@ describe("Slack native workflow review controls", () => {
       expect(listed).not.toContain("<!channel>");
       const radios = actionBlocks(modal).map((block) => block.element as { type: string; options: Array<{ text: { text: string }; value: string }>; initial_option: { value: string } });
       expect(radios).toHaveLength(2);
-      for (const radio of radios) {
+      // DEC 236h: a security finding (the second here) offers Fix alone; accepting it is the web page's.
+      const offered = [[["Fix", "FIX"], ["Accept", "ACCEPT"]], [["Fix", "FIX"]]];
+      radios.forEach((radio, index) => {
         expect(radio.type).toBe("radio_buttons");
-        expect(radio.options.map((option) => [option.text.text, option.value])).toEqual([["Fix", "FIX"], ["Accept", "ACCEPT"]]);
+        expect(radio.options.map((option) => [option.text.text, option.value])).toEqual(offered[index]);
         expect(radio.initial_option.value).toBe("FIX");
-      }
+      });
       for (const block of noteBlocks(modal)) {
         expect(block.optional).toBe(true);
         // Slack itself adds "(optional)" to an optional input, so the label never says it: it says what the text is for.
@@ -892,7 +894,6 @@ describe("Slack native workflow review controls", () => {
       const cases: Array<[Array<{ action?: "FIX" | "ACCEPT"; note?: string }>, string]> = [
         [[{ action: "FIX" }, { action: "FIX" }], "Sending 2 findings back to coding."],
         [[{ action: "ACCEPT", note: "Known." }, { action: "FIX" }], "Sending 1 finding back to coding."],
-        [[{ action: "ACCEPT", note: "Known." }, { action: "ACCEPT", note: "Test token." }], "Accepted 2 findings; the change goes on to its draft pull request."],
       ];
       for (const [picks, text] of cases) {
         const t = setup(blocked);
@@ -901,6 +902,11 @@ describe("Slack native workflow review controls", () => {
         expect(t.resolved).toHaveLength(1);
         expect(t.acks).toEqual([{ url, text }]);
       }
+      const twoCode = blockedOn([PARSER, finding("Another code problem.")]);
+      const both = setup(twoCode);
+      await both.handlers.handleAction(press(valueOf(twoCode)));
+      await both.handlers.handleSubmission(submission(both.opened[0]!, [{ action: "ACCEPT", note: "Known." }, { action: "ACCEPT", note: "Also known." }]));
+      expect(both.acks).toEqual([{ url, text: "Accepted 2 findings; the change goes on to its draft pull request." }]);
       const single = blockedOn([PARSER]);
       const one = setup(single);
       await one.handlers.handleAction(press(valueOf(single)));
@@ -991,19 +997,37 @@ describe("Slack native workflow review controls", () => {
       const modal = t.opened[0]!;
       const { handler, ephemeral } = harness({ workflow: t.handlers });
       const [codeNote, securityNote] = noteBlocks(modal).map((block) => String(block.block_id));
-      // Accept without a reason (empty, or only spaces): an error on that finding's own text box.
+      const securityAction = String(securityNote).replace("finding_note_", "finding_action_");
+      // Accept without a reason (empty, or only spaces): an error on that finding's own text box. A security finding is not accepted in Slack at all (DEC 236h).
       const response = await handler(signed(submission(modal, [{ action: "ACCEPT", note: "   " }, { action: "ACCEPT" }])));
       expect(response.statusCode).toBe(200);
-      expect(JSON.parse(response.body)).toEqual({ response_action: "errors", errors: { [codeNote!]: "Give a reason to accept this finding.", [securityNote!]: "Give a reason to accept this finding." } });
+      expect(JSON.parse(response.body)).toEqual({ response_action: "errors", errors: { [codeNote!]: "Give a reason to accept this finding.", [securityAction]: "Open the Rovara web page to accept this." } });
       // Only the finding with the problem gets an error, and a too-long reason or instruction is told too.
-      const one = await handler(signed(submission(modal, [{ action: "FIX", note: "x".repeat(1_001) }, { action: "ACCEPT", note: "r".repeat(501) }])));
-      expect(JSON.parse(one.body)).toEqual({ response_action: "errors", errors: { [codeNote!]: "Instructions are at most 1,000 characters.", [securityNote!]: "A reason is at most 500 characters." } });
+      const one = await handler(signed(submission(modal, [{ action: "ACCEPT", note: "r".repeat(501) }, { action: "FIX", note: "x".repeat(1_001) }])));
+      expect(JSON.parse(one.body)).toEqual({ response_action: "errors", errors: { [codeNote!]: "A reason is at most 500 characters.", [securityNote!]: "Instructions are at most 1,000 characters." } });
       expect(t.resolved).toEqual([]);
       expect(ephemeral).toEqual([]);
       // A good answer clears the form.
       const good = await handler(signed(submission(modal, [{ action: "ACCEPT", note: "Known." }, { action: "FIX" }])));
       expect(JSON.parse(good.body)).toEqual({ response_action: "clear" });
       expect(t.resolved).toHaveLength(1);
+    });
+
+    it("offers Fix alone for a security finding and says to open the web page; a code finding still offers Accept (DEC 236h)", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const t = setup(blocked);
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      const modal = t.opened[0]!;
+      const options = (block: { element?: unknown }) => ((block.element as { options: Array<{ value: string }> }).options).map((option) => option.value);
+      const actionBlocks = inputs(modal).filter((block) => String(block.block_id).startsWith("finding_action_"));
+      expect(actionBlocks.map(options)).toEqual([["FIX", "ACCEPT"], ["FIX"]]);
+      const text = JSON.stringify(modal.blocks);
+      expect(text.match(/Open the Rovara web page to accept this\./gu)).toHaveLength(1);
+      // A tampered submission that accepts the security finding is refused, and nothing is handed over.
+      const { handler } = harness({ workflow: t.handlers });
+      const refused = await handler(signed(submission(modal, [{ action: "FIX" }, { action: "ACCEPT", note: "Known." }])));
+      expect(JSON.parse(refused.body)).toEqual({ response_action: "errors", errors: { [String(actionBlocks[1]!.block_id)]: "Open the Rovara web page to accept this." } });
+      expect(t.resolved).toEqual([]);
     });
 
     it("tells a refused submission in the form (first finding), as a refusal rather than a failed save", async () => {

@@ -33,7 +33,7 @@ it("operator disablement is separate from rows and returns only null values", as
   for (const candidate of [source, createDefaultPolicySource({ installOff: true })]) {
     const got = await candidate.resolve(scopeFor(COMPANY_A), { taskRaises: { extra_review: true } });
     expect(got.status).toBe("disabled");
-    expect(Object.keys(got.values)).toHaveLength(10);
+    expect(Object.keys(got.values)).toHaveLength(12);
     for (const row of Object.values(got.values)) expect(row).toEqual({ value: null, origin: "install_off" });
   }
   await expect(createRowsPolicySource(async (scope) => ({ scope, rows: { installOff: true } })).resolve(scopeFor(COMPANY_A), {})).rejects.toThrow("policy_unavailable");

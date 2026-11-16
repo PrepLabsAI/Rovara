@@ -1,7 +1,7 @@
 // what an Ask about a Code task is given (the loader half of the hosted product's `agent-sessions/ask-context.ts`, written on the document store). The asker is the install's owner, so the audience is
 // `web` and its tier is `ASK_AUDIENCE_POLICY.web`; the pure builder (`ask-context.ts`) renders it and enforces the tier by construction. Everything read here is a Code record (the task, its workflow and documents, the
 // session's events and its notes); a reader that fails gives nothing for its section, never an error with text.
-import { workflowSelectedChecks, type AgentSessionRecord, type DocumentStore, type WorkflowSnapshot } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE, workflowSelectedChecks, type AgentSessionRecord, type DocumentStore, type WorkflowSnapshot } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { plainBlockReason } from "../../developer/workflow-messages.js";
 import { textReaderOf } from "../build-step/plan-input.js";
@@ -46,7 +46,7 @@ function checkRows(workflow: WorkflowSnapshot, tails: Readonly<Record<string, st
   const results = workflow.verification?.results;
   if (results === undefined) return undefined;
   const labels = new Map(workflowSelectedChecks(workflow.checkPolicy).map((check) => [check.id, check.label]));
-  return results.map((result) => ({ name: labels.get(result.checkId) ?? result.checkId, status: result.status, ...(result.status === "FAILED" && tails !== undefined && Object.hasOwn(tails, result.checkId) ? { failureTail: tails[result.checkId] } : {}) }));
+  return results.map((result) => ({ name: `${labels.get(result.checkId) ?? result.checkId}${result.madeByRovara === true ? ` (${GENERAL_FAKE_MADE_NOTE})` : ""}`, status: result.status, ...(result.status === "FAILED" && tails !== undefined && Object.hasOwn(tails, result.checkId) ? { failureTail: tails[result.checkId] } : {}) }));
 }
 
 /**

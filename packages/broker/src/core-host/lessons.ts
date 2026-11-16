@@ -19,6 +19,8 @@ import type { TaskFlow } from "../core/task-flow/flow.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
+import { sendLessonDigests } from "../lessons/digest-notice.js";
+import type { ChannelCompanyOf } from "../core/channel/company.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
 import { gatedByLessonsSwitch } from "../lessons/model-gate.js";
@@ -28,6 +30,7 @@ import { lessonDeletionPort } from "../lessons/deletion.js";
 import { DocumentLessonStore } from "../lessons/document-store.js";
 import { documentLessonVectors } from "../lessons/document-vectors.js";
 import { lessonAuditSink } from "../lessons/audit-sink.js";
+import { eraseLoggedCorrections } from "../lessons/correction-log.js";
 import type { CodeFactsReader } from "../lessons/code-facts.js";
 import type { TaskSubjectSource } from "../lessons/task-end.js";
 import type { OutcomeRowReader } from "../lessons/task-outcome-rows.js";
@@ -74,6 +77,8 @@ export interface CoreLessonsOptions {
   /** The lessons of another company, for a message of the shared reflection queue that names it. Undefined: lessons are off for that company (the message is removed). */
   hostFor: (companyId: string) => Promise<Pick<LessonsHost, "reflectOne"> | undefined>;
   edition?: Edition;
+  /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places. Absent: one company, whose every tenant is. */
+  channelCompanyOf?: ChannelCompanyOf;
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -90,7 +95,7 @@ export interface CoreLessons {
   readTask(taskId: string): Promise<{ companyId: string; project: string; developerId: string } | undefined>;
   /** Whether the company has this project (its latest revision can be read). */
   projectExists(project: string): Promise<boolean>;
-  /** Fills the task flow's lessons slots (`learned`, `lessonsUsed`, `milestones`). Call once, before the first task of the company is started or dispatched. */
+  /** Fills the task flow's lessons slots (`learned`, `lessonsUsed`, `lessonsSentBack`, `milestones`). Call once, before the first task of the company is started or dispatched. */
   attach(): void;
   /** The scheduled pass: milestones due, the shared reflection queue, and once a day the upkeep of the company's projects. */
   readonly service: CoreService;
@@ -199,11 +204,16 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
           try { await host.nightly(await projectNames()); } catch (error) { log("nightly_failed", { error: error instanceof Error ? error.name : "unknown" }); await releaseNightly(day); nightly = false; }
         }
       }
+      // The weekly lessons summary in the chats, for the projects that turned it on (off by default), in at most a quarter of the pass's time.
+      const digests = await sendLessonDigests({
+        companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry, companyOf: options.channelCompanyOf, now,
+        log: (event, fields) => log(event, fields),
+      }, await projectNames().catch(() => []), { deadlineAt: Date.now() + Math.max(0, Math.min(Math.floor(budgetMs / 4), deadlineAt - now())) }).catch(() => ({ projects: 0, sent: 0, held: 0, failed: 0 }));
       const reflected = await pumpReflectQueue({ queues: registry.require("queue"), hostFor, perPass: REFLECT_PER_PASS, now, log, deadlineAt }).catch((error: unknown) => {
         log("reflect_pass_failed", { error: error instanceof Error ? error.name : "unknown" });
         return { received: 0, reflected: 0, dropped: 0, retried: 0 };
       });
-      return { milestones: delivered.attempted, ...reflected, nightly };
+      return { milestones: delivered.attempted, ...reflected, nightly, digests: digests.sent, digestsHeld: digests.held, digestsFailed: digests.failed };
     },
   };
 
@@ -213,6 +223,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     attached = true;
     deps.learned = (input) => host.learnedFor(input);
     deps.lessonsUsed = (task, repositoryId) => host.usedInPullRequest(task, repositoryId);
+    deps.lessonsSentBack = (taskId) => host.noteSentBack(taskId);
     deps.milestones = milestones;
   }
 
@@ -231,7 +242,7 @@ export interface ErasePersonLessonsReport {
   projects: number;
   purged: number;
   scrubbed: number;
-  /** Rows that named the person or a purged lesson outside the lesson itself (a comment's retire request, the "used in" list of a purged lesson) and were removed. */
+  /** Rows that named the person or a purged lesson outside the lesson itself (a comment's retire request, the "used in" list of a purged lesson, a correction they gave as the measure logged it) and were removed. */
   rows: number;
 }
 
@@ -264,6 +275,10 @@ export async function erasePersonLessons(input: { store: DocumentStore; audit: A
     await deletion.scrubAudienceIds(companyId, project, [personId]);
     for (const lessonId of done.purged) await removeAll(companyScoped(companyId, `LESSON_USE#${project}#${lessonId}`));
     await removeAll(companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`), (row) => row["personId"] !== personId);
+    // The corrections the person gave, as the "same mistake twice" measure logged them (no text, but their words' signature and their id).
+    rows += await eraseLoggedCorrections(store, companyId, project, personId);
+    // The weekly summary's "sent this week" row of the person.
+    await removeAll(companyScoped(companyId, `LESSON_DIGEST#${project}`), (row) => row.sk !== `SENT#${personId}`);
   }
   input.log?.({ component: "core-lessons", companyId, event: "person_erased", projects: projects.length, purged, scrubbed, rows });
   return { projects: projects.length, purged, scrubbed, rows };

@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
+  withoutOwnRovaraCheck,
   MERGE_CLAIM_SECONDS,
   MERGE_NOT_READY_MESSAGES as M,
   MERGE_VIEW_MESSAGE_MAX,
@@ -60,6 +61,7 @@ import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { scopeHoldOf } from "../build-step/scope-question.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
+import { ownCheckSourceOf } from "./summary-check.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-read.js";
@@ -592,7 +594,8 @@ async function mergeableNow(
     // The pull request must be the one Rovara linked to this task: nothing a stored field says moves it to another.
     const linked = await deps.links.find({ hostKind: providerOf(home.codeHost), connectionKind: home.codeHost.kind, repositoryAddress: url, id: String(entry.number) });
     if (linked === undefined || linked.taskId !== task.taskId || linked.repositoryId !== entry.repositoryId || linked.url !== entry.url) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
-    const status = await home.codeHost.changeRequestStatus(changeRequestRef(url, entry.number), scope);
+    // TE-B4: Rovara's own "Rovara" Check is not the customer's CI here either (summary-check.ts).
+    const status = withoutOwnRovaraCheck(await home.codeHost.changeRequestStatus(changeRequestRef(url, entry.number), scope), await ownCheckSourceOf(home.codeHost, scope));
     if (status.id !== String(entry.number)) throw agentXError("RUNTIME_UNAVAILABLE", "The code host answered for another pull request");
     if (status.state !== "merged" && status.headRevision !== wanted[index]!.headSha) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     const item = items.get(key);

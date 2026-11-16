@@ -2,7 +2,7 @@
 // a broker without the root and on one with it, and every answer and every row of the table is compared whole (ids and times are renamed in order of first appearance, since each run
 // makes its own). The root reads nothing at all while off.
 import { randomUUID } from "node:crypto";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { loadSlackBroker } from "../support/slack-broker.js";
 import { brokerCoreModuleDeps, createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -11,7 +11,7 @@ beforeAll(async () => { await loadSlackBroker(); });
 
 const DIFF = ["## demo", "", "### status", " M src/retry.ts", "### diff", "diff --git a/src/retry.ts b/src/retry.ts", "--- a/src/retry.ts", "+++ b/src/retry.ts", "@@ -1 +1,2 @@", "-old", "+new", "+more", ""].join("\n");
 
-/** Ids (UUIDs, 64-hex digests and signed tokens that differ per run) and times, renamed in order of first appearance; everything else kept byte for byte. */
+/** Ids (UUIDs, 64-hex digests and signed tokens that differ per run) and durations (the wall clock itself is frozen, see FROZEN_AT), renamed in order of first appearance; everything else kept byte for byte. */
 function normalise(text: string): string {
   const seen = new Map<string, string>();
   const name = (prefix: string) => (value: string) => {
@@ -26,10 +26,16 @@ function normalise(text: string): string {
     .replace(/[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)*/gu, "<token>")
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/gu, "<time>")
     .replace(/"durationMs":\d+/gu, "\"durationMs\":<ms>")
-    .replace(/"(?:expiresAt|indexExpiresAt|ttl|updatedAtEpoch|startedAtEpoch|at)":\d{9,13}/gu, (match) => match.replace(/\d{9,13}/u, "<epoch>"));
+    .replace(/"(?:expiresAt|indexExpiresAt|ttl|updatedAtEpoch|startedAtEpoch|endsAt|at)":\d{9,13}/gu, (match) => match.replace(/\d{9,13}/u, "<epoch>"));
 }
 
+/** Both runs see the same wall clock: only `Date` is frozen (timers stay real), so every clock-derived field (a session's endsAt, times, durations) is equal by construction. */
+const FROZEN_AT = new Date("2026-11-15T10:00:00.000Z");
+afterEach(() => { vi.useRealTimers(); });
+
 async function script(withCore: boolean): Promise<{ answers: string[]; rows: string[]; coreReads: number }> {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(FROZEN_AT);
   let coreReads = 0;
   const counting = { send: async () => { coreReads += 1; throw new Error("the off root must read nothing"); } };
   const root = withCore ? createBrokerCoreRoot({
@@ -53,8 +59,13 @@ async function script(withCore: boolean): Promise<{ answers: string[]; rows: str
     [MAYA, "GET", `/v1/dev/tasks/${randomUUID()}`], [OMAR, "POST", "/v1/dev/tasks"], [MAYA, "POST", `/v1/dev/tasks/${taskId}/close`]] as const) {
     keep(await harness.dev(who, method, path, method === "POST" && path === "/v1/dev/tasks" ? { requestId: randomUUID(), project: "payments", instructions: "Another", client: "claude-code" } : undefined));
   }
+  // Lane L12: the core's /v1/app/* paths, which the broker answers only while the switch serves: off, exactly as without the root.
+  for (const [method, path] of [["GET", "/v1/app/script-tokens"], ["POST", "/v1/app/script-tokens"], ["GET", "/v1/app/sessions"], ["GET", "/v1/app/decisions"], ["POST", `/v1/app/people/${OMAR.developerId}/erase`], ["GET", "/v1/app/projects/payments/how-we-work"]] as const) {
+    keep(await harness.dev(MAYA, method, path, method === "POST" ? { requestId: randomUUID() } : undefined));
+  }
   // Each row on its own (its ids renamed within the row), then sorted: the table's rows as a set, every byte but the ids and times compared.
   const rows = harness.db.find(() => true).map((item) => normalise(JSON.stringify(item))).sort();
+  vi.useRealTimers();
   return { answers, rows, coreReads };
 }
 

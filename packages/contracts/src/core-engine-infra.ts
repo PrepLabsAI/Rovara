@@ -26,6 +26,7 @@ export const CORE_JOB_SCHEDULES: readonly CoreJobSchedule[] = [
   { job: "notify-deliver", rate: "rate(5 minutes)" },
   { job: "admission-hold-sweep", rate: "rate(15 minutes)" },
   { job: "automation-stop", rate: "rate(1 minute)" },
+  { job: "person-erase-resume", rate: "rate(15 minutes)" },
   // #684: the lessons job (core-host/jobs.ts), one schedule per scheduled row.
   { job: "lessons", rate: "rate(5 minutes)" },
 ];

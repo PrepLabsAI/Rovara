@@ -24,6 +24,8 @@ export interface DevRoute {
 }
 
 export const DEV_ROUTES: readonly DevRoute[] = [
+  { method: "GET", path: "/v1/dev/projects/{name}/settings", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{name}/settings", requires: "full" },
   // Spec 063 FR-004: a registered service's own route, authenticated by its secret or the person's token.
   { method: "POST", path: "/v1/dev/access", requires: "none" },
   // #634: the person chooses their own name.
@@ -41,6 +43,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/client/projects/{project}/members", requires: "projects:members" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/members/{developerId}", requires: "projects:members" },
   { method: "DELETE", path: "/v1/dev/client/projects/{project}/members/{developerId}", requires: "projects:members" },
+  // Lane W: a project's merge rules; full access only (the route also checks the project and, to loosen, a fresh step-up).
+  { method: "GET", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
+  { method: "PUT", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
@@ -78,6 +83,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/tasks/{taskId}/readers", requires: "tasks:share" },
   { method: "PUT", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
   { method: "DELETE", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
+  // Lane W: merge a task's pull request; full access only, and a fresh step-up from a web client's verified token.
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/merge", requires: "full" },
   // Decisions: approve a plan or request changes; decide on the pull-request feedback proposal.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/decision", requires: "decisions:decide" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-decision", requires: "decisions:decide" },
@@ -89,6 +96,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/retire-requests", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/mode/trial-offer", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/weekly-summary", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{project}/lessons/weekly-summary", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/approve", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/reject", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
@@ -96,6 +106,14 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
+  // The Home number "Corrections you had to repeat" (core-host/lessons-repeats-api.ts): one project (its roster), or the company (owners and admins). Full access only, live membership.
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/repeats", requires: "full" },
+  { method: "GET", path: "/v1/dev/lessons/repeats", requires: "full" },
+  // Lane W part 4: the company administrator's routes; full access only (DEC ANSWER-4), then a live admin or owner membership, and a fresh step-up to change anyone.
+  { method: "GET", path: "/v1/dev/company/members", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/members/{personId}/removal-preview", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/members/{personId}/removal", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/members/{personId}/role", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },
@@ -108,12 +126,55 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/canvas-closeout/retry", requires: "full" },
 ];
 
-const COMPILED = DEV_ROUTES.map((route) => ({
+/**
+ * Lane L12: the core engine's own /v1/app/* routes on the broker's HTTP API (aws/core-app-routes.ts), served only while the core switch serves. The same rule as DEV_ROUTES: a method and
+ * path with no row here is refused before anyone is authenticated, and a sign-in client's token reaches a row only with its scope. Only the routes the core serves on AWS have rows (not
+ * the laptop's asks, automations or page routes). Behind every row the core's own handler still takes the company from live membership and checks the person's level, grant or role.
+ */
+export const APP_ROUTES: readonly DevRoute[] = [
+  // Sessions (the core's session routes): reading one's own sessions is a task read; following and presence are a reader's own marks.
+  { method: "GET", path: "/v1/app/sessions", requires: "tasks:read" },
+  { method: "GET", path: "/v1/app/sessions/{sessionId}", requires: "tasks:read" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/follow", requires: "tasks:read" },
+  { method: "DELETE", path: "/v1/app/sessions/{sessionId}/follow", requires: "tasks:read" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/unfollow", requires: "tasks:read" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/presence", requires: "tasks:read" },
+  // Acting on a session's task (each also needs the person's session level).
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/stop", requires: "tasks:act" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/retry", requires: "tasks:act" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/messages", requires: "tasks:act" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/answers", requires: "tasks:act" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/revise-plan", requires: "tasks:act" },
+  { method: "POST", path: "/v1/app/sessions/{sessionId}/close", requires: "tasks:act" },
+  // Decision cards: the list and every act on a card (an act also needs a fresh step-up, which a sign-in client's token never carries).
+  { method: "GET", path: "/v1/app/decisions", requires: "decisions:decide" },
+  { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/approve", requires: "decisions:decide" },
+  { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/reject", requires: "decisions:decide" },
+  { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/request-changes", requires: "decisions:decide" },
+  { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/evidence-opened", requires: "decisions:decide" },
+  // How we work (read only): no named scope reads a project's settings, so full access only.
+  { method: "GET", path: "/v1/app/projects/{project}/how-we-work", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/playbook", requires: "full" },
+  // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
+  { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
+  { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
+  { method: "POST", path: "/v1/app/script-tokens/{tokenId}/revoke", requires: "full" },
+  { method: "POST", path: "/v1/app/people/{personId}/erase", requires: "full" },
+];
+
+const compile = (routes: readonly DevRoute[]) => routes.map((route) => ({
   route,
   pattern: new RegExp(`^${route.path.split("/").map((segment) => /^\{[A-Za-z]+\}$/.test(segment) ? "[^/]+" : segment.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("/")}$`),
 }));
+const COMPILED = compile(DEV_ROUTES);
+const APP_COMPILED = compile(APP_ROUTES);
 
 /** The row for this method and raw (still percent-encoded) path, or undefined: refused. */
 export function devRouteOf(method: string, pathname: string): DevRoute | undefined {
   return COMPILED.find(({ route, pattern }) => route.method === method && pattern.test(pathname))?.route;
+}
+
+/** Lane L12: the /v1/app/* row for this method and raw (still percent-encoded) path, or undefined: refused. */
+export function appRouteOf(method: string, pathname: string): DevRoute | undefined {
+  return APP_COMPILED.find(({ route, pattern }) => route.method === method && pattern.test(pathname))?.route;
 }

@@ -52,6 +52,8 @@ export interface SessionWorkerPing {
 export interface SessionWorkerMachinesDependencies {
   /** The one company this adapter serves. */
   companyId: OrgId;
+  /** Broker restriction: stop uses the deleter (also removes the volume); live health and dispatch refuse. Absent preserves dispatcher behavior. */
+  brokerOnly?: boolean;
   sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "markStopped">;
   /** The company a workspace belongs to (its record's company), or undefined when there is no such workspace. Read on every call, never cached. */
   companyOfWorkspace: (workspaceId: string) => Promise<OrgId | undefined>;
@@ -73,6 +75,9 @@ export interface SessionWorkerMachinesDependencies {
   /** Epoch milliseconds. */
   now?: () => number;
 }
+
+export const BROKER_DISPATCH_ONLY_WORDS = "only the dispatcher starts workers and signs or posts worker jobs";
+export const BROKER_LIVE_HEALTH_WORDS = "live worker health is unavailable on the broker";
 
 const defaultWorkspaceOfKey = (machineKey: string): string | undefined => (UUID.test(machineKey) ? machineKey : undefined);
 
@@ -144,6 +149,7 @@ export class SessionWorkerMachines implements WorkerMachines {
     // Checked at run time, not only by the type: an adapter bound to no company (or to a malformed one) would compare every workspace against nothing.
     if (!OrgIdSchema.safeParse(dependencies.companyId).success) throw new MachineError("rejected", "the company id is not valid");
     this.#deps = dependencies;
+    if (dependencies.brokerOnly === true) this.capabilities = { ...this.capabilities, persistentVolume: false };
   }
 
   get companyId(): OrgId {
@@ -151,6 +157,7 @@ export class SessionWorkerMachines implements WorkerMachines {
   }
 
   async start(spec: MachineSpec): Promise<MachineHandle> {
+    if (this.#deps.brokerOnly === true) throw new MachineError("rejected", BROKER_DISPATCH_ONLY_WORDS);
     if (spec.companyId !== this.#deps.companyId) throw new MachineError("rejected", "this machine adapter serves another company");
     // What a worker runs and with what is the launch template's and the boot script's alone: a spec cannot choose an image, sizes or environment.
     if (spec.image !== undefined || spec.resources !== undefined || Object.keys(spec.environment ?? {}).length > 0) {
@@ -174,6 +181,8 @@ export class SessionWorkerMachines implements WorkerMachines {
   }
 
   async stop(machineId: string): Promise<void> {
+    // The broker has StartExecution on the deleter, not EC2 terminate. Cancellation destroys compute and volume.
+    if (this.#deps.brokerOnly === true) return this.terminate(machineId);
     const owned = await this.#ownedSession(machineId);
     if (owned === undefined) return;
     let session = owned.session;
@@ -212,6 +221,8 @@ export class SessionWorkerMachines implements WorkerMachines {
     if (owned === undefined) return idle("terminated");
     const { session } = owned;
     if (session.state !== "READY") return idle(machineState(session.state), session.state === "FAILED" ? "the worker did not start" : undefined);
+    // READY is a stored provisioning result, not evidence of current liveness. The watchdog waits on this refusal.
+    if (this.#deps.brokerOnly === true) throw new MachineError("unavailable", BROKER_LIVE_HEALTH_WORDS);
     if (session.privateIp === undefined) return idle("unhealthy", "the worker has no address");
     let ping: SessionWorkerPing | undefined;
     try {
@@ -228,6 +239,7 @@ export class SessionWorkerMachines implements WorkerMachines {
   }
 
   async deliver(machineId: string, invocation: WorkerInvocation): Promise<DeliveryReceipt> {
+    if (this.#deps.brokerOnly === true) throw new MachineError("rejected", BROKER_DISPATCH_ONLY_WORDS);
     const owned = await this.#ownedSession(machineId);
     if (owned === undefined || owned.session.state === "DELETING" || owned.session.state === "DELETED") throw new MachineError("not_found", "no such machine");
     const { workspaceId, session } = owned;
@@ -282,6 +294,7 @@ export class SessionWorkerMachines implements WorkerMachines {
 
   /** The session behind a machine id, only for this company's workspaces. A session that never started (NONE) or was deleted reads as none. */
   async #ownedSession(machineId: string): Promise<{ workspaceId: string; session: WorkspaceSession } | undefined> {
+    if (this.#deps.brokerOnly === true && typeof machineId !== "string") return undefined;
     const workspaceId = workspaceOfMachineId(machineId);
     if (workspaceId === undefined || (await this.#ownedWorkspace(workspaceId)) === undefined) return undefined;
     const session = await this.#deps.sessions.get(workspaceId);
@@ -319,6 +332,7 @@ export class SessionWorkerFleet implements WorkerMachines {
 
   constructor(dependencies: SessionWorkerFleetDependencies) {
     this.#deps = dependencies;
+    if (dependencies.brokerOnly === true) this.capabilities = { ...this.capabilities, persistentVolume: false };
   }
 
   /** The adapter of one company. A value that is not a company id is refused (never bound to a guess). */
