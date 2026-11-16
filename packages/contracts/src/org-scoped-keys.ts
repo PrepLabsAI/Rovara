@@ -1012,3 +1012,8 @@ export function intakeOwnWriteKey(orgId: OrgId, ticketItemId: string, kind: Inta
   const part = kind === "touch" ? "-" : createHash("sha256").update(value.normalize("NFC").trim().toLowerCase(), "utf8").digest("hex").slice(0, 32);
   return { pk: orgScoped(orgId, "INTAKE_OWN"), sk: `${ticketItemId}#${kind}#${part}` };
 }
+
+/** TE-H1 browser evidence, slice 3: the project's recipe as its owner saved it on the recipe page (which pages to photograph, the app's start command, the sign-in's form). One row per project in one company; holds no secret. */
+export function projectBrowserEvidenceRecipeKey(orgId: OrgId, name: string): OrgKey {
+  return { pk: projectPk(orgId, name), sk: "BROWSER_EVIDENCE_RECIPE" };
+}

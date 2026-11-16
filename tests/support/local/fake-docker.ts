@@ -53,7 +53,7 @@ export class FakeDocker implements DockerRunner {
   readonly containers = new Map<string, FakeContainer>();
   readonly networks = new Map<string, FakeNetwork>();
   readonly calls: string[][] = [];
-  readonly images = new Set<string>(["worker:test"]);
+  readonly images = new Set<string>(["worker:test", "rovara-e2e-executor:test"]);
   reachable = true;
   /** Make the simulated worker not answer /ping (still starting). */
   silent = false;

@@ -203,6 +203,37 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     expect((await h.callback(run.job, "setup-agent", { kind: "command_done", seq: 1, journalN: 3 })).body).toMatchObject({ finished: true });
   });
 
+  it("keeps the pages a run suggested for browser evidence as text to read: the setup page links to the recipe page, which shows them; nothing is saved or applied, and 'Use this setup' leaves them alone", async () => {
+    const h = await launch({ environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" } });
+    const run = await startRun(h);
+    const be = h.runtime.app.browserEvidence!;
+    expect((await be.page("payments"))?.suggestion).toBeUndefined();
+    const suggestion = { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }], confidence: "medium", from: [cite(4, "\"test\": \"npm test\"")] };
+    await h.callback(run.job, "setup-agent", { kind: "journal", entries: [entry(1, "npm ci"), entry(2, "npm test")] });
+    expect((await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: { ...proposal(), browserEvidence: suggestion }, setupRunSummary: SUMMARY } })).status).toBe(200);
+    // The broker read the worker's copy again: the item is there, whole, with its place, and never "verified" (nothing re-reads a recipe against a quote).
+    const ready = await h.api(ROUTE);
+    expect(ready.body["proposal"]["browserEvidence"]).toMatchObject({ id: "browser-recipe", value: { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }] } });
+    expect(ready.body["verification"]["browser-recipe"]).toBe("unchecked");
+    const page = await be.page("payments");
+    expect(page).toMatchObject({ source: "none", signInSaved: false, suggestion: { recipe: { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }] }, from: ["demo/package.json:4"], verdict: "unchecked" } });
+    // Nothing was applied: browser evidence is still off for the project, and no row was written.
+    expect(await be.recipeFor("payments")).toBeUndefined();
+    const link = await h.browse("/setup/payments");
+    const shown = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
+    expect(shown.body).toContain("Browser evidence pages");
+    expect(shown.body).toContain(`${link.pathname.replace(/\/setup.*$/u, "")}/browser-evidence/payments`);
+    // "Use this setup" takes the commands only: the suggestion is not among what it carries.
+    const confirmForm = formOf(shown.body, "/confirm");
+    expect((await h.post(link, confirmForm.action, { ...confirmForm.fields })).headers["location"]).toContain("n=setupdone");
+    expect(await be.recipeFor("payments")).toBeUndefined();
+    // The recipe page (the owner's own, in the same session) draws it, and the form is empty until the owner asks to start from it.
+    const recipePage = await raw(h.runtime.pagesUrl, { path: `${link.pathname.replace(/\/setup.*$/u, "")}/browser-evidence/payments`, headers: { host: link.host } });
+    expect(recipePage.status).toBe(200);
+    expect(recipePage.body).toContain("What Rovara suggests");
+    expect(recipePage.body).not.toContain('name="startCommand" value="npm run start"');
+  });
+
   it("keeps a proposal the run reported, re-reads its citations, and applies it only after a passing check on a new workspace and the owner's approval", async () => {
     const h = await launch();
     const run = await startRun(h);

@@ -13,7 +13,7 @@ const driver = createChromiumEvidenceDriver({
   origin: `http://127.0.0.1:${port}`,
   app: {
     async start(side, timeoutMs) {
-      const started = await startProjectApp({ command: "node ../server.mjs", cwd: `/fixture/${side}`, port, readyPath: "/health", timeoutMs, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" } });
+      const started = await startProjectApp({ command: "node ../server.mjs", cwd: `/fixture/${side}`, port, readyPath: "/health", timeoutMs, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", ...(side === "after" ? { BE_REGRESS: "1" } : {}) } });
       if (started.status === "ready") apps.set(side, started.app);
       // A start that fails says why on stderr (the test shows it): what the shell sees, and what the start command prints when run once by hand.
       else {
@@ -27,12 +27,16 @@ const driver = createChromiumEvidenceDriver({
   },
 });
 const shot = (s) => ({ sha256: s.sha256, bytes: s.bytes.byteLength, jpeg: s.bytes[0] === 0xff && s.bytes[1] === 0xd8 && s.bytes[2] === 0xff });
-const view = (run) => ({ notRun: run.notRun ?? null, routes: run.routes.map((r) => (r.status === "shown" ? { route: r.route, status: r.status, before: shot(r.before), after: shot(r.after), consoleErrors: r.consoleErrors } : r)) });
+// Slice 4: a recording is shown as its size and whether it starts like a WebM (never the bytes).
+const clip = (v) => ({ bytes: v.bytes.byteLength, webm: v.bytes[0] === 0x1a && v.bytes[1] === 0x45 && v.bytes[2] === 0xdf && v.bytes[3] === 0xa3 });
+const videoOf = (r) => (r.video === undefined ? {} : { video: clip(r.video) });
+const view = (run) => ({ notRun: run.notRun ?? null, routes: run.routes.map((r) => (r.status === "shown" ? { route: r.route, status: r.status, before: shot(r.before), after: shot(r.after), consoleErrors: r.consoleErrors, ...videoOf(r), ...(r.videoNotKept === undefined ? {} : { videoNotKept: r.videoNotKept }) } : { route: r.route, status: r.status, reason: r.reason, ...videoOf(r), ...(r.videoNotKept === undefined ? {} : { videoNotKept: r.videoNotKept }) })) });
 let exitCode = 0;
 try {
   const changed = await runBrowserEvidence({ isolation: "sandbox", routes: ["/checkout", "/missing"], notShown: [], moreNotShown: 0, maskSelectors: [], driver });
   const masked = await runBrowserEvidence({ isolation: "sandbox", routes: ["/masked-a", "/masked-b", "/email-a", "/email-b"], notShown: [], moreNotShown: 0, maskSelectors: [], driver });
-  process.stdout.write(`${JSON.stringify({ changed: view(changed), masked: view(masked) })}\n`);
+  const withVideo = await runBrowserEvidence({ isolation: "sandbox", routes: ["/regress", "/checkout", "/regress-ok"], notShown: [], moreNotShown: 0, maskSelectors: [], driver, video: true });
+  process.stdout.write(`${JSON.stringify({ changed: view(changed), masked: view(masked), withVideo: view(withVideo) })}\n`);
 } catch (error) {
   process.stderr.write(`browser evidence run failed: ${error instanceof Error ? error.message : String(error)}\n`);
   exitCode = 1;
