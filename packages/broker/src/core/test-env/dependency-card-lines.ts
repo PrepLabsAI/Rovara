@@ -16,9 +16,12 @@ export function backingWords(backing: TestEnvDependency["backing"], origins?: Fa
     case "project_image": return "runs your own image (a second person approves this)";
     case "emulated": return "runs against Rovara local AWS. Not checked here: AWS permissions and exact AWS behaviour";
     case "test_account": return "uses your test account in sealed checks (a second person approves this)";
+    case "vendor_test": return "uses the vendor's own test mode with your test key in sealed checks (a second person approves this)";
     case "fake": {
       const kind = origins?.get(backing.fixtureSetRef)?.origin;
-      const fake = kind === "recorded" ? "a recorded fake" : kind === "hand_written" ? "a hand-written fake" : "a fake";
+      // As the evidence says it (`pinnedFakeOf`): "recorded" comes from the fixture store alone; the plan's own provenance can only make a fake weaker (made by Rovara), never a recording (review L1).
+      const made = backing.provenance?.origin === "rovara_setup" || backing.provenance?.origin === "rovara_task";
+      const fake = made ? "a fake made by Rovara" : kind === "recorded" ? "a recorded fake" : kind === "hand_written" ? "a hand-written fake" : "a fake";
       return backing.unmatched === "schema_synth" ? `answers from ${fake} that makes up answers for requests it has no recording for (a second person approves this)` : `answers from ${fake}`;
     }
     case "none": return backing.reason === "faked_by_tests" ? "is faked by your own tests, so Rovara starts nothing" : "has nothing behind it, so tests that need it do not run";
