@@ -1401,8 +1401,14 @@ export function developerTaskRouteDependencies(
     ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
     checkAccess: async (project) => {
-      const workspace = await workspaceForProject(project);
-      return checkProjectAccess(workspace === undefined ? deps : { ...deps, workspace }, caller, project);
+      try {
+        const workspace = await workspaceForProject(project);
+        return await checkProjectAccess(workspace === undefined ? deps : { ...deps, workspace }, caller, project);
+      } catch (error) {
+        // startTask audits AgentXError refusals; never expose a directory cause as an unaudited 500.
+        if (error instanceof SlackWorkspaceRefused) throw agentXError("SLACK_UNAVAILABLE", "This Slack workspace is not available.");
+        throw error;
+      }
     },
     taskReaderPerson: (developerId, project) => taskReaderPerson(deps, developerId, project),
     ...(!companySlackMode(deps) ? {} : { workspaceForTask: taskWorkspace, workspaceForProject }),

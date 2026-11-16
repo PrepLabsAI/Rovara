@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXError, IMPLICIT_COMPANY_ID, companyScoped } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { LEGACY_KEY_SCOPE, scopedProjectPk } from "../../packages/broker/src/e2e/legacy-key-scope.js";
@@ -312,10 +311,7 @@ it("merge-up 2 checks the linking deadline after the last provider read", async 
   h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
   h.db.set({ pk: "SLACK_BINDING#T0SHARED", sk: "CHANNEL#C0SHARED", teamId: "T0SHARED", channelId: "C0SHARED", projectName: "shared-project", updatedAt: TIME });
   h.deps.workspaces = { requireCompany: async () => COMPANY_A.orgId };
-  const send = h.deps.documentClient.send.bind(h.deps.documentClient);
-  h.deps.documentClient = { send: async (command) => command instanceof ScanCommand ? { Items: [{
-    pk: "SLACK_TEAM#T0SHARED", sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId: "T0SHARED", companyId: COMPANY_A.orgId, boundAt: TIME, boundBy: "operator",
-  }] } : send(command) };
+  h.db.set({ pk: `ORG#${COMPANY_A.orgId}#SLACK_WORKSPACES`, sk: "TEAM#T0SHARED", entityType: "COMPANY_SLACK_WORKSPACE_VIEW", teamId: "T0SHARED", companyId: COMPANY_A.orgId, boundAt: TIME, boundBy: "operator" });
   let elapsed = 0; let slow = false;
   const clock = vi.spyOn(Date, "now").mockImplementation(() => elapsed);
   h.deps.developer.channelInfo = vi.fn(async () => { if (slow) elapsed = 10_001; return { ok: true as const, channels: [] }; });

@@ -47,3 +47,18 @@ it("project senders retain the verified thread and use T4a project ownership for
     await expect(deps.workspaceForProject!("payments")).rejects.toThrow("This Slack workspace is not available.");
   }
 });
+
+
+it.each(["missing dependencies", "no binding", "ambiguous binding"])("project access maps %s to a fixed AgentX refusal", async (kind) => {
+  const db = new FakeDynamoDb();
+  db.set({ pk: "PROJECT#payments", sk: "REV#000001", companyId: A, definition: { revision: 1 } });
+  if (kind === "ambiguous binding") for (const teamId of ["T0AAAAAAA", "T0BBBBBBB"]) {
+    db.set({ pk: `ORG#${A}#SLACK_WORKSPACES`, sk: `TEAM#${teamId}`, entityType: "COMPANY_SLACK_WORKSPACE_VIEW", companyId: A, teamId, boundAt: "2026-11-15T00:00:00.000Z", boundBy: "operator" });
+    db.set({ pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0SHARED", teamId, channelId: "C0SHARED", projectName: "payments", updatedAt: "2026-11-15T00:00:00.000Z" });
+  }
+  const deps = developerTaskRouteDependencies({ documentClient: db, tableName: "state", now: Date.now,
+    companies: { companyOf: async () => A }, developer: {} as never,
+    ...(kind === "missing dependencies" ? {} : { workspaces: { requireCompany: async () => A, getProject: async () => ({ companyId: A }) } }),
+  }, { developerId: "a".repeat(64) } as never);
+  await expect(deps.checkAccess("payments")).rejects.toMatchObject({ name: "AgentXError", code: "SLACK_UNAVAILABLE", message: "SLACK_UNAVAILABLE: This Slack workspace is not available." });
+});

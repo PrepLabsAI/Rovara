@@ -1,4 +1,4 @@
-388 record kinds: 37 company-scoped, 10 install-wide, 341 needs-company. 174 routes: 10 company-scoped, 2 install-wide, 162 needs-company.
+389 record kinds: 38 company-scoped, 10 install-wide, 341 needs-company. 174 routes: 10 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -1191,3 +1191,7 @@ Forwarding rows were relocated by exact expression; the extracted host-glue rows
 ### T4b workspace token caller plumbing (2026-11-15)
 
 Internal directory/proof/callback scope is optional and runtime-validated. Company-mode senders derive it from authoritative task, project or workspace/thread records and authenticated membership where applicable; receivers recheck the workspace binding before token acquisition. Existing inventory forwarding rows are relocated without changing their family classification; the form refusal expression now uses the fixed `form` fallback. No storage-key family or record kind is added. Legacy PROJECT policy projections remain under their existing T1 inventory classification; the T4a project provider supplies company authority when present. Company activation and scoped IAM/secret access remain deferred to the integrated release owner.
+
+| record | entity:COMPANY_SLACK_WORKSPACE_VIEW | company-scoped | State table | no | - | T4b FIX-1: ORG#company#SLACK_WORKSPACES / TEAM#team, non-secret binding projection written with an authoritative conditional transaction. Only bounded company-partition Query on request paths; operator backfill snapshot-checked. Writer walk, collisions, bounds and dryRun: slack-workspace-binding.test.ts. Partition family pk:ORG retains its existing mixed-family classification. |
+| forwarding | packages/broker/src/aws/slack-workspace-binding.ts:158:33:pk | z.string().min(1).max(2048) | Runtime cursor validation only; Query additionally checks the exact company partition and team sort key. Operator Scan continuation is operator-only. | pk:ORG; pk:SLACK_TEAM |
+| forwarding | packages/broker/src/aws/slack-workspace-binding.ts:158:66:sk | z.string().min(1).max(1024) | Runtime cursor validation only; Query additionally checks the exact company partition and team sort key. Operator Scan continuation is operator-only. | pk:ORG; pk:SLACK_TEAM |
