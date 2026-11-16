@@ -1245,7 +1245,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
       // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off.
-      if (core !== undefined && request.method === "POST") {
+      if (core !== undefined && (request.method === "POST" || (request.method === "GET" && request.path.split("?")[0] === "/v1/internal/context-tools"))) {
         const answer = await core.callback(request);
         if (answer !== undefined) return answer;
       }
