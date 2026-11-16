@@ -752,7 +752,7 @@ export const handler = withCoreDispatch(workflowHandler, {
         machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker },
         changeVisibility: async (receiptHandle, seconds) => { await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds })); },
         // Lane E2 step 6: the declared flow inputs (none while lessons are switched on anywhere: then nothing is declared and every core record comes back) and the step 5 points.
-        // A dispatch decides nothing for a person, so the identity point names nobody here.
+        // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.
         ...(flow === undefined ? {} : { flow }),
         extraModules: hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } }),
         log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); }, // one JSON line on stderr, as logDispatchFailure's fallback (fixed fields only)

@@ -13,10 +13,13 @@
 //   - the developer task routes' core entry (`coreTasks`): the core host's dev routes over the caller mapping (the broker's signed-in developer -> the principal the core knows, company
 //     from MEMBERSHIP, never a claim; the verified token's step-up rides along), with the session cap (hosted wiring (f)) and every audit event of a script token naming the caller it came
 //     through (hosted wiring (d)).
+//     Lane L11 adds, per company: the session levels (live membership role, the broker's project grant), the decision cards (the task's own person's waiting documents; an act goes
+//     through the approval gate with the approvers point's own signed step-up proof, lane L2a) and how we work (the code host, with the deployment's `codeSettings`). Each part the
+//     deployment does not give answers "not on the core yet".
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
 //
-// What the registry still lacks (approvers, model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
+// What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
 // the admission hold sweep) refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -28,6 +31,9 @@ import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modul
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
+import { deployedDevWiringParts, stepUpDecisionProofs } from "../core-host/deployed-decisions.js";
+import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
+import type { CodeSettingsReader } from "../core/merge/seams.js";
 import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
@@ -68,7 +74,7 @@ export interface BrokerCoreRootInputs {
   repositoryCredential: CoreRuntimeOptions["repositoryCredential"];
   /** Code's AWS adapter inputs, asked for only when the registry is first built. */
   codeModules: () => CodeModuleDeps;
-  /** More modules after Code's and the step 5 ones (approvers and model keys when their lanes land). */
+  /** More modules after Code's and the step 5 ones (model keys when lane L2b lands). */
   extraModules?: () => readonly CoreAdapterModule[];
   /** The policy hook's asker (`policyHookInstallFromEnvironment`). Absent: an install with hook settings refuses its registry. */
   policyHookInstall?: () => PolicyHookInstall | undefined;
@@ -81,6 +87,8 @@ export interface BrokerCoreRootInputs {
    * (lane L3 gives it with merge tracking).
    */
   ciReporting?: CiReporting;
+  /** Lane L11: the company's code settings (how a project merges and approves), for how we work. Absent: how we work answers "not on the core yet" (never the laptop's fixed settings). */
+  codeSettings?: CodeSettingsReader;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
   services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry) => Partial<Record<CoreServiceName, CoreService>>;
   /** The API's own address (a session's link). */
@@ -240,7 +248,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity }), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey }), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -291,16 +299,22 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     // The library's install-wide learning gate follows the lessons switch.
     setCoreLessonsGate(env);
     const companyOf = async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => membershipOf(caller.principal.personId);
+    // Lane L11: an act on a decision card carries the approvers point's own proof (lane L2a), signed with the key the point verifies with.
+    const decisionProofs = stepUpDecisionProofs(stepUpApprovalKeyOf(inputs.callbackSigningKey), () => now().getTime());
     const routes = createCoreDevRoutes({
       app, companyOf, log,
-      wiring: () => ({
-        origin: inputs.origin,
-        sessionCapSeconds: hostedSessionCapSeconds(),
-        scriptTokens: {},
-        canReadProject: (personId, project) => projectGrant(personId, project),
-        auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
-        // Not wired yet (each answers "not on the core yet"): the session levels and the decision cards (lanes ID and T, #662), how we work (the company's code host).
-      }),
+      wiring: async (runtime) => {
+        // Lane L11: the session levels, the decision cards and how we work, from the company's own records (membership and the broker's project grants).
+        const registry = await app.registry();
+        return {
+          origin: inputs.origin,
+          sessionCapSeconds: hostedSessionCapSeconds(),
+          scriptTokens: {},
+          canReadProject: (personId, project) => projectGrant(personId, project),
+          auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
+          ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
+        };
+      },
     });
     const deployedCallerOf = async (caller: CoreEntryCaller): Promise<DeployedCaller | undefined> => {
       const membership = await membershipOf(caller.developerId);

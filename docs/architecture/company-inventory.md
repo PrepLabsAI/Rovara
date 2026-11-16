@@ -4,6 +4,7 @@
 387 record kinds: 38 company-scoped, 8 install-wide, 341 needs-company. 186 routes: 22 company-scoped, 2 install-wide, 162 needs-company.
 387 record kinds: 38 company-scoped, 8 install-wide, 341 needs-company. 185 routes: 21 company-scoped, 2 install-wide, 162 needs-company.
 395 record kinds: 41 company-scoped, 13 install-wide, 341 needs-company. 184 routes: 21 company-scoped, 2 install-wide, 161 needs-company.
+396 record kinds: 42 company-scoped, 13 install-wide, 341 needs-company. 184 routes: 21 company-scoped, 2 install-wide, 161 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -186,6 +187,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:APPROVAL_PROOF_SPENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_PROOF_USED | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_SIGN_IN_SETTING | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:APPROVAL_STEP_UP_CLAIM | company-scoped | State table | no | - | Switch-on lane L2a: written, read and settled only under companyScoped(company, APPROVAL_STEP_UP_CLAIM); a claim id names its company and a random part that must match the row (core-host-hosted-approvers two-company test). |
 | record | entity:ARTIFACT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ASK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ASK_LOCK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -936,7 +938,7 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/ci-fix/ci-fix.ts:217:5:computed | [input.ttlAttribute ?? INDEX_EXPIRY_ATTRIBUTE] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | ciEvidenceKey |
 | forwarding | packages/broker/src/core/cost/estimate.ts:49:41:pk | key.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | runCostKey |
 | forwarding | packages/broker/src/core/cost/ledger.ts:69:73:sk | entry.entryId | Runtime sort component forwarded within the feeding partition; not an independent record family. | costPartition |
-| forwarding | packages/broker/src/core/decisions/approval-gate.ts:188:60:sk | proofKey | Runtime sort component forwarded within the feeding partition; not an independent record family. | approvalProofKey, approvalProofMarkerKey, approvalRecordKey, spentOnceKey |
+| forwarding | packages/broker/src/core/decisions/approval-gate.ts:193:60:sk | proofKey | Runtime sort component forwarded within the feeding partition; not an independent record family. | approvalProofKey, approvalProofMarkerKey, approvalRecordKey, spentOnceKey |
 | forwarding | packages/broker/src/core/design-review/effective-setting.ts:9:68:computed | [EFFECTIVE] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/core/design-review/effective-setting.ts (EFFECTIVE) |
 | forwarding | packages/broker/src/core/design-review/lock.ts:55:17:pk | orgMetaKey(orgId).pk | Projects the partition supplied by the named key constructor; no new family. | orgMetaKey |
 | forwarding | packages/broker/src/core/design-review/lock.ts:92:43:pk | orgMetaKey(orgId).pk | Projects the partition supplied by the named key constructor; no new family. | orgMetaKey |
@@ -1007,6 +1009,7 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core-host/lessons.ts:250:47:pk | pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
 | forwarding | packages/broker/src/core-host/lessons.ts:252:35:pk | row.pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
 | forwarding | packages/broker/src/core-host/lessons.ts:252:47:sk | row.sk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
+| forwarding | packages/broker/src/core-host/hosted-approvers.ts:146:64:sk | partHash | Runtime sort component (the sha256 of a proof's one-time part) within the companyScoped APPROVAL_STEP_UP_CLAIM partition; no new family (core-host-hosted-approvers two-company test). | stepUpClaimKey -> companyScoped(companyId, APPROVAL_STEP_UP_CLAIM) |
 | forwarding | packages/broker/src/core-host/lessons.ts:226:41:pk | orgProjectCatalogKey(companyId, "x").pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
 | forwarding | packages/broker/src/core-host/lessons.ts:253:47:pk | pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
 | forwarding | packages/broker/src/core-host/lessons.ts:255:35:pk | row.pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
