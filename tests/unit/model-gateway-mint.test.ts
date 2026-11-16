@@ -82,12 +82,10 @@ it.each([false, true])("signs the largest fitting input and refuses the next lar
 it("rejects an issuer larger than the whole byte budget before a key read", async () => {
   const w = setup(); let keys = 0; const key = w.deps.signer.publicJwk.bind(w.deps.signer);
   w.deps.signer.publicJwk = async () => { keys += 1; return key(); };
-  let message = "";
-  // The refusal must cost no more than the size of the issuer: 125 KB, then 1 MB, grows about 8x at most.
-  await expectLinearScalingAsync((size) => {
-    const issuer = "a".repeat(size);
-    return async () => { message = await mintTaskToken({ ...w.deps, issuer }, operation).then(() => "minted", (error: unknown) => (error instanceof Error ? error.message : String(error))); };
-  }, { n: 125_000, label: "refusing an oversized issuer" });
+  // The refusal must cost no more than the size of the issuer: 32 KB, then 256 KB, grows about 8x at most (the 8N input stays at or under 256 KiB so it stays in CPU cache; the 1 MB issuer runs once, un-timed, below).
+  const refuse = (issuer: string) => mintTaskToken({ ...w.deps, issuer }, operation).then(() => "minted", (error: unknown) => (error instanceof Error ? error.message : String(error)));
+  await expectLinearScalingAsync((size) => { const issuer = "a".repeat(size); return () => refuse(issuer); }, { n: 32_000, label: "refusing an oversized issuer" });
+  const message = await refuse("a".repeat(1_000_000));
   expect(message).toContain("invalid or expired model access"); expect(keys).toBe(0); expect(w.signs()).toBe(0);
 });
 

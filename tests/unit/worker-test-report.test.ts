@@ -65,15 +65,17 @@ describe("JUnit written by a command the agent can influence", () => {
     expect(parseJunit('<testsuite><testcases name="a"/><testcase name="b"/></testsuite>')?.total).toBe(1);
   });
   it("reads a test case with one huge attribute without a quadratic scan: over 16 KiB of attributes is unreadable, under it is read in linear time", () => {
-    // Scaling checks, not wall-clock bounds: the same parse at an eighth of the size and at the full size may take about eight times as long, never sixty-four.
+    // Scaling checks, not wall-clock bounds: the same parse at an eighth of the size and at the full timed size may take about eight times as long, never sixty-four.
+    // The timed 8N input is 256 KiB, so it stays in CPU cache; the old 8 MB input is parsed once, untimed, and must still be unreadable.
     for (const filler of ["a", "a=", "a =", 'a="', "a='", "= "]) {
       const hostileOf = (size: number) => `<testsuite><testcase ${filler.repeat(Math.ceil(size / filler.length))}/></testsuite>`;
       let got: ReturnType<typeof parseJunit> | undefined = parseJunit('<testsuite><testcase name="seed"/></testsuite>');
       expectLinearScaling((size) => {
         const hostile = hostileOf(size);
         return () => { got = parseJunit(hostile); };
-      }, { n: 1_000_000, label: `junit attribute filler ${JSON.stringify(filler)}` });
+      }, { n: 32_768, label: `junit attribute filler ${JSON.stringify(filler)}` });
       expect(got, filler).toBeUndefined();
+      expect(parseJunit(hostileOf(8_000_000)), `${filler} full size`).toBeUndefined();
     }
     let read: ReturnType<typeof parseJunit> | undefined;
     expectLinearScaling((length) => {
@@ -88,22 +90,22 @@ describe("JUnit written by a command the agent can influence", () => {
     expect(read.tests[0]).toMatchObject({ name: "first", file: "a/b" });
   });
   it("reads a hostile 8 MiB file in one pass: many unclosed test cases, comments or CDATA sections cost no more than a single scan", () => {
-    // Scaling checks, not wall-clock bounds: the same hostile shape at an eighth of the count and at the full count (the old input) may take about eight times as long, never sixty-four.
-    // The CDATA shape is cache-sensitive: at 8N = 8 MiB CI runners measured a steady ratio of about 25 (a quadratic gives about 64), so its timed N is a sixty-fourth of the count and 8N stays at an eighth of it. The full-size file is still parsed once and checked.
-    const hostile: ReadonlyArray<readonly [string, number, number]> = [
-      ['<testcase name="a">', 400_000, 8],
-      ["<!--", 2_000_000, 8],
-      ["<![CDATA[", 900_000, 64],
-      ['<testcase name="a" ', 400_000, 8],
+    // Scaling checks, not wall-clock bounds: the same hostile shape at N and at 8N copies may take about eight times as long, never sixty-four.
+    // The timed 8N input is at most 256 KiB, so it stays in CPU cache (on CI runners an 8 MiB 8N input reads a steady ratio of about 25 for linear code); the full-size count (the old input) is parsed once, untimed.
+    const hostile: ReadonlyArray<readonly [string, number]> = [
+      ['<testcase name="a">', 400_000],
+      ["<!--", 2_000_000],
+      ["<![CDATA[", 900_000],
+      ['<testcase name="a" ', 400_000],
     ];
-    for (const [unit, count, divisor] of hostile) {
+    for (const [unit, count] of hostile) {
       let got: ReturnType<typeof parseJunit> | undefined = parseJunit('<testsuite><testcase name="seed"/></testsuite>');
       expectLinearScaling((copies) => {
         const text = `<testsuite>${unit.repeat(copies)}`;
         return () => { got = parseJunit(text); };
-      }, { n: count / divisor, label: `junit hostile ${JSON.stringify(unit)}` });
+      }, { n: Math.floor(32_768 / unit.length), unitBytes: unit.length, label: `junit hostile ${JSON.stringify(unit)}` });
       expect(got, unit).toBeUndefined();
-      if (divisor > 8) expect(parseJunit(`<testsuite>${unit.repeat(count)}`), `${unit} full size`).toBeUndefined();
+      expect(parseJunit(`<testsuite>${unit.repeat(count)}`), `${unit} full size`).toBeUndefined();
     }
   });
 });
@@ -346,14 +348,17 @@ describe("tests that ran before and not now (absentOnNew)", () => {
     expect(absentOnNew(report(), undefined)).toBeUndefined();
   });
   it("reads a very large report in linear time", () => {
-    // A scaling check, not a wall-clock bound: 6,250 tests and 50,000 tests (the old input) may take about eight times as long, never sixty-four.
+    // A scaling check, not a wall-clock bound: 500 tests and 4,000 tests may take about eight times as long, never sixty-four. About 60 bytes per test keeps the 8N input near 240 KiB (in CPU cache);
+    // the old 50,000-test report is read once, untimed.
     let count: number | undefined;
+    const bigOf = (tests: number) => counted("json", Array.from({ length: tests }, (_unused, n) => ({ file: "t.py", name: `test_${String(n)}`, status: "passed" as const })));
     expectLinearScaling((tests) => {
-      const big = counted("json", Array.from({ length: tests }, (_unused, n) => ({ file: "t.py", name: `test_${String(n)}`, status: "passed" as const })));
+      const big = bigOf(tests);
       const other = report();
       return () => { count = absentOnNew(big, other)?.count; };
-    }, { n: 6_250, label: "absentOnNew over a large report" });
-    expect(count).toBe(50_000);
+    }, { n: 500, unitBytes: 60, label: "absentOnNew over a large report" });
+    expect(count).toBe(4_000);
+    expect(absentOnNew(bigOf(50_000), report())?.count).toBe(50_000);
   });
 });
 

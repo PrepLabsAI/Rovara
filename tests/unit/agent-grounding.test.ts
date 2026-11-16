@@ -399,21 +399,21 @@ describe("review P2: a claim to have posted, with no connector call that answere
 });
 
 describe("review M1: no pattern is quadratic", () => {
-  // Scaling checks, not wall-clock bounds: each hostile shape is timed at N and at 8N (8N is the original size) and the cost must stay near linear.
-  const shapes: Array<[string, number, (n: number) => string]> = [
-    ["blanks between PR and the number", 250_000, (n) => `PR${" ".repeat(n)}7`],
-    ["pull request then blank-tabs", 120_000, (n) => `pull request${" \t".repeat(n)}#`],
-    ["many path segments", 120_000, (n) => `${"a/".repeat(n)}`],
-    ["many open code fences", 60_000, (n) => `${"```\n".repeat(n)}<tool_call>`],
-    ["backticks", 250_000, (n) => `${"`".repeat(n)}`],
-    ["hashes", 250_000, (n) => `${"#".repeat(n)}`],
-    ["hex-looking runs", 30_000, (n) => `${"deadbeef".repeat(n)}`],
-    ["a claim then words", 120_000, (n) => `I posted ${"a ".repeat(n)}`],
-    ["parameter openers", 20_000, (n) => `${"<parameter ".repeat(n)}`],
+  // Scaling checks, not wall-clock bounds: each hostile shape is timed at N and at 8N (8N is at most 250,000 bytes, under 256 KiB, so it stays in CPU cache) and the cost must stay near linear.
+  const shapes: Array<[string, number, number, (n: number) => string]> = [
+    ["blanks between PR and the number", 250_000, 1, (n) => `PR${" ".repeat(n)}7`],
+    ["pull request then blank-tabs", 120_000, 2, (n) => `pull request${" \t".repeat(n)}#`],
+    ["many path segments", 120_000, 2, (n) => `${"a/".repeat(n)}`],
+    ["many open code fences", 60_000, 4, (n) => `${"```\n".repeat(n)}<tool_call>`],
+    ["backticks", 250_000, 1, (n) => `${"`".repeat(n)}`],
+    ["hashes", 250_000, 1, (n) => `${"#".repeat(n)}`],
+    ["hex-looking runs", 30_000, 8, (n) => `${"deadbeef".repeat(n)}`],
+    ["a claim then words", 120_000, 2, (n) => `I posted ${"a ".repeat(n)}`],
+    ["parameter openers", 20_000, 11, (n) => `${"<parameter ".repeat(n)}`],
   ];
   it("reads pathological reports quickly", () => {
-    for (const [label, full, shape] of shapes) {
-      expectLinearScaling((n) => { const report = shape(n); return () => check({ report, provided: report }); }, { n: full / 8, label });
+    for (const [label, full, unitBytes, shape] of shapes) {
+      expectLinearScaling((n) => { const report = shape(n); return () => check({ report, provided: report }); }, { n: full / 8, unitBytes, label });
     }
   });
 });

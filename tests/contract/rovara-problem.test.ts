@@ -199,12 +199,12 @@ describe("words from a repository, a person or a model are inert", () => {
     expect(line).toContain("did not start (s)");
   });
   it("a 1 MB input is cheap and the line stays within its bound", () => {
-    let line = "";
-    // 125 KB, then 1 MB: linear work grows about 8x, quadratic about 64x.
+    // Linear work grows about 8x, quadratic about 64x. N is small (8N = 256 KiB) so the 8N input stays in CPU cache; the full 1 MB input is checked once below.
     expectLinearScaling((repeats) => {
       const input = facts("out_of_memory", { check: "a ".repeat(repeats) });
-      return () => { line = rovaraProblem(input).line; };
-    }, { n: 62_500, label: "a problem line from a 1 MB input" });
+      return () => rovaraProblem(input);
+    }, { n: 16_384, unitBytes: 2, label: "a problem line from a 1 MB input" });
+    const line = rovaraProblem(facts("out_of_memory", { check: "a ".repeat(500_000) })).line;
     expect(Array.from(line).length).toBeLessThanOrEqual(300);
     expect(line).toMatch(/Next: .+\.$/u);
   });

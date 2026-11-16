@@ -286,12 +286,12 @@ describe("secret redaction, fix round 2", () => {
   });
 
   it("bounds the work redactAndCap does on a very long input", () => {
-    // Raw text past the ceiling (160,000 characters) is dropped before redacting, so the cost must not grow with the input (here 200,000 -> 1,600,000 characters, both past it).
+    // Raw text past the ceiling (160,000 characters) is dropped before redacting, so the cost must not grow with the input (here 200,000 -> 1,600,000 characters, both past it). Only the first 160,000 characters are ever read, which stays in CPU cache, so the larger input adds no bytes to the work (unitBytes 0).
     let result: ReturnType<typeof redactAndCap> | undefined;
     const { ratio } = expectLinearScaling((length) => {
       const input = "a".repeat(length);
       return () => { result = redactAndCap(input, TURN_TEXT_LIMIT); };
-    }, { n: 200_000, label: "redactAndCap on a very long input" });
+    }, { n: 200_000, unitBytes: 0, label: "redactAndCap on a very long input" });
     // The work is flat above the ceiling (ratio near 1); linear growth with the input would give about 8.
     expect(ratio).toBeLessThan(3);
     expect(result?.truncated).toBe(true);
@@ -550,14 +550,14 @@ describe("secret redaction, fix round 3", () => {
   });
 
   it("redactArguments scales linearly for a long argv array and many keys", () => {
-    // N = 6,250 argv items and 2,500 keys; 8N = 50,000 and 20,000 (the old largest size).
+    // N = 1,000 argv items and 400 keys; 8N = 8,000 and 3,200 (about 24 bytes per unit, so 8N stays under 256 KiB and stays in CPU cache).
     expectLinearScaling((scale) => {
       const inputs = [
         Array.from({ length: scale }, () => "-p"),
         Object.fromEntries(Array.from({ length: scale * 0.4 }, (_, i) => [`key${i}`, `password=x${i}`])),
       ] as const;
       return () => { for (const value of inputs) redactArguments(value); };
-    }, { n: 6_250, label: "redactArguments on a long argv array and many keys" });
+    }, { n: 1_000, unitBytes: 24, label: "redactArguments on a long argv array and many keys" });
   });
 
   it("redactAndCap keeps content when the text past the ceiling has no whitespace", () => {

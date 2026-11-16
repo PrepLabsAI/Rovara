@@ -175,6 +175,7 @@ describe("import graph and declared selection", () => {
     expect(result).toMatchObject({ mode: "selected", tests: ["tests/test_m1.py::test_a", "tests/test_m2.py::test_a"], selection: { method: "declared", selected: 2 } });
   });
   it("builds and selects a large graph with linear scaling", () => {
+    // N is small (125 files, about 250 bytes each with the graph) so the 8N input stays at or under 256 KiB and stays in CPU cache.
     expectLinearScaling((n) => {
       const many = Array.from({ length: n }, (_, index) => ({ path: `m${String(index)}.py`, text: index === 0 ? "" : `import m${String(index - 1)}\n` }));
       const inventory = many.map((file) => `${file.path}::t`);
@@ -182,7 +183,7 @@ describe("import graph and declared selection", () => {
         const graph = buildImportGraph(many);
         selectTests(input({ config: { method: "import_graph", alwaysRun: [], fullSuiteOn: [] }, importGraph: graph, coverageMap: undefined, inventory, changes: [{ path: "m0.py", status: "modified" }] }));
       };
-    }, { n: 375, k: 8, maxRatio: 24, label: "buildImportGraph and selectTests on a long chain" });
+    }, { n: 125, k: 8, maxRatio: 24, unitBytes: 250, label: "buildImportGraph and selectTests on a long chain" });
   });
   it("walks a changed source's reverse dependency chain with linear scaling", () => {
     expectLinearScaling((n) => {
@@ -194,7 +195,7 @@ describe("import graph and declared selection", () => {
         const result = selectTests(input({ config: { method: "import_graph", alwaysRun: [], fullSuiteOn: [] }, importGraph: graph, coverageMap: undefined, inventory, changes: [{ path: "m0.py", status: "modified" }] }));
         expect(result).toMatchObject({ mode: "selected", tests: ["tests/test_0.py::t"] });
       };
-    }, { n: 375, k: 8, maxRatio: 24, label: "selectTests reverse closure on a long chain with separate tests" });
+    }, { n: 125, k: 8, maxRatio: 24, unitBytes: 250, label: "selectTests reverse closure on a long chain with separate tests" });
   });
 });
 

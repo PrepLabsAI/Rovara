@@ -106,10 +106,10 @@ it("unparsable syntax and console aliases fail as unclassifiable", () => {
 it("one total byte/file/time budget; a large input remains bounded", () => {
   const source = 'console.log("x");\n'.repeat(20_000);
   expect(scan([{ path: "large.ts", source }])).toEqual({ "large.ts": 20_000 });
-  // The scan's cost must not grow faster than the source (2,500 -> 20,000 calls, the original size).
+  // The scan's cost must not grow faster than the source (1,500 -> 12,000 calls of 18 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 20,000 calls are scanned once above).
   let counted: Record<string, number> = {};
-  expectLinearScaling((lines) => { const sources = [{ path: "large.ts", source: 'console.log("x");\n'.repeat(lines) }]; return () => { counted = scan(sources); }; }, { n: 2_500, label: "company log scan by source size" });
-  expect(counted).toEqual({ "large.ts": 20_000 });
+  expectLinearScaling((lines) => { const sources = [{ path: "large.ts", source: 'console.log("x");\n'.repeat(lines) }]; return () => { counted = scan(sources); }; }, { n: 1_500, unitBytes: 18, label: "company log scan by source size" });
+  expect(counted).toEqual({ "large.ts": 12_000 });
   expect(() => scan(Array.from({ length: MAX_FILES + 1 }, () => ({ path: "x.ts", source: "" })))).toThrow("unclassifiable");
   expect(() => scan([{ path: "x.ts", source: " ".repeat(MAX_BYTES / 2 + 1) }, { path: "y.ts", source: " ".repeat(MAX_BYTES / 2 + 1) }])).toThrow("unclassifiable");
   let now = 0; expect(() => scan([{ path: "x.ts", source: "" }], () => { now += MAX_MS + 1; return now; })).toThrow("unclassifiable");

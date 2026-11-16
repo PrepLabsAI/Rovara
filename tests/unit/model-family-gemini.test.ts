@@ -128,13 +128,13 @@ describe("routeGeminiRequest: every path form of the redirect check", () => {
   it("is safe against hostile keys and is fast on huge input", () => {
     expect(route("/v1beta/models/m:generateContent", { query: "__proto__=x&constructor=y&alt=sse", headers: JSON.parse(`{"__proto__":"x","x-goog-api-key":"k"}`) as Record<string, string> })).toMatchObject({ ok: true });
     expect(({} as Record<string, unknown>).x).toBeUndefined();
-    // Scaling check: refusing a huge path or query must not cost more as the input grows (the largest is the old 1,000,000-character path and 1,500,000-character query).
+    // Scaling check: refusing a huge path or query must not cost more as the input grows (N is small so the 8N input stays at or under 256 KiB and stays in CPU cache; the old 1,000,000-character path and 1,500,000-character query are checked once at full size below).
     let results: unknown[] = [];
     const { ratio } = expectLinearScaling((size) => {
       const path = "/v1beta/models/" + "a".repeat(size);
       const query = "a=".concat("%41".repeat(size / 2));
       return () => { results = [route(path), route("/v1beta/models/m:generateContent", { query })]; };
-    }, { n: 125_000, label: "routeGeminiRequest on a huge path and query" });
+    }, { n: 12_000, unitBytes: 2.5, label: "routeGeminiRequest on a huge path and query" });
     // Both are refused before they are read, so the work is flat (ratio near 1); work that reads them would grow about 8 times.
     expect(ratio).toBeLessThan(3);
     expect(results[0]).toMatchObject({ ok: false });
@@ -211,11 +211,11 @@ describe("Gemini response builders", () => {
   });
   it("is bounded: a huge reply grows the chunk size instead of the chunk count, and one past the cap is refused", () => {
     const big = "x".repeat(MODEL_REPLY_MAX_CHARS);
-    // Scaling check: building the chunks and the body must grow no faster than the reply (the largest is the cap, 1,000,000 characters).
+    // Scaling check: building the chunks and the body must grow no faster than the reply (N is small so the 8N input stays at or under 256 KiB and stays in CPU cache; the cap, 1,000,000 characters, is built once at full size below).
     expectLinearScaling((size) => {
       const text = "x".repeat(size);
       return () => geminiSseBody(buildGeminiStreamChunks(reply({ text }), { model: "m", seed: "s", chunkChars: 1 }), "lf");
-    }, { n: MODEL_REPLY_MAX_CHARS / 8, label: "a huge Gemini stream reply" });
+    }, { n: 32_000, label: "a huge Gemini stream reply" });
     const chunks = buildGeminiStreamChunks(reply({ text: big }), { model: "m", seed: "s", chunkChars: 1 });
     expect(chunks.length).toBeLessThanOrEqual(20_000);
     expect(geminiSseBody(chunks, "lf").length).toBeGreaterThan(MODEL_REPLY_MAX_CHARS);
@@ -349,12 +349,12 @@ describe("serveModelRequest: the one entry the helper calls", () => {
     expect(serve("/p/gemini/v1beta/models/m:generateContent", { body: "x".repeat(1024 * 1024) }).status).toBe(200);
     expect(serve("/p/gemini/v1beta/models/m:countTokens", { body: "x".repeat(400) }).body).toContain("totalTokens");
     expect(serve("/p/gemini/v1beta/models/m:embedContent").status).toBe(501);
-    // Scaling check: a huge path is refused without being read (the largest is the old 1,000,000 characters), so the work is flat (ratio near 1); work that reads it would grow about 8 times.
+    // Scaling check: a huge path is refused without being read (N is small so the 8N input stays in CPU cache; the old 1,000,000 characters is checked once at full size below), so the work is flat (ratio near 1); work that reads it would grow about 8 times.
     let served: { status: number } | undefined;
     const { ratio } = expectLinearScaling((size) => {
       const path = "/p/gemini/" + "a".repeat(size);
       return () => { served = serve(path); };
-    }, { n: 125_000, label: "serveModelRequest on a huge path" });
+    }, { n: 32_000, label: "serveModelRequest on a huge path" });
     expect(ratio).toBeLessThan(3);
     expect(served?.status).toBeGreaterThanOrEqual(400);
     expect(serve("/p/gemini/" + "a".repeat(1_000_000)).status).toBeGreaterThanOrEqual(400);

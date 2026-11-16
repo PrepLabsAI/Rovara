@@ -51,7 +51,7 @@ describe("agent replies agreement", () => {
       const realRun = run(names.map((test) => ({ checkId, test, result: "passed" })));
       const testProof = proof(names.map(item));
       return () => { outcomes.set(count, status(realRun, testProof)); };
-    }, { n: 25, label: "agent replies: items up to the 200 bound" });
+    }, { n: 25, unitBytes: 800, label: "agent replies: items up to the 200 bound" });
     expect([outcomes.get(25), outcomes.get(200)]).toEqual(["confirmed", "confirmed"]);
   });
   it("refuses a huge proof array on its length alone, without visiting any element", () => {
@@ -65,7 +65,7 @@ describe("agent replies agreement", () => {
     expectLinearScaling((count) => {
       const testProof = proof(huge(count));
       return () => { verdicts.set(count, status(run(), testProof)); };
-    }, { n: 2_500, label: "agent replies: huge proof array refused" });
+    }, { n: 2_500, unitBytes: 0, label: "agent replies: huge proof array refused" }); // N cannot shrink below the 200-item bound the refusal tests; no element is visited, so no input that grows with n is read (unitBytes 0)
     expect([verdicts.get(2_500), verdicts.get(20_000)]).toEqual(["unconfirmed", "unconfirmed"]);
   });
 });

@@ -334,28 +334,31 @@ describe("requests that are not served", () => {
 
 describe("speed and bounds", () => {
   it("a 1 MB request is read fast", () => {
-    // The cost grows linearly with the request, not faster: 20k then 160k repeats (the last is about 1 MB).
+    // The cost grows linearly with the request, not faster: 5k then 40k repeats of 6 bytes (the 8N input stays at or under 256 KiB so it stays in CPU cache). The 1 MB request (160k repeats) is served once, un-timed, below.
     const results = new Map<number, ServeRepliesResult>();
+    const set = stamp("openai_compatible", [{ id: "a", match: { promptContains: "paris" } }]);
     expectLinearScaling((repeats) => {
       const big = { model: "m", messages: [{ role: "user", content: "paris ".repeat(repeats) }] };
-      const set = stamp("openai_compatible", [{ id: "a", match: { promptContains: "paris" } }]);
       const request = post("/p/openai/v1/chat/completions", big);
       return () => { results.set(repeats, serve(request, set)); };
-    }, { n: 20_000, label: "model serve: a 1 MB request" });
-    expect([results.get(20_000)!.kind, results.get(160_000)!.kind]).toEqual(["scripted", "scripted"]);
+    }, { n: 5_000, unitBytes: 6, label: "model serve: a 1 MB request" });
     const big = { model: "m", messages: [{ role: "user", content: "paris ".repeat(160_000) }] };
+    results.set(160_000, serve(post("/p/openai/v1/chat/completions", big), set));
+    expect([results.get(5_000)!.kind, results.get(40_000)!.kind, results.get(160_000)!.kind]).toEqual(["scripted", "scripted", "scripted"]);
     const facts = readModelRequestFacts(JSON.stringify(big));
     expect(facts.promptText?.length).toBeGreaterThan(900_000);
   }, 60_000);
   it("a 2,000-reply set is searched fast", () => {
-    // The last reply matches, so the whole set is searched: the cost grows linearly with the set, not faster.
+    // The last reply matches, so the whole set is searched: the cost grows linearly with the set, not faster (125, then 1,000 replies of about 250 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 2,000-reply set is searched once, un-timed).
     const replyIds = new Map<number, string | undefined>();
-    expectLinearScaling((count) => {
+    const searchLast = (count: number) => {
       const set = stamp("openai_compatible", Array.from({ length: count }, (_, index) => ({ id: `r${String(index)}`, match: { promptContains: `#${String(index)}#` } })));
       const request = post("/p/openai/v1/chat/completions", { model: "m", messages: [{ role: "user", content: `#${String(count - 1)}#` }] });
       return () => { replyIds.set(count, serve(request, set).replyId); };
-    }, { n: 250, label: "model serve: a 2,000-reply set" });
-    expect([replyIds.get(250), replyIds.get(2000)]).toEqual(["r249", "r1999"]);
+    };
+    expectLinearScaling(searchLast, { n: 125, unitBytes: 250, label: "model serve: a 2,000-reply set" });
+    searchLast(2000)();
+    expect([replyIds.get(125), replyIds.get(1000), replyIds.get(2000)]).toEqual(["r124", "r999", "r1999"]);
   }, 60_000);
 });
 
@@ -377,12 +380,12 @@ describe("M3: embedding requests are capped before anything is built", () => {
         { request: post("/p/openai/v1/embeddings", { model: "m", input: texts, dimensions: 4096 }), set: openaiSet },
       ];
     };
-    // The refusal does not build anything from the request: the cost does not grow faster than the number of texts (256, then 2,048).
+    // The refusal does not build anything from the request: the cost does not grow faster than the number of texts (256, then 2,048; about 30 bytes a text across the three requests, so the 8N input is far under 256 KiB).
     let answers: ServeRepliesResult[] = [];
     expectLinearScaling((count) => {
       const requests = requestsFor(count);
       return () => { answers = requests.map(({ request, set }) => serve(request, set)); };
-    }, { n: 256, label: "model serve: embedding refusal" });
+    }, { n: 256, unitBytes: 30, label: "model serve: embedding refusal" });
     for (const answer of answers) refused(answer);
     // One full-size pass: nothing big is built.
     const full = requestsFor(2048);

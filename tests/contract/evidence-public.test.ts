@@ -404,13 +404,14 @@ describe("bounded and fast", () => {
       return pack;
     };
     let out: ReturnType<typeof renderEvidencePublic> | undefined;
-    let largest = "";
-    // 500 checks, then 4,000 (about 1 MB): linear work grows about 8x.
+    // Linear work grows about 8x. A check is about 300 bytes with its notes, so N stays small (8N under 256 KiB, in CPU cache); the full 4,000 checks (about 1 MB) is rendered once below.
     expectLinearScaling((checks) => {
       const pack = packOf(checks);
-      largest = JSON.stringify(pack);
       return () => { out = renderEvidencePublic(pack as unknown as EvidencePackV2); };
-    }, { n: 500, label: "rendering a large evidence pack" });
+    }, { n: 100, unitBytes: 300, label: "rendering a large evidence pack" });
+    const fullPack = packOf(4_000);
+    const largest = JSON.stringify(fullPack);
+    out = renderEvidencePublic(fullPack as unknown as EvidencePackV2);
     expect(largest.length).toBeGreaterThan(1_000_000);
     if (out === undefined) throw new Error("no render");
     expect(out.text.length).toBeLessThan(3_000);
@@ -420,20 +421,23 @@ describe("bounded and fast", () => {
   });
 
   it("a 3.5 MB stored pack read as text is rendered in time that grows no faster than its size too", () => {
-    let textOf = "";
-    let out = undefined as ReturnType<typeof renderEvidencePublic> | undefined;
-    // 375 dependencies and 25 notes, then 3,000 and 200: linear work grows about 8x.
-    expectLinearScaling((dependencies) => {
+    const textFor = (dependencies: number) => {
       const pack = clone(v2Pack()) as unknown as Record<string, any>;
       pack.notTested = Array.from({ length: dependencies / 15 }, () => ({ what: "w".repeat(300), reason: "r".repeat(100) }));
       pack.dependencies = Array.from({ length: dependencies }, (_, index) => ({ name: `dep${String(index)}`.padEnd(80, "x"), kind: "http", backing: "fake", label: "real", trust: "real" }));
-      const text = JSON.stringify(pack);
-      textOf = text;
-      return () => {
-        const read = readEvidencePackText(text);
-        out = read.status === "v2" ? renderEvidencePublic(read.pack, { newer: read.newer }) : undefined;
-      };
-    }, { n: 375, label: "reading and rendering a large stored evidence pack" });
+      return JSON.stringify(pack);
+    };
+    const readAndRender = (text: string) => {
+      const read = readEvidencePackText(text);
+      return read.status === "v2" ? renderEvidencePublic(read.pack, { newer: read.newer }) : undefined;
+    };
+    // Linear work grows about 8x. A dependency is about 160 bytes with its notes, so N stays small (8N under 256 KiB, in CPU cache); the full 3,000 dependencies is read and rendered once below.
+    expectLinearScaling((dependencies) => {
+      const text = textFor(dependencies);
+      return () => readAndRender(text);
+    }, { n: 195, unitBytes: 160, label: "reading and rendering a large stored evidence pack" });
+    const textOf = textFor(3_000);
+    const out = readAndRender(textOf);
     expect(textOf.length).toBeGreaterThan(300_000);
     expect(out).toBeDefined();
     expect(out!.text.length).toBeLessThan(3_000);
