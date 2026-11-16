@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // FIX-0518 review fixes (Opus review of #552): a setup host request cannot bring a model host back, the opt-out line does not change a verdict, evidence reads the state the machine was created with.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -52,7 +53,7 @@ describe("the setup agent cannot ask for a model host back (M1)", () => {
     const taskId = randomUUID();
     const workspaceId = randomUUID();
     await store.put({ item: { ...taskRow(taskId), workspaceId } });
-    await store.put({ item: { ...taskPointerKey(workspaceId), taskId } });
+    await store.put({ item: { ...taskPointerKey(T1_COMPANY, workspaceId), taskId } });
     const operation = { kind: "task", workflowMode: SETUP_AGENT_WORKFLOW_MODE, status: "RUNNING", workspaceId, companyId: orgId };
     const deps = (list?: (project: string) => readonly string[]) => ({ store, companyId: orgId, now: () => Date.parse("2026-11-13T12:00:00Z"), installDomains: () => ["api.openai.com", "*.openai.com"], ...(list === undefined ? {} : { sandboxDenied: list }) });
     const ask = (host: string, list?: (project: string) => readonly string[]) => handleSetupAgentCallback(deps(list), operation, { kind: "host", host });

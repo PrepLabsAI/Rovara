@@ -10,7 +10,7 @@ import {
   CATALOG_UNREADABLE, MAX_CATALOG_PAGES, MAX_PROJECTS_PER_PAGE, NOT_A_COMPANY_REPOSITORY, SYSTEM_SCOPE_REFUSED,
   brokerCoreCodeHost, companyRepositoriesFromStore, companyScopedGitHubProvider, githubRepositoryKey,
 } from "../../packages/broker/src/aws/core-code-host.js";
-import { BROKER_CORE_NOT_CONFIGURED, BROKER_CORE_OWED, brokerCoreModuleDeps } from "../../packages/broker/src/aws/core-engine-root.js";
+import { BROKER_CORE_NOT_CONFIGURED, BROKER_CORE_OWED, brokerCoreModuleDeps, type BrokerCoreModuleParts } from "../../packages/broker/src/aws/core-engine-root.js";
 import { codeAdapterModules, owedPoints } from "../../packages/broker/src/core-host/code-modules.js";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { githubActionsCheckRunner } from "../../packages/broker/src/plugins/check-runner/github-actions/index.js";
@@ -355,12 +355,14 @@ describe("the core's code host in the broker's adapter inputs", () => {
     expect(owedPoints({ checkRunner: { githubActions: world.githubActions } }).map((owed) => owed.point)).not.toContain("check-runner");
   });
 
-  it("the broker's refusal names only what is still owed once the code host is given; without it, all three as before", () => {
-    const given = (() => { try { brokerCoreModuleDeps({}, { codeHost: () => { throw new Error("not built while other inputs are owed"); } }); } catch (error) { return (error as Error).message; } return ""; })();
-    expect(given.startsWith(BROKER_CORE_NOT_CONFIGURED)).toBe(true);
-    expect(given).toContain(BROKER_CORE_OWED.queue);
-    expect(given).toContain(BROKER_CORE_OWED.workerMachines);
-    expect(given).not.toContain(BROKER_CORE_OWED.codeHost);
-    expect(() => brokerCoreModuleDeps({})).toThrow(`${BROKER_CORE_NOT_CONFIGURED}: it needs ${BROKER_CORE_OWED.queue}, ${BROKER_CORE_OWED.codeHost}, ${BROKER_CORE_OWED.workerMachines}`);
+  it("names the missing adapter builders before validating the composed queue", () => {
+    const workers: NonNullable<BrokerCoreModuleParts["workerMachines"]> = () => ({}) as ReturnType<NonNullable<BrokerCoreModuleParts["workerMachines"]>>;
+    const codeHost: NonNullable<BrokerCoreModuleParts["codeHost"]> = () => ({}) as ReturnType<NonNullable<BrokerCoreModuleParts["codeHost"]>>;
+    expect(() => brokerCoreModuleDeps({}, { workerMachines: workers })).toThrow(`${BROKER_CORE_NOT_CONFIGURED}: it needs ${BROKER_CORE_OWED.codeHost}`);
+
+    const missingWorkers = (() => { try { brokerCoreModuleDeps({}, { codeHost: () => { throw new Error("not built while other inputs are owed"); } }); } catch (error) { return (error as Error).message; } return ""; })();
+    expect(missingWorkers).toBe(`${BROKER_CORE_NOT_CONFIGURED}: it needs ${BROKER_CORE_OWED.workerMachines}`);
+
+    expect(() => brokerCoreModuleDeps({}, { codeHost, workerMachines: workers })).toThrow("the broker needs valid core dispatch queue URLs");
   });
 });

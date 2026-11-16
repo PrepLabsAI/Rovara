@@ -1,10 +1,11 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Port lane P2, review M2: a project whose external check names a provider nothing in this release runs is refused at task start with a clear sentence, before any machine; and if one still gets to the
 // dispatcher the operation FAILS with the sentence instead of throwing and being redelivered until its attempts run out.
 import { describe, expect, it } from "vitest";
 import { UNRUNNABLE_EXTERNAL_CHECK_MESSAGE } from "@agentx/contracts";
 import { createTaskFlow } from "../../packages/broker/src/core/task-flow/index.js";
 import type { ProjectRevision } from "../../packages/broker/src/core/task-flow/deps.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const OTHER = { provider: "examplebuild", name: "q", reference: "pipeline/1", timeoutMinutes: 10 };
@@ -49,7 +50,7 @@ describe("an external check nothing runs", () => {
       h.clock.advance(70);
     }
     expect(delivered).toBe(0);
-    const operation = (await h.store.get(operationKey(task.workspaceId, (await h.store.query({ pk: `WORKSPACE#${task.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items[0]!["id"] as string)))!;
+    const operation = (await h.store.get(operationKey(T1_COMPANY, task.workspaceId, (await h.store.query({ pk: workspacePartition(T1_COMPANY, task.workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } })).items[0]!["id"] as string)))!;
     expect(operation["status"]).toBe("FAILED");
     expect(JSON.stringify(operation)).toContain(UNRUNNABLE_EXTERNAL_CHECK_MESSAGE);
     // Nothing is left to redeliver.

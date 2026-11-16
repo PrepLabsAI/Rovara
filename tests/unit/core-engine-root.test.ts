@@ -2,6 +2,9 @@
 // company is membership, never a claim; the task access re-reads live membership and keeps the broker's project grant rule; the stream hook finds only outbox inserts.
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
+import type { CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
   brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
@@ -44,6 +47,20 @@ function rootInputs(env: NodeJS.ProcessEnv, client: { send(command: unknown): Pr
 }
 
 describe("the broker's core root, switch off (the default)", () => {
+  it("reads no core setting while off and not draining (CORE_ENGINE_BROKER_WIRED), and reads them when on or draining", async () => {
+    const watched = ["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_TASK_CAP_USD", "ROVARA_CORE_COMPANY_DAY_CAP_USD", "ROVARA_CORE_LESSONS", "ROVARA_CORE_AGENT_MODEL_CHOICE"];
+    const reads = (base: NodeJS.ProcessEnv) => {
+      const seen = new Set<string>();
+      const env = new Proxy({ ...base }, { get: (target, key) => { if (typeof key === "string" && watched.includes(key)) seen.add(key); return target[key as string]; } });
+      createBrokerCoreRoot(rootInputs(env, fakeTables().client, { codeModules: () => brokerCoreModuleDeps({}) }));
+      return [...seen].sort();
+    };
+    for (const env of [{}, { ROVARA_CORE_ENGINE: "off" }, { ROVARA_CORE_ENGINE: "typo" }]) expect(reads({ ...env, ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }), JSON.stringify(env)).toEqual([]);
+    expect(reads({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toEqual(expect.arrayContaining(["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_LESSONS"]));
+    expect(reads({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toEqual(expect.arrayContaining(["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_LESSONS"]));
+    expect(reads({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_AGENT_MODEL_CHOICE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toContain("ROVARA_CORE_AGENT_MODEL_CHOICE");
+  });
+
   it("builds nothing, reads nothing and gives the developer routes no core entry", async () => {
     const tables = fakeTables();
     const codeModules = vi.fn(() => brokerCoreModuleDeps({}));
@@ -380,4 +397,85 @@ describe("the broker core dispatch queue piece (L1a)", () => {
   it("keeps the complete broker dependency builder refusing until L6 composes the pieces", () => {
     expect(() => brokerCoreModuleDeps({ CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl })).toThrow(BROKER_CORE_NOT_CONFIGURED);
   });
+});
+
+it("composes the broker adapters lazily and preserves the L1c builder object including brokerOnly", async () => {
+  const unused = async (): Promise<never> => { throw new Error("composition does not invoke adapters"); };
+  const machines: NonNullable<CodeModuleDeps["workerMachines"]> = {
+    brokerOnly: true, sessions: { get: unused, ensureSession: unused, deleteSession: unused, claimStop: unused, markStopped: unused },
+    companyOfWorkspace: unused, binding: unused, stopInstance: unused, sign: unused, post: unused, ping: unused,
+  };
+  const codeHost: Pick<CodeModuleDeps, "codeHost"> = {
+    codeHost: { provider: new GitHubFixtureProvider(new FakeHostModel({ url: "https://github.com/example/demo.git", id: "1", fullName: "example/demo" })), options: { credentialRef: "app" } },
+  };
+  const workerMachines = vi.fn(() => machines);
+  const host = vi.fn(() => codeHost);
+  const env = { STATE_TABLE_NAME: STATE, ARTIFACT_BUCKET_NAME: "artifacts", CORE_DISPATCH_QUEUE_URL: "https://queue.example/core", CORE_DISPATCH_DEAD_LETTER_URL: "https://queue.example/dead" };
+  const objects: CodeModuleDeps["objects"] = { bucket: "artifacts", client: { send: unused } };
+  const secrets = { namePrefix: "", clientFor: () => ({ send: async () => ({}) }) };
+  const built = brokerCoreModuleDeps(env, { codeHost: host, workerMachines, objects, secrets });
+  expect(built.workerMachines).toBe(machines);
+  expect(built.objects).toBe(objects);
+  expect(built.secrets).toBe(secrets);
+  expect(built.codeHost).toBe(codeHost.codeHost);
+  expect(host).toHaveBeenCalledTimes(1);
+  expect(workerMachines).toHaveBeenCalledTimes(1);
+  expect(built.queue).toEqual(brokerCoreDispatchQueue(env));
+});
+
+it("reads no new wiring environment and answers no new routes with the switch off", async () => {
+  const env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "off" };
+  for (const key of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "TASK_TOKEN_KEY_ARN", "ROVARA_CORE_MODEL_GATEWAY_URL", "ROVARA_CORE_AGENT_MODEL", "ROVARA_CORE_AGENT_MODEL_CHOICE", "ROVARA_POLICY_HOOK", "SLACK_MEMBER_WORKSPACE_LIMIT", "SLACK_ORGANIZATION_WORKSPACE_LIMIT"]) {
+    Object.defineProperty(env, key, { get() { throw new Error(`unexpected read: ${key}`); } });
+  }
+  const tables = fakeTables();
+  const root = createBrokerCoreRoot(rootInputs(env, tables.client));
+  expect(root.policyHook).toBeUndefined();
+  for (const path of ["/v1/internal/model-access", "/v1/internal/model-access?slot=reviewer", "/v1/dev/tasks/id/continue"]) {
+    expect(await root.callback({ method: "GET", path, headers: {} })).toBeUndefined();
+  }
+  expect(root.coreTasks).toBeUndefined();
+  expect(root.coreApp).toBeUndefined();
+  expect(tables.reads).toEqual([]);
+});
+
+it("uses live membership plus the existing fresh PEOPLE proof for owner and co-owner acts, fencing its revision", async () => {
+  const { MemoryDocumentStore } = await import("../../packages/broker/src/ports/memory-document-store.js");
+  const { taskOwnerKey } = await import("../../packages/broker/src/developer/task-records.js");
+  const store = new MemoryDocumentStore();
+  const a = "a".repeat(64), b = "b".repeat(64), foreign = "c".repeat(64), taskId = "11111111-1111-4111-8111-111111111111";
+  const task = { taskId, developerId: a, project: "payments", ownerKey: taskOwnerKey(a, taskId) };
+  await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", ...task, companyId: ORG } });
+  const people = { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 7, orphaned: false,
+    people: [a, b].map((developerId, i) => ({ developerId, slackUserId: `U00${i}`, name: `Person ${i}`, role: "owner" })) };
+  await store.put({ item: people });
+  const check = vi.fn(async (_task, developerId: string) => ({ subject: { developerId, slackUserId: developerId === a ? "U000" : "U001" }, identity: { developerId, slackUserId: developerId === a ? "U000" : "U001", name: "Member", method: "slack", issuer: "https://slack.com", subject: "person" }, eligible: true, channelMember: true }));
+  const access = hostedTaskAccess({ companyId: ORG, membershipOf: async (id) => ({ companyId: id === foreign ? OTHER : ORG, role: "member" }), projectGrant: async () => true, storage: async () => store,
+    people: { documentClient: { send: async (command) => ({ Item: await store.get((command as GetCommand).input.Key as { pk: string; sk: string }) }) }, tableName: STATE, now: Date.now, checkTaskPerson: check as never } });
+  const principal = (personId: string): Principal => ({ companyId: ORG, personId, displayName: "Member", roles: ["owner"], provider: "test" });
+  const acting = await access.ownerActing!(principal(b), task);
+  expect(acting).toMatchObject({ actorId: taskOwnerKey(b, taskId), authority: { ownerIds: [taskOwnerKey(a, taskId), taskOwnerKey(b, taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 7 } }] });
+  expect(check).toHaveBeenCalled();
+  expect(await access.canAct(principal(b), task)).toBe(true);
+  expect(await access.ownerActing!(principal(foreign), task)).toBeUndefined();
+  await store.delete({ key: { pk: `DEVTASK#${taskId}`, sk: "PEOPLE" } });
+  expect(await access.ownerActing!(principal(b), task)).toBeUndefined();
+  expect(await access.ownerActing!(principal(a), task)).toMatchObject({ actorId: task.ownerKey, items: [{ condition: { op: "notExists", path: ["pk"] } }] });
+});
+
+it("shares one resolved hosted-hook setting with the developer API and never falls back when that setting is invalid", () => {
+  let reads = 0;
+  const settings = { address: "https://hook.example/answer", jwks: "https://hook.example/keys", thumbprints: ["A".repeat(43)] };
+  const env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG };
+  Object.defineProperty(env, "ROVARA_POLICY_HOOK", { get() { reads++; return JSON.stringify(settings); } });
+  const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client));
+  const config = withCoreRoutes({}, root) as { policyHook: NonNullable<typeof root.policyHook> };
+  expect(config.policyHook).toBe(root.policyHook);
+  expect(config.policyHook.settings).toEqual(settings);
+  expect(reads).toBe(1);
+  expect(() => config.policyHook.install).toThrow("the policy hook install is unavailable");
+  const invalid = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "invalid" }, fakeTables().client));
+  const refused = withCoreRoutes({}, invalid) as { policyHook: NonNullable<typeof invalid.policyHook> };
+  expect(refused.policyHook).toBeDefined();
+  expect(() => refused.policyHook.settings).toThrow("the policy hook settings are not readable");
 });

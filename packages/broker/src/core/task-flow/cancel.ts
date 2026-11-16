@@ -1,6 +1,6 @@
+import { workspaceKeys } from "./workspace-location.js";
 import { change, when } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, workspaceKey } from "./keys.js";
 import { askWorkerToFlush, endUnflushed } from "./money-stop.js";
 import { readTask } from "./reads.js";
 import { fromDocument, type OperationRecord, type WorkspaceRecord } from "./records.js";
@@ -12,13 +12,14 @@ import { iso } from "./support.js";
 export async function cancelTask(deps: TaskFlowDeps, taskId: string): Promise<{ nothingRunning: boolean; message?: string }> {
   const task = await readTask(deps, taskId);
   if (task === undefined || task.closedAt !== undefined) return { nothingRunning: true };
-  const workspace = fromDocument<WorkspaceRecord>(await deps.store.get(workspaceKey(task.workspaceId)));
+  const location = await workspaceKeys({ store: deps.store, companyId: task.companyId }, task.workspaceId);
+  const workspace = fromDocument<WorkspaceRecord>(await deps.store.get(location.workspaceKey));
   if (workspace === undefined || workspace.activeOperationId === null) return { nothingRunning: true };
-  const operation = fromDocument<OperationRecord>(await deps.store.get(operationKey(workspace.id, workspace.activeOperationId)));
+  const operation = fromDocument<OperationRecord>(await deps.store.get(location.operationKey(workspace.activeOperationId)));
   if (operation === undefined) return { nothingRunning: true };
   // The stop is asked for first, so the result that follows reads as a stop the flow asked for and not as the worker giving up on its own.
   await deps.store.update({
-    key: operationKey(workspace.id, operation.id), ops: [change.set("status", "CANCEL_REQUESTED"), change.set("updatedAt", iso(deps))],
+    key: location.operationKey(operation.id), ops: [change.set("status", "CANCEL_REQUESTED"), change.set("updatedAt", iso(deps))],
     condition: when.and(when.eq("fence", operation.fence), when.not(when.or(when.eq("status", "SUCCEEDED"), when.eq("status", "FAILED"), when.eq("status", "CANCELLED"), when.eq("status", "INTERRUPTED")))),
   });
   // A deployed install (money-stop.ts): the worker is asked to stop and send what it spent, and its end is waited for a bounded time, before the machine is stopped. A run whose end did not
@@ -31,7 +32,7 @@ export async function cancelTask(deps: TaskFlowDeps, taskId: string): Promise<{ 
   // A run that finished on its own while its worker was asked to stop (it SUCCEEDED or FAILED during the wait) was not stopped: its end already made the task's next move, which the
   // Stop does not undo.
   if (flushed === "flushed") {
-    const ended = fromDocument<OperationRecord>(await deps.store.get(operationKey(workspace.id, operation.id)));
+    const ended = fromDocument<OperationRecord>(await deps.store.get(location.operationKey(operation.id)));
     if (ended?.status === "SUCCEEDED" || ended?.status === "FAILED") return { nothingRunning: false };
   }
   // A workflow step that was stopped has nothing running: it waits for the owner's Retry.

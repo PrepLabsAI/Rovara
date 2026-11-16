@@ -654,7 +654,7 @@ describe("through the worker's egress gateway, with the worker's own client", ()
     const w = await world();
     const gateway = await throughGateway(w);
     const capability = w.capability();
-    const source = modelAccessSource({ controlPlaneUrl: gateway.url, capability });
+    const source = modelAccessSource({ controlPlaneUrl: gateway.url, capability, fallbackBaseUrl: `${gateway.url}${MODEL_PROXY_PREFIX}` });
     const access = await source();
     // What the worker holds: an address, a token and an expiry. The worker's process environment has no key either.
     expect(JSON.stringify(access)).not.toMatch(new RegExp(Object.values(w.keys).join("|"), "u"));
@@ -681,7 +681,7 @@ describe("through the worker's egress gateway, with the worker's own client", ()
   it("runs the worker's model library against OpenRouter's default Claude model in the chat shape, and the key never reaches the worker (L13)", async () => {
     const w = await world();
     const gateway = await throughGateway(w);
-    const source = modelAccessSource({ controlPlaneUrl: gateway.url, capability: w.capability() });
+    const source = modelAccessSource({ controlPlaneUrl: gateway.url, capability: w.capability(), fallbackBaseUrl: `${gateway.url}${MODEL_PROXY_PREFIX}` });
     const model = defaultModelOf("openrouter");
     const { route, workerRoute } = localRoute("openrouter", model);
     w.allowed.set(OPERATION, [route]);

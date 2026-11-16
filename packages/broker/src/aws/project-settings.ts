@@ -4,16 +4,17 @@ import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dyn
 import { z } from "zod";
 import {
   AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, PolicyRowsSchema, POLICY_FIELDS, PROJECT_CATALOG_PK, agentXError, projectCatalogKey, companyScoped, policyFieldPageOnly,
-  createRowsPolicySource, withPolicyHookValues, type PolicySource, type PolicyRows, type ResolvedPolicy,
+  createRowsPolicySource, withPolicyHookValues, type HostedPolicyHookSettings, type PolicySource, type PolicyRows, type ResolvedPolicy,
 } from "@agentx/contracts";
 import { freshStepUp } from "../core-host/step-up.js";
 import { createPolicyHookClient, policyHookValuesAsker, type PolicyHookClientOptions } from "../core/policy-hook/index.js";
+import { createHostedPolicyHookClient } from "../core/policy-hook/hosted.js";
 import { projectGrant } from "./admin-actions.js";
 import { Membership, boundedCompanyReads, membershipKey, recordInCompany, resolveCompany } from "./company-check.js";
 import type { DeveloperCaller, DeveloperRouteDependencies } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
-export type ProjectSettingsHook = Omit<PolicyHookClientOptions, "now" | "randomId" | "log">;
+export type ProjectSettingsHook = Omit<PolicyHookClientOptions, "now" | "randomId" | "log" | "settings"> & { settings: PolicyHookClientOptions["settings"] | HostedPolicyHookSettings };
 const revisionSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER - 1);
 const settingsSchema = z.object({
   companyId: OrgIdSchema, projectName: AgentXNameSchema, preset: z.enum(["lightweight", "balanced", "careful"]).optional(),
@@ -60,7 +61,9 @@ export function createProjectSettingsPolicySource(
   let policy: PolicySource = source;
   if (hook !== undefined) {
     try {
-      const client = createPolicyHookClient({ ...hook, now: deps.now });
+      const client = "jwks" in hook.settings
+        ? createHostedPolicyHookClient(hook.settings, hook.install, { ...hook, now: deps.now })
+        : createPolicyHookClient({ ...hook, settings: hook.settings, now: deps.now });
       policy = withPolicyHookValues(source, policyHookValuesAsker(client), { scopeOf: (asked) => asked.key === scope.key ? target : undefined, now: deps.now, graceMs: 0 });
     } catch { throw unavailable(); }
   }

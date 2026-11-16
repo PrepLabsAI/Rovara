@@ -1,3 +1,5 @@
+import { storedAgentModelChoice, STORED_MODEL_CHOICE_UNAVAILABLE } from "../../packages/broker/src/core-host/stored-agent-model-choice.js";
+import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 // DEC 243c / DEC 236j: a company's agents run on a model it chose from what the gateway offers it. The list is the gateway's (read per company, checked against the contract); a model not on it is never chosen
 // (a step already holding its choice keeps it); every route is the gateway's agent route under the model's own name; the default is the install's model while nothing is chosen. Two companies never see each other's list or choice.
 import { describe, expect, it } from "vitest";
@@ -325,5 +327,37 @@ describe("the broker root's companies", () => {
     expect(await b.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: DEFAULT } } });
     expect(await setBuild(choices.choiceFor(ORG_B)!, ORG_B, "zai.glm-5")).toMatchObject({ ok: false, code: "model_unavailable" });
     expect((await choices.choiceFor(ORG_B)!.offered()).map((entry) => entry.model)).toEqual(["claude-sonnet-5-5"]);
+  });
+});
+
+describe("broker-validated model choices stored on the company's existing model-policy row", () => {
+  it("uses a validated choice through the dispatcher without asking the offered-models route", async () => {
+    const w = world();
+    const choice = w.choiceFor(ORG_A);
+    await setBuild(choice, ORG_A, "zai.glm-5");
+    await choice.service().state();
+    const before = w.reader.asked.length;
+    const stored = storedAgentModelChoice({ store: w.store, companyId: ORG_A, now: () => 1_000_000 });
+    expect(await stored.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "zai.glm-5" } } });
+    expect(w.reader.asked).toHaveLength(before);
+    expect(await storedAgentModelChoice({ store: w.store, companyId: ORG_B, now: () => 1_000_000 }).choose({ stage: "build" })).toEqual({ ok: false, code: "MODEL_STALE", words: STORED_MODEL_CHOICE_UNAVAILABLE });
+  });
+
+  it.each(["expired", "future", "malformed", "other-company", "wrong-key", "revision-changed"])("refuses a %s snapshot with fixed words", async (bad) => {
+    const w = world();
+    await w.choiceFor(ORG_A).service().state();
+    const key = modelSelectionPolicyKey(ORG_A);
+    const row = (await w.store.get(key))!;
+    const snapshot = row["agentModelValidation"] as Record<string, unknown>;
+    // A genuinely expired, otherwise valid interval: the expiry guard alone must refuse it.
+    if (bad === "future") snapshot["validatedAt"] = 1_000_001;
+    if (bad === "malformed") snapshot["offered"] = { version: 1, models: [] };
+    if (bad === "other-company") row["orgId"] = ORG_B;
+    if (bad === "wrong-key") row["pk"] = modelSelectionPolicyKey(ORG_B).pk;
+    if (bad === "revision-changed") row["revision"] = 3;
+    await w.store.put({ item: { ...row, ...key } });
+    // Wrong key is represented by a faulty adapter response, not a legitimate write to another key.
+    const store = bad === "wrong-key" ? { get: async () => ({ ...row, pk: modelSelectionPolicyKey(ORG_B).pk }) } : w.store;
+    expect(await storedAgentModelChoice({ store, companyId: ORG_A, now: () => bad === "expired" ? 1_060_000 : 1_000_000 }).choose({ stage: "build" })).toEqual({ ok: false, code: "MODEL_STALE", words: STORED_MODEL_CHOICE_UNAVAILABLE });
   });
 });

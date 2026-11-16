@@ -240,7 +240,7 @@ describe("turn record export", () => {
   it("reads a workspace's project name from the state table", async () => {
     const send = vi.fn(async () => ({ Item: { projectName: "payments" } }));
     expect(await workspaceProjectReader({ send } as never, "state")(workspaceId)).toBe("payments");
-    expect((send.mock.calls[0] as unknown as [{ input: unknown }])[0].input).toEqual({ TableName: "state", Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } });
+    expect((send.mock.calls[0] as unknown as [{ input: unknown }])[0].input).toEqual({ TableName: "state", Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" }, ConsistentRead: true });
     const missing = vi.fn(async () => ({}));
     expect(await workspaceProjectReader({ send: missing } as never, "state")(workspaceId)).toBeUndefined();
   });

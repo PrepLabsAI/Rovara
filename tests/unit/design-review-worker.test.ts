@@ -201,9 +201,9 @@ describe("runDesignReview: model keys and tools", () => {
     const fetchStub = vi.fn(async (url: string) => {
       asked.push(url);
       const slot = new URL(url).searchParams.get("slot");
-      return new Response(JSON.stringify({ baseUrl: "http://proxy.invalid", apiKey: `key-for-${slot}`, expiresAt: Date.now() + 3_600_000 }), { status: 200 });
+      return new Response(JSON.stringify({ baseUrl: "https://proxy.invalid", apiKey: `key-for-${slot}`, expiresAt: Date.now() + 3_600_000 }), { status: 200 });
     }) as unknown as typeof fetch;
-    const runtimeFor = slotRuntimeFor({ controlPlaneUrl: "http://broker.invalid", capability: "c".repeat(64), proxyUrl: "http://proxy.invalid", binding, environment: {}, fetch: fetchStub });
+    const runtimeFor = slotRuntimeFor({ controlPlaneUrl: "http://broker.invalid", capability: "c".repeat(64), proxyUrl: "https://proxy.invalid", binding, environment: {}, fetch: fetchStub });
     const critic = runtimeFor({ purpose: "reviewer", keySlot: "slot-critic", model: { provider: "p", modelId: "strong" }, system: "s", tools: [] });
     expect(await critic.keyId!()).toBe(modelKeyIdOf("key-for-slot-critic"));
     expect(asked).toEqual(["http://broker.invalid/v1/internal/model-access?slot=slot-critic"]);
@@ -214,7 +214,7 @@ describe("runDesignReview: model keys and tools", () => {
 
   it("modelAccessSource without a slot asks the operation's own key, as before", async () => {
     const urls: string[] = [];
-    const fetchStub = (async (url: string) => { urls.push(url); return new Response(JSON.stringify({ baseUrl: "http://p.invalid", apiKey: "k", expiresAt: Date.now() + 3_600_000 })); }) as typeof fetch;
+    const fetchStub = (async (url: string) => { urls.push(url); return new Response(JSON.stringify({ baseUrl: "https://p.invalid", apiKey: "k", expiresAt: Date.now() + 3_600_000 })); }) as typeof fetch;
     await modelAccessSource({ controlPlaneUrl: "http://b.invalid/", capability: "c", fetch: fetchStub })();
     expect(urls).toEqual(["http://b.invalid/v1/internal/model-access"]);
   });

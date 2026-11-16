@@ -1,3 +1,5 @@
+import { OPERATION_SK_PREFIX } from "../task-flow/keys.js";
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Task-scoped, bounded reads. Unknown prior spend never becomes zero and permits another run.
 import { EVAL_ROUND_ARTIFACT, EVAL_ROUND_ARTIFACT_MAX_BYTES, EvalRequestSchema, readEvalRoundArtifact, type EvalRoundArtifact, type EvalRequest, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
@@ -91,12 +93,14 @@ export async function evalRequestForChecks(
   const artifacts = deps.artifacts;
   const requested = new Set<string>();
   const deadline = Date.now() + PROOF_READ_MAX_MS;
+  let located: ReturnType<typeof workspaceKeys> | undefined;
+  const location = (workspaceId: string) => located ??= workspaceKeys(deps, workspaceId);
   const actions: TestProofActions = {
     async operations(workspaceId) {
       const found: OperationFacts[] = []; let cursor: string | undefined; let pages = 0;
       do {
         if (++pages > 100 || Date.now() >= deadline) throw new Error("eval evidence unavailable");
-        const page = await deps.store.query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+        const page = await deps.store.query({ pk: (await location(workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
         if (page.items.length > 100 || found.length + page.items.length > OPERATIONS_INPUT_MAX) throw new Error("eval evidence unavailable");
         for (const row of page.items) {
           const dispatch = row["dispatch"];
@@ -112,7 +116,7 @@ export async function evalRequestForChecks(
     async artifacts(workspaceId, operationId) {
       // Only dispatched eval attempts can have usage to account for.
       if (!requested.has(operationId)) return [];
-      const row = await deps.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `ARTIFACT#${operationId}#${EVAL_ROUND_ARTIFACT}` });
+      const row = await deps.store.get({ pk: (await location(workspaceId)).workspaceKey.pk, sk: `ARTIFACT#${operationId}#${EVAL_ROUND_ARTIFACT}` });
       if (row === undefined) {
         if (requested.has(operationId)) throw new Error("eval evidence unavailable");
         return [];

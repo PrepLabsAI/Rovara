@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // a message to a running step reaches the worker through the machines port, with a capability that opens nothing, only to a worker that is up and lists the feature; anything else is a note.
  
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,7 +29,7 @@ async function world(options: { features?: readonly string[]; answers?: Array<Re
   // The workspace's task pointer: which task the workspace is working for now.
   if (options.pointerTask !== null) await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: "DEVELOPER_TASK", taskId: options.pointerTask ?? TASK } });
   const sleeps: number[] = [];
-  const deps: LiveSteerDeps = { store, machines, callbackSigningKey: KEY, sleep: async (ms) => { sleeps.push(ms); } };
+  const deps: LiveSteerDeps = { companyId: T1_COMPANY, store, machines, callbackSigningKey: KEY, sleep: async (ms) => { sleeps.push(ms); } };
   return { deps, machines, handle, sleeps, store };
 }
 const send = (deps: LiveSteerDeps, n = 1, text = "also log the request id", owner = true) => sendLiveSteer(deps, { taskId: TASK, messageId: msg(n), text, owner, developerId: "dev_owner" });

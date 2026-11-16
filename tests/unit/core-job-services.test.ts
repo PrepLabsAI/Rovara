@@ -187,3 +187,22 @@ it("shares the notification deadline across targets instead of resetting it per 
   await deliverAttention({ store: w.h.store, registry: w.registry, now: () => w.clock.ms, companyOf: async () => ORG, log: () => undefined }, { companyId: ORG, deadlineMs: w.clock.ms + 5 });
   expect(deliver).toHaveBeenCalledTimes(1);
 });
+
+it("shares one recovery-index read across company passes in a scheduled invocation", async () => {
+  const { host, ORG } = await import("../support/service-host.js");
+  const { createBrokerCoreServices, withSharedMergeRecovery } = await import("../../packages/broker/src/aws/core-job-services.js");
+  const { TASK_ID } = await import("../support/merge-world.js");
+  const { recoveryRowKey } = await import("../../packages/broker/src/core/merge/store.js");
+  const w = await host();
+  const otherId = "33333333-3333-4333-8333-333333333333";
+  const original = (await w.h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: "META" }))!;
+  await w.h.store.put({ item: { ...original, pk: `DEVTASK#${otherId}`, taskId: otherId, companyId: B } });
+  await w.h.store.put({ item: { ...recoveryRowKey(otherId), taskId: otherId, kind: "tracking", nextAttemptAt: 0 } });
+  const query = vi.spyOn(w.h.store, "query");
+  const services = [ORG, B].map((companyId) => createBrokerCoreServices({ companyId, flow: { ...w.h.flow, deps: { ...w.h.deps, companyId } }, registry: w.registry,
+    ciMode: async () => "their_ci_fix" as const, repository: w.world.host.repository, people: w.people, now: () => new Date(w.clock.ms) }));
+  await withSharedMergeRecovery(async () => {
+    for (const service of services) expect(await service["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 1 });
+  });
+  expect(query.mock.calls.filter(([input]) => input.pk === "WORKFLOW_MERGE_RECOVERY")).toHaveLength(1);
+});

@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The second review inside the task flow (the key rules), on the W0 fakes: the REVIEW start asks the service and records a plan on the operation and a `workflowSecondReviewer` field
 // on the job; the REVIEW end stores the opinion beside the workflow, never in it.
 //   1. A second review's result never clears or fails a first review.
@@ -50,7 +51,7 @@ async function seeded(mode: "off" | "shadow" | "on", options: { world?: Paramete
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, companyId: COMPANY, developerId: "local-owner", provider: "local-owner", developerName: "Local owner", client: "test", project: "payments", title: "Add a retry flag",
     workspaceId, ownerKey: "local-owner", conversationId: randomUUID(), startingRevision: 1, charge: plain(developerCharge({ companyId: COMPANY, developerId: "local-owner" })), shared: false, createdAt: NOW, updatedAt: NOW, workflow: plain(workflow),
   } });
-  await h.store.put({ item: { ...workspaceKey(workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: COMPANY, orgId: COMPANY, ownerKey: "local-owner", projectName: "payments", projectRevision: 1, status: "READY", activeOperationId: null, fence: 1,
+  await h.store.put({ item: { ...workspaceKey(T1_COMPANY, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: COMPANY, orgId: COMPANY, ownerKey: "local-owner", projectName: "payments", projectRevision: 1, status: "READY", activeOperationId: null, fence: 1,
     workspaceProject: "payments", workspaceCreatedAt: NOW, createdAt: NOW, updatedAt: NOW } });
   if (mode !== "off") {
     await world.review.apply(OWNER, { action: "choose", primary: GPT });
@@ -226,7 +227,7 @@ describe("key rule 3: `on` blocks, in the same write as the workflow's transitio
     await w.review.apply(OWNER, { action: "mode", scope: "company", mode: "off" });
     const waiting = workflowAt({ secondReviewBlock: first.workflow.secondReviewBlock, revision: first.workflow.revision + 1 });
     expect((await h.store.update({ key: taskKey(taskId), ops: [{ op: "set", path: ["workflow"], value: plain(waiting) }] })).applied).toBe(true);
-    expect((await h.store.update({ key: workspaceKey(workspaceId), ops: [{ op: "set", path: ["status"], value: "READY" }, { op: "set", path: ["activeOperationId"], value: null }] })).applied).toBe(true);
+    expect((await h.store.update({ key: workspaceKey(T1_COMPANY, workspaceId), ops: [{ op: "set", path: ["status"], value: "READY" }, { op: "set", path: ["activeOperationId"], value: null }] })).applied).toBe(true);
     expect(await startReview(h.deps, { taskId, workflowRevision: waiting.revision })).toBe("STARTED");
     const retry = (await workspaceOperations(h.deps, workspaceId)).filter((entry) => entry.workflowMode === "REVIEW").at(-1)!;
     expect(retry.secondReviewPlan).toBeUndefined();
@@ -384,7 +385,7 @@ describe("the allowance held for a second review", () => {
       const { h } = await seeded("on", { world: { admission: t.admission } });
       const operation = await started(h);
       expect(t.held.size, `${status}: held while it runs`).toBe(1);
-      if (status === "CANCELLED") await h.store.update({ key: operationKey(workspaceId, operation.id), ops: [{ op: "set", path: ["status"], value: "CANCEL_REQUESTED" }] });
+      if (status === "CANCELLED") await h.store.update({ key: operationKey(T1_COMPANY, workspaceId, operation.id), ops: [{ op: "set", path: ["status"], value: "CANCEL_REQUESTED" }] });
       await settle(h, operation, status);
       expect(t.held.size, `${status}: given back at the end`).toBe(0);
     }
@@ -429,7 +430,7 @@ describe("the allowance held for a second review", () => {
   it("is given back when the workspace is busy and the step waits (the start did not happen, the row will try again)", async () => {
     const t = holdingAdmission();
     const { h } = await seeded("on", { world: { admission: t.admission } });
-    await h.store.update({ key: workspaceKey(workspaceId), ops: [{ op: "set", path: ["activeOperationId"], value: "someone-else" }] });
+    await h.store.update({ key: workspaceKey(T1_COMPANY, workspaceId), ops: [{ op: "set", path: ["activeOperationId"], value: "someone-else" }] });
     expect(await startReview(h.deps, { taskId, workflowRevision: (await readTask(h.deps, taskId))!.workflow!.revision })).toBe("WAITING");
     expect(t.keys).toHaveLength(1);
     expect(t.held.size).toBe(0);
@@ -446,7 +447,7 @@ describe("the allowance held for a second review", () => {
     const b = await seeded("on", { world: { admission: repeated.admission } });
     const task = (await readTask(b.h.deps, taskId))!;
     // The request of this very step is already recorded: the start is the first one's duplicate.
-    await b.h.store.put({ item: { ...operationRequestKey("local-owner", workspaceId, workflowRequestId("agentx-auto-review", taskId, task.workflow!.revision, code.digest)), entityType: "IDEMPOTENCY", operationId: "earlier", payloadHash: "x" } });
+    await b.h.store.put({ item: { ...operationRequestKey(T1_COMPANY, "local-owner", workspaceId, workflowRequestId("agentx-auto-review", taskId, task.workflow!.revision, code.digest)), entityType: "IDEMPOTENCY", operationId: "earlier", payloadHash: "x" } });
     expect(await startReview(b.h.deps, { taskId, workflowRevision: task.workflow!.revision })).toBe("DUPLICATE");
     expect(repeated.keys).toHaveLength(1);
     expect(repeated.held.size).toBe(0);

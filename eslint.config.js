@@ -24,6 +24,7 @@ export default tseslint.config(
       "tests/fixtures/e2e-inferred-web-app/**",
       "tests/fixtures/orders-web-m13/**",
       "tests/fixtures/browser-evidence-app/**",
+      "tests/fixtures/device-evidence-app/**",
       "tests/fixtures/model-helper/scripted-run/**",
       "eslint.config.js",
     ],

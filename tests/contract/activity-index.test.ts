@@ -4,6 +4,7 @@
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { FailureIndexRecordSchema, UsageIndexRecordSchema } from "../../packages/contracts/src/index.js";
+import { IMPLICIT_COMPANY_ID } from "../../packages/contracts/src/index.js";
 import { indexActivity, type IndexStore } from "../../packages/broker/src/aws/activity-index.js";
 import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 
@@ -93,6 +94,7 @@ describe("the failure index (FR-038, A5)", () => {
     await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
     expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack", requester: { kind: "none" } });
   });
+
 });
 
 describe("the usage index (A5, A9)", () => {
@@ -116,6 +118,31 @@ describe("the usage index (A5, A9)", () => {
       requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" }, thread: "T0BSHLLUGBD/C0123456789/1695500000.000100",
       at: "2026-09-30T08:10:00.000Z", durationMs: 600_000, inputTokens: 1_050, outputTokens: 200, costUsd: 0.42,
     });
+  });
+
+  it("follows a company pointer for project and core operation requester", async () => {
+    const companyId = IMPLICIT_COMPANY_ID;
+    const scopedPk = `ORG#${companyId}#WORKSPACE#${WORKSPACE}`;
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId },
+      { pk: scopedPk, sk: "META", entityType: "WORKSPACE", companyId, orgId: companyId, projectName: "core-payments" },
+      { ...operation({ requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } }), pk: scopedPk },
+    ]);
+    await indexActivity([usageEvent(telemetry)], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "core-payments", requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } });
+  });
+
+  it("fails soft on a broken company pointer without reading the legacy operation", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const companyId = IMPLICIT_COMPANY_ID;
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId },
+      operation({ requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } }),
+    ]);
+    await indexActivity([usageEvent(telemetry)], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "unknown", requester: { kind: "none" } });
+    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
+    warn.mockRestore();
   });
 
   it("records a task's usage on the task too, under the usage record's own key; a Slack thread's usage and a store without it record nothing more (#651)", async () => {

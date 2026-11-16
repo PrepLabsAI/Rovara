@@ -2,7 +2,7 @@
 // and the unchanged code for the baseline round) and the evidence a checks run posts, all arrive as 64 KiB chunks of one exact byte string with its digest. The upload's row is in the
 // document store and its chunks are staged in object storage until the whole is checked. This file holds what every one of them shares; the rules of each are in `uploads.ts` and `callbacks.ts`.
 //
-// The stored keys are the hosted product's, byte for byte: the rows under `WORKSPACE#<workspace>`, the staged and kept objects under the same prefixes.
+// Upload rows follow the authenticated operation's resolved workspace partition (company keys for new workspaces, settled legacy keys for old ones). Object prefixes are unchanged.
 import { createHash, randomUUID } from "node:crypto";
 import { ZodError, type ZodType } from "zod";
 import { ObjectConflictError, ObjectTooBigError, agentXError, when, type Condition, type DocumentKey, type DocumentStore, type JsonValue, type ObjectStorage, type StoredDocument } from "@agentx/contracts";
@@ -30,6 +30,8 @@ export const whenOperationLive = (): Condition => when.or(...LIVE_OPERATION_STAT
 
 /** What the upload handlers read of the worker's operation: the row the flow keeps, as the callback layer read it for this request. */
 export interface UploadOperation {
+  pk: string;
+  companyId: string;
   id: string;
   workspaceId: string;
   fence: number;
@@ -65,8 +67,8 @@ export function parseUploadBody<T>(schema: ZodType<T>, raw: unknown, label: stri
   }
 }
 
-/** The row an upload of one kind keeps: `WORKSPACE#<workspace>` / `<prefix>#<operation>`. */
-export const uploadRowKey = (workspaceId: string, prefix: string, operationId: string, suffix = ""): DocumentKey => ({ pk: `WORKSPACE#${workspaceId}`, sk: `${prefix}#${operationId}${suffix}` });
+/** The row an upload keeps in its already located operation partition: `<prefix>#<operation>`. */
+export const uploadRowKey = (workspace: Pick<UploadOperation, "pk">, prefix: string, operationId: string, suffix = ""): DocumentKey => ({ pk: workspace.pk, sk: `${prefix}#${operationId}${suffix}` });
 
 /** What one kind of upload is called and where it keeps its row and its staged chunks. */
 export interface UploadSpec {

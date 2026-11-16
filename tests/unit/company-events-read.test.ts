@@ -282,3 +282,11 @@ describe("the event read: a bounded page at a time, polled with a cursor", () =>
     await readCompanyEvents(countingReadOnly(store).store, COMPANY_A, WIDE, NOW);
   });
 });
+
+it("company change feeds never return a workspace discovery pointer", async () => {
+  const store = newStore();
+  await seedEvent(store, COMPANY_A, { at: D(2) });
+  const row = (await store.scanPage()).items[0]!;
+  await store.put({ item: { ...row, entityType: "WORKSPACE_COMPANY_POINTER" } });
+  expect((await readCompanyEvents(store, COMPANY_A, WIDE, NOW)).events).toEqual([]);
+});

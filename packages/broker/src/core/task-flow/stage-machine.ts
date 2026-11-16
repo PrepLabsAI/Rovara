@@ -1,3 +1,4 @@
+import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // Lane L6a, task flow core: the stage machine's driver. The transitions themselves are the pure functions in `@agentx/contracts`
 // (`task-workflow-node.ts`: `startWorkflowUnderstand`, `recordIntentAssessment`, `submitWorkflowArtifact`, ...). This module is what Cloud's
 // `developer-tasks/workflow-starts.ts` and the broker's result hook do around them: read the task, apply one transition, and write the new
@@ -46,7 +47,7 @@ import { textReaderOf } from "../build-step/plan-input.js";
 import { buildOperation, assertPromptFits } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js";
-import { dispatchRowKey, operationRequestKey, taskKey, taskPointerKey, workspaceKey } from "./keys.js";
+import { dispatchRowKey, taskKey } from "./keys.js";
 import { structuredPlanContextOf } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
 import { readTask } from "./reads.js";
@@ -75,15 +76,15 @@ export const DISPATCH_ROW_ATTEMPTS_MAX = 8;
 const backoffSeconds = (attempts: number): number => Math.min(15 * 60, 15 * 2 ** Math.max(0, attempts - 1));
 const later = (deps: Pick<TaskFlowDeps, "now">, seconds: number): string => new Date((deps.now?.() ?? new Date()).getTime() + seconds * 1_000).toISOString();
 
-export async function readWorkspace(deps: Pick<TaskFlowDeps, "store">, workspaceId: string): Promise<WorkspaceRecord | undefined> {
-  return fromDocument<WorkspaceRecord>(await deps.store.get(workspaceKey(workspaceId)));
+export async function readWorkspace(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string): Promise<WorkspaceRecord | undefined> {
+  return fromDocument<WorkspaceRecord>((await locateWorkspace(deps, workspaceId))?.workspace);
 }
 
 /** The workspace steps that hand it to one operation: BUSY, held by it, under the next fence. Applies only to a ready workspace nobody holds, at the fence read. */
 export function holdWorkspaceItem(workspace: WorkspaceRecord, operationId: string, now: string): TransactItem {
   return {
     kind: "update",
-    key: workspaceKey(workspace.id),
+    key: { pk: workspace.pk, sk: "META" },
     ops: [change.set("status", "BUSY"), change.set("activeOperationId", operationId), change.set("fence", workspace.fence + 1), change.set("updatedAt", now)],
     condition: when.and(when.eq("status", "READY"), when.eq("activeOperationId", null), when.eq("fence", workspace.fence)),
   };
@@ -143,7 +144,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   // (Cloud's GATED_TASK_TURN_REFUSAL).
   const operationKind = input.kind ?? "task";
   if (task.workflow !== undefined && input.workflowMode === undefined && operationKind === "task") throw agentXError("TASK_BUSY", "this task runs as a workflow: its steps are started by the workflow, not as ordinary runs");
-  const existing = await deps.store.get(operationRequestKey(workspace.ownerKey, workspace.id, input.requestId));
+  const location = await workspaceKeys(deps, workspace.id);
+  const existing = await deps.store.get(location.operationRequestKey(workspace.ownerKey, input.requestId));
   if (existing !== undefined) return { result: "DUPLICATE" };
   if (workspace.status !== "READY" || workspace.activeOperationId !== null) return { result: "WAITING" };
   // The person the step runs for must still be allowed to have it run, asked now and fenced into the step's own transaction.
@@ -161,7 +163,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   const fed = input.notes === undefined ? undefined : notesFedUpdate(input.notes);
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
   const built = buildOperation(deps, {
-    workspace: { id: workspace.id, ownerKey: workspace.ownerKey, fence: workspace.fence + 1 },
+    workspace: { pk: workspace.pk, id: workspace.id, ownerKey: workspace.ownerKey, fence: workspace.fence + 1 },
     kind: operationKind, requestId: input.requestId, now, ...(input.operationId === undefined ? {} : { operationId: input.operationId }), ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     conversationId: input.conversationId ?? task.conversationId,
     ...(input.programStepId === undefined ? {} : { programStepId: input.programStepId }),
@@ -203,7 +205,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     return { result: "STARTED", operation: built.operation };
   }
   // Why it did not apply: the same request committed first, the workspace is taken, or the task moved on.
-  if (await deps.store.get(operationRequestKey(workspace.ownerKey, workspace.id, input.requestId)) !== undefined) return { result: "DUPLICATE" };
+  if (await deps.store.get(location.operationRequestKey(workspace.ownerKey, input.requestId)) !== undefined) return { result: "DUPLICATE" };
   const fresh = await readWorkspace(deps, workspace.id);
   if (fresh !== undefined && (fresh.status !== "READY" || fresh.activeOperationId !== null || fresh.fence !== workspace.fence) && fresh.status !== "CLOSED" && fresh.status !== "PREPARATION_FAILED") return { result: "WAITING" };
   return { result: "STALE" };
@@ -438,7 +440,8 @@ export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: nu
  * run of the workflow that already started RUNNING at PLAN; a task with no workflow runs the instructions plainly.
  */
 export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promise<StepStart> {
-  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(task.workspaceId)));
+  const location = await workspaceKeys(deps, task.workspaceId);
+  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(location.taskPointerKey()));
   if (pointer === undefined || pointer.pendingPrompt === undefined || pointer.cancelledAt !== undefined) return "STALE";
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
@@ -452,11 +455,11 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
       workflowMode: "SETUP_AGENT" as const, requires: ["task.workflowMode", SETUP_AGENT_FEATURE], extraActions: ["setup-agent"],
       payload: { setupAgent: JSON.parse(JSON.stringify(setupAgentWireOf(setup))) as JsonValue },
     }),
-    extra: [{ kind: "update", key: taskPointerKey(task.workspaceId), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") }],
+    extra: [{ kind: "update", key: location.taskPointerKey(), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") }],
   });
   if (accepted.result === "DUPLICATE") {
     // The first run was accepted and only the pointer was not cleared (or it was, by a repeat): clear it so the task no longer reads as starting.
-    await deps.store.update({ key: taskPointerKey(task.workspaceId), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") });
+    await deps.store.update({ key: location.taskPointerKey(), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") });
   }
   return accepted.result;
 }
@@ -468,7 +471,7 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
  * the first one's) and does nothing. Never throws for a task that moved on.
  */
 export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void> {
-  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(operation.workspaceId)));
+  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey()));
   if (pointer === undefined) {
     // A workspace with no task is a project's setup check: its preparation ended, so its workspace and machine are closed.
     if (operation.kind === "prepare") await closeSetupCheck(deps, operation.workspaceId);

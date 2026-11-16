@@ -34,7 +34,7 @@ describe("continue", () => {
     expect(round!.workflowMode).toBeUndefined();
     expect(promptOf(round!)).toBe(long);
     expect((round!.dispatch.payload as { conversationId?: string }).conversationId).toBe(conversationId);
-    expect(await h.store.get(workspaceKey(WORKSPACE_ID))).toMatchObject({ status: "BUSY", activeOperationId: round!.id, fence: 3 });
+    expect(await h.store.get(workspaceKey(COMPANY, WORKSPACE_ID))).toMatchObject({ status: "BUSY", activeOperationId: round!.id, fence: 3 });
     expect(h.audit.map((event) => event.action)).toEqual(["task.continued"]);
     expect((await taskOf(h)).workflow).toBeUndefined();
   });
@@ -157,9 +157,9 @@ describe("continue", () => {
   it("a round that lost the workspace to another run meanwhile says TASK_BUSY and writes nothing; one that finds its request id taken by other words is refused", async () => {
     const racing = (what: "busy" | "taken"): Admission => ({ ...createAllowAllAdmission(), async admit() {
       // The workspace is taken (or the request id is spent) after the checks looked, before the round commits.
-      if (what === "busy") await racingWorld!.h.store.update({ key: workspaceKey(WORKSPACE_ID), ops: [change.set("status", "BUSY"), change.set("activeOperationId", "op-other")] });
+      if (what === "busy") await racingWorld!.h.store.update({ key: workspaceKey(COMPANY, WORKSPACE_ID), ops: [change.set("status", "BUSY"), change.set("activeOperationId", "op-other")] });
       else {
-        await racingWorld!.h.store.put({ item: { ...operationRequestKey(OWNER_KEY, WORKSPACE_ID, REQUEST_A), entityType: "IDEMPOTENCY", operationId: "op-other", payloadHash: "f".repeat(64) } });
+        await racingWorld!.h.store.put({ item: { ...operationRequestKey(COMPANY, OWNER_KEY, WORKSPACE_ID, REQUEST_A), entityType: "IDEMPOTENCY", operationId: "op-other", payloadHash: "f".repeat(64) } });
         await racingWorld!.h.store.put({ item: { ...continueRecordKey(TASK_ID, REQUEST_A), entityType: "TASK_CONTINUE", payloadHash: "f".repeat(64), operationId: "op-other" } });
       }
       return { allowed: true };

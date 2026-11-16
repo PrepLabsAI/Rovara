@@ -1,3 +1,5 @@
+import { OPERATION_SK_PREFIX } from "../../core/task-flow/keys.js";
+import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 // Lane L9-wire: the wiring. `createLocalApp` joins what the wave-1 lanes built, over the registry `rovara up` made (the lanes know the ports, not each other):
 //
 //   L3 the storage and queue the registry holds ->  L6a the task flow (start, stage machine, dispatch to the registry's worker machines)
@@ -47,7 +49,7 @@ import type { RoundRecordReaders } from "../../core/e2e/callbacks.js";
 import { readWorkflowE2EBaselineRecord } from "../../core/e2e/baseline.js";
 import { readWorkflowE2EReplayRecord } from "../../core/e2e/replay.js";
 import { readWorkflowE2EGroundingRecord } from "../../core/e2e/grounding.js";
-import { operationKey, taskPointerKey, workspaceKey } from "../../core/task-flow/keys.js";
+
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
 import { createStandingInstructions } from "../../core/instructions/step-block.js";
 import { createCodeHostPlaybookSource } from "../../core/playbook/source.js";
@@ -403,7 +405,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
         const operations: OperationRecord[] = [];
         let cursor: string | undefined;
         do {
-          const page = await store.query({ pk: `WORKSPACE#${task.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" }, ...(cursor === undefined ? {} : { cursor }) });
+          const page = await store.query({ pk: (await workspaceKeys({ store, companyId }, task.workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX }, ...(cursor === undefined ? {} : { cursor }) });
           for (const item of page.items) if (item["entityType"] === "OPERATION") operations.push(item as unknown as OperationRecord);
           cursor = page.cursor;
         } while (cursor !== undefined);
@@ -518,10 +520,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     async describe(operation) {
       // A design review's operation has no key of its own: only its slots get one (`describeSlot`).
       if (await designReview.isDesignReviewOperation(operation)) return undefined;
-      const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
+      const pointer = fromDocument<TaskPointerRecord>(await store.get((await workspaceKeys({ store, companyId }, operation.workspaceId)).taskPointerKey()));
       const task = pointer === undefined ? undefined : await readTask(flow.deps, pointer.taskId);
       // Second review: the models this REVIEW operation may also call are the ones the broker chose for its second reviewer (never the worker's say), each through its own route.
-      const operationRecord = await store.get(operationKey(operation.workspaceId, operation.operationId));
+      const operationRecord = await store.get((await workspaceKeys({ store, companyId }, operation.workspaceId)).operationKey(operation.operationId));
       const second = SecondReviewerSchema.safeParse((operationRecord?.["dispatch"] as { payload?: Record<string, unknown> } | undefined)?.payload?.["workflowSecondReviewer"]);
       const caps = (operationRecord?.["secondReviewPlan"] as { caps?: Record<string, ProxyRoute["cap"]> } | undefined)?.caps ?? {};
       // Every extra route carries its own cap (never the first review's route): a second model is called within a limit of its own.
@@ -549,7 +551,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       return { routes: [own, ...extra.filter((route) => route.alias !== own.alias)], ...(budget === undefined ? {} : { budget }), ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
     },
     async holds(operation) {
-      const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);
+      const [record, workspace] = await Promise.all([store.get((await workspaceKeys({ store, companyId }, operation.workspaceId)).operationKey(operation.operationId)), store.get((await workspaceKeys({ store, companyId }, operation.workspaceId)).workspaceKey)]);
       return record !== undefined && typeof record["status"] === "string" && !isTerminalStatus(record["status"]) && record["fence"] === operation.fence && workspace?.["activeOperationId"] === operation.operationId && workspace["fence"] === operation.fence;
     },
   }), oneShot);

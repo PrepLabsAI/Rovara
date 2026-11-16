@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Lane L6a: the task flow end to end on the W0 fakes: a task is started, staged and dispatched to a fake worker machine, and every record is in the
 // document store port. Nothing here names DynamoDB, SQS or EC2.
 import { randomUUID } from "node:crypto";
@@ -12,7 +13,7 @@ import { COMPANY, SIGNING_KEY, createHarness, newRequestId, type Harness } from 
 const READY = { kind: "ready", path: "QUICK", restatement: "Add a health endpoint", assumptions: ["It returns 200"] } as const;
 
 async function operationsOf(h: Harness, workspaceId: string): Promise<OperationRecord[]> {
-  const items = await queryAll(h.store, { pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+  const items = await queryAll(h.store, { pk: workspaceKey(T1_COMPANY, workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } });
   return items.map((item) => item as unknown as OperationRecord).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.fence - b.fence);
 }
 
@@ -41,9 +42,9 @@ describe("starting a task", () => {
 
     const record = (await h.store.get(taskKey(task.taskId))) as unknown as TaskRecord;
     expect(record).toMatchObject({ entityType: "DEVELOPER_TASK", companyId: COMPANY, developerId: "local-owner", provider: "local-owner", startingRevision: 1 });
-    const workspace = (await h.store.get(workspaceKey(task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, task.workspaceId))) as unknown as WorkspaceRecord;
     expect(workspace).toMatchObject({ status: "PREPARING", fence: 1, projectName: "payments", workspaceProject: (expect.stringContaining("payments") as string) });
-    const pointer = await h.store.get(taskPointerKey(task.workspaceId));
+    const pointer = await h.store.get(taskPointerKey(T1_COMPANY, task.workspaceId));
     expect(pointer).toMatchObject({ pendingPrompt: "Add a /health endpoint\nreturn 200", pendingWorkflowMode: "PLAN" });
     expect(await h.store.get(taskIndexKey("local-owner", record.createdAt, task.taskId))).toMatchObject({ status: "STARTING" });
 
@@ -129,7 +130,7 @@ describe("a task through its stages, dispatched to a worker machine", () => {
     expect(first).toMatchObject({ received: 1, retried: 1, delivered: 0 });
     h.clock.advance(70);
     expect(await h.flow.dispatchOnce()).toMatchObject({ received: 1, delivered: 1 });
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const machineId = workspace.machine!.machineId;
     const prepareInvocation = lastInvocation(h, machineId);
     expect(WorkerInvocationSchema.safeParse(prepareInvocation).success).toBe(true);
@@ -173,7 +174,7 @@ describe("a task through its stages, dispatched to a worker machine", () => {
     expect(view.workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     expect(view.operations.map((operation) => `${operation.kind}:${operation.workflowMode ?? "-"}:${operation.status}`)).toEqual(["prepare:-:SUCCEEDED", "task:UNDERSTAND:SUCCEEDED", "task:PLAN:SUCCEEDED"]);
     // The workspace is free again and the task index reflects the run.
-    expect(((await h.store.get(workspaceKey(workspace.id))) as unknown as WorkspaceRecord)).toMatchObject({ status: "READY", activeOperationId: null, fence: 3 });
+    expect(((await h.store.get(workspaceKey(T1_COMPANY, workspace.id))) as unknown as WorkspaceRecord)).toMatchObject({ status: "READY", activeOperationId: null, fence: 3 });
   });
 
   it("a workflow with an explicit path plans straight after the preparation, with the first instructions as the prompt", async () => {
@@ -182,7 +183,7 @@ describe("a task through its stages, dispatched to a worker machine", () => {
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Rename the flag", workflow: true, workflowPath: "FULL" });
     expect(started.task.workflow).toMatchObject({ definitionVersion: "1.0.0", stage: "PLAN", state: "RUNNING", path: "FULL" });
     await drain(h);
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const machineId = workspace.machine!.machineId;
     const prepare = lastInvocation(h, machineId);
     h.machines.finish(machineId, prepare.operationId);
@@ -191,7 +192,7 @@ describe("a task through its stages, dispatched to a worker machine", () => {
     const plan = lastInvocation(h, machineId);
     expect(plan).toMatchObject({ kind: "task", payload: { prompt: "Rename the flag", workflowMode: "PLAN" } });
     // The first instructions are queued once: the pointer no longer holds them.
-    expect(await h.store.get(taskPointerKey(workspace.id))).not.toHaveProperty("pendingPrompt");
+    expect(await h.store.get(taskPointerKey(T1_COMPANY, workspace.id))).not.toHaveProperty("pendingPrompt");
   });
 
   it("a task with no workflow runs its instructions as one plain run", async () => {
@@ -200,7 +201,7 @@ describe("a task through its stages, dispatched to a worker machine", () => {
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Just do it" });
     expect(started.task.workflow).toBeUndefined();
     await drain(h);
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const machineId = workspace.machine!.machineId;
     const prepare = lastInvocation(h, machineId);
     h.machines.finish(machineId, prepare.operationId);
@@ -220,7 +221,7 @@ describe("results and the sweep", () => {
     await h.registerProject();
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Do the thing", ...request });
     await drain(h);
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
     return { started, workspace, machineId: workspace.machine!.machineId, prepare: lastInvocation(h, workspace.machine!.machineId) };
   }
 
@@ -241,7 +242,7 @@ describe("results and the sweep", () => {
     await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "FAILED", error: "clone failed" });
     const view = await h.flow.get(h.owner, started.task.taskId);
     expect(view.status).toBe("FAILED");
-    expect(((await h.store.get(workspaceKey(workspace.id))) as unknown as WorkspaceRecord).status).toBe("PREPARATION_FAILED");
+    expect(((await h.store.get(workspaceKey(T1_COMPANY, workspace.id))) as unknown as WorkspaceRecord).status).toBe("PREPARATION_FAILED");
     // The waiting Understand row is dropped as stale by the sweep: nothing is started.
     h.clock.advance(60);
     expect(await h.flow.sweepOnce()).toMatchObject({ stale: 1, started: 0 });
@@ -276,8 +277,8 @@ describe("results and the sweep", () => {
     // The worker's result commits but the process dies before the next move: only the dispatch row remains.
     const ended = await operationsOf(h, workspace.id);
     expect(ended).toHaveLength(1);
-    await h.store.update({ key: operationKey(workspace.id, prepare.operationId), ops: [{ op: "set", path: ["status"], value: "SUCCEEDED" }] });
-    await h.store.update({ key: workspaceKey(workspace.id), ops: [{ op: "set", path: ["status"], value: "READY" }, { op: "set", path: ["activeOperationId"], value: null }] });
+    await h.store.update({ key: operationKey(T1_COMPANY, workspace.id, prepare.operationId), ops: [{ op: "set", path: ["status"], value: "SUCCEEDED" }] });
+    await h.store.update({ key: workspaceKey(T1_COMPANY, workspace.id), ops: [{ op: "set", path: ["status"], value: "READY" }, { op: "set", path: ["activeOperationId"], value: null }] });
     expect(await h.flow.sweepOnce()).toMatchObject({ started: 1 });
     expect(await h.flow.sweepOnce()).toMatchObject({ started: 0 });
     expect((await operationsOf(h, workspace.id)).filter((operation) => operation.workflowMode === "UNDERSTAND")).toHaveLength(1);
@@ -290,7 +291,7 @@ describe("dispatching to a worker machine", () => {
     await h.registerProject();
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true });
     await drain(h);
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const machineId = workspace.machine!.machineId;
     const prepare = lastInvocation(h, machineId);
     await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED" });
@@ -329,7 +330,7 @@ describe("dispatching to a worker machine", () => {
     await h.registerProject();
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
     await drain(h);
-    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
     const [prepare] = await operationsOf(h, workspace.id);
     // A second message for the same operation (a relay that handed it over twice): the machine already has the job.
     const queue = await h.queues.queue("task-dispatch");

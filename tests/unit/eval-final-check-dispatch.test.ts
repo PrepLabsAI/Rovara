@@ -43,11 +43,11 @@ describe("eval CHECKS dispatch", () => {
     expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
   });
   it.each([0, 1, 2])("finds prior evals in a long task with %s completed passes", async passes => {
-    const w = await world(true); let queries = 0; let gets = 0; let reads = 0;
+    const w = await world(true); let queries = 0; let gets = 0; let metaGets = 0; let reads = 0;
     const operations = Array.from({ length: 120 }, (_, i) => ({ pk: "workspace", sk: `OPERATION#op-${i}`, id: `op-${i}`, kind: "task", status: "SUCCEEDED", createdAt: new Date(Date.UTC(2026, 10, 14, 0, 0, i)).toISOString(),
       ...(i < passes ? { dispatch: { payload: { evalRequest: { aiChange: true } } } } : {}) }));
     w.h.deps.store.query = async () => { const start = queries++ * 100; return { items: operations.slice(start, start + 100), ...(start === 0 ? { cursor: "next" } : {}) }; };
-    w.h.deps.store.get = async key => { gets++; const id = key.sk.split("#")[1]!; return { ...key, objectKey: `private/${w.task.ownerKey}/${w.task.workspaceId}/${id}/eval-round.json` }; };
+    w.h.deps.store.get = async key => { gets++; if (key.sk === "META") { metaGets++; return { ...key, id: w.task.workspaceId, companyId: w.h.deps.companyId }; } const id = key.sk.split("#")[1]!; return { ...key, objectKey: `private/${w.task.ownerKey}/${w.task.workspaceId}/${id}/eval-round.json` }; };
     w.h.deps.artifacts = { get: async objectKey => {
       reads++; const pass = objectKey.includes("/op-0/") ? 1 : 2;
       return Buffer.from(JSON.stringify({ schemaVersion: 1, candidateDigest: "a".repeat(64), roundKind: "check_unsealed", evalPass: pass, outcome: "done", usage: { calls: 4, costMicros: 40 }, cache: "hit", evalConfigured: true,
@@ -56,7 +56,7 @@ describe("eval CHECKS dispatch", () => {
     const request = await evalRequestForChecks(w.h.deps, w.task, w.workflow);
     if (passes === 2) expect(request).toBeUndefined();
     else expect(request).toEqual({ aiChange: true, reason: "eval_hint", evalPass: passes + 1, callsAlreadyUsed: passes * 4, costAlreadyUsedMicros: passes * 40 });
-    expect(queries).toBe(2); expect(gets).toBe(passes); expect(reads).toBe(passes);
+    expect(queries).toBe(2); expect(gets).toBe(passes + 1); expect(metaGets).toBe(1); expect(reads).toBe(passes);
   });
   it.each([true, false])("runs the real checks dispatcher with eval feature %s", async feature => {
     const w = await world(feature);

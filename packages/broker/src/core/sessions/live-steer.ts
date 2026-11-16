@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Live steer, the broker's send (the hosted product's `agent-sessions/live-steer.ts` and `live-steer-dispatch.ts`). A message the task took as a note is also handed, when its task's step is running
 // right now on a worker, to that step's session within seconds. The note stays the durable record and the fallback: nothing here changes it, and a message that cannot go live (no running step, a step that takes no
 // message, a worker that does not list `task.liveSteer.v1`, a machine that is not up) is simply a note, read by the next step as before.
@@ -16,7 +17,7 @@ import {
 } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
-import { operationKey, taskPointerKey } from "../task-flow/keys.js";
+
 import { readTask } from "../task-flow/reads.js";
 import { fromDocument, type OperationRecord } from "../task-flow/records.js";
 import { readWorkspace } from "../task-flow/stage-machine.js";
@@ -40,7 +41,7 @@ export type LiveSteerResult =
   | "not_ready"
   | "failed";
 
-export interface LiveSteerDeps extends Pick<TaskFlowDeps, "store" | "machines" | "callbackSigningKey" | "now" | "log"> {
+export interface LiveSteerDeps extends Pick<TaskFlowDeps, "store" | "companyId" | "machines" | "callbackSigningKey" | "now" | "log"> {
   sleep?: (ms: number) => Promise<void>;
   /** The longest the whole send may take. Default `LIVE_STEER_BUDGET_MS`. */
   budgetMs?: number;
@@ -61,14 +62,15 @@ export interface LiveSteerInput {
 export const livePersonLabel = (developerId: string): string => `person p_${createHash("sha256").update(`person\0${developerId}`, "utf8").digest("hex").slice(0, 6)}`;
 
 /** The running step a message could reach, or why not: only a running (handed to its machine, not ended) understanding, planning, coding or setup operation of this task, on the workspace that is busy with it. */
-export async function runningSteerableStep(deps: Pick<TaskFlowDeps, "store">, taskId: string): Promise<{ workspaceId: string; fence: number; projectRevision: number; machineId: string; operationId: string; step: LiveSteerStep } | undefined> {
+export async function runningSteerableStep(deps: Pick<TaskFlowDeps, "store" | "companyId">, taskId: string): Promise<{ workspaceId: string; fence: number; projectRevision: number; machineId: string; operationId: string; step: LiveSteerStep } | undefined> {
   const task = await readTask(deps, taskId);
   if (task === undefined || task.closedAt !== undefined) return undefined;
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status !== "BUSY" || workspace.activeOperationId === null || workspace.machine === undefined) return undefined;
   // The workspace must be working for THIS task now: a workspace the task once had and another task holds is someone else's run, and a message never reaches it.
-  if ((await deps.store.get(taskPointerKey(workspace.id)))?.["taskId"] !== task.taskId) return undefined;
-  const operation = fromDocument<OperationRecord>(await deps.store.get(operationKey(workspace.id, workspace.activeOperationId)));
+  const location = await workspaceKeys(deps, workspace.id);
+  if ((await deps.store.get(location.taskPointerKey()))?.["taskId"] !== task.taskId) return undefined;
+  const operation = fromDocument<OperationRecord>(await deps.store.get(location.operationKey(workspace.activeOperationId)));
   const mode = operation?.workflowMode;
   const step = LIVE_STEER_STEPS.find((candidate) => candidate === (typeof mode === "string" ? LIVE_STEER_STEP_OF_MODE[mode] ?? mode : mode));
   // A local worker's operation stays DISPATCHING while it runs (its events do not move the status), a Cloud one is RUNNING: both are handed to the machine. The worker is the judge of whether its session is open

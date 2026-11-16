@@ -305,6 +305,9 @@ describe("header injection", () => {
     for (const name of ["x-custom-api-key", "x-apikey", "X-Goog-Api-Key", "set-cookie", "Cookie", "x-amz-date", "proxy-connection", "X-Goog-User-Project", "my-authorization-header"]) expect(isInboundCredentialHeader(name), name).toBe(true);
     expect(isInboundCredentialHeader("content-type")).toBe(false);
     expect(isInboundCredentialHeader("x-goog-api-client")).toBe(false);
+    expect(isInboundCredentialHeader("X-Amzn-Bedrock-GuardrailIdentifier")).toBe(false);
+    expect(isInboundCredentialHeader("X-Amz-Bedrock-PerformanceConfig-Latency")).toBe(false);
+    expect(dropInboundCredentials([["X-Amzn-Bedrock-GuardrailIdentifier", "guardrail"], ["x-amz-security-token", "secret"]])).toEqual([["X-Amzn-Bedrock-GuardrailIdentifier", "guardrail"]]);
     expect(dropInboundCredentials([["Authorization", "a"], ["content-type", "b"], ["Proxy-Foo", "c"]])).toEqual([["content-type", "b"]]);
   });
   it("copes with a body of 5 MB without copying it", () => {
