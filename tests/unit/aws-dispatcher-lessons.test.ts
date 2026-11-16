@@ -88,6 +88,22 @@ describe("read-only dispatcher lessons", () => {
     expect(await w.learned(request)).toEqual({});
     for (const write of w.writes) expect(write).not.toHaveBeenCalled();
   });
+  it("offers only approved, live lessons in the task's company and project", async () => {
+    const w = await world();
+    const original = await w.store.get(lessonKey(A, "payments", "les_aaaa1111"));
+    const members = { "les_aaaa1111": 1, les_unapproved: 1, les_retired: 1 };
+    await w.store.put({ item: { ...original!, ...lessonKey(A, "payments", "les_unapproved"), id: "les_unapproved", approvals: [] } });
+    await w.store.put({ item: { ...original!, ...lessonKey(A, "payments", "les_retired"), id: "les_retired", status: "retired" } });
+    await w.store.put({ item: { ...lessonSetKey(A, "payments"), setVersion: 1, members } });
+    const otherProject = { ...original!, ...lessonKey(A, "other-project", "les_otherproj"), id: "les_otherproj" };
+    await w.store.put({ item: otherProject });
+    await w.store.put({ item: { ...lessonSetKey(A, "other-project"), setVersion: 1, members: { les_otherproj: 1 } } });
+    const answer = await w.learned(request);
+    expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+    expect(JSON.stringify(answer)).not.toContain("les_unapproved");
+    expect(JSON.stringify(answer)).not.toContain("les_retired");
+    expect(JSON.stringify(answer)).not.toContain("les_otherproj");
+  });
   it("off is byte-identical and reads nothing; on declares only a supplied reader", async () => {
     const w = await world();
     for (const raw of [undefined, "off", "", "malformed"]) {
