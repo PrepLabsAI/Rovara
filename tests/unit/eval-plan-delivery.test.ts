@@ -34,14 +34,14 @@ const grantOf = (company: string, project: string): EvalSpendGrant => ({ company
 const RECORD: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.04, count: 50 }], caseCount: 50, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1 };
 
 /** One store holding two companies' tasks and sources; every source is per company and per project, and records what it was asked. */
-async function world(options: { company?: string; operation?: Record<string, unknown>; taskCompany?: string; body?: string } = {}) {
+async function world(options: { company?: string; operation?: Record<string, unknown>; taskCompany?: string; taskWorkspace?: string; body?: string } = {}) {
   const company = options.company ?? A;
   const store = new MemoryDocumentStore();
   const workspaceId = randomUUID(); const operationId = randomUUID(); const taskId = randomUUID();
   await store.put({ item: { ...operationKey(workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS", status: "RUNNING", fence: 3, companyId: company,
     dispatch: { kind: "task", payload: { workflowMode: "CHECKS", evalRequest: EVAL_REQUEST } }, ...options.operation } });
   await store.put({ item: { ...taskPointerKey(workspaceId), taskId } });
-  await store.put({ item: { ...taskKey(taskId), taskId, project: "web", companyId: options.taskCompany ?? company } });
+  await store.put({ item: { ...taskKey(taskId), taskId, workspaceId: options.taskWorkspace ?? workspaceId, project: "web", companyId: options.taskCompany ?? company } });
   const caches = new Map<string, BaseScoreCache>([[A, createDocumentBaseScoreCache(store, { companyId: A })], [B, createDocumentBaseScoreCache(store, { companyId: B })]]);
   const asked: Array<{ source: string; scope: unknown }> = [];
   const sources: EvalPlanSources = {
@@ -176,6 +176,17 @@ describe("the eval-plan callback", () => {
       expect(reply.statusCode, JSON.stringify(operation)).toBeGreaterThanOrEqual(400);
       expect(w.asked).toEqual([]);
     }
+    for (const status of ["SUCCEEDED", "FAILED", "CANCELLED"]) {
+      const ended = await world({ operation: { status } });
+      const reply = await ended.call(ended.token([EVAL_PLAN_DELIVERY_ACTION]));
+      expect(reply.statusCode, status).toBe(409);
+      expect(json(reply)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+      expect(ended.asked).toEqual([]);
+    }
+    // A pointer that names a task of another workspace (the pointer moved): refused (mutant: the task workspace check).
+    const moved = await world({ taskWorkspace: randomUUID() });
+    expect(json(await moved.call(moved.token([EVAL_PLAN_DELIVERY_ACTION])))).toEqual({ error: { code: "CALLBACK_FORBIDDEN", message: EVAL_PLAN_DELIVERY_FORBIDDEN } });
+    expect(moved.asked).toEqual([]);
     const w = await world();
     await w.store.delete({ key: taskPointerKey(w.workspaceId) });
     expect(json(await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION])))).toEqual({ error: { code: "CALLBACK_FORBIDDEN", message: EVAL_PLAN_DELIVERY_FORBIDDEN } });

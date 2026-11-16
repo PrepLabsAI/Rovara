@@ -316,6 +316,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       // ended. Cloud's rule: once an operation has ended, only its result is taken; late output (a pull request opened from an interrupted publication, a rewritten record) could undo what the workflow read.
       const capability = capabilities.verify(token, action as CallbackAction);
       if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
+      // The eval plan's request is bounded before any store read (the capability is already checked).
+      if (action === EVAL_PLAN_DELIVERY_ACTION && request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval plan request is too large");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
       if (action !== "result" && isTerminalStatus(operation.status)) {
@@ -343,12 +345,12 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       }
       if (action === EVAL_PLAN_DELIVERY_ACTION) {
         // The run's own company and task project, never the request's: the body is bounded and must be an object, and no field of it is read. The answer is for this one ask; no cache keeps it.
-        if (request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval plan request is too large");
         bodyOf(request);
         const answer = await handleEvalPlanDelivery({ sources: deps.evalPlan!, companyId: deps.flow.companyId, log: (event) => deps.flow.log?.({ component: "callbacks", event }), async projectOf() {
           const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(operation.workspaceId)));
           const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
-          return task !== undefined && task.companyId === deps.flow.companyId ? task.project : undefined;
+          // The pointer's task must be this company's AND this operation's workspace's own.
+          return task !== undefined && task.companyId === deps.flow.companyId && task.workspaceId === operation.workspaceId ? task.project : undefined;
         } }, operation);
         return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
       }
