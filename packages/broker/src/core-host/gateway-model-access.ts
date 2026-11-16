@@ -14,7 +14,7 @@
 // ROVARA_CORE_AGENT_MODEL (an Anthropic model id). Both absent: nothing is built and the model-keys point stays empty, so the registry refuses the switch
 // by name, as before. One without the other, or either malformed, refuses in fixed words (no value is echoed).
 import { TASK_KEY_PURPOSE, type InvocationModelRoute, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
-import type { TokenSigner } from "../developer/tokens.js";
+import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
 import type { ModelGateway } from "../core/model-gateway/route.js";
 import type { TaskTokenDescriber } from "../core/model-gateway/token.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
@@ -127,4 +127,15 @@ export function coreModelGatewayWiring(env: NodeJS.ProcessEnv, taskTokens: (() =
     flowOptions: { modelAccess: gatewayModelRoute(settings) },
     callbackGateway: (describer) => gatewayForCallbacks(settings, { issuer: tokens.issuer, signer: tokens.signer, describer }),
   };
+}
+
+/**
+ * L2b (DEC 236): the task-token signer and issuer from the environment: the install's KMS task key (TASK_TOKEN_KEY_ARN; only the broker may sign with it, by its key policy) and the sign-in issuer
+ * (DEVELOPER_TOKEN_ISSUER, whose JWKS publishes that key with purpose `task`). Either absent: undefined. It also signs the service token that reads a company's offered models.
+ */
+export function taskTokensFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameters<typeof kmsTokenSigner>[0]["kms"]): { signer: TokenSigner; issuer: string } | undefined {
+  const keyId = env.TASK_TOKEN_KEY_ARN ?? "";
+  const issuer = env.DEVELOPER_TOKEN_ISSUER ?? "";
+  // Published with purpose `task` by the JWKS (developer-identity.ts); stamped here, where the key is known to be the task key.
+  return keyId === "" || issuer === "" ? undefined : { signer: taskKeySigner(kmsTokenSigner({ kms, keyId })), issuer };
 }

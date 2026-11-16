@@ -37,6 +37,7 @@ import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
 import type { MoneyStop } from "../../core/task-flow/money-stop.js";
 import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
+import { agentModelChoiceFromRegistry, type AgentModelChoice, type OfferedModelsReader } from "../../core-host/gateway-model-selection.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
 export interface DispatcherRecord extends CoreDispatchRecord {
@@ -190,6 +191,8 @@ export interface DispatcherCoreInputs {
   changeVisibility: (receiptHandle: string, seconds: number) => Promise<void>;
   /** The flow inputs every worker job carries, each declared (see DISPATCHER_FLOW_DECLARATIONS). Absent, or any key missing: every company's runtime is refused and its records come back. */
   flow?: DispatcherFlowWiring | ((registry: AdapterRegistry, companyId: OrgId) => DispatcherFlowWiring | undefined);
+  /** DEC 243c: what the model gateway offers one company's agents. With it each company's chosen model (made on its web page) is the step's model, refused when it is not on the list; without it every step runs on the declared route. */
+  offeredModels?: OfferedModelsReader;
   /** The points Code's AWS modules do not fill (admission, metering, identity, approvers, audit-sink, model keys: lane E2 step 5), added after them. Absent: the registry refuses by name. */
   extraModules?: readonly CoreAdapterModule[];
   /** Wraps the registry's store (the deployment's retention rule, core-host/retention.ts, is applied by the storage module itself). */
@@ -202,6 +205,9 @@ export interface DispatcherCoreInputs {
   log: (entry: Record<string, unknown>) => void;
   now?: () => Date;
 }
+
+/** The flow option a company's step rule gives (none without a reader). */
+const stepModelsOf = (choice: AgentModelChoice | undefined): Partial<RegistryTaskFlowOptions> => (choice === undefined ? {} : { stepModels: choice.stepModels });
 
 const required = (value: string | undefined): string | undefined => (value === undefined || value.trim() === "" ? undefined : value);
 
@@ -259,6 +265,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
+        // DEC 243c: the company's own model rule (its choice on the gateway's list), the same rule the broker's pages change; absent a reader or a model route, every step runs on the declared route.
+        ...(modelAccess === null || modelAccess === undefined ? {} : stepModelsOf(agentModelChoiceFromRegistry({ registry, companyId, reader: inputs.offeredModels, modelAccess, now: () => now().getTime() }))),
         ...(learned === null || learned === undefined ? {} : { learned }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
       };

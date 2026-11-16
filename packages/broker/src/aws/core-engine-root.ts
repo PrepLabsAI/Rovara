@@ -45,7 +45,7 @@ import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
-import type { TaskFlow } from "../core/task-flow/flow.js";
+import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { taskPointerKey } from "../core/task-flow/keys.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
@@ -63,8 +63,10 @@ import { createCallbackService, type CallbackServiceOptions } from "../services/
 import { createTaskTokenDescriber } from "../core/model-gateway/describer.js";
 import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
-import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
-import { coreModelGatewayWiring, gatewayModelKeysModules, taskKeySigner } from "../core-host/gateway-model-access.js";
+import type { TokenSigner } from "../developer/tokens.js";
+import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
+import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
@@ -125,6 +127,11 @@ export interface BrokerCoreRootInputs {
    * for the gateway. Configured without these: the core callback layer refuses to build (never a worker that cannot reach its model, silently).
    */
   taskTokens?: () => { signer: TokenSigner; issuer: string } | undefined;
+  /**
+   * DEC 243c: what the model gateway offers one company's agents (the contract is `OfferedAgentModels`; the gateway serves it, docs/architecture/agent-model-choice.md). With it (or, from the environment, ROVARA_CORE_AGENT_MODEL_CHOICE=on and the model
+   * gateway configured) each company chooses its agents' models on the web page from that list; without it every core step runs on ROVARA_CORE_AGENT_MODEL, exactly as before.
+   */
+  offeredModels?: OfferedModelsReader;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -333,6 +340,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
+  // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
+  // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
+  const modelChoices = createCompanyModelChoices({ reader: inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens), now: () => now().getTime() });
+  const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => modelChoices.flowOptionsFor(registry, companyId, modelGateway()!.flowOptions);
   const lessonsSwitch = readCoreLessonsSwitch(env);
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
   const readSettings = readHostedAdmissionSettings(env);
@@ -356,7 +367,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
-      flowOptions: { ...(modelGateway()?.flowOptions ?? {}), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
+      flowOptions: { ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
@@ -430,6 +441,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           origin: inputs.origin,
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {},
+          ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
           canReadProject: (personId, project) => projectGrant(personId, project),
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
@@ -590,28 +602,7 @@ export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCor
 /** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */
 export const CORE_MODEL_ACCESS_PATH = MODEL_ACCESS_PATH;
 
-/** L1a's queue piece, called by L6 only when composing a serving broker's complete dependencies. Makes no client or queue. */
-export function brokerCoreDispatchQueue(env: NodeJS.ProcessEnv): CodeModuleDeps["queue"] {
-  const url = env[CORE_DISPATCH_QUEUE_URL_VARIABLE];
-  const deadLetterUrl = env[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE];
-  // Same URL shape and queue-kind rule as the SQS adapter; validate here before a registry can be built, with fixed refusal words.
-  const queueUrl = (value: unknown): value is string => typeof value === "string" && /^https?:\/\/[^\s/]+\/(?:[^\s/]+\/)*[A-Za-z0-9_-]{1,80}(?:\.fifo)?$/u.test(value);
-  if (!queueUrl(url) || !queueUrl(deadLetterUrl) || url.endsWith(".fifo") !== deadLetterUrl.endsWith(".fifo")) {
-    throw Object.assign(new Error("the broker needs valid core dispatch queue URLs"), { name: "BrokerCoreQueueNotConfigured" });
-  }
-  return { settings: { ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }), queues: { [CORE_DISPATCH_QUEUE]: { url, deadLetterUrl } } } };
-}
-
-/**
- * L2b (DEC 236): the task-token signer and issuer from the broker's environment: the install's KMS task key (TASK_TOKEN_KEY_ARN; only the broker may sign with it, by its key policy)
- * and the sign-in issuer (DEVELOPER_TOKEN_ISSUER, whose JWKS publishes that key with purpose `task`). Either absent: undefined.
- */
-export function taskTokensFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameters<typeof kmsTokenSigner>[0]["kms"]): { signer: TokenSigner; issuer: string } | undefined {
-  const keyId = env.TASK_TOKEN_KEY_ARN ?? "";
-  const issuer = env.DEVELOPER_TOKEN_ISSUER ?? "";
-  // Published with purpose `task` by the JWKS (developer-identity.ts); stamped here, where the key is known to be the task key.
-  return keyId === "" || issuer === "" ? undefined : { signer: taskKeySigner(kmsTokenSigner({ kms, keyId })), issuer };
-}
+export { taskTokensFromEnvironment };
 
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */
 export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engine's adapters yet";

@@ -24,6 +24,8 @@ import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js";
+import { taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
@@ -749,6 +751,7 @@ export const handler = withCoreDispatch(workflowHandler, {
       const sqs = new SQSClient(awsClientConfiguration);
       const queueUrl = process.env[CORE_DISPATCH_QUEUE_URL_VARIABLE] ?? "";
       const flow = hostedDispatcherFlow(process.env);
+      const offeredReader = offeredModelsReaderFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
       return createDispatcherCoreHost({
         env: process.env,
         documentClient,
@@ -758,6 +761,8 @@ export const handler = withCoreDispatch(workflowHandler, {
         // Lane E2 step 6: the declared flow inputs (none while lessons are switched on anywhere: then nothing is declared and every core record comes back) and the step 5 points.
         // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.
         ...(flow === undefined ? {} : { flow }),
+        // DEC 243c: the company's chosen model, from the gateway's offered list: the same reader as the broker's, wired only where ROVARA_CORE_AGENT_MODEL_CHOICE=on, the model gateway is configured AND this function can sign with the task key (the key policy lets only the broker; until infra grants it, none).
+        ...(offeredReader === undefined ? {} : { offeredModels: offeredReader }),
         extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env) }), ...gatewayModelKeysModules(process.env)],
         // The per-run stop's dispatch side (core-money-stop): each model run is admitted and goes only to a worker that reports its usage while it runs; a queued cancel is delivered.
         moneyStop: (registry, companyId) => {
