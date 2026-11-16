@@ -25,7 +25,7 @@ import { createAdminBroker } from "../support/admin-broker.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
-const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb", C = "org_cccccccccccccccccccc";
+const A: OrgId = "org_aaaaaaaaaaaaaaaaaaaa", B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb", C: OrgId = "org_cccccccccccccccccccc";
 const personA = "a".repeat(64), personB = "b".repeat(64), personC = "c".repeat(64);
 const SIGNING = "k".repeat(32);
 const MODEL = "claude-sonnet-4-6";
@@ -88,8 +88,8 @@ async function world(options: { noSigner?: boolean } = {}) {
     for (const message of messages) if (!result.failures.includes(message.messageId)) await queue.ack(message.receiptHandle);
     return result;
   };
-  const invocation = async (workspaceId: string): Promise<WorkerInvocation> => {
-    const workspace = await w.store.get(workspaceKey(workspaceId));
+  const invocation = async (companyId: OrgId, workspaceId: string): Promise<WorkerInvocation> => {
+    const workspace = await w.store.get(workspaceKey(companyId, workspaceId));
     const machineId = (workspace?.["machine"] as { machineId: string }).machineId;
     return w.machines.delivered(machineId).at(-1)!;
   };
@@ -101,20 +101,20 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
   const h = await world();
   const broker = await createAdminBroker({ core: h.root });
   const runs: Array<{ companyId: string; person: string; taskId: string; workspaceId: string; job: WorkerInvocation }> = [];
-  for (const [companyId, person] of [[A, personA], [B, personB]]) {
-    const answer = await h.start(person!);
+  for (const [companyId, person] of [[A, personA], [B, personB]] as const) {
+    const answer = await h.start(person);
     expect(answer?.statusCode, answer?.body).toBe(200);
     const { task: { taskId } } = z.object({ task: z.object({ taskId: z.string() }) }).parse(JSON.parse(answer!.body));
     const task = (await h.w.store.get(taskKey(taskId)))!;
     const workspaceId = z.string().parse(task["workspaceId"]);
     expect(task["companyId"]).toBe(companyId);
     expect((await h.dispatchOnce()).failures).toEqual([]);
-    let job = await h.invocation(workspaceId);
+    let job = await h.invocation(companyId, workspaceId);
     expect(job.kind).toBe("prepare");
     expect((await h.callback(job, "result", { status: "SUCCEEDED" }))?.statusCode).toBe(200);
-    h.w.machines.finish(((await h.w.store.get(workspaceKey(workspaceId)))!["machine"] as { machineId: string }).machineId, job.operationId);
+    h.w.machines.finish(((await h.w.store.get(workspaceKey(companyId, workspaceId)))!["machine"] as { machineId: string }).machineId, job.operationId);
     expect((await h.dispatchOnce()).failures).toEqual([]);
-    job = await h.invocation(workspaceId);
+    job = await h.invocation(companyId, workspaceId);
     expect(job.kind).toBe("task");
     if (job.kind !== "task") throw new Error("expected a task invocation");
     expect((await h.callback(job, "events", { events: [{ type: "progress", timestamp: new Date(h.w.clock.now).toISOString(), payload: { message: companyId } }] }))?.statusCode).toBe(200);
@@ -140,11 +140,11 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ url: `${gateway}/v1/messages`, claims: { cid: companyId, ws: workspaceId, op: job.operationId, mdl: [MODEL] } });
     expect((await get("slot=other-reviewer")).statusCode).toBe(401);
-    const operation = (await h.w.store.get(operationKey(workspaceId, job.operationId)))!;
-    await h.w.store.update({ key: operationKey(workspaceId, job.operationId), ops: [change.set("workflowMode", "REVIEW"), change.set(["dispatch", "payload", "workflowSecondReviewer"], { provider: "anthropic", modelId: MODEL })] });
+    const operation = (await h.w.store.get(operationKey(companyId, workspaceId, job.operationId)))!;
+    await h.w.store.update({ key: operationKey(companyId, workspaceId, job.operationId), ops: [change.set("workflowMode", "REVIEW"), change.set(["dispatch", "payload", "workflowSecondReviewer"], { provider: "anthropic", modelId: MODEL })] });
     expect((await get()).statusCode).toBeGreaterThanOrEqual(400);
     await h.w.store.put({ item: operation });
-    runs.push({ companyId: companyId!, person: person!, taskId, workspaceId, job });
+    runs.push({ companyId, person, taskId, workspaceId, job });
   }
   const [a, b] = runs;
   for (const [own, other] of [[a!, b!], [b!, a!]] as const) {
