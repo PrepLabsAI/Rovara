@@ -1,4 +1,5 @@
 import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
+import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 // Engine host (lane E2, step 4): the dispatcher Lambda as the host of the core's dispatch, over Code's EC2 session machines. Ported from the monolith's host test.
 // The core's task flow (on the in-memory store and queue) starts tasks for two companies; their dispatch messages reach the dispatcher as an SQS batch from the core queue, the core hands
 // each operation to that company's EC2 machines, and the worker (which checks each token as the real one does, and lists the real worker's features) is given each job once.
@@ -312,13 +313,16 @@ describe("the core on the dispatcher", () => {
   });
   const inputs = (environment: NodeJS.ProcessEnv) => {
     const world = createSessionMachinesWorld();
+    let clock = Date.now();
+    const log = vi.fn();
     return {
       world,
       inputs: {
         env: environment, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
         machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined },
-        changeVisibility: async () => undefined, log: () => undefined,
+        changeVisibility: async () => undefined, log, now: () => new Date(clock),
       } as Parameters<typeof createDispatcherCoreHost>[0],
+      advance: (milliseconds: number) => { clock += milliseconds; }, log,
     };
   };
 
@@ -394,29 +398,46 @@ describe("the core on the dispatcher", () => {
     const route = { route: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" }) };
     const flow = { standingInstructions: null, modelAccess: route, learned: null };
     const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
-    // No reader: no step rule (every step runs on the declared route, as before).
+    // The dispatcher always consults stored state, and absence uses the configured default.
     const plain = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow }).app.runtimeFor(COMPANY_A);
-    expect(plain.flow.deps.stepModels).toBeUndefined();
+    expect(await plain.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
     expect(plain.flow.deps.modelAccess).toBe(route);
-    // With the choice switch on, even a missing declared route must fail closed on missing stored validation.
+    // Without a configured route there is no default model to use.
     const reader = createFakeOfferedModels();
     reader.set(COMPANY_A, ["claude-sonnet-5-5", "qwen.qwen3-coder-480b-a35b-v1:0"]);
     reader.set(COMPANY_B, ["claude-haiku-5-5"]);
     const noRoute = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { ...flow, modelAccess: null }, env: { ...made.inputs.env, ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } }).app.runtimeFor(COMPANY_A);
-    expect(await noRoute.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false, code: "MODEL_STALE" });
-    // With both: the company's own list decides. A is offered the default and a Bedrock model; B (the default is not on its list) is refused its steps.
+    expect(await noRoute.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    // Fresh rows are company scoped. A's missing row uses the default, even when B has a fresh choice.
     const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow, env: { ...made.inputs.env, [CORE_ENGINE_VARIABLE]: "on", ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } });
     const a = await host.app.runtimeFor(COMPANY_A);
     const b = await host.app.runtimeFor(COMPANY_B);
     expect(a.flow.deps.modelAccess).toBe(route);
     const registry = await host.app.registry();
-    const choice = createAgentModelChoice({ store: registry.require("storage"), companyId: COMPANY_A, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), reader, defaultModel: async () => "claude-sonnet-5-5", now: Date.now });
+    const choice = createAgentModelChoice({ store: registry.require("storage"), companyId: COMPANY_A, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), reader, defaultModel: async () => "claude-sonnet-5-5", now: () => made.inputs.now!().getTime() });
     await choice.service().state();
+    const otherChoice = createAgentModelChoice({ store: registry.require("storage"), companyId: COMPANY_B, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), reader, defaultModel: async () => "claude-haiku-5-5", now: () => made.inputs.now!().getTime() });
+    await otherChoice.service().state();
     const before = reader.asked.length;
     expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-sonnet-5-5", api: "anthropic-messages" } } });
-    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-haiku-5-5" } } });
     expect(reader.asked).toHaveLength(before);
-    expect(reader.asked).toEqual([COMPANY_A]);
+    expect(reader.asked).toEqual([COMPANY_A, COMPANY_B]);
+    made.advance(60_001);
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
+    expect(made.log).toHaveBeenCalledWith({ component: "dispatcher", event: "core_engine.model_choice_expired" });
+    expect(made.log).toHaveBeenCalledTimes(1);
+    const state = registry.require("storage");
+    const policyKey = modelSelectionPolicyKey(COMPANY_A);
+    const freshRow = await state.get(policyKey);
+    const validation = freshRow!["agentModelValidation"] as Record<string, unknown>;
+    await state.update({ key: policyKey, ops: [change.set("agentModelValidation", { malformed: true })] });
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    await state.update({ key: policyKey, ops: [change.set("agentModelValidation", { ...validation, choice: { ...(validation["choice"] as Record<string, unknown>), defaultModel: "claude-haiku-5-5" } })] });
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    // A company's model rule with no validated choice (the broker's model choice off, or never published) is no stored choice: the default model, not a refusal.
+    await state.update({ key: policyKey, ops: [change.remove("agentModelValidation")] });
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
   });
 
   it("builds nothing until a core record arrives, and then refuses by name while the security-list points are owed: the record comes back, no machine is started", async () => {

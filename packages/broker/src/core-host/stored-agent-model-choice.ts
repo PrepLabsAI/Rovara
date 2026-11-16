@@ -3,8 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 // No signing/HTTP capability or sign-in-table grant is needed by the dispatcher. DocumentStore.get is strongly consistent.
 import { z } from "zod";
 import { AGENT_MODEL_NAME, OfferedAgentModelsSchema, StageModelOverridesSchema, agentModelIdentity, agentModelName, when,
-  type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
-import { createModelSelection, type ModelSelectionService } from "../core/model-selection/service.js";
+  type DocumentStore, type InvocationModelRoute, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { createModelSelection, type ModelSelectionService, type StepChoice } from "../core/model-selection/service.js";
 import { modelSelectionPolicyKey, readModelSelectionPolicy } from "../core/model-selection/policy-store.js";
 
 export const STORED_MODEL_CHOICE_UNAVAILABLE = "The company's validated model choice could not be read just now, so this step cannot run.";
@@ -61,4 +61,39 @@ export function storedAgentModelChoice(input: { store: Pick<DocumentStore, "get"
       return chosen.ok ? chosen : refused();
     } catch { return refused(); }
   } };
+}
+
+/** Dispatcher policy: only absence or expiry uses the install's configured default; malformed and off-list state still refuses. */
+export function dispatcherStoredAgentModelChoice(input: { store: Pick<DocumentStore, "get">; companyId: OrgId; now: () => number; defaultRoute: () => Promise<InvocationModelRoute | undefined>; log: (entry: Record<string, unknown>) => void }): Pick<ModelSelectionService, "choose"> {
+  const validated = storedAgentModelChoice(input);
+  return { async choose(request) {
+    try {
+    const key = modelSelectionPolicyKey(input.companyId);
+    const row = await input.store.get(key);
+    if (row === undefined || row.pk !== key.pk || row.sk !== key.sk || row["orgId"] !== input.companyId || row["entityType"] !== "MODEL_SELECTION_POLICY") {
+      if (row !== undefined) return refused();
+      return dispatcherDefault(input.defaultRoute);
+    }
+    // A company's model rule without a validated choice (the broker's model choice is off, or never published): no stored choice, so the default model.
+    if (row["agentModelValidation"] === undefined) return dispatcherDefault(input.defaultRoute);
+    const parsed = Validation.safeParse(row["agentModelValidation"]);
+    if (!parsed.success) return refused();
+    const { choice, offered, validatedAt, expiresAt } = parsed.data;
+    const now = input.now();
+    const names = new Set(offered.models.map((model) => model.model));
+    if (row["revision"] !== choice.revision || !isDeepStrictEqual(row["stepOverrides"], choice.stepOverrides) || row["reviewDefault"] !== choice.reviewDefault
+      || !names.has(choice.defaultModel) || Object.values(choice.stepOverrides).some((setting) => [setting?.model, setting?.fallbackModel].some((model) => model !== undefined && !names.has(agentModelName(model) ?? "")))) return refused();
+    if (expiresAt <= now && expiresAt > validatedAt && expiresAt - validatedAt <= VALIDATION_TTL_MS) {
+      input.log({ component: "dispatcher", event: "core_engine.model_choice_expired" });
+      return dispatcherDefault(input.defaultRoute);
+    }
+    return validated.choose(request);
+    } catch { return refused(); }
+  } };
+}
+
+async function dispatcherDefault(defaultRoute: () => Promise<InvocationModelRoute | undefined>): Promise<StepChoice> {
+  const route = await defaultRoute();
+  if (route === undefined) return refused();
+  return { ok: true, step: { model: agentModelIdentity(route.alias), thinkingLevel: null, reason: "INSTALL_MODEL", sameModelAsChecked: false, route } };
 }

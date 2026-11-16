@@ -37,8 +37,7 @@ import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
 import type { MoneyStop } from "../../core/task-flow/money-stop.js";
 import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
-import { storedAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
-import { CORE_AGENT_MODEL_CHOICE_VARIABLE } from "../../core-host/offered-models-http.js";
+import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
 import { createDispatcherLearned, type DispatcherLessonsOptions } from "./dispatcher-lessons.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
@@ -267,8 +266,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
-        // ANSWER-3: only the broker validates/signs. The dispatcher reads the company's stored validation, with no network reader.
-        ...(env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? { stepModels: storedAgentModelChoice({ store: registry.require("storage"), companyId, now: () => now().getTime() }) } : {}),
+        // The broker's switch controls whether it writes fresh validation rows. The dispatcher always uses a fresh row when present and otherwise its configured default.
+        stepModels: dispatcherStoredAgentModelChoice({ store: registry.require("storage"), companyId, now: () => now().getTime(), defaultRoute: async () => modelAccess?.route(), log: inputs.log }),
         ...(learned === null || learned === undefined ? {} : { learned }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
       };
