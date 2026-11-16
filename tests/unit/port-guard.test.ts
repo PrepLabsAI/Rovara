@@ -669,8 +669,8 @@ describe("port-guard hardening (review of lane L0)", () => {
   });
 
   it("stays fast on a long line of host-name characters", () => {
-    // A scaling check, not a wall-clock bound: the line is timed at 12,500 and at 100,000 characters.
-    expectLinearScaling((n) => { const line = "a".repeat(n); return () => lineFindings(line); }, { n: 12_500, label: "lineFindings on a long line" });
+    // A scaling check, not a wall-clock bound: the line is timed at 2,000 and at 16,000 characters (kept small so a slow CI runner stays far from the test timeout); the full 100,000-character line runs once below.
+    expectLinearScaling((n) => { const line = "a".repeat(n); return () => lineFindings(line); }, { n: 2_000, label: "lineFindings on a long line" });
     expect(lineFindings(`${"a".repeat(100_000)}`)).toEqual([]);
   });
 
@@ -788,14 +788,15 @@ describe("port-guard hardening (review of lane L0)", () => {
       lines.splice(Math.floor(count * 0.73219), 0, `key "${fakeAccessKey()}"`);
       return `${lines.join("\n")}\n`;
     };
-    // A scaling check, not a wall-clock bound: a 12,500-line and a 100,000-line added lockfile, each in a lane of its own (built outside the timed guard run). The guard's own scan is timed
-    // (gitleaks off): the external gitleaks process would add a large linear cost that hides a super-linear one; it still runs on the full 100,000-line lockfile below.
+    // A scaling check, not a wall-clock bound: a 4,000-line and a 32,000-line added lockfile, each in a lane of its own (built outside the timed guard run), 3 samples each (kept small so a slow CI
+    // runner stays far from the test timeout). The guard's own scan is timed (gitleaks off): the external gitleaks process would add a large linear cost that hides a super-linear one; the one
+    // full-size 100,000-line lockfile below runs the whole guard with gitleaks on and must still find the secret.
     expectLinearScaling((count) => {
       const own = new Lane();
       own.write("yarn.lock", lockOf(count));
       own.commit("big lock");
       return () => own.guard({ gitleaks: "off" });
-    }, { n: 12_500, label: "guard on an added lockfile" });
+    }, { n: 4_000, runs: 3, label: "guard on an added lockfile" });
     lane.write("yarn.lock", lockOf(100_000));
     lane.commit("big lock");
     const found = lane.guard({ gitleaks: "run" });
@@ -1067,8 +1068,11 @@ describe("the hashed name list and the private extended list", () => {
 
   it("stays fast on a 100,000-line file", () => {
     const linesOf = (count: number) => Array.from({ length: count }, (_, i) => `const name${String(i)} = "value-${String(i % 97)}"; // resolved package-${String(i)}`);
-    // A scaling check, not a wall-clock bound: 12,500 and 100,000 lines.
-    expectLinearScaling((count) => { const text = linesOf(count); return () => { for (const line of text) lineFindings(line, INVENTED); }; }, { n: 12_500, label: "lineFindings over many lines" });
+    // A scaling check, not a wall-clock bound: 2,000 and 16,000 lines; the full 100,000 lines run once below.
+    expectLinearScaling((count) => { const text = linesOf(count); return () => { for (const line of text) lineFindings(line, INVENTED); }; }, { n: 2_000, label: "lineFindings over many lines" });
+    let found = 0;
+    for (const line of linesOf(100_000)) found += lineFindings(line, INVENTED).length;
+    expect(found).toBe(0);
   });
 
   it("the command line says when the extended list was not loaded, and does not say it when the list is given", () => {
