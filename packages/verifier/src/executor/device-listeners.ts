@@ -72,16 +72,16 @@ const sleepSync = (ms: number): void => { Atomics.wait(new Int32Array(new Shared
 export const DEVICE_LISTENER_RESAMPLE: Resample = { attempts: 4, delayMs: 100, sleep: sleepSync };
 
 /** One look: the listening table FIRST, then who holds each socket. In that order a socket opened after the table was read is simply not in this look, rather than listed with no holder yet. */
-function look(proc: ProcReader): DeviceListenerRow[] {
+function look(proc: ProcReader): Array<DeviceListenerRow & { inode: string }> {
   const sockets = listeningSockets(proc);
   const holders = socketHolders(proc);
-  const rows: DeviceListenerRow[] = [];
+  const rows: Array<DeviceListenerRow & { inode: string }> = [];
   for (const { port, inode } of sockets) {
     const pids = holders.get(inode) ?? [];
-    if (pids.length === 0) { rows.push({ port, owner: "unowned", exe: "" }); continue; }
+    if (pids.length === 0) { rows.push({ port, inode, owner: "unowned", exe: "" }); continue; }
     const who = pids.map((pid) => identifyProcess(proc, pid));
     const bad = who.find((row) => row.owner === "other");
-    rows.push(bad !== undefined ? { port, owner: "other", exe: bad.exe } : { port, owner: who[0]!.owner, exe: who[0]!.exe });
+    rows.push(bad !== undefined ? { port, inode, owner: "other", exe: bad.exe } : { port, inode, owner: who[0]!.owner, exe: who[0]!.exe });
   }
   return rows;
 }
@@ -94,12 +94,14 @@ function look(proc: ProcReader): DeviceListenerRow[] {
  * replaces "unowned" with what it found (an owner, or "other", which is a violation too): who counts as an owner is not widened, and a stray that no process here holds stays unowned.
  */
 export function listenerReport(proc: ProcReader = nodeProcReader(), resample: Resample = DEVICE_LISTENER_RESAMPLE): DeviceListenerReport {
-  let rows = look(proc);
-  for (let attempt = 1; attempt < resample.attempts && rows.some((row) => row.owner === "unowned"); attempt += 1) {
+  let seen = look(proc);
+  for (let attempt = 1; attempt < resample.attempts && seen.some((row) => row.owner === "unowned"); attempt += 1) {
     resample.sleep(resample.delayMs);
-    const again = new Map(look(proc).map((row) => [row.port, row]));
-    rows = rows.map((row) => { const found = row.owner === "unowned" ? again.get(row.port) : undefined; return found !== undefined && found.owner !== "unowned" ? found : row; });
+    // Matched by socket (port AND inode): the same port in the IPv4 and IPv6 tables is two sockets, and one's owner says nothing about the other.
+    const again = new Map(look(proc).map((row) => [`${String(row.port)}:${row.inode}`, row]));
+    seen = seen.map((row) => { const found = row.owner === "unowned" ? again.get(`${String(row.port)}:${row.inode}`) : undefined; return found !== undefined && found.owner !== "unowned" ? found : row; });
   }
+  const rows: DeviceListenerRow[] = seen.map(({ port, owner, exe }) => ({ port, owner, exe }));
   return { rows, violations: rows.filter((row) => row.owner === "unowned" || row.owner === "other").map((row) => `${String(row.port)} ${row.owner} ${row.exe}`.trim()) };
 }
 

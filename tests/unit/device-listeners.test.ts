@@ -148,6 +148,11 @@ describe("device listener ownership: a listener is unowned only if every look fi
     expect(listenerReport(withIntruder, noSleep()).violations).toEqual(["5554 other /usr/local/bin/node", "5555 other /usr/local/bin/node"]);
   });
 
+  it("MUTANT: the same port in the IPv4 and IPv6 tables is two sockets: an owned one never clears an unowned stray on the other", () => {
+    const both = { ...normal, tcp: (normal.tcp ?? "") + row(9, 50000, "0A", 999) };
+    expect(listenerReport(fake(both), noSleep()).violations).toEqual(["50000 unowned"]);
+  });
+
   it("reads the listening table before the holders, so a socket opened after the table was read is not listed without its holder", () => {
     // The emulator appears (its process and its socket) the moment the process list is first read: after that read, before the other.
     const base = fake(normal); let appeared = false;
