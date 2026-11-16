@@ -11,6 +11,7 @@ import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeW
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
+import { stepUpOf } from "../developer/verify-token.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
@@ -118,6 +119,11 @@ import type { BrokerResponse } from "../handler.js";
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
   policyHook?: ProjectSettingsHook;
+  /**
+   * Host-owned: the company's step-up window in seconds (the policy hook's answer). It may only SHORTEN the ten-minute default; an answer that is not a whole number from 0 to 86400,
+   * or a throw, refuses the press (`freshStepUp`). Absent: the default.
+   */
+  stepUpWindowSeconds?: (companyId: string) => Promise<unknown>;
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
   /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
   since?: Partial<Record<DeveloperSignInMethod, number>>;

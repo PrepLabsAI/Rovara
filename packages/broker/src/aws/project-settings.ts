@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  AgentXError, AgentXNameSchema, OrgIdSchema, PolicyRowsSchema, POLICY_FIELDS, agentXError, companyScoped,
+  AgentXError, AgentXNameSchema, OrgIdSchema, PolicyRowsSchema, POLICY_FIELDS, agentXError, companyScoped, policyFieldPageOnly,
   createRowsPolicySource, withPolicyHookValues, type PolicySource, type PolicyRows, type ResolvedPolicy,
 } from "@agentx/contracts";
+import { freshStepUp } from "../core-host/step-up.js";
 import { createPolicyHookClient, policyHookValuesAsker, type PolicyHookClientOptions } from "../core/policy-hook/index.js";
 import { projectGrant } from "./admin-actions.js";
 import { boundedCompanyReads, recordInCompany, resolveCompany } from "./company-check.js";
@@ -27,6 +28,8 @@ export const projectSettingsKey = (companyId: string, projectName: string) => ({
   pk: companyScoped(OrgIdSchema.parse(companyId), `PROJECT_SETTINGS#${AgentXNameSchema.parse(projectName)}`), sk: "META",
 });
 const rowsOf = (row: SettingsRow | undefined): PolicyRows => row === undefined ? {} : { ...(row.preset === undefined ? {} : { preset: row.preset }), project: row.overrides };
+/** Fixed words (no field, no value): a cost or approval setting is changed on the page, right after a fresh step-up. */
+export const SETTINGS_CHANGE_ON_THE_PAGE = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that only holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "policy_unavailable");
 
 /** Adapter-issued scope, after caller/project authorization. One reader, no fallback or cross-company cache.
@@ -111,12 +114,24 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
   const row: SettingsRow = { companyId, projectName, ...(preset === undefined ? {} : { preset }),
     overrides: (input.overrides ?? current?.overrides ?? {}) as SettingsRow["overrides"], revision: input.expectedRevision + 1,
     updatedAt: new Date(deps.now()).toISOString(), updatedBy: caller.developerId };
+  // M4a slice 2: a change to a cost or approval field needs a fresh step-up. The STORED choice is compared (preset and overrides, before any company bound), so a company minimum that
+  // hides the effect today cannot be used to change what would show when the minimum is lifted. A repeat of what is stored changes nothing and needs none.
+  const storedRows = (value: SettingsRow | undefined) => createRowsPolicySource(async (scope) => ({ scope, rows: rowsOf(value) })).resolve(policy.scope, {});
+  const [storedBefore, storedAfter] = await Promise.all([storedRows(current), storedRows(row)]);
+  // The chosen preset is itself a cost and approval choice: an override that pins preset_level can hide a preset change in the resolved values, so it is compared directly too.
+  const pageOnlyChange = current?.preset !== row.preset || POLICY_FIELDS.some((field) => policyFieldPageOnly(field.id)
+    && (storedBefore.values[field.id]!.value !== storedAfter.values[field.id]!.value
+      || Object.hasOwn(current?.overrides ?? {}, field.id) !== Object.hasOwn(row.overrides, field.id)));
+  if (pageOnlyChange) {
+    const window = deps.developer.stepUpWindowSeconds;
+    await freshStepUp(caller, window === undefined ? undefined : () => window(companyId), deps.now(), SETTINGS_CHANGE_ON_THE_PAGE);
+  }
   policy.propose(row);
   let after: ResolvedPolicy;
   try { after = await policy.source.resolve(policy.scope, {}); }
   catch { throw unavailable(); }
   // Resolve the proposed project layers through the same seam; company bounds are applied by the shared clamp above.
-  const unbounded = await createRowsPolicySource(async (scope) => ({ scope, rows: rowsOf(row) })).resolve(policy.scope, {});
+  const unbounded = storedAfter;
   for (const field of POLICY_FIELDS) {
     const value = unbounded.values[field.id]!.value;
     const bounded = after.values[field.id]!;
