@@ -78,7 +78,7 @@ export async function retryBlockedReview(deps: TaskFlowDeps, task: TaskRecord, e
   if (expectedRevision !== undefined && workflow.revision !== expectedRevision) throw agentXError("CHANGE_STALE", STALE);
   let next: WorkflowSnapshot;
   try {
-    next = await resumeBlockedCheck(deps.store, task.workspaceId, workflow, iso(deps));
+    next = await resumeBlockedCheck(deps.store, deps.companyId, task.workspaceId, workflow, iso(deps));
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
     throw error;

@@ -156,8 +156,8 @@ describe("the broker's model gateway for core callbacks", () => {
 // ---- the root routes a core worker's model-access request
 const SIGNING = "k".repeat(32);
 function tables() {
-  const reads: string[] = [];
-  return { reads, client: { async send(command: unknown) { if (!(command instanceof GetCommand)) throw new Error("only reads"); reads.push(String((command.input.Key as { pk?: unknown } | undefined)?.pk)); return { Item: undefined }; } } };
+  const reads: Array<{ pk: string; sk: string }> = [];
+  return { reads, client: { async send(command: unknown) { if (!(command instanceof GetCommand)) throw new Error("only reads"); reads.push(command.input.Key as { pk: string; sk: string }); return { Item: undefined }; } } };
 }
 function root(env: NodeJS.ProcessEnv, client: BrokerCoreRootInputs["documentClient"]) {
   return createBrokerCoreRoot({
@@ -186,9 +186,9 @@ describe("the broker's core root: a worker's model-access request", () => {
     const { createHmac } = await import("node:crypto");
     expect(await get(`${expired}.${createHmac("sha256", Buffer.from(SIGNING)).update(expired).digest("base64url")}`)).toBeUndefined();
     expect(t.reads).toEqual([]);
-    // A verified one: its workspace is looked up (a workspace with no core task is the old routes').
+    // A verified one: discover its workspace, then read its task pointer. A workspace with no core task is the old routes'.
     expect(await get(capability(workspaceId))).toBeUndefined();
-    expect(t.reads).toEqual([`WORKSPACE#${workspaceId}`]);
+    expect(t.reads).toEqual([{ pk: `WORKSPACE#${workspaceId}`, sk: "META" }, { pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK" }]);
   });
   it("is never looked up while the switch is off", async () => {
     const t = tables();

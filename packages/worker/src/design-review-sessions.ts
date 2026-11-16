@@ -2,7 +2,7 @@
 // Each reviewer is a NEW pi session made by `createWorkspacePiSession` as an agent-run session: its own system prompt (the role prompt), no repository context files and no coding preamble, the
 // read-only file tools (nothing for the merge step), and no history. The one user message is sent by `design-review.ts`; this file only wires pi to the port.
 import { randomUUID } from "node:crypto";
-import { DESIGN_REVIEW_ARTIFACT, MODEL_NOT_ENABLED_CODE, PACKET_DELIVERY_BYTES_MAX, agentXError, type DesignReviewBinding, type DesignReviewWorkerResult } from "@agentx/contracts";
+import { DESIGN_REVIEW_ARTIFACT, MODEL_NOT_ENABLED_CODE, PACKET_DELIVERY_BYTES_MAX, agentXError, type DesignReviewBinding, type DesignReviewWorkerResult, type InvocationModelRoute } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import { runDesignReview, modelKeyIdOf, type DesignReviewOptions, type DesignReviewPorts, type DesignReviewSession, type OpenDesignReviewSession } from "./design-review.js";
 import type { FileOpsTarget } from "./file-ops-exec.js";
@@ -38,13 +38,13 @@ export const DESIGN_REVIEW_NO_OPERATION_KEY = "design-review-operation-has-no-ke
  * only and refuses the operation's own (security S6). Its own session is still opened (its transcript and rule files) but never prompted, and opening a proxied session asks for its key at once, so
  * that session holds `DESIGN_REVIEW_NO_OPERATION_KEY` and never asks the broker. Each reviewer asks for its slot's key itself (`slotRuntimeFor`). Any other operation asks for its own key, as before.
  */
-export function operationModelProxy(input: { payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined }; proxyUrl: string | undefined; controlPlaneUrl: string; capability: string; fetch?: typeof fetch }): ModelProxyOptions | undefined {
-  if (input.proxyUrl === undefined || input.proxyUrl === "") return undefined;
+export function operationModelProxy(input: { payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined; modelRoute?: InvocationModelRoute | undefined }; proxyUrl: string | undefined; controlPlaneUrl: string; capability: string; fetch?: typeof fetch }): ModelProxyOptions | undefined {
+  if (!input.proxyUrl && input.payload.modelRoute === undefined) return undefined;
   if (designReviewBindingOf(input.payload) !== undefined) {
-    const baseUrl = input.proxyUrl;
+    const baseUrl = input.proxyUrl || input.controlPlaneUrl;
     return lazyModelProxy({ baseUrl, source: async () => ({ baseUrl, apiKey: DESIGN_REVIEW_NO_OPERATION_KEY, expiresAt: Number.MAX_SAFE_INTEGER }) });
   }
-  return lazyModelProxy({ baseUrl: input.proxyUrl, source: modelAccessSource({ controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
+  return lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: modelAccessSource({ ...(input.proxyUrl ? { fallbackBaseUrl: input.proxyUrl } : {}), controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
 }
 
 /** The reviewer's packet from the broker's route, with the operation's capability. Bounded; anything but a JSON answer is an error (the reviewer then gives no result). */
@@ -172,8 +172,8 @@ export function slotRuntimeFor(input: { controlPlaneUrl: string; capability: str
     const declared = open.purpose === "merge" ? input.binding.merge : input.binding.reviewers.find((entry) => entry.keySlot === open.keySlot);
     // The model and route come from the binding, never from the port's caller: a slot the binding does not hold is refused.
     if (declared === undefined || declared.keySlot !== open.keySlot) throw agentXError("CONFIG_INVALID", "a design review session was asked for with a key slot the binding does not hold");
-    const proxy = input.proxyUrl === undefined ? undefined
-      : lazyModelProxy({ baseUrl: input.proxyUrl, source: modelAccessSource({ controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, slot: declared.keySlot, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
+    const proxy = !input.proxyUrl && declared.modelRoute === undefined ? undefined
+      : lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: modelAccessSource({ ...(input.proxyUrl ? { fallbackBaseUrl: input.proxyUrl } : {}), controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, slot: declared.keySlot, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
     const runtime = designReviewRuntime({ model: declared.model, modelRoute: declared.modelRoute }, proxy, input.environment);
     return { ...runtime, keyId: async () => (proxy === undefined ? undefined : modelKeyIdOf(await proxy.apiKey())) };
   };

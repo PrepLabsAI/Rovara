@@ -1,7 +1,7 @@
 // TE-H1 slice 2 (DEC 241): keeping browser evidence in the pack, and reading it back. A run with no browser evidence is the pack it always was (byte for byte, version 1); a run with it is a v2 pack with the `visual` check and its
 // pairs, whose pictures live under the task and are served only when the CURRENT pack names them; the v1 view never shows a picture as a passed check; and a keep that writes no pack leaves no picture behind.
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   EvidencePackV2Schema, browserEvidenceLines, browserEvidenceOutcomeOfPack, type BrowserEvidenceCaptured, type CheckEntry, type EvidencePackV2,
 } from "../../packages/contracts/src/index.js";
@@ -13,6 +13,14 @@ import { eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence
 import { createLocalEvidence } from "../../packages/broker/src/local/app/evidence.js";
 import { proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
+
+import { createWorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
+import { IMPLICIT_COMPANY_ID, MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, encodeBrowserEvidenceUpload } from "@agentx/contracts";
+import { createHarness, newRequestId } from "../support/task-flow-harness.js";
+import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import { fromDocument, type OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { handleBrowserEvidenceUpload } from "../../packages/broker/src/core/proof/browser-evidence-upload.js";
 
 const DIGEST = "c".repeat(64);
 const TASK = { ownerKey: "owner-1", workspaceId: "ws-1", taskId: "task-1" };
@@ -185,4 +193,34 @@ describe("the local evidence reads", () => {
     await keepEvidence({ scan: scanTextForTests, actions: { async artifacts() { return []; }, async readArtifact() { return ""; } }, store: { blobs: plain } }, input());
     expect(await createLocalEvidence({ flow: { store: documents, companyId: "org_00000000000000000000" }, blobs: plain }).browserEvidencePanelOf(TASK, DIGEST)).toBeUndefined();
   });
+});
+
+
+it("keeps H1 evidence for the task's own company and follows its thin workspace pointer", async () => {
+  const companyId = "org_bbbbbbbbbbbbbbbbbbbb";
+  const h = createHarness({ companyId });
+  await h.registerProject();
+  const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Show checkout" });
+  const task = (await readTask(h.deps, started.task.taskId))!;
+  const key = workspaceKey(task.companyId, task.workspaceId);
+  const base = fromDocument<OperationRecord>((await h.store.query({ pk: key.pk, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items[0])!;
+  const operation: OperationRecord = { ...base, kind: "task", workflowMode: "CHECKS", status: "RUNNING", dispatch: { ...base.dispatch, payload: { browserEvidence: { startCommand: "npm start", port: 4321, routes: [{ path: "/checkout", files: ["src/**"] }] } } } };
+  const workspace = (await h.store.get(key))!;
+  await h.store.put({ item: { ...workspace, machine: { machineId: "own-machine", machineKey: "own" } } });
+  await h.store.put({ item: { ...workspace, ...workspaceKey(IMPLICIT_COMPANY_ID, task.workspaceId), companyId: IMPLICIT_COMPANY_ID, orgId: IMPLICIT_COMPANY_ID, machine: { machineId: "other-machine", machineKey: "other" } } });
+  const blobs = createDocumentEvidenceBlobStore(h.store, { companyId });
+  const bytes = Buffer.from(encodeBrowserEvidenceUpload(captured()));
+  const digest = sha(bytes);
+  const stores = { store: h.store, objects: blobs };
+  const init = await handleBrowserEvidenceUpload(stores, operation, { stage: "init", totalBytes: bytes.length, chunkCount: 1, sha256: digest });
+  await handleBrowserEvidenceUpload(stores, operation, { stage: "chunk", uploadId: init["uploadId"], index: 0, bytesBase64: bytes.toString("base64"), sha256: digest });
+  await handleBrowserEvidenceUpload(stores, operation, { stage: "finalize", uploadId: init["uploadId"], sha256: digest });
+  const sandboxModelHostsOf = vi.fn(async () => "allowed" as const);
+  const evidence = createLocalEvidence({ flow: { store: h.store, companyId: IMPLICIT_COMPANY_ID }, blobs, sandboxModelHostsOf });
+  expect(await evidence.keepAfterChecks({ task, operation, workflow: createWorkflowSnapshot({ taskId: task.taskId, ownerId: "a".repeat(64), now: new Date().toISOString() }), candidateDigest: DIGEST, checks: [entry("readiness:0", "pytest -q")] })).toMatchObject({ kept: true });
+  expect(sandboxModelHostsOf).toHaveBeenCalledExactlyOnceWith("own-machine");
+  const read = await loadEvidenceRead(blobs, task, DIGEST);
+  expect(read?.status).toBe("v2");
+  expect(JSON.stringify(read)).toContain(MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE);
+  expect((await evidence.browserEvidencePanelOf(task, DIGEST))?.pairs[0]).toMatchObject({ route: "/checkout" });
 });

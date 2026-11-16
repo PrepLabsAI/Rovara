@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // the stored result of a proposal's CANDIDATE check. A candidate check prepares a fresh workspace from the commands a test-environment proposal would put in the project's settings (the settings' own commands
 // plus the proposal's), so the commands are run BEFORE they are applied. Its record is keyed by (project, proposal digest, settings revision) and holds the workspace (whose status is the result, read live as the
 // project's own setup check is) and the exact command lists the check ran. Nothing else reads a candidate: the Prove derives its report from it, and the approval writes into the settings only what it ran.
@@ -75,7 +76,7 @@ export type UsageRefusal = (typeof USAGE_REFUSALS)[number];
 export async function candidateCheckOfWorkspace(deps: StoreOnly, orgId: OrgId, workspaceId: string): Promise<{ project: string; digest: string; revision: number } | undefined> {
   try {
     // The record `commitSetupCheck` writes for every setup check (org/project-setup-check.ts `setupCheckRecordKey`; not imported here, that module imports this one).
-    const record = (await deps.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: "SETUP_CHECK" })) as Record<string, unknown> | undefined;
+    const record = (await deps.store.get({ pk: (await workspaceKeys({ store: deps.store, companyId: orgId }, workspaceId)).workspaceKey.pk, sk: "SETUP_CHECK" })) as Record<string, unknown> | undefined;
     if (record === undefined || record["orgId"] !== orgId || record["workspaceId"] !== workspaceId || typeof record["project"] !== "string") return undefined;
     const project = record["project"];
     const candidates = await queryAll(deps.store, { pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: "TESTENV#CANDIDATE#" }, limit: 50 });

@@ -1,7 +1,8 @@
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import { DescribeInstancesCommand, DescribeVolumesCommand, EC2Client, TerminateInstancesCommand } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
@@ -60,7 +61,16 @@ export function createReaperHandler(dependencies: ReaperDependencies) {
       const expired = now - Date.parse(session.launchedAt!) > MAX_LIFETIME_MS;
       if (!idle && !expired) continue;
       // Never reaped while the broker sees work, or while the worker reports work the broker does not.
-      if (await dependencies.activeOperation(session.workspaceId) || await isBusy(dependencies, session)) {
+      let busy: boolean;
+      try {
+        busy = await dependencies.activeOperation(session.workspaceId);
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND")) throw error;
+        // A broken discovery pointer is busy for safety, but must not block other sessions.
+        report.skippedBusy.push(session.workspaceId);
+        continue;
+      }
+      if (busy || await isBusy(dependencies, session)) {
         report.skippedBusy.push(session.workspaceId);
         continue;
       }
@@ -139,7 +149,7 @@ export const handler = createReaperHandler({
     },
   }),
   async activeOperation(workspaceId) {
-    const item = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" }, ConsistentRead: true }))).Item;
+    const item = (await readWorkspaceMeta(documentClient, tableName, workspaceId))?.item;
     return typeof item?.activeOperationId === "string";
   },
   async ping(url) {

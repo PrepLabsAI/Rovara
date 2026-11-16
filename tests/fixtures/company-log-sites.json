@@ -66,6 +66,7 @@
   "packages/broker/src/core/sessions/summary.ts": 2,
   "packages/broker/src/core/sessions/sweep.ts": 1,
   "packages/broker/src/core/setup-agent/eval-spend.ts": 1,
+  "packages/broker/src/core/task-flow/workspace-pointer.ts": 1,
   "packages/broker/src/core/test-env/candidate-check.ts": 1,
   "packages/broker/src/core/test-env/nightly.ts": 2,
   "packages/broker/src/core/test-env/saved-env-lease.ts": 1,

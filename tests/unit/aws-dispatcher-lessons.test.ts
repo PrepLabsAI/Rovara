@@ -28,8 +28,9 @@ async function world(companyId = A) {
     const lesson = lessonRecord({ id: company === A ? "les_aaaa1111" : "les_bbbb1111", workspaceId: company, project: "payments", title: company === A ? "A advice" : "B private advice", tier: 1, approvals: [{ approvalId: "approved", by: "person-1", at: 1, mode: "one" }], citations: [], citationChecks: [], scope: {}, stages: ["PLAN"], provenance: { ...lessonRecord().provenance, supportTasks: [] } });
     expect((await lessons.commit({ workspaceId: company, project: "payments" }, 0, [lesson], now)).ok).toBe(true);
   }
-  await store.put({ item: { ...workspaceKey(WS), companyId } });
-  await store.put({ item: { ...taskPointerKey(WS), taskId: TASK } });
+  await store.put({ item: { ...workspaceKey(companyId, WS), entityType: "WORKSPACE", companyId } });
+  await store.put({ item: { pk: `WORKSPACE#${WS}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", companyId, workspaceId: WS } });
+  await store.put({ item: { ...taskPointerKey(companyId, WS), taskId: TASK } });
   await store.put({ item: { ...taskKey(TASK), taskId: TASK, workspaceId: WS, companyId, project: "payments", title: "Retry network calls", developerId: "person-1", startingRevision: 1, workflow: { revision: 1 } } });
   const people: HostedLessonPeople = {
     approvers: async () => ({ complete: true, membershipVersion: 1, ownerIds: ["person-1"], eligibleIds: ["person-1"], lastEligibleLossAtMs: null }),
@@ -42,6 +43,31 @@ async function world(companyId = A) {
 }
 
 describe("read-only dispatcher lessons", () => {
+  it("composes the hosted reader only for a covered company and passes its lessons through readVisible", async () => {
+    const w = await world();
+    const original = (await w.store.get(lessonKey(A, "payments", "les_aaaa1111")))!;
+    await w.store.put({ item: { ...original, ...lessonKey(A, "payments", "les_hidden11"), id: "les_hidden11",
+      provenance: { ...(original["provenance"] as Record<string, JsonValue>), audience: { kind: "restricted", acl: { source: "slack", scope: "slack:channel/private", principals: ["someone-else"], groups: [], capturedAt: "2026-11-01T00:00:00.000Z", liveCheck: "on_read" } } } } });
+    await w.store.put({ item: { ...lessonSetKey(A, "payments"), setVersion: 1, members: { les_aaaa1111: 1, les_hidden11: 1 } } });
+    for (const write of w.writes) write.mockClear();
+    const env = { ROVARA_CORE_LESSONS: `on:${A}` };
+    const covered = hostedDispatcherFlow(env, w.options);
+    expect(typeof covered?.learned).toBe("function");
+    const answer = await covered!.learned!({ ...request, companyId: B } as typeof request);
+    expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+    expect(JSON.stringify(answer)).not.toContain("les_hidden11");
+    expect(JSON.stringify(answer)).not.toContain("B private advice");
+    w.send.mockClear();
+    // Even though the supplied options say on, only the deployment's switch decides.
+    const uncovered = hostedDispatcherFlow(env, { ...w.options, companyId: B });
+    expect(uncovered).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    for (const raw of [undefined, "off"]) {
+      expect(hostedDispatcherFlow(raw === undefined ? {} : { ROVARA_CORE_LESSONS: raw }, w.options)).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    }
+    expect(w.send).not.toHaveBeenCalled();
+    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+  });
+
   it("uses the workspace company with identical raw ids, never a payload company, and writes nothing", async () => {
     for (const company of [A, B]) {
       const w = await world(company);
@@ -50,20 +76,20 @@ describe("read-only dispatcher lessons", () => {
       expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual([company === A ? "les_aaaa1111" : "les_bbbb1111"]);
       expect(JSON.stringify(answer)).not.toContain(company === A ? "B private advice" : "A advice");
       for (const write of w.writes) expect(write).not.toHaveBeenCalled();
-      expect(w.send).toHaveBeenCalledOnce();
-      expect(w.send.mock.calls[0]![0].input).toMatchObject({ ConsistentRead: true, Key: workspaceKey(WS) });
+      expect(w.send).toHaveBeenCalledTimes(2);
+      expect(w.send.mock.calls[0]![0].input).toMatchObject({ ConsistentRead: true, Key: { pk: `WORKSPACE#${WS}`, sk: "META" } });
     }
   });
   it.each([undefined, "invalid-private-value", B, 42])("refuses missing, invalid or foreign workspace company (%s) with fixed words", async (companyId) => {
     const w = await world();
-    await w.store.put({ item: { ...workspaceKey(WS), ...(companyId === undefined ? {} : { companyId }) } });
+    await w.store.put({ item: { ...workspaceKey(A, WS), ...(companyId === undefined ? {} : { companyId }) } });
     await expect(w.learned(request)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${DISPATCHER_LESSONS_UNAVAILABLE}` });
   });
   it("refuses conflicting workspace ownership and foreign task records", async () => {
     const w = await world();
-    await w.store.put({ item: { ...workspaceKey(WS), companyId: A, orgId: B } });
+    await w.store.put({ item: { ...workspaceKey(A, WS), companyId: A, orgId: B } });
     await expect(w.learned(request)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${DISPATCHER_LESSONS_UNAVAILABLE}` });
-    await w.store.put({ item: { ...workspaceKey(WS), companyId: A } });
+    await w.store.put({ item: { ...workspaceKey(A, WS), companyId: A } });
     await w.store.update({ key: taskKey(TASK), ops: [{ op: "set", path: ["companyId"], value: B }] });
     await expect(w.learned(request)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${DISPATCHER_LESSONS_UNAVAILABLE}` });
   });
@@ -156,7 +182,7 @@ describe("read-only dispatcher lessons", () => {
   it("refuses a total byte cap across individually smaller documents", async () => {
     const w = await world();
     const padding = "x".repeat(Math.floor(DISPATCHER_LESSONS_LIMITS.bytes * 0.3));
-    for (const key of [workspaceKey(WS), taskPointerKey(WS), taskKey(TASK), projectRevisionKey(A, "payments", 1)]) {
+    for (const key of [workspaceKey(A, WS), taskPointerKey(A, WS), taskKey(TASK), projectRevisionKey(A, "payments", 1)]) {
       await w.store.put({ item: { ...(await w.store.get(key))!, padding } });
     }
     await expect(w.learned(request)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${DISPATCHER_LESSONS_UNAVAILABLE}` });
@@ -183,7 +209,7 @@ describe("read-only dispatcher lessons", () => {
     vi.useFakeTimers();
     const w = await world();
     let release!: () => void;
-    w.send.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ Item: { ...workspaceKey(WS), companyId: A } }); }));
+    w.send.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ Item: { pk: `WORKSPACE#${WS}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", companyId: A } }); }));
     const pending = expect(w.learned(request)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${DISPATCHER_LESSONS_UNAVAILABLE}` });
     await vi.advanceTimersByTimeAsync(2_500);
     await pending;

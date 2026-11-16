@@ -1,3 +1,4 @@
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
 import { chatPostMessage } from "./slack-web.js";
 import {
@@ -12,7 +13,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { failActiveOperation } from "./outbox-failure.js";
@@ -191,7 +192,14 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       if (!settled(volume.createdAt) || volume.workspaceId === undefined) continue;
       const owner = sessions.get(volume.workspaceId) ?? await dependencies.sessions.get(volume.workspaceId);
       if (owner !== undefined && owner.state !== "DELETED" && owner.volumeId === volume.volumeId) continue;
-      const closedAt = await dependencies.closedAt(volume.workspaceId);
+      let closedAt: string | undefined;
+      try {
+        closedAt = await dependencies.closedAt(volume.workspaceId);
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND")) throw error;
+        // A pointer integrity fault cannot authorize deletion or quarantine. Continue the run.
+        continue;
+      }
       if (closedAt !== undefined && now - Date.parse(closedAt) > CLOSED_VOLUME_MS && volume.state === "available") {
         await dependencies.deleteVolume(volume.volumeId);
         report.closedVolumesDeleted.push(volume.volumeId);
@@ -616,8 +624,8 @@ return createReconcilerHandler({
   },
   failActiveOperation: (workspaceId, error) => failActiveOperation(documentClient, tableName, workspaceId, error),
   async closedAt(workspaceId) {
-    const item = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }))).Item as { status?: string; closedAt?: string } | undefined;
-    return item?.status === "CLOSED" ? item.closedAt : undefined;
+    const item = (await readWorkspaceMeta(documentClient, tableName, workspaceId))?.item;
+    return item?.["status"] === "CLOSED" && typeof item["closedAt"] === "string" ? item["closedAt"] : undefined;
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
   sweepStuckCancels: stuckCancelSweep(workspaces),

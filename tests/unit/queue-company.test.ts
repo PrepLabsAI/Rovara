@@ -1,3 +1,5 @@
+import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, OUTBOX_PENDING_INDEX, companyScoped, type QueueService } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -94,11 +96,22 @@ it("fails closed: unusable consumer releases even malformed messages", async () 
   expect(await runDispatchOnce(h.deps)).toMatchObject({ foreign: 1, dropped: 0 }); h.clock.advance(31);
   expect((await queue.receive())).toHaveLength(1);
 });
-it("known gap: unscoped operation keys cannot hold the same raw ids for two companies", async () => {
-  const store = new MemoryDocumentStore(); const key = { pk: "WORKSPACE#shared-workspace", sk: "OPERATION#shared-operation" };
-  await store.put({ item: { ...key, companyId: A, marker: "a" } }); await store.put({ item: { ...key, companyId: B, marker: "b" } });
-  expect(store.size).toBe(1); expect((await store.get(key))?.companyId).toBe(B);
+it("unscoped keys no longer hold two companies' same raw ids", async () => {
+  const store = new MemoryDocumentStore();
+  for (const company of [A, B]) await store.put({ item: { ...operationKey(company, "shared-workspace", "shared-operation"), marker: company } });
+  expect(store.size).toBe(2);
+  for (const company of [A, B]) expect((await store.get(operationKey(company, "shared-workspace", "shared-operation")))?.marker).toBe(company);
 });
+it("legacy unscoped workspace rows belong to the implicit company only", async () => {
+  const store = new MemoryDocumentStore();
+  await store.put({ item: { pk: "WORKSPACE#shared-workspace", sk: "META", companyId: A } });
+  expect((await locateWorkspace({ store, companyId: A }, "shared-workspace"))?.scope).toBe("legacy");
+  const get = vi.spyOn(store, "get");
+  expect(await locateWorkspace({ store, companyId: B }, "shared-workspace")).toBeUndefined();
+  // Its own scoped key, then the id-only discovery key (only to log a dangling pointer of its OWN company); a legacy row is never admitted for B.
+  expect(get.mock.calls.map(([key]) => key.pk)).toEqual([`ORG#${B}#WORKSPACE#shared-workspace`, "WORKSPACE#shared-workspace"]);
+});
+
 it("a foreign visibility failure never logs the adapter's cause or foreign company", async () => {
   const h = createHarness(); const queue = await h.queues.queue("task-dispatch"); const lines: unknown[] = [];
   h.deps.log = (line) => { lines.push(line); };

@@ -174,6 +174,7 @@ const state = createWorkerServerState(
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
         const { chatGptToken, chatGptFallback, authorizeModelFallback, ...callbacks } = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
         // #341: a task on its owner's ChatGPT plan; the token never leaves this process's memory.
+        // ANSWER-2: a core model route asks the broker even without a boot proxy URL.
         // Ruling R29: on an install with a model proxy the task calls models through it, with a key minted for this task;
         // the worker holds no provider secret. The key is asked for lazily, at the first request that needs the proxy (a ChatGPT
         // plan's own requests never do), so a task on a plan is not held up by a proxy it may never call.

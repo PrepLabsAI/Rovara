@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The setup run's callback: ONE worker-to-broker action, `POST /v1/internal/workspaces/{w}/operations/{o}/setup-agent`, for everything a running setup run reports or asks. It is granted (capability `setup-agent`) only to a
 // SETUP_AGENT operation, and the route accepts it only for that operation while it RUNS.
 //
@@ -10,7 +11,7 @@
 // Nothing in a reply is repository or command text except the person's own command (which only the owner could type and the broker already checked).
 import { z } from "zod";
 import { agentXError, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
-import { taskPointerKey, taskKey } from "../task-flow/keys.js";
+import { taskKey } from "../task-flow/keys.js";
 import { SETUP_AGENT_WORKFLOW_MODE } from "./agent.js";
 import { finishSetupCommand, readSetupCommand, takeSetupCommand } from "./command.js";
 import { listHostAsks, approvedHostsOf, requestHostAsk } from "./host-ask.js";
@@ -55,7 +56,7 @@ const RUNNING_STATUSES: ReadonlySet<string> = new Set(["DISPATCHING", "RUNNING"]
 /** The run an operation belongs to: its task, which must be a setup-run task of this company. Undefined for anything else. */
 export async function setupRunOfOperation(deps: Pick<SetupAgentCallbackDeps, "store" | "companyId">, operation: SetupAgentOperation): Promise<{ orgId: OrgId; project: string; taskId: string } | undefined> {
   if (operation.kind !== "task" || operation.workflowMode !== SETUP_AGENT_WORKFLOW_MODE || !RUNNING_STATUSES.has(operation.status)) return undefined;
-  const pointer = await deps.store.get(taskPointerKey(operation.workspaceId));
+  const pointer = await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey());
   if (typeof pointer?.["taskId"] !== "string") return undefined;
   const task = await deps.store.get(taskKey(pointer["taskId"]));
   if (task === undefined || task["purpose"] !== "setup_agent" || task["companyId"] !== deps.companyId || task["workspaceId"] !== operation.workspaceId || task["closedAt"] !== undefined || typeof task["project"] !== "string") return undefined;

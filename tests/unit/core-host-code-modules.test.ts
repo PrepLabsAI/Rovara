@@ -78,9 +78,8 @@ describe("Code's AWS adapter modules", () => {
       runtime: () => ({
         callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }),
         now: () => new Date("2026-11-15T10:00:00.000Z"), log: () => undefined,
+        ciReporting: { honest: true, ciMode: () => "their_ci_fix" },
         services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }),
-        // Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
-        ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const },
       }),
     });
     const store = (await app.registry()).require("storage");
@@ -145,8 +144,7 @@ describe("Code's AWS adapter modules", () => {
     const registry = await buildCoreRegistry({ modules: modulesWithOwed(aws), context: context(), areas: ["flow", "build", "merge"] });
     const secrets = registry.require("secrets");
     expect((await secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${FAKE_COMPANY}/linear` }))?.reveal()).toBe("own");
-    // T6 (#655): another company's secret answers exactly like a missing one, and is never read.
-    expect(await secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${OTHER}/linear` })).toBeUndefined();
+    await expect(secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${OTHER}/linear` })).resolves.toBeUndefined();
     expect(aws.secrets.reads).toEqual([`agentx/staging/org-connectors/${FAKE_COMPANY}/linear`]);
     expect(COMPANY_SECRET_PATHS).toContain("org-connectors");
   });

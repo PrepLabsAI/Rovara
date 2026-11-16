@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- rows read back from the store are free-form JSON. */
 // The setup agent's stores and rules, on the in-memory document store: the person's commands, the websites a run asks for, the journal, what a proposal's commands become, and the status of a setup check.
 import { randomUUID } from "node:crypto";
@@ -262,7 +263,7 @@ describe("the status of a project's setup check", () => {
   const mark = (workspaceId: string, revision = 3, startedAt = "2026-11-10T11:59:00Z") => ({ workspaceId, revision, startedAt, startedBy: OWNER });
 
   it("is unchecked with no check, outdated for an older revision, checking, ready, and failed with the step that failed", async () => {
-    const deps = (store: MemoryDocumentStore) => ({ store, now: () => new Date(now) });
+    const deps = (store: MemoryDocumentStore) => ({ store, companyId: T1_COMPANY, now: () => new Date(now) });
     expect(await setupStateOfCheck(deps(new MemoryDocumentStore()), undefined, definitionOf(3))).toEqual({ status: "unchecked" });
     const preparing = await world("PREPARING");
     expect(await setupStateOfCheck(deps(preparing.store), mark(preparing.workspaceId), definitionOf(3))).toMatchObject({ status: "checking" });

@@ -25,8 +25,8 @@ export const OFFERED_MODELS_HTTP_TIMEOUT_MS = 4_000;
 /** Cloud rejects a longer issuer in a service token. */
 export const SERVICE_TOKEN_ISSUER_MAX_CHARS = 2_048;
 /**
- * The switch that offers companies a model choice (default off, read the same way on the broker and on the dispatcher). The dispatcher chooses every step's model, so it must be able to read the list
- * too before this is turned on: until infrastructure lets it sign with the task key, leave it unset, or a saved choice would not be the model the steps run on.
+ * The switch that offers companies a model choice (default off, matching on broker and dispatcher). Only the broker reads the offered list and signs;
+ * the dispatcher reads the broker's short-lived validation on the company's existing policy row (ANSWER-3). It gets no signing rights.
  */
 export const CORE_AGENT_MODEL_CHOICE_VARIABLE = "ROVARA_CORE_AGENT_MODEL_CHOICE";
 /** The only thing a failed read says. */

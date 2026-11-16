@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 // A stage's context tools on a laptop: `GET /v1/internal/context-tools` and `POST /v1/internal/context-tools/call`, the two routes a running Understand, Plan, Plan-check or Review stage reaches
 // the project's read-only sources through. Built on the task flow's ports, in the way `design-review/packet-route.ts` is:
 //   - the callback capability must name the `context-tools` action (a purpose of its own; a `model-access` capability alone is refused);
@@ -15,11 +16,11 @@ import { answerMcp, type McpToolHost } from "../context-sources/mcp-endpoint.js"
 import { documentContextSourceStore } from "../context-sources/store.js";
 import { documentUsageStore } from "../context-sources/usage.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
-import { operationKey, taskPointerKey } from "../core/task-flow/keys.js";
+
 import { readTask } from "../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type WorkspaceRecord } from "../core/task-flow/records.js";
 import { isTerminalStatus } from "../core/task-flow/results.js";
-import { workspaceKey } from "../core/task-flow/keys.js";
+
 
 export const CONTEXT_TOOLS_PATH = "/v1/internal/context-tools";
 export const CONTEXT_TOOLS_CALL_PATH = "/v1/internal/context-tools/call";
@@ -71,13 +72,14 @@ async function authorizedRun(flow: TaskFlowDeps, capabilities: Pick<CallbackCapa
   const claims = (() => { try { return capabilities.verify(token, "context-tools"); } catch { throw agentXError("CALLBACK_FORBIDDEN", "invalid callback capability"); } })();
   // The worker's own egress gateway stamps the workspace the call comes from: a capability is good only for its own workspace's worker.
   if (request.headers[WORKSPACE_HEADER] !== claims.workspaceId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
-  const operation = fromDocument<OperationRecord>(await flow.store.get(operationKey(claims.workspaceId, claims.operationId)));
+  const location = await workspaceKeys(flow, claims.workspaceId);
+  const operation = fromDocument<OperationRecord>(await flow.store.get(location.operationKey(claims.operationId)));
   if (operation === undefined || operation.companyId !== flow.companyId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
   if (operation.fence !== claims.fence) throw agentXError("STALE_FENCE", "callback fence is stale");
   if (isTerminalStatus(operation.status) || operation.status === "CANCEL_REQUESTED") throw agentXError("STALE_FENCE", "a finished or stopped step cannot use context tools");
-  const workspace = fromDocument<WorkspaceRecord>(await flow.store.get(workspaceKey(operation.workspaceId)));
+  const workspace = fromDocument<WorkspaceRecord>(await flow.store.get(location.workspaceKey));
   if (workspace === undefined || workspace.activeOperationId !== operation.id) throw agentXError("STALE_FENCE", "operation no longer owns the workspace");
-  const pointer = fromDocument<TaskPointerRecord>(await flow.store.get(taskPointerKey(operation.workspaceId)));
+  const pointer = fromDocument<TaskPointerRecord>(await flow.store.get(location.taskPointerKey()));
   const task = pointer === undefined ? undefined : await readTask(flow, pointer.taskId);
   if (task === undefined || task.companyId !== flow.companyId || task.workspaceId !== workspace.id) throw agentXError("NOT_FOUND", "no task belongs to this operation");
   return { orgId: flow.companyId, task: { taskId: task.taskId, project: task.project }, operation: { id: operation.id, workflowMode: operation.workflowMode } };

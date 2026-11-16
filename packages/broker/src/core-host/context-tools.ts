@@ -8,7 +8,7 @@ import { CONTEXT_TOOLS_PATH, CONTEXT_TOOLS_CALL_PATH, GATEWAY_MCP_PATH } from ".
 import { frameResult, inertSentence } from "../context-sources/present.js";
 import { TEAM_SEARCH_LIMIT_MAX, type TeamRecordSearch } from "../context-sources/team-record.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
-import { operationKey, taskPointerKey, workspaceKey } from "../core/task-flow/keys.js";
+import { locateWorkspace } from "../core/task-flow/workspace-location.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type WorkspaceRecord } from "../core/task-flow/records.js";
 import { withinTaskTokenDeadline } from "../core/model-gateway/deadline.js";
@@ -55,15 +55,16 @@ export async function handleCoreContextTools(request: BrokerRequest, ports: Core
       const { flow, teamSearch } = await ports.runtimeFor(companyId!);
       deadline.check();
       if (flow.companyId !== companyId) return refuse();
-      const workspace = fromDocument<WorkspaceRecord>(await flow.store.get(workspaceKey(claims.workspaceId)));
+      const location = await locateWorkspace({ store: flow.store, companyId }, claims.workspaceId);
+      const workspace = fromDocument<WorkspaceRecord>(location?.workspace);
       deadline.check();
-      if (workspace === undefined || workspace.id !== claims.workspaceId || workspace.companyId !== companyId
+      if (location === undefined || workspace === undefined || workspace.id !== claims.workspaceId || workspace.companyId !== companyId
         || (workspace.orgId !== undefined && workspace.orgId !== companyId) || workspace.activeOperationId !== claims.operationId || workspace.fence !== claims.fence) return refuse();
-      const operation = fromDocument<OperationRecord>(await flow.store.get(operationKey(claims.workspaceId, claims.operationId)));
+      const operation = fromDocument<OperationRecord>(await flow.store.get(location.operationKey(claims.operationId)));
       deadline.check();
       if (operation === undefined || operation.id !== claims.operationId || operation.workspaceId !== claims.workspaceId || operation.companyId !== companyId
         || operation.fence !== claims.fence || !["ACCEPTED", "DISPATCHING", "RUNNING"].includes(operation.status) || !isContextSourceStage(operation.workflowMode)) return refuse();
-      const pointer = fromDocument<TaskPointerRecord>(await flow.store.get(taskPointerKey(claims.workspaceId)));
+      const pointer = fromDocument<TaskPointerRecord>(await flow.store.get(location.taskPointerKey()));
       deadline.check();
       if (pointer === undefined || typeof pointer.taskId !== "string" || !UUID.test(pointer.taskId)) return refuse();
       const task = await readTask(flow, pointer.taskId);

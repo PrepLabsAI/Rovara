@@ -14,8 +14,7 @@ import { clearStoredRecipe, effectiveRecipe, readStoredRecipe, recipeFitsProject
 import { handleBrowserEvidenceSignIn } from "../../packages/broker/src/core/proof/browser-evidence-sign-in-callback.js";
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { taskKey, taskPointerKey } from "../../packages/broker/src/developer/task-records.js";
+import { operationKey, taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
 const A = COMPANY_A.orgId;
@@ -202,11 +201,13 @@ describe("the sign-in callback", () => {
     const w = await secretsWorld();
     const store = new MemoryDocumentStore();
     const recipe = options.recipe ?? WITH_SIGN_IN("web");
-    await store.put({ item: { ...operationKey(workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS", status: "RUNNING", fence: 1, companyId: A,
+    await store.put({ item: { pk: `ORG#${A}#WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE", companyId: A } });
+    await store.put({ item: { pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", companyId: A, workspaceId } });
+    await store.put({ item: { ...operationKey(A, workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS", status: "RUNNING", fence: 1, companyId: A,
       dispatch: { kind: "task", payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe as never } }, ...options.operation } });
-    await store.put({ item: { ...taskPointerKey(workspaceId), taskId } });
+    await store.put({ item: { ...taskPointerKey(A, workspaceId), taskId } });
     await store.put({ item: { ...taskKey(taskId), taskId, project: options.project ?? "web", companyId: options.taskCompany ?? A } });
-    const operation = async () => (await store.get(operationKey(workspaceId, operationId))) as never;
+    const operation = async () => (await store.get(operationKey(A, workspaceId, operationId))) as never;
     const deps = (companyId = A) => ({ signIn: w.signIn, companyId, async projectOf() { return (await store.get(taskKey(taskId)))?.["project"] as string | undefined; } });
     return { ...w, store, operation, deps };
   }

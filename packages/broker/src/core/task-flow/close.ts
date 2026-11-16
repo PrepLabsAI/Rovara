@@ -1,3 +1,4 @@
+import { workspaceKeys } from "./workspace-location.js";
 // Lane L6a, task flow core: closing a task, minimally: the task is closed, its workspace is closed under a new fence (so a late callback is
 // refused), a job still running is ended as interrupted, the workspace slot is given back once, and the machine is terminated. Cloud's
 // `developer-tasks/close.ts` also asks the worker to discard unpublished work and checks the task's pull requests first; that is a gap
@@ -6,7 +7,7 @@ import { agentXError, change, when, type TransactItem } from "@agentx/contracts"
 import { releaseAdmission, stageAudit } from "./admission.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { releaseItems } from "./limits.js";
-import { chargeMarkerKey, operationKey, taskIndexKey, taskKey, taskPointerKey, workspaceKey } from "./keys.js";
+import { chargeMarkerKey, taskIndexKey, taskKey } from "./keys.js";
 import { loadOwnedTask, readTask, taskViewOf, type TaskView } from "./reads.js";
 import { isTerminalStatus, readOperation, syncTaskIndex } from "./results.js";
 import type { OperationRecord, TaskRecord, WorkspaceRecord } from "./records.js";
@@ -32,6 +33,7 @@ export interface CloseParts {
 }
 
 export async function closeParts(deps: TaskFlowDeps, task: TaskRecord, now: string, actor: CloseActor): Promise<CloseParts> {
+  const location = await workspaceKeys(deps, task.workspaceId);
   const workspace = await readWorkspace(deps, task.workspaceId);
   const active = workspace?.activeOperationId == null ? undefined : await readOperation(deps, workspace.id, workspace.activeOperationId);
   // The slot goes back once: the marker of the charge must still be there. A task with none (its slot was released, or it was charged in Cloud's
@@ -40,19 +42,19 @@ export async function closeParts(deps: TaskFlowDeps, task: TaskRecord, now: stri
   if (!holdsSlot && task.releasedAt === undefined) log(deps, { event: "task_flow.close_without_slot", taskId: task.taskId });
   const items: TransactItem[] = [
     ...(holdsSlot ? releaseItems(task.charge, task.taskId) : []),
-    { kind: "update", key: taskPointerKey(task.workspaceId), ops: [change.set("cancelledAt", now), change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")] },
+    { kind: "update", key: location.taskPointerKey(), ops: [change.set("cancelledAt", now), change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")] },
     ...stageAudit(deps, { eventId: `task.closed:${task.taskId}`, actor, action: "task.closed", subject: { type: "task", id: task.taskId }, details: { project: task.project } }),
   ];
   if (workspace !== undefined) {
     items.push({
-      kind: "update", key: workspaceKey(workspace.id),
+      kind: "update", key: location.workspaceKey,
       ops: [change.set("status", "CLOSED"), change.set("activeOperationId", null), change.set("closedAt", now), change.set("fence", workspace.fence + 1), change.set("updatedAt", now)],
       condition: when.eq("fence", workspace.fence),
     });
   }
   if (active !== undefined && !isTerminalStatus(active.status)) {
     items.push({
-      kind: "update", key: operationKey(active.workspaceId, active.id), ops: [change.set("status", "INTERRUPTED"), change.set("error", "the task was closed"), change.set("updatedAt", now)],
+      kind: "update", key: location.operationKey(active.id), ops: [change.set("status", "INTERRUPTED"), change.set("error", "the task was closed"), change.set("updatedAt", now)],
       condition: when.and(when.eq("status", active.status), when.eq("fence", active.fence)),
     });
   }

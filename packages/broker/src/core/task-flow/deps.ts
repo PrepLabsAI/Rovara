@@ -226,7 +226,7 @@ export interface TaskFlowDeps {
   /** When present, a start is refused for a repository whose code host nobody registered. */
   codeHosts?: RegistryView;
   /** Open workspaces one person may hold, and all together. Default 10 and 100. */
-  limits?: { member: number; organization: number };
+  limits?: { member: number; organization: number } | (() => Promise<{ member: number; organization: number }>);
   /** Whether a workflow task starts by understanding the request (workflow 1.1.0). Default: Cloud's `ROVARA_CODE_V2_FOR_NEW_ORGS`. */
   understandFirst?: boolean;
   /**

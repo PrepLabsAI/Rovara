@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Standing instructions on the task flow: the company's rules and the project's How we work are put in front of every step that reads them, read at the dispatch, never dropped and never cut.
 import { describe, expect, it } from "vitest";
 import {
@@ -37,7 +38,7 @@ async function setup(options: { file?: string; company?: Parameters<typeof fakeC
 }
 
 async function operationsOf(h: Harness, workspaceId: string): Promise<OperationRecord[]> {
-  const items = await queryAll(h.store, { pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+  const items = await queryAll(h.store, { pk: workspaceKey(T1_COMPANY, workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } });
   return items.map((item) => item as unknown as OperationRecord).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.fence - b.fence);
 }
 
@@ -58,7 +59,7 @@ async function startedAndPrepared(h: Harness, options: { unpinned?: boolean } = 
   if (options.unpinned === true) delete h.deps.standingInstructions;
   const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a /health endpoint", workflow: true }).finally(() => { if (seam !== undefined) h.deps.standingInstructions = seam; });
   await drain(h);
-  const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+  const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
   const machineId = workspace.machine!.machineId;
   const prepare = h.machines.delivered(machineId).at(-1)!;
   h.machines.finish(machineId, prepare.operationId);
@@ -189,7 +190,7 @@ describe("the rules are read first, and the true cause is said", () => {
       const { h, host } = await setup({ file: mode === "invalid" ? "version: 1\nstages:\n  check:\n    instructions: x" : FILE });
       const { workspace } = await startedAndPrepared(h, { unpinned: true });
       // The machine of the workspace is gone (reaped): the next step would have to ask for one.
-      await h.store.update({ key: workspaceKey(workspace.id), ops: [change.remove("machine")] });
+      await h.store.update({ key: workspaceKey(T1_COMPANY, workspace.id), ops: [change.remove("machine")] });
       if (mode === "outage") host.baseBranchHead = () => Promise.reject(agentXError("RUNTIME_UNAVAILABLE", "down"));
       const asked: string[] = [];
       const original = h.deps.admission;

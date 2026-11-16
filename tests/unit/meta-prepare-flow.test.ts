@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // A project whose meta repository is separate from its code: the head is pinned when the task starts (through the code host), the preparation carries exactly that commit, a worker that cannot
 // materialize it is refused, and the task keeps the commit only when the worker reports the one that was pinned.
 import { describe, expect, it } from "vitest";
@@ -39,7 +40,7 @@ async function drain(h: Harness, rounds = 12): Promise<void> {
 }
 const prepareOf = async (h: Harness, workspaceId: string): Promise<{ invocation: WorkerInvocation | undefined; machineId: string }> => {
   await drain(h);
-  const workspace = (await h.store.get(workspaceKey(workspaceId))) as unknown as WorkspaceRecord;
+  const workspace = (await h.store.get(workspaceKey(T1_COMPANY, workspaceId))) as unknown as WorkspaceRecord;
   const machineId = workspace.machine!.machineId;
   return { invocation: h.machines.delivered(machineId)[0], machineId };
 };

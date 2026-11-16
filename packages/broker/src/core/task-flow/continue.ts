@@ -9,7 +9,7 @@
 import { ContinueDeveloperTaskRequestSchema, agentXError, when, type TransactItem } from "@agentx/contracts";
 import { stageAudit } from "./admission.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
-import { taskPointerKey } from "./keys.js";
+import { workspaceKeys } from "./workspace-location.js";
 import { CLOSED_TASK, GATED_TASK_TURN_REFUSAL, NEVER_STARTED_TASK, admitRound, loadTaskAsOwner, parseBody, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
 import { fromDocument, type TaskPointerRecord } from "./records.js";
@@ -41,7 +41,7 @@ export async function continueTask(deps: TaskFlowDeps, options: TaskActionsOptio
   if (workspace === undefined || workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
   if (workspace.status === "PREPARATION_FAILED") throw agentXError("CONFIG_INVALID", NEVER_STARTED_TASK);
   // A task whose first instructions have not run yet is still starting: they are its first round, and this is not. A task still working holds its workspace; any other state that cannot take a round is the step's own WAITING, below.
-  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(task.workspaceId)));
+  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get((await workspaceKeys({ store: deps.store, companyId: task.companyId }, task.workspaceId)).taskPointerKey()));
   if (pointer?.pendingPrompt !== undefined || workspace.activeOperationId !== null) throw agentXError("TASK_BUSY", STILL_WORKING);
   // The money, access and admission checks come last, so a refusal for any other reason is the one the person reads first, and nothing has been written when one is refused.
   await admitRound(deps, options, { task, caller, requestId: request.requestId });

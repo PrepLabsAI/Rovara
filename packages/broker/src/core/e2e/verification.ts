@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The verification of the browser and API checks (E2E): what a finished round's stored evidence proves, decided by the broker alone. Cloud's `workflow-e2e-verification.ts` (the part that
 // judges evidence and settles the baseline, replay and grounding rounds) on the document store and object storage. Everything a round is compared with is the broker's own: the stored
 // admission, the operation's reference and fence, the content-addressed evidence it accepted, and the receipt time it recorded for each group's upload. Whether the owner and the code
@@ -321,7 +322,7 @@ export async function loadApplicationEvidenceInputs(deps: E2EVerificationDeps, o
     groupEvidence.set(groupRunId, JSON.parse(groupText) as unknown);
     // The broker's own receipt of this group's evidence: the start of the upload that was accepted, recorded once with its row. A row that is not exactly this
     // operation's completed upload of exactly this content gives no receipt, and the group is then UNKNOWN.
-    const upload = await deps.state.store.get({ pk: `WORKSPACE#${operation.workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}#${groupRunId}` });
+    const upload = await deps.state.store.get({ pk: (await workspaceKeys({ store: deps.state.store, companyId: operation.companyId }, operation.workspaceId)).workspaceKey.pk, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}#${groupRunId}` });
     const accepted = E2EWorkflowGroupEvidenceRefSchema.safeParse(upload?.groupEvidenceRef);
     if (upload?.entityType === "WORKFLOW_E2E_EVIDENCE_UPLOAD" && upload.status === "COMPLETE" && upload.operationId === operation.id && upload.groupRunId === groupRunId
       && upload.fence === operation.fence && upload.admissionSha256 === reference.admissionRef.sha256 && accepted.success && accepted.data.evidenceRef.sha256 === stored.sha256

@@ -2,7 +2,7 @@
 // the callback rules (the capability's task, the slot, the revision, the commit).
 import { describe, expect, it } from "vitest";
 import { NIGHTLY_RUN_ORIGIN, NIGHTLY_RUN_PURPOSE, NightlyRunPayloadSchema, ROVARA_CODE_AGENT_ID, agentXError, projectPk, type OrgId, type TestEnvironment } from "@agentx/contracts";
-import { taskKey, taskPointerKey } from "../../packages/broker/src/developer/task-records.js";
+import { taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { handleNightlyResultCallback, nightlyRunOfOperation, type NightlyOperation } from "../../packages/broker/src/core/test-env/nightly-callback.js";
 import { isNightlyOperation, nightlyEndItems, nightlyRequestId, nightlyRunPayloadOf, nightlyRunPort, nightlyRunText, skipReasonOf, type NightlyAutomaticRun } from "../../packages/broker/src/core/test-env/nightly-run.js";
 import { nightlyScheduleName, nightlySlotId, readNightlyBaseline } from "../../packages/broker/src/core/test-env/nightly.js";
@@ -199,7 +199,7 @@ describe("the result route", () => {
     if (fire.outcome !== "started") throw new Error("not started");
     const nightlyRun = { slotId: fire.slotId, envRevision: 1, branch: "main", headSha: HEAD1 };
     await h.store.put({ item: documentOf({ ...taskKey(TASK), entityType: "DEVELOPER_TASK", orgId: ORG, taskId: TASK, project: PROJECT, workspaceId: WORKSPACE, purpose: "nightly_run", nightlyRun, ...over.task }) });
-    await h.store.put({ item: { ...taskPointerKey(WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK } });
+    await h.store.put({ item: { ...taskPointerKey(ORG, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK } });
     const operation: NightlyOperation = { kind: "task", workflowMode: "CHECKS", status: "RUNNING", workspaceId: WORKSPACE, orgId: ORG, ...over.operation };
     const deps = { ...h.deps, maps: h.mapStore };
     return { h, deps, operation, slotId: fire.slotId };

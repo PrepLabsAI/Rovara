@@ -228,6 +228,7 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
       throw new Error("the spend hold could not be taken");
     },
     async stage(request) {
+      if (request?.action === "automation.run" && !runStopWired) return { decision: refuse("run_stop_not_wired", RUN_STOP_NOT_WIRED), items: [] };
       const earlier = await heldBefore(request);
       if (earlier !== undefined) return { decision: earlier, items: [] };
       const { decision, items } = await decide(request);

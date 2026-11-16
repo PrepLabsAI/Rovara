@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // the checkpoints of an ordered run (Cloud's `validateWorkflowProgressChunk` and the workflow write of `appendEventChunk`, in `broker/pull-request-reconcile.ts`).
 //
 // While an approved work breakdown is coded the worker reports each item's start and end as a `progress` event carrying a `workItemProgress` (`WorkItemProgressV1`). The worker advances to the next item only when the
@@ -14,7 +15,7 @@ import {
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
-import { operationKey, taskKey, workspaceKey } from "../task-flow/keys.js";
+import { taskKey } from "../task-flow/keys.js";
 import { readTask } from "../task-flow/reads.js";
 import { workflowWriteOps } from "../task-flow/flow-guard.js";
 import { fromDocument, type OperationRecord, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
@@ -68,7 +69,7 @@ async function judge(deps: TaskFlowDeps, operation: OperationRecord, rawProgress
     throw forbidden("work breakdown progress no longer matches the current task and owner approval");
   }
   const task = record as TaskRecord & { workflow: WorkflowSnapshot };
-  const workspace = fromDocument<WorkspaceRecord>(await deps.store.get(workspaceKey(operation.workspaceId)));
+  const workspace = fromDocument<WorkspaceRecord>(await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).workspaceKey));
   if (workspace === undefined || workspace.status !== "BUSY" || workspace.activeOperationId !== operation.id || workspace.fence !== operation.fence) {
     throw forbidden("work breakdown progress belongs to a stale workspace operation");
   }
@@ -138,6 +139,7 @@ async function judge(deps: TaskFlowDeps, operation: OperationRecord, rawProgress
 export async function recordWorkItemProgress(deps: TaskFlowDeps, operation: OperationRecord, events: ReadonlyArray<{ type: string; payload?: unknown }>): Promise<void> {
   const raw = workItemProgressOf(events);
   if (raw.length === 0) return;
+  const location = await workspaceKeys(deps, operation.workspaceId);
   for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
     const judged = await judge(deps, operation, raw);
     if (judged === "repeat") return;
@@ -155,8 +157,8 @@ export async function recordWorkItemProgress(deps: TaskFlowDeps, operation: Oper
         ),
       },
       // The coding run reads as the run the workflow waits for: its revision moves with the workflow's.
-      { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("workflowRevision", next.revision), change.set("updatedAt", now)], condition: when.eq("fence", operation.fence) },
-      { kind: "check", key: workspaceKey(operation.workspaceId), condition: when.and(when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence), when.eq("status", "BUSY")) },
+      { kind: "update", key: location.operationKey(operation.id), ops: [change.set("workflowRevision", next.revision), change.set("updatedAt", now)], condition: when.eq("fence", operation.fence) },
+      { kind: "check", key: location.workspaceKey, condition: when.and(when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence), when.eq("status", "BUSY")) },
     ];
     if ((await deps.store.transact(items)).applied) return;
     // Lost a race with another checkpoint (or a stop): judge again from what is stored now.
