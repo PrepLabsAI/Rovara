@@ -1,7 +1,7 @@
 // Device testing slice 2: the Android emulator driver against scripted adb, emulator and Maestro. What it starts, with which arguments and environment; what it answers when the emulator does not
 // boot, the app does not install or a step fails; how it reads the screen (the UI dump as a view tree, `screencap` as pixels); and that it fails closed on everything it cannot read.
 import { describe, expect, it } from "vitest";
-import { DEVICE_UNREADABLE_TREE } from "../../packages/contracts/src/device-evidence-android.js";
+import { ANDROID_HIERARCHY_MAX_BYTES, DEVICE_UNREADABLE_TREE } from "../../packages/contracts/src/device-evidence-android.js";
 import { DEVICE_EVIDENCE_FRAME_PIXELS_MAX } from "../../packages/contracts/src/device-evidence.js";
 import {
   ANDROID_BOOT_MS, androidEmulatorArgs, createAndroidEmulatorDriver, rawScreencapFrame, type AndroidDriverOptions,
@@ -91,6 +91,8 @@ describe("createAndroidEmulatorDriver", () => {
       const racing = setupped.driver.prepare("before", { timeoutMs: 600_000 });
       setupped.starts.find((row) => row.file === ADB)!.running = false;
       expect(await racing).toBe("device_did_not_start");
+      // it gave up at once, not after the boot limit
+      expect(setupped.time.now() - 1_000).toBeLessThan(10_000);
       expect(setupped.runs.some((row) => row.args.includes("install"))).toBe(false);
     });
 
@@ -129,6 +131,21 @@ describe("createAndroidEmulatorDriver", () => {
       expect(await slow.driver.prepare("before", { timeoutMs: 25_000 })).toBe("time_limit");
       expect(slow.runs.some((row) => row.args.includes("install"))).toBe(false);
       expect(maestroRuns(slow.runs)).toHaveLength(0);
+    });
+
+    it("answers the time limit when the run's time ends while the app installs, and starts no Maestro after that", async () => {
+      const slow = setup({}, {}, 10_000);
+      expect(await slow.driver.prepare("before", { timeoutMs: 45_000 })).toBe("time_limit");
+      expect(slow.runs.some((row) => row.args.includes("install"))).toBe(true);
+      expect(maestroRuns(slow.runs)).toHaveLength(0);
+    });
+
+    it("answers the time limit when it is stopped after the boot, even though every later command would have worked", async () => {
+      let driverRef: { stop(side: "before" | "after"): Promise<void> } | undefined;
+      const stopped = setup({ first: (_file, args) => { if (args.includes("wm")) void driverRef!.stop("before"); return undefined; } });
+      driverRef = stopped.driver;
+      expect(await stopped.driver.prepare("before", { timeoutMs: 600_000 })).toBe("time_limit");
+      expect(stopped.runs.some((row) => row.args.includes("install"))).toBe(false);
     });
 
     it("answers the time limit when the runner already stopped it (a prepare that answered late), and goes no further", async () => {
@@ -205,10 +222,11 @@ describe("createAndroidEmulatorDriver", () => {
       expect(sent[0]![1]).toContain("rm -f /data/local/tmp/rovara-ui.xml");
       expect(sent[1]).toEqual(["shell", "uiautomator", "dump", "--windows", "/data/local/tmp/rovara-ui.xml"]);
       expect(sent[2]).toEqual(["exec-out", "cat", "/data/local/tmp/rovara-ui.xml"]);
+      expect(runs.at(-1)!.options.maxStdoutBytes).toBeLessThanOrEqual(ANDROID_HIERARCHY_MAX_BYTES * 4 + 1_024);
     });
 
     it("is unreadable (not null: a failed read is never 'no tree') when the dump fails, cannot be read, is too big or is not a dump", async () => {
-      for (const script of [{ dump: answer("ERROR: could not get idle state", 1) }, { dump: DUMP, cat: answer("", 1) }, { dump: DUMP, cat: answer("x", 0, { tooLarge: true }) }, { dump: DUMP, cat: answer("x", 0, { timedOut: true }) },
+      for (const script of [{ dump: answer("ERROR: could not get idle state", 1) }, { dump: DUMP, cat: answer("", 1) }, { dump: answer("ERROR: could not get idle state", 1), cat: answer(DUMP) }, { dump: DUMP, cat: answer("x", 0, { tooLarge: true }) }, { dump: DUMP, cat: answer("x", 0, { timedOut: true }) },
         { dump: "not xml" }, { dump: "" }, { dump: "<displays>" }, { dump: DUMP.replace("<displays><display id=\"0\"><window id=\"1\">", "").replace("</window></display></displays>", "") }]) {
         const { driver } = setup(script);
         await driver.prepare("before", { timeoutMs: 600_000 });
@@ -280,7 +298,7 @@ describe("createAndroidEmulatorDriver", () => {
     it("never puts what is on the screen into its notes: the UI dump, the picture and the secret text in them stay out", async () => {
       const secret = "tok_SCREEN_SECRET_VALUE";
       const dump = DUMP.replace("Total: 12", secret);
-      const { driver, diag } = setup({ dump, cat: answer(dump.slice(0, -3)) });
+      const { driver, diag } = setup({ dump, cat: answer(dump, 1) });
       await driver.prepare("before", { timeoutMs: 600_000 });
       expect(await driver.readTree("before", { timeoutMs: 20_000 })).toEqual(DEVICE_UNREADABLE_TREE);
       await driver.screenshot("before", { timeoutMs: 20_000 });
@@ -308,6 +326,12 @@ describe("rawScreencapFrame", () => {
     const zero = new Uint8Array(16);
     new DataView(zero.buffer).setUint32(8, 1, true);
     expect(rawScreencapFrame(zero)).toBeUndefined();
+  });
+  it("refuses a frame over the pixel cap even when its bytes are all there", () => {
+    const width = 3_000;
+    const height = Math.floor(DEVICE_EVIDENCE_FRAME_PIXELS_MAX / width) + 1;
+    expect(rawScreencapFrame(rawScreencap(width, height, { header: 12 }))).toBeUndefined();
+    expect(rawScreencapFrame(rawScreencap(width, height - 1, { header: 12 }))).toMatchObject({ width });
   });
   it("gives pixels that are the caller's own copy", () => {
     const source = rawScreencap(2, 2);

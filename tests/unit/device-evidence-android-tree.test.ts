@@ -63,6 +63,7 @@ describe("androidHierarchyToTree", () => {
       rawLess: dump(`<node text="a<b" />`), duplicate: dump(`<node text="a" text="b" />`), unclosedNode: `${XML}${OPEN}<node text="a">${CLOSE}`,
       skipped: dump(`${ok}<node text="a" ${ok}`), nodeBeforeRoot: `${ok}${dump("")}`, twoRoots: `${dump(ok)}${dump(ok)}`, nodeOutsideAWindow: `<displays><display>${ok}</display></displays>`,
       activeWindowOnly: `${XML}<hierarchy rotation="0">${ok}</hierarchy>`, noDisplays: `<hierarchy rotation="0">${ok}</hierarchy>`, windowsUnclosed: `${XML}<displays><display><window><hierarchy>${ok}</hierarchy></window></display>`,
+      comment: dump(`${ok}<!-- hidden -->${ok}`), cdata: dump(`${ok}<![CDATA[x]]>`), trailingLess: `${dump(ok)}<`, emptyRoot: `${XML}<displays />`,
       nestedDisplays: `${XML}<displays><displays><display><window><hierarchy>${ok}</hierarchy></window></display></displays></displays>`,
     };
     for (const [name, xml] of Object.entries(cases)) expect(androidHierarchyToTree(xml, SIZE), name).toBe(DEVICE_UNREADABLE_TREE);

@@ -32,6 +32,14 @@ describe("maestroStepFlow", () => {
     ]]);
   });
 
+  it("writes the three Unicode line breaks as escapes, never raw (a YAML 1.1 reader ends a line at them)", () => {
+    const breaks = ["\u0085", "\u2028", "\u2029"].map((char) => `a${char}b`);
+    const text = maestroStepFlow(APP, [{ do: "input", text: breaks[1]! }, { do: "input", text: breaks[2]! }])!;
+    expect(text).not.toMatch(/[\u2028\u2029\u0085]/u);
+    expect(text).toContain("a\\u2028b");
+    expect(text).toContain("a\\u2029b");
+  });
+
   it("has no flow for a step with no actions", () => {
     expect(maestroStepFlow(APP, [])).toBeNull();
   });
