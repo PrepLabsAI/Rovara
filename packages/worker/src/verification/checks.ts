@@ -234,7 +234,13 @@ export async function runChecks(
   } finally {
     await Promise.resolve().then(() => runners.endRound?.()).catch(() => undefined);
   }
-  return runners.markEntries === undefined ? round : { ...round, entries: runners.markEntries(round.entries) };
+  if (runners.markEntries === undefined) return round;
+  try {
+    return { ...round, entries: runners.markEntries(round.entries) };
+  } catch {
+    // A marker that failed cannot say which checks a fake answered: fail closed, every check that ran to a result is labelled (a label too many is honest; a label too few is not).
+    return { ...round, entries: round.entries.map((entry) => (entry.after === "passed" || entry.after === "failed" || entry.after === "timed_out" ? { ...entry, madeByRovara: true as const } : entry)) };
+  }
 }
 
 async function runChecksRound(

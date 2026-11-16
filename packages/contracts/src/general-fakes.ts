@@ -63,6 +63,8 @@ export const GENERAL_FAKE_NOT_RUN_SENTENCES: Readonly<Record<GeneralFakeReason, 
 /** The trust class and its words: shared with the evidence vocabulary (check-kinds.ts), never a second spelling. */
 export const GENERAL_FAKE_TRUST = "made_by_rovara" as const;
 export const GENERAL_FAKE_LABEL = EVIDENCE_TRUST_CLASS_WORDS[GENERAL_FAKE_TRUST];
+/** Said beside any check a Rovara-made fake answered, wherever it is reported as passed or failed (slice 2). Fixed words only: the shared label and the never-proof rule. */
+export const GENERAL_FAKE_MADE_NOTE = `${GENERAL_FAKE_LABEL}, never change proof`;
 /** The setting is on but the checks run in a task sandbox or dev container: slice 1 serves fakes only on the local shell. Checks run exactly as without the setting. */
 export const GENERAL_FAKES_LOCAL_ONLY_SENTENCE = "Rovara-made fakes were not used: for now they run only when checks run on this machine's local shell.";
 

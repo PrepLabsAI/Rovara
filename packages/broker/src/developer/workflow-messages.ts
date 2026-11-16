@@ -6,6 +6,7 @@ import {
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { splitTextAtLines } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 import { isE2EPlanCorrectionBlockReason } from "./task-records.js";
@@ -826,8 +827,10 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
   const passed = workflow.verification?.results.length;
   // Review only: no automated check applied, so nothing "passed".
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
-  const allPassed = reviewOnly ? "No automated check applied." : passed === undefined ? "The checks passed." : passed === 1 ? "The check passed." : `All ${passed} checks passed.`;
-  const checksAndReviewsPassed = reviewOnly ? "Reviews passed (no automated check applied)." : "Checks and reviews passed.";
+  // General fakes (DEC 234): a check a Rovara-made fake answered is never said to have passed on its own word.
+  const madeNote = !reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? ` (${GENERAL_FAKE_MADE_NOTE}: a check was answered by a Rovara-made fake)` : "";
+  const allPassed = reviewOnly ? "No automated check applied." : `${passed === undefined ? "The checks passed." : passed === 1 ? "The check passed." : `All ${passed} checks passed.`}${madeNote}`;
+  const checksAndReviewsPassed = reviewOnly ? "Reviews passed (no automated check applied)." : `Checks and reviews passed.${madeNote}`;
   if (context.publishFailure !== undefined && workflow.stage === "PULL_REQUEST") return publishFailed(context, exits, context.publishFailure);
   switch (`${workflow.stage}/${workflow.state}`) {
     case "PLAN/RUNNING": return plain(context.planGroundingHeld === true ? PLAN_GROUNDING_HOLD_LINE : planRunning(context));

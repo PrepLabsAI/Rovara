@@ -461,7 +461,10 @@ generalFakes:
   from its 2xx JSON answer schema (no example values are copied).
 - Every check a fake answered is labelled **Made by Rovara** and **never counts as change proof**. The label is on the
   check's own result: the pull request's Checks section says it on the check's line, and the Proof section shows the
-  check as "with a Rovara-made mock; not Proven" (also when no test proof was saved).
+  check as "with a Rovara-made mock; not Proven" (also when no test proof was saved). The Tests section, the status
+  lines, the task page and the chat message say "Made by Rovara, never change proof" beside it too.
+- A result a fake answered is never kept as a check's earlier result, so the next task does not read a real failure
+  as a regression against it.
 - A check that fails after a call the fake could not answer reads **Not run** with the reason (no description found,
   more than one found, unreadable, an operation it does not list, or OpenAPI parts Rovara cannot fake yet), never
   "failed".

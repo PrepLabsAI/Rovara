@@ -90,6 +90,13 @@ describe("the Made by Rovara label on a check result", () => {
     expect(runners.markEntries?.([entry("readiness:0")])).toEqual([entry("readiness:0")]);
   });
 
+  it("a marker that throws labels every check that ran to a result (fail closed), and leaves a Not run check alone", async () => {
+    const root = await workspace();
+    const runners = { ...createCheckRunners({ rootPath: root, local: true }), markEntries: () => { throw new Error("boom"); } };
+    const round = await runChecks(planOf([command(["-e", "process.exit(0)"]), command(["-e", "process.exit(1)"])]), runners, options());
+    expect(round.entries.map((item) => [item.after, item.madeByRovara])).toEqual([["passed", true], ["failed", true]]);
+  });
+
   it("without a plan the entries have no label and the runners object is the same", async () => {
     const root = await workspace();
     const runners = createCheckRunners({ rootPath: root, local: true });

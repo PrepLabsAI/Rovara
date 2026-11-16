@@ -12,6 +12,7 @@ import {
   planSummaryLines,
   workflowFindingAccepted,
 } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { documentSummaryLines } from "../../developer/workflow-messages.js";
@@ -121,7 +122,7 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, conte
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const passed = (workflow.verification?.results ?? []).filter((result) => result.status === "PASS")
     // A proposed check's label is model-written: one line, redacted and made inert like a plan line, as every label is.
-    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed`);
+    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed${result.madeByRovara === true ? ` (${GENERAL_FAKE_MADE_NOTE})` : ""}`);
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
   // S3: also the path the status block is rewritten by after a pushed fix, so no line reaches GitHub with an email address.
   return [
