@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -61,12 +61,18 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.diagnosis.v1",
   // Proof and evidence (wire-proof): a CHECKS run writes evidence-raw.json when the invocation carries `evidenceCapture` (verification/evidence-raw.ts).
   "task.evidenceCapture.v1",
+  // TE-H1 browser evidence (DEC 241): a CHECKS run that carries `browserEvidence` starts the app in its sandbox and photographs the changed pages in the executor image (browser-evidence-run.ts).
+  "task.browserEvidence.v1",
+  // TE-H1 slice 4: the same run also records each page of the candidate's side and keeps the video of a page that failed, for a recipe with `video` (the project says its app shows fixture data only; browser-evidence-chromium.ts).
+  "task.browserEvidenceVideo.v1",
   // Learning v2 (L4): approved lessons arrive as `learnedContext`, are re-checked against the base commit and framed as inert advice (learned-run.ts, learned-context.ts).
   "task.learnedContext.v1",
   // Test environment (wire-testenv): a setup draft run that is told `testEnvDetect` also reports the environment the detectors would propose (test-env-detect.ts).
   "task.testEnvDetect.v1",
   // Test environment (wire-testenv): a verification run that carries the environment's plan applies its test selection and round budget and reports the selection (verification/test-env-plan.ts).
   "task.testEnvironment.v1",
+  // TE-C6: the plan's `flakyRerun: true` (a failing test of a check that passed before is rerun once; verification/flaky-rerun.ts).
+  TASK_FLAKY_RERUN_FEATURE,
   // Evidence (S-2): the plan's `checks[].coveragePath` (the approved report) is read as a named coverage report (verification/evidence-raw.ts).
   "task.testEnvCoveragePath.v1",
   // N9 (INTG2): the prepare invocation's `registries` (a project's private package registries for the setup and readiness commands; registry-config.ts).
@@ -93,5 +99,11 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   GENERAL_FAKES_FEATURE,
   // The approved plan a coding run keeps in its conversation summaries (compaction.ts).
   "task.workflowApprovedPlan.v1",
+  // Per-run dollar stop: a run asked for `usageCheckpoints` reports its usage while it runs, not only at its end (run-task.ts `checkpointUsage`).
+  USAGE_CHECKPOINTS_FEATURE,
+  // TE-C1: a verification run whose plan carries `baselineCandidates` finds the nearest one that is an ancestor of the task's base commit, before any check runs, and reports it in evidence-raw.json (verification/baseline-ancestry.ts).
+  TEST_ENV_BASELINE_FEATURE,
+  // TE-MR2b: a plan with `repositoryCoverageMap` and a repository on each check is read (verification/multi-repo-selection.ts); selection across repositories stays off (the whole check runs) until it is proven live.
+  TEST_ENV_MULTI_REPO_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];

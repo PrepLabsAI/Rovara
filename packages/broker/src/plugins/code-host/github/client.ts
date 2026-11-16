@@ -1,6 +1,6 @@
 import { createHash, createSign } from "node:crypto";
 import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
-import { GitBranchNameSchema, HostRateLimitError, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -12,6 +12,12 @@ import {
 } from "../../../github-pull-status.js";
 
 export type { PullRequestCheck, PullRequestReview, PullRequestStatus } from "../../../github-pull-status.js";
+import { ARTIFACT_ZIP_BYTES_MAX, ZIP_REPORTS_TOTAL_BYTES_MAX, ZIP_REPORT_FILES_MAX, zipReports } from "../../../core/ci-evidence/zip.js";
+import { addSeenCheckNames, latestCheckRunOf, latestStatusOf, parseCheckRunFacts, recentPullRequestHeads, type CheckRunFacts, type LatestCheckRun, type SeenCheckName } from "../../../github-check-facts.js";
+export type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
+
+/** TE-E0 option A, setup: how many recently updated pull requests' heads the check-name listing reads. */
+const SEEN_PULL_REQUESTS = 5;
 
 const GITHUB_APP_ID = /^[1-9][0-9]*$/;
 /** A GitHub user or organization login: letters, digits and single hyphens inside, at most 39 characters. */
@@ -340,10 +346,48 @@ const WEBHOOK_SCOPE: GitHubTokenScope = { system: "webhook" };
 
 /** What a tracking pass's reads ask for: the pull request, its reviews, the head's checks and statuses, the base branch and the workflow files, all at read. */
 const STATUS_TOKEN_PERMISSIONS = { contents: "read", pull_requests: "read", checks: "read", statuses: "read" } as const;
+/** TE-E0: the reads of check runs and commit statuses alone. */
+const CHECK_READ_PERMISSIONS = { checks: "read", statuses: "read" } as const;
 /** The same without the checks and statuses access, for an installation that has not accepted it yet. */
 /** How many pages of 100 reviews a tracking read takes. */
 const REVIEW_PAGES_MAX = 5;
 const BASIC_TOKEN_PERMISSIONS = { contents: "read", pull_requests: "read" } as const;
+
+/** TE-B4: the Check Run write asks for this and nothing else. */
+const CHECK_WRITE_PERMISSIONS = { checks: "write" } as const;
+const CHECK_RUN_ID = /^[1-9][0-9]{0,19}$/u;
+
+/** TE-B4: one write of the "Rovara" Check Run (see `upsertRovaraCheck`). */
+export interface RovaraCheckWrite {
+  headSha: string;
+  runId?: string | undefined;
+  payload: RovaraCheckPayload;
+  detailsUrl?: string | undefined;
+}
+
+/** The request body for a Check Run write, checked at runtime: a head, a known status and conclusion, bounded words, an https details address. Anything else is refused (fixed words). */
+export function rovaraCheckBody(input: RovaraCheckWrite, nowMs: number): Record<string, unknown> {
+  const { payload } = input;
+  const bounded = (text: unknown, max: number): text is string => typeof text === "string" && text.length > 0 && text.length <= max;
+  if (!/^[a-f0-9]{40}$/u.test(input.headSha) || (input.runId !== undefined && !CHECK_RUN_ID.test(input.runId))) throw agentXError("CONFIG_INVALID", "the check run write names no usable head or run");
+  if (!bounded(payload.title, ROVARA_CHECK_TITLE_MAX * 2) || !bounded(payload.summary, ROVARA_CHECK_TEXT_MAX) || !bounded(payload.text, ROVARA_CHECK_TEXT_MAX)) throw agentXError("CONFIG_INVALID", "the check run words do not fit");
+  const completed = payload.status === "completed";
+  if (!completed && payload.status !== "in_progress") throw agentXError("CONFIG_INVALID", "the check run status is not one Rovara writes");
+  if (completed !== (payload.conclusion !== undefined) || (payload.conclusion !== undefined && !["success", "failure", "neutral"].includes(payload.conclusion))) throw agentXError("CONFIG_INVALID", "the check run conclusion is not one Rovara writes");
+  let detailsUrl: string | undefined;
+  if (input.detailsUrl !== undefined) {
+    let parsed: URL | undefined;
+    try { parsed = new URL(input.detailsUrl); } catch { parsed = undefined; }
+    if (parsed?.protocol !== "https:" || input.detailsUrl.length > 2_000) throw agentXError("CONFIG_INVALID", "the check run details address is not https");
+    detailsUrl = input.detailsUrl;
+  }
+  return {
+    name: ROVARA_CHECK_NAME, head_sha: input.headSha, status: payload.status,
+    ...(completed ? { conclusion: payload.conclusion, completed_at: new Date(nowMs).toISOString() } : {}),
+    output: { title: payload.title, summary: payload.summary, text: payload.text },
+    ...(detailsUrl === undefined ? {} : { details_url: detailsUrl }),
+  };
+}
 
 /** A repository the App can reach: its installation, and the owner as GitHub spells it. */
 interface InstalledRepository {
@@ -863,14 +907,20 @@ export class GitHubAppCredentialProvider {
     return provider;
   }
 
-  private async trackingJson(url: string, token: string, init: { method?: string; body?: unknown; rateLimit?: boolean } = {}): Promise<{ status: number; body: unknown }> {
+  private async trackingJson(url: string, token: string, init: { method?: string; body?: unknown; rateLimit?: boolean; maxBytes?: number } = {}): Promise<{ status: number; body: unknown; tooLarge?: true }> {
     const response = await this.fetchImplementation(url, {
       method: init.method ?? "GET", headers: githubHeaders(token), redirect: "error", signal: AbortSignal.timeout(8_000),
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
     });
     let body: unknown;
+    let tooLarge = false;
     try {
-      body = response.status === 204 ? undefined : await response.json();
+      // TE-E0: a caller that names `maxBytes` reads the body as a stream and stops past it (the answer is then unread, never cut).
+      if (init.maxBytes !== undefined && response.status !== 204) {
+        const capped = await cappedJsonBody(response, init.maxBytes);
+        tooLarge = capped.tooLarge;
+        body = capped.body;
+      } else body = response.status === 204 ? undefined : await response.json();
     } catch {
       body = undefined;
     }
@@ -880,7 +930,7 @@ export class GitHubAppCredentialProvider {
       const retryAt = compareRateLimitRetryAt(response, body, this.now());
       if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
     }
-    return { status: response.status, body };
+    return { status: response.status, body, ...(tooLarge ? { tooLarge: true as const } : {}) };
   }
 
   /**
@@ -1149,6 +1199,62 @@ export class GitHubAppCredentialProvider {
     return "ready";
   }
 
+  /** TE-B4: the source word of the App's own checks (`checks[].source` is the App's id, from `statusCheckRollup`'s `checkSuite.app.databaseId`). */
+  async summaryCheckSource(): Promise<string> {
+    const appId = typeof this.options.appId === "string" ? this.options.appId : await this.options.appId();
+    if (!GITHUB_APP_ID.test(appId)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App ID must be numeric");
+    return appId;
+  }
+
+  /**
+   * TE-B4: creates or updates the one "Rovara" Check Run on a head, with a token that asks for `checks: write` only (minted on its own, so no other call gains the permission). An installation that has
+   * not granted it refuses the token (`no_permission`; the pull request body stays the only summary). With `runId` that run is updated (one that is gone is created again); without, the App's own
+   * "Rovara" run on the head is looked up first, so a lost record never makes a second run. The answer must name the same head, name and App, or it is refused. With a `budget` every request counts.
+   */
+  async upsertRovaraCheck(repositoryUrl: string, input: RovaraCheckWrite, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<{ runId: string } | "no_permission"> {
+    const body = rovaraCheckBody(input, this.now());
+    const appId = await this.summaryCheckSource();
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    let token: string;
+    try {
+      token = await provider.createInstallationToken(repository, CHECK_WRITE_PERMISSIONS, scope);
+    } catch (error) {
+      if (isAgentXError(error) && error.code === "GITHUB_NOT_CONNECTED") return "no_permission";
+      throw error;
+    }
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const ours = (value: unknown): string | undefined => {
+      const run = statusRecord(value);
+      const id = run.id;
+      return typeof id === "number" && Number.isSafeInteger(id) && id > 0 && run.name === ROVARA_CHECK_NAME && run.head_sha === input.headSha && String(statusRecord(run.app).id) === appId ? String(id) : undefined;
+    };
+    let runId = input.runId;
+    if (runId === undefined) {
+      const listed = await provider.trackingJson(`${root}/commits/${input.headSha}/check-runs?check_name=${ROVARA_CHECK_NAME}&app_id=${appId}&filter=all&per_page=20`, token, { rateLimit: true });
+      if (listed.status === 403) return "no_permission";
+      if (listed.status !== 200 || !Array.isArray(statusRecord(listed.body).check_runs)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run lookup failed with HTTP ${listed.status}`);
+      runId = (statusRecord(listed.body).check_runs as unknown[]).map(ours).find((id) => id !== undefined);
+    }
+    if (runId !== undefined) {
+      const update = Object.fromEntries(Object.entries(body).filter(([name]) => name !== "head_sha"));
+      const patched = await provider.trackingJson(`${root}/check-runs/${runId}`, token, { method: "PATCH", body: update, rateLimit: true });
+      if (patched.status === 403) return "no_permission";
+      if (patched.status === 200) {
+        const id = ours(patched.body);
+        if (id === undefined || id !== runId) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned another check run");
+        return { runId: id };
+      }
+      if (patched.status !== 404) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run update failed with HTTP ${patched.status}`);
+    }
+    const created = await provider.trackingJson(`${root}/check-runs`, token, { method: "POST", body, rateLimit: true });
+    if (created.status === 403) return "no_permission";
+    if (created.status !== 201) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run create failed with HTTP ${created.status}`);
+    const id = ours(created.body);
+    if (id === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned another check run");
+    return { runId: id };
+  }
+
   /**
    * Asks for reviews: a name with a `/` (`org/team`) is a team, any other a person. One call; `refused` when GitHub refuses it (a name it cannot request, such as the
    * author), which is not an error: the pull request is simply left as it is.
@@ -1331,6 +1437,157 @@ export class GitHubAppCredentialProvider {
     }
     if (located.status === 200) return logTail(await readLogEnd(located, signal));
     throw agentXError("RUNTIME_UNAVAILABLE", `GitHub log lookup failed with HTTP ${located.status}`);
+  }
+
+  /**
+   * TE-E0 option A: one check run's times (`GET check-runs/{id}`, `checks: read`) and, for a GitHub Actions job, its run attempt and workflow run (`GET actions/jobs/{id}`, `actions: read`). Both permissions are
+   * ones the App already asks. Absent when GitHub has no such run (or the App may not see it); a job that cannot be read leaves the attempt out, never guessed. With a `budget` every request counts.
+   */
+  async getCheckRunFacts(repositoryUrl: string, checkRunId: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget, options: { actionsJob?: boolean } = {}): Promise<CheckRunFacts | undefined> {
+    if (!/^[1-9][0-9]{0,19}$/u.test(checkRunId)) throw agentXError("CONFIG_INVALID", "GitHub check run id is invalid");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const token = await provider.createInstallationToken(repository, CHECK_READ_PERMISSIONS, scope);
+    const run = await provider.trackingJson(`${root}/check-runs/${checkRunId}`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (run.status === 404 || run.status === 403 || run.status === 410) return undefined;
+    if (run.status !== 200 || run.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run lookup failed with HTTP ${run.status}`);
+    let job: unknown;
+    if (options.actionsJob === true) {
+      let actionsToken: string | undefined;
+      try {
+        actionsToken = await provider.createInstallationToken(repository, { actions: "read" }, scope);
+      } catch (error) {
+        // An installation that has not accepted the Actions permission: no attempt is read, and none is said.
+        if (!isAgentXError(error) || (error.code !== "GITHUB_NOT_CONNECTED" && error.code !== "RUNTIME_UNAVAILABLE")) throw error;
+      }
+      if (actionsToken !== undefined) {
+        const read = await provider.trackingJson(`${root}/actions/jobs/${checkRunId}`, actionsToken, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+        if (read.status === 200 && read.tooLarge !== true) job = read.body;
+        else if (read.status !== 404 && read.status !== 403 && read.status !== 410) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub job lookup failed with HTTP ${read.status}`);
+      }
+    }
+    return parseCheckRunFacts(run.body, job, checkRunId);
+  }
+
+  /**
+   * TE-E0 option A: the latest run of a named check on a commit (`revision`, a full sha: the base commit's run) or on a branch's head (`branch`: the main branch's latest run), from its check runs and then its
+   * commit statuses (`checks` and `statuses` at read). Undefined when there is none, or no such commit or branch; an answer that does not parse throws (not known, never "passed").
+   */
+  async getLatestCheckRun(repositoryUrl: string, at: { revision: string } | { branch: string }, check: { name: string; appId?: number | undefined }, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<LatestCheckRun | undefined> {
+    const revision = "revision" in at ? at.revision : undefined;
+    if (revision !== undefined && !/^[a-f0-9]{40}$/u.test(revision)) throw agentXError("CONFIG_INVALID", "commit sha is invalid");
+    if (!("revision" in at) && !GitBranchNameSchema.safeParse(at.branch).success) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (check.name.length === 0 || check.name.length > 200 || /[\p{Cc}\p{Cf}]/u.test(check.name)) throw agentXError("CONFIG_INVALID", "check name is invalid");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const token = await provider.createInstallationToken(repository, CHECK_READ_PERMISSIONS, scope);
+    // A branch is read at one commit: its head is looked up once, and both reads below are of that commit (the branch can move between them).
+    let ref = revision;
+    if (ref === undefined && "branch" in at) {
+      const branch = await provider.trackingJson(`${root}/branches/${at.branch.split("/").map(encodeURIComponent).join("/")}`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+      if (branch.status === 404) return undefined;
+      const sha = (branch.body as { commit?: { sha?: unknown } } | undefined)?.commit?.sha;
+      if (branch.status !== 200 || branch.tooLarge === true || typeof sha !== "string" || !/^[a-f0-9]{40}$/u.test(sha)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub branch lookup failed with HTTP ${branch.status}`);
+      ref = sha;
+    }
+    if (ref === undefined) throw agentXError("CONFIG_INVALID", "commit sha is invalid");
+    const wanted = { name: check.name, ...(check.appId === undefined ? {} : { appId: check.appId }), expectedSha: ref };
+    const runs = await provider.trackingJson(`${root}/commits/${ref}/check-runs?check_name=${encodeURIComponent(check.name)}&filter=latest&per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (runs.status === 404 || runs.status === 422) return undefined;
+    if (runs.status !== 200 || runs.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check runs lookup failed with HTTP ${runs.status}`);
+    const unreadable = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned check runs Rovara cannot read"); };
+    let found: LatestCheckRun | undefined;
+    try { found = latestCheckRunOf(runs.body, wanted); } catch { unreadable(); }
+    if (found !== undefined || check.appId !== undefined) return found;
+    const statuses = await provider.trackingJson(`${root}/commits/${ref}/status?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (statuses.status === 404 || statuses.status === 422) return undefined;
+    if (statuses.status !== 200 || statuses.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub commit status lookup failed with HTTP ${statuses.status}`);
+    try { return latestStatusOf(statuses.body, wanted); } catch { return unreadable(); }
+  }
+
+  /**
+   * TE-E0 option A, setup: the check names seen on the five most recently updated pull requests' heads (their check runs and commit statuses), at most `SEEN_CHECKS_MAX`, sorted. Read-only, eleven requests at
+   * most. A head whose checks cannot be read is skipped: this is a list a person ticks, never a decision.
+   */
+  async listSeenCheckNames(repositoryUrl: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<{ checks: SeenCheckName[]; complete: boolean }> {
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const token = await provider.createInstallationToken(repository, STATUS_TOKEN_PERMISSIONS, scope);
+    const pulls = await provider.trackingJson(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=${String(SEEN_PULL_REQUESTS)}`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (pulls.status !== 200 || pulls.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request list failed with HTTP ${pulls.status}`);
+    const seen = new Map<string, SeenCheckName>();
+    let complete = true;
+    for (const head of recentPullRequestHeads(pulls.body, SEEN_PULL_REQUESTS)) {
+      const runs = await provider.trackingJson(`${root}/commits/${head}/check-runs?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+      const statuses = await provider.trackingJson(`${root}/commits/${head}/status?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+      const readable = (answer: { status: number; tooLarge?: true }) => answer.status === 200 && answer.tooLarge !== true;
+      // A head whose checks could not be read, or a list longer than one page, leaves the listing incomplete: the setup screen says so, never "no checks seen".
+      if (!readable(runs) || !readable(statuses)) complete = false;
+      if (!addSeenCheckNames(seen, readable(runs) ? runs.body : undefined, readable(statuses) ? statuses.body : undefined)) complete = false;
+    }
+    const checks = [...seen.values()].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : (left.source ?? "").localeCompare(right.source ?? "")));
+    return { checks, complete };
+  }
+
+
+  /**
+   * TE-E0 option B: the per-test report files of one GitHub Actions workflow run. Its artifacts are listed (`actions: read`, already asked), the ones named like test results (`junit`, `test-results`,
+   * `test-report`) are downloaded (at most `REPORT_ARTIFACTS_MAX`, each at most `ARTIFACT_ZIP_BYTES_MAX` zipped, from GitHub's own storage hosts only, with no credentials), and their `.xml`/`.json` entries
+   * read whole. `none` when the run has no such artifact (or the App may not read Actions); `unreadable` when one that matched could not be read whole (or one expired); `ambiguous` when the run's latest
+   * attempt has more than one job, so its artifacts cannot be told to belong to the one check (they are then not read at all). `since` (the check run's start) leaves out artifacts an earlier attempt
+   * made. Logs and other artifacts are never read here.
+   */
+  async getRunReportFiles(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget, options: { since?: string } = {}): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" } | { kind: "ambiguous" }> {
+    if (!/^[1-9][0-9]{0,19}$/u.test(workflowRunId)) throw agentXError("CONFIG_INVALID", "GitHub workflow run id is invalid");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    let token: string;
+    try {
+      token = await provider.createInstallationToken(repository, { actions: "read" }, scope);
+    } catch (error) {
+      if (isAgentXError(error) && (error.code === "GITHUB_NOT_CONNECTED" || error.code === "RUNTIME_UNAVAILABLE")) return { kind: "none" };
+      throw error;
+    }
+    // The run's artifacts are the run's, not one job's: they speak for the marked check only when its latest attempt has that one job.
+    const jobs = await provider.trackingJson(`${root}/actions/runs/${workflowRunId}/jobs?filter=latest&per_page=1`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (jobs.status === 404 || jobs.status === 403 || jobs.status === 410) return { kind: "none" };
+    const jobCount = (jobs.body as { total_count?: unknown } | undefined)?.total_count;
+    if (jobs.status !== 200 || jobs.tooLarge === true || typeof jobCount !== "number") throw agentXError("RUNTIME_UNAVAILABLE", `GitHub job list failed with HTTP ${jobs.status}`);
+    if (jobCount !== 1) return { kind: "ambiguous" };
+    const listed = await provider.trackingJson(`${root}/actions/runs/${workflowRunId}/artifacts?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (listed.status === 404 || listed.status === 403 || listed.status === 410) return { kind: "none" };
+    if (listed.status !== 200 || listed.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub artifact list failed with HTTP ${listed.status}`);
+    const since = options.since === undefined ? undefined : Date.parse(options.since);
+    const chosen = reportArtifactsOf(listed.body, since !== undefined && Number.isFinite(since) ? since : undefined);
+    if (chosen === "unreadable") return { kind: "unreadable" };
+    if (chosen.length === 0) return { kind: "none" };
+    const files: Array<{ name: string; text: string }> = [];
+    let total = 0;
+    for (const artifact of chosen) {
+      const located = await provider.fetchImplementation(`${root}/actions/artifacts/${String(artifact.id)}/zip`, { method: "GET", headers: githubHeaders(token), redirect: "manual", signal: AbortSignal.timeout(8_000) });
+      const limitedAt = mergeRateLimitRetryAt(located, this.now());
+      if (limitedAt !== undefined) throw new GithubMergeRateLimitError(limitedAt);
+      if (located.status < 300 || located.status >= 400) return { kind: "unreadable" };
+      const address = located.headers.get("location") ?? "";
+      if (!isAllowedLogAddress(address)) return { kind: "unreadable" };
+      const signal = AbortSignal.any([AbortSignal.timeout(30_000), ...(budget === undefined ? [] : [budget.signal])]);
+      const zip = await this.fetchImplementation(address, { method: "GET", headers: { accept: "application/zip" }, redirect: "error", signal });
+      if (zip.status !== 200) return { kind: "unreadable" };
+      const body = await cappedBytes(zip, ARTIFACT_ZIP_BYTES_MAX);
+      if (body === undefined) return { kind: "unreadable" };
+      const read = zipReports(body);
+      if (read.kind === "unreadable") return read;
+      // One total for the whole run, across its artifacts.
+      for (const file of read.files) total += Buffer.byteLength(file.text, "utf8");
+      if (total > ZIP_REPORTS_TOTAL_BYTES_MAX) return { kind: "unreadable" };
+      files.push(...read.files);
+      if (files.length > ZIP_REPORT_FILES_MAX) return { kind: "unreadable" };
+    }
+    return { kind: "read", files };
   }
 
   /** Reads a bounded PR diff summary for a code-aware, owner-approved feedback proposal. */
@@ -3049,6 +3306,76 @@ function workingBranchInput(repositoryUrl: string, expected: { installationId: n
 
 export interface WorkingBranchPage { branches: string[]; page: number; mayHaveMore: boolean; omittedUnsupported: boolean }
 /** Bound both metadata and list bodies independently of content-length or unknown provider fields. */
+/** TE-E0 option B: the most test-result artifacts read for one run. */
+const REPORT_ARTIFACTS_MAX = 3;
+/** An artifact named like test results. */
+const REPORT_ARTIFACT_NAME = /junit|surefire|test[-_ ]?results?|test[-_ ]?reports?/iu;
+
+/**
+ * The test-result artifacts of a run's artifact list, named like test results, at most `ARTIFACT_ZIP_BYTES_MAX` each. Made before `since` (an earlier attempt's): left out. An expired one, more than
+ * `REPORT_ARTIFACTS_MAX`, a creation time that does not parse while `since` is given, or a list that does not parse: `unreadable` (the rest would be a partial report).
+ */
+function reportArtifactsOf(body: unknown, since?: number): Array<{ id: number }> | "unreadable" {
+  const list = (body as { artifacts?: unknown; total_count?: unknown } | undefined)?.artifacts;
+  const total = (body as { total_count?: unknown } | undefined)?.total_count;
+  if (!Array.isArray(list) || (typeof total === "number" && total > list.length)) return "unreadable";
+  const chosen: Array<{ id: number }> = [];
+  for (const value of list) {
+    const artifact = value as { id?: unknown; name?: unknown; expired?: unknown; size_in_bytes?: unknown; created_at?: unknown } | null;
+    if (artifact === null || typeof artifact !== "object" || typeof artifact.name !== "string" || !REPORT_ARTIFACT_NAME.test(artifact.name)) continue;
+    if (since !== undefined) {
+      const created = typeof artifact.created_at === "string" ? Date.parse(artifact.created_at) : Number.NaN;
+      if (!Number.isFinite(created)) return "unreadable";
+      if (created < since) continue;
+    }
+    if (artifact.expired === true) return "unreadable";
+    if (typeof artifact.id !== "number" || !Number.isSafeInteger(artifact.id) || artifact.id <= 0 || typeof artifact.size_in_bytes !== "number" || artifact.size_in_bytes > ARTIFACT_ZIP_BYTES_MAX) return "unreadable";
+    chosen.push({ id: artifact.id });
+  }
+  return chosen.length > REPORT_ARTIFACTS_MAX ? "unreadable" : chosen;
+}
+
+/** A body read as bytes to at most `maxBytes`; undefined past it. */
+async function cappedBytes(response: Response, maxBytes: number): Promise<Uint8Array | undefined> {
+  if (response.body === null) return undefined;
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk: unknown = next.value;
+      if (!(chunk instanceof Uint8Array)) return undefined;
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) { await reader.cancel(); return undefined; }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  } finally { reader.releaseLock(); }
+}
+
+/** TE-E0: the most bytes one check-run or status answer is read to (100 runs with their output summaries fit well within it). */
+const CHECK_LIST_MAX_BYTES = 2 * 1024 * 1024;
+
+/** A JSON body read as a stream to at most `maxBytes`; past it the read stops and nothing is parsed. */
+async function cappedJsonBody(response: Response, maxBytes: number): Promise<{ body: unknown; tooLarge: boolean }> {
+  if (response.body === null) return { body: undefined, tooLarge: false };
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk: unknown = next.value;
+      if (!(chunk instanceof Uint8Array)) return { body: undefined, tooLarge: false };
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) { await reader.cancel(); return { body: undefined, tooLarge: true }; }
+      chunks.push(chunk);
+    }
+    return { body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown, tooLarge: false };
+  } finally { reader.releaseLock(); }
+}
+
 async function workingBranchPageJson(response: Response): Promise<unknown> {
   if (response.body === null) throw workingBranchUnavailable();
   const reader = response.body.getReader(), chunks: Uint8Array[] = [];

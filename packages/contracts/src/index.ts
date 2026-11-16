@@ -58,6 +58,7 @@ export * from "./workflow-dependencies-node.js";
 export * from "./display-name.js";
 export * from "./environments.js";
 export * from "./core-engine-infra.js";
+export * from "./broker-environment.js";
 export * from "./github-mcp.js";
 export * from "./oauth-profiles.js";
 export * from "./operation.js";
@@ -222,6 +223,7 @@ export { formatUsdMicrodollars } from "./money-format.js";
 
 // Lane A G1: versioned project intent, preserved but not set by legacy settings writes.
 export * from "./test-proof.js";
+export * from "./rovara-check.js";
 // TE-B5a: the one table of who may decide what (task owner, maintainer, admin).
 export * from "./can-decide.js";
 export * from "./real-model-check.js";
@@ -231,6 +233,9 @@ export * from "./outcomes.js";
 
 // Proof and evidence (W4/W5): the evidence pack, decision cards, the test environment and service mocks.
 export * from "./check-kinds.js";
+export * from "./browser-evidence.js";
+export * from "./browser-evidence-wire.js";
+export * from "./device-evidence.js";
 export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";
@@ -238,6 +243,7 @@ export * from "./evidence-inert.js";
 export * from "./evidence-ai.js";
 export * from "./evidence-public.js";
 export * from "./evidence-render.js";
+export * from "./ci-evidence.js";
 export * from "./rovara-problem.js";
 export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
@@ -343,6 +349,9 @@ export * from "./test-environment-prod-deny.js";
 export * from "./test-environment-wire.js";
 export * from "./service-mock-additions.js";
 export * from "./test-env-nightly.js";
+export * from "./test-flaky.js";
+export * from "./test-env-baseline.js";
+export * from "./test-env-multi-repo.js";
 export * from "./nightly-run.js";
 export * from "./eval-files.js";
 export * from "./system-owner.js";
@@ -379,6 +388,7 @@ export * from "./task-status.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
+export * from "./company-reads.js";
 // TE-F8 (M2, 0.5.19): record-then-replay for changed prompts. Additive, no callers; depends on TE-F1a (model-egress) and TE-F4 (prompt-change).
 export * from "./model-record-key.js";
 export * from "./model-record-policy.js";
@@ -398,6 +408,7 @@ export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReserva
 export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
 export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";
+export * from "./machine-setup.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
@@ -411,3 +422,4 @@ export * from "./service-contract-mock.js";
 export * from "./general-fakes.js";
 export * from "./general-fakes-set.js";
 export * from "./openapi-fake.js";
+export * from "./agent-model-choice.js";

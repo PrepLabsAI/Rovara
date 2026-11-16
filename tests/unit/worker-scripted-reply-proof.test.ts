@@ -36,6 +36,19 @@ describe("reply facts in the saved proof", () => {
       expect(serializeTestProof(withScriptedReplyFacts(p, "project", facts))).toBe(JSON.stringify(p));
     }
   });
+  it("an independent count (parked by DEC 192a) round-trips as an optional key, and is absent, never 0, when there is none", () => {
+    const withIndependent = [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: 2 }, facts[2]!];
+    const added = withScriptedReplyFacts(proof(), "project", withIndependent);
+    expect(added.scriptedReplies).toEqual(withIndependent);
+    const bytes = serializeTestProof(added);
+    expect(TestProofWriteSchema.parse(JSON.parse(bytes))).toEqual(added);
+    expect(TestProofSchema.parse(JSON.parse(bytes))).toEqual(added);
+    expect(bytes).not.toContain('"independent":0');
+    expect(serializeTestProof(withScriptedReplyFacts(proof(), "project", facts))).not.toContain("independent");
+    expect(withScriptedReplyFacts(proof(), "project", [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: -1 }]).scriptedReplies).toEqual([
+      { checkId: "readiness:0", taskMade: 1, counted: 0 }, { checkId: "readiness:2", taskMade: 1, counted: 0 },
+    ]);
+  });
   it("writes zero-use entries explicitly", () => {
     const zero = [{ checkId: "readiness:0", taskMade: 0, counted: 0 }];
     expect(serializeTestProof(withScriptedReplyFacts(proof(), "project", zero))).toBe(JSON.stringify({ ...proof(), scriptedReplies: zero }));

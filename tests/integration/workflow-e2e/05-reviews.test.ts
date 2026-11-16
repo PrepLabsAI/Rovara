@@ -35,7 +35,7 @@ async function acceptAll(e2e: WorkflowE2E, reason: string): Promise<void> {
 describe("Suite 5: reviews", () => {
   journeySuite();
 
-  it("5.4 a security finding marked advisory still blocks, with Resolve findings, and accepting it needs a reason", async () => {
+  it("5.4 a security finding marked advisory still blocks, with Resolve findings, and accepting it is the web page's, not Slack's", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS, reviews: reviewerFindings(1, { role: "SECURITY", advisory: true, severity: "HIGH" }) } });
     await reviewed(e2e);
     expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
@@ -47,7 +47,9 @@ describe("Suite 5: reviews", () => {
     await e2e.click("agentx_workflow_resolve_findings");
     const form = e2e.slack.views.at(-1)!.view as { blocks: Array<{ type: string; block_id?: string }> };
     const [action, note] = form.blocks.filter((block) => block.type === "input").map((block) => block.block_id!);
-    await expect(e2e.submitView({ [action!]: { action: { selected_option: { value: "ACCEPT" } } }, [note!]: { note: { value: " " } } })).rejects.toThrow("Give a reason to accept this finding.");
+    // DEC 236h: a security finding is accepted on the Rovara web page, not in this form: Slack offers Fix alone and refuses a tampered accept in fixed words.
+    expect(JSON.stringify(form.blocks)).toContain("Open the Rovara web page to accept this.");
+    await expect(e2e.submitView({ [action!]: { action: { selected_option: { value: "ACCEPT" } } }, [note!]: { note: { value: "Known." } } })).rejects.toThrow("Open the Rovara web page to accept this.");
     expect(e2e.github.pullRequests).toEqual([]);
   }, 120_000);
 

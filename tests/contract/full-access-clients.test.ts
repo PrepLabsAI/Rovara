@@ -3,7 +3,7 @@
 // request, so turning it off ends that at once. Only a client with a secret can have it.
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SignInClientRegistrationSchema } from "@agentx/contracts";
+import { SignInClientRecordSchema, SignInClientRegistrationSchema } from "@agentx/contracts";
 import { signInClientRegistration, signInClientUpdate } from "../../packages/cli/src/admin/sign-in-clients.js";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -117,5 +117,15 @@ describe("registering full access (spec 066)", () => {
     const record = { clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: [], loopback: true, fullAccess: true, createdAt: at, updatedAt: at, updatedBy: "admin" };
     expect(await h.handler({ kind: "put-sign-in-client", client: record } as never)).toEqual({ ok: false, error: "invalid_request" });
     expect(await h.handler({ kind: "put-sign-in-client", client: { ...record, secretHash: createHash("sha256").update("s").digest("hex") } } as never)).toEqual({ ok: true });
+  });
+
+  it("never takes the web app marker from an applied admin change (DEC 236h): the operator or the install seeds it", async () => {
+    const h = identityHarness();
+    const at = "2026-11-13T00:00:00.000Z";
+    const record = { clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: [], loopback: true, fullAccess: true, secretHash: createHash("sha256").update("s").digest("hex"), createdAt: at, updatedAt: at, updatedBy: "admin" };
+    expect(await h.handler({ kind: "put-sign-in-client", client: { ...record, webApp: true } } as never)).toEqual({ ok: false, error: "invalid_request" });
+    // The marker is only ever on a full-access client, and the registration an administrator sends has no such field.
+    expect(SignInClientRecordSchema.safeParse({ ...record, fullAccess: undefined, webApp: true }).success).toBe(false);
+    expect(SignInClientRegistrationSchema.safeParse({ name: "Web App", audience: "web-app", redirectUris: [], loopback: true, secretHash: "f".repeat(64), fullAccess: true, webApp: true }).success).toBe(false);
   });
 });

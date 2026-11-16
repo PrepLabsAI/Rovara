@@ -92,3 +92,21 @@ describe("the access-denied message (FR-049, R10)", () => {
     expect(accessDeniedMessage("ledger", [])).toBe("you don't have access to `ledger`: ask an admin");
   });
 });
+
+it("scopes membership to the authoritative binding and never cross-grants identical channel ids", async () => {
+  for (const companyId of ["org_aaaaaaaaaaaaaaaaaaaa", "org_bbbbbbbbbbbbbbbbbbbb"]) {
+    const seen: ChannelMembersRequest[] = [];
+    const result = await resolveDeveloperAccess({ companyId, grants: [], slackUserId: "U0SHARED", channelMembersMayUse: () => true,
+      bindings: [{ ...binding("C0SHARED", "allowed"), teamId: "T0AAAAAAA" }, { ...binding("C0SHARED", "denied"), teamId: "T0BBBBBBB" }],
+      channelMembers: async (request) => { seen.push(request); return { ok: true, memberOf: request.workspace?.teamId === "T0AAAAAAA" ? ["C0SHARED"] : [] }; } });
+    expect([...result.projects.keys()]).toEqual(["allowed"]);
+    expect(seen.map((request) => request.workspace)).toEqual([{ companyId, teamId: "T0AAAAAAA" }, { companyId, teamId: "T0BBBBBBB" }]);
+  }
+});
+
+it("refuses oversized company membership input before making a Slack call", async () => {
+  const channelMembers = vi.fn();
+  const result = await resolveDeveloperAccess({ companyId: "org_aaaaaaaaaaaaaaaaaaaa", grants: [], slackUserId: "U0SHARED", channelMembersMayUse: () => true,
+    bindings: Array.from({ length: 100_000 }, () => binding("C0SHARED", "payments")), channelMembers });
+  expect(result).toEqual({ projects: new Map(), slackUnavailable: true }); expect(channelMembers).not.toHaveBeenCalled();
+});

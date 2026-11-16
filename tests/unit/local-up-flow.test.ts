@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
-  ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
+  ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, flakyOnChangeHoldInput, projectPk, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
@@ -35,6 +35,7 @@ import { registerConnectionsCommand, registerModelsCommand, registerDiagnosisCom
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, encodeBrowserEvidenceUpload, type BrowserEvidenceCaptured } from "../../packages/contracts/src/index.js";
 import { BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_RETRY_REASON, workflowAutoFixCounts, type Admission } from "@agentx/contracts";
 import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
@@ -117,7 +118,7 @@ const planText = (extra: string[] = []): string => planAnswer(planDoc(extra), NO
 const PLAN_TEXT = planText();
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { planFormat?: "markdown" | "structured"; features?: readonly string[]; connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; provider?: string; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string }; connections?: { fetch?: typeof fetch; checkEndpoint?: (url: string) => Promise<void>; serverPort?: NonNullable<Parameters<typeof startLocalRuntime>[0]["connectionsServerPort"]> } } = {}) {
+async function launch(extra: { planFormat?: "markdown" | "structured"; features?: readonly string[]; connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; provider?: string; model?: FakeHostModel; readiness?: boolean | "two"; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string }; connections?: { fetch?: typeof fetch; checkEndpoint?: (url: string) => Promise<void>; serverPort?: NonNullable<Parameters<typeof startLocalRuntime>[0]["connectionsServerPort"]> } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -133,7 +134,7 @@ async function launch(extra: { planFormat?: "markdown" | "structured"; features?
   const fakeHost = Object.defineProperties(new FakeCodeHost(model), { kind: { value: connection }, ...(connection === "github" && extra.provider === undefined ? {} : { provider: { value: extra.provider ?? "github" } }) });
   // A project cannot yet name another code host at registration (51 gap: the project contract refuses `repositories[].host`), so a repository is on the code host registered as `github`; the
   // test's host is the fake one under that name.
-  const readiness = extra.readiness === true ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] : [];
+  const readiness = extra.readiness === true || extra.readiness === "two" ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }, ...(extra.readiness === "two" ? [{ cwd: "repo/demo", executable: "npm", args: ["run", "lint"], timeoutSeconds: 60 }] : [])] : [];
   const project = extra.host === true ? { ...PROJECT, readiness, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl, ...(connection === "github" ? {} : { host: { kind: connection } }) }] } : PROJECT;
   const base = extra.host === true ? model.headOf("main") : BASE_COMMIT;
   /** The addresses the server asked the browser to open: the only place a page address goes. */
@@ -1046,7 +1047,7 @@ function reviewsOf(job: WorkerInvocation, tree: string, verdict: "pass" | "findi
 /** A page of the local review server, fetched as the browser the owner was sent to. */
 const raw_ = (h: Awaited<ReturnType<typeof launch>>, link: URL) => raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
 const taskRecord = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) =>
-  (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" })) as unknown as { workflow: { stage: string; state: string; revision: number; blockReason?: string; reviewBase?: unknown[]; verification?: { reviewOnly?: boolean }; decisions: Array<{ source?: string; actorRole?: string }> }; autofixAsk?: { reason: string } };
+  (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" })) as unknown as { workflow: { stage: string; state: string; revision: number; blockReason?: string; reviewBase?: unknown[]; verification?: { reviewOnly?: boolean; results: Array<{ checkId: string; status: string }> }; candidate?: { digest: string }; flakyOnChange?: { candidateDigest: string; count: number; ids: string[] }; decisions: Array<{ source?: string; actorRole?: string }> }; autofixAsk?: { reason: string } };
 
 describe("rovara up: from the approved plan to the checked code and its reviews, against a fake worker", () => {
   it("builds the approved plan, records the checked code, runs both reviews and makes the pull request due", async () => {
@@ -2200,6 +2201,121 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect(review).toMatchObject({ payload: { workflowMode: "REVIEW" } });
   });
 
+  describe("TE-C6: a check whose only failures passed on the worker's one rerun (switch ROVARA_FLAKY_RERUN)", () => {
+    const ON = { ROVARA_FLAKY_RERUN: "1" } as NodeJS.ProcessEnv;
+    const ID = "tests/test_cart.py::test_total";
+    const failedEntry = (index: number, over: Record<string, unknown> = {}) => ({ id: `readiness:${String(index)}`, label: index === 0 ? "npm test" : "npm run lint", source: "project", before: "passed", after: "failed", class: "regression", output: "1 failing", durationMs: 5, exitCode: 1, ...over });
+    const passedEntry = (index: number) => ({ ...failedEntry(index), after: "passed", class: "passing", output: "", exitCode: 0 });
+    const flakyFile = (checks: Array<{ checkId: string; flaky: string[] }>) => JSON.stringify({ schemaVersion: 1, checks });
+
+    /** A coding run whose checks are these entries; the worker's flaky-rerun file (if any) arrives before the result, as the worker saves it. */
+    async function run(options: { environment?: NodeJS.ProcessEnv; readiness?: true | "two"; entries: object[]; file?: string; status?: string }) {
+      const h = await launch({ host: true, readiness: options.readiness ?? true, ...(options.environment === undefined ? {} : { environment: options.environment }) });
+      const { taskId, workspaceId, seen, coding } = await toCoding(h);
+      const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+      const tree = h.model.revision(commit).tree;
+      const result = builtResult(tree, h.base, commit);
+      (result.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: options.status ?? "regression", source: "project", notVerifiedReason: undefined, checks: options.entries };
+      if (options.file !== undefined) expect((await h.callback(coding, "artifacts", { name: "flaky-rerun.json", mediaType: "application/json", content: options.file })).status).toBe(200);
+      await h.callback(coding, "result", result);
+      return { h, taskId, workspaceId, seen, tree, commit, workflow: (await taskRecord(h, taskId)).workflow };
+    }
+
+    it("flaky only: VERIFY is passed, the reviews are due, and the workflow carries the fact B5's hold reads", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0)], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "REVIEW", verification: { results: [{ status: "PASS" }] }, flakyOnChange: { count: 1, ids: [ID] } });
+      expect(r.workflow.flakyOnChange?.candidateDigest).toBe(r.workflow.candidate?.digest);
+      expect(flakyOnChangeHoldInput(r.workflow)).toEqual([ID]);
+      expect(await r.h.nextJob(r.workspaceId, r.seen)).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+    });
+
+    it("flaky plus a real failure: the real failure stays FAILED, the task blocks, and no fact is kept", async () => {
+      const r = await run({ environment: ON, readiness: "two", entries: [failedEntry(0), failedEntry(1)], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
+      // The flaky check is recorded as passed and the real failure as failed: the verification as a whole is not.
+      expect(r.workflow.verification?.results.map((result) => result.status)).toEqual(["PASS", "FAILED"]);
+    });
+
+    it("flaky in one check and the other passed: only the flaky one is excused", async () => {
+      const r = await run({ environment: ON, readiness: "two", entries: [failedEntry(0), passedEntry(1)], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "REVIEW", flakyOnChange: { count: 1 } });
+    });
+
+    it("a timeout stays FAILED, even when the file names the check", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0, { after: "timed_out", exitCode: null })], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
+    });
+
+    it("a check whose command could not run (program not found) stays FAILED, whatever the file says", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0, { output: "spawn npm ENOENT", exitCode: null })], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
+    });
+
+    it("ids the data guard would drop (a credential in a test name) excuse nothing, and no fact keeps them", async () => {
+      const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
+      const r = await run({ environment: ON, entries: [failedEntry(0)], file: flakyFile([{ checkId: "readiness:0", flaky: [`tests/t.py::leak ${secret}`] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(JSON.stringify(r.workflow)).not.toContain(secret);
+    });
+
+    it("a file over the broker's bound (64 KiB) is refused whole, even though every part of it is valid", async () => {
+      const ids = (letter: string) => Array.from({ length: 50 }, (_, index) => `tests/${letter}${String(index).padStart(3, "0")}.py::${"x".repeat(470)}`);
+      const big = flakyFile([{ checkId: "readiness:0", flaky: ids("a") }, { checkId: "readiness:1", flaky: ids("b") }, { checkId: "readiness:2", flaky: ids("c") }]);
+      expect(Buffer.byteLength(big)).toBeGreaterThan(64 * 1024);
+      const r = await run({ environment: ON, entries: [failedEntry(0)], file: big });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
+    });
+
+    it("a check that is not a regression (already failing) stays FAILED", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0, { before: "failed", class: "already_failing" })], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]), status: "verified" });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    });
+
+    it("no file, a file about another check, an unreadable file or one with an invalid id: nothing is excused", async () => {
+      for (const file of [undefined, flakyFile([{ checkId: "readiness:1", flaky: [ID] }]), "not json", flakyFile([{ checkId: "readiness:0", flaky: [" bad id"] }]), JSON.stringify({ schemaVersion: 1, checks: [{ checkId: "readiness:0", flaky: [ID] }], extra: true })]) {
+        const r = await run({ environment: ON, entries: [failedEntry(0)], ...(file === undefined ? {} : { file }) });
+        expect(r.workflow, String(file)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+        expect(r.workflow).not.toHaveProperty("flakyOnChange");
+      }
+    });
+
+    it("flaky on the base too: passed without a hold (no fact); flaky only on the change: passed with the fact", async () => {
+      const baseline = (flaky: string[]) => ({ recordedAt: new Date().toISOString(), envRevision: 1, branch: "main", headSha: "a".repeat(40), finishedAt: new Date().toISOString(), tests: { total: 10, passed: 10, failed: 0, skipped: 0 }, failed: [], flaky });
+      const withBase = async (flaky: string[]) => {
+        const h = await launch({ host: true, readiness: true, environment: ON });
+        await h.runtime.registry.require("storage").put({ item: { pk: projectPk(IMPLICIT_COMPANY_ID, "payments"), sk: "TESTENV#BASELINE#LATEST", entityType: "TEST_ENV_BASELINE_LATEST", orgId: IMPLICIT_COMPANY_ID, project: "payments", baseline: baseline(flaky) } });
+        const { taskId, coding } = await toCoding(h);
+        const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+        const result = builtResult(h.model.revision(commit).tree, h.base, commit);
+        (result.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: "regression", source: "project", notVerifiedReason: undefined, checks: [failedEntry(0)] };
+        await h.callback(coding, "artifacts", { name: "flaky-rerun.json", mediaType: "application/json", content: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+        await h.callback(coding, "result", result);
+        return (await taskRecord(h, taskId)).workflow;
+      };
+      const both = await withBase([ID]);
+      expect(both).toMatchObject({ stage: "REVIEW", verification: { results: [{ status: "PASS" }] } });
+      expect(both).not.toHaveProperty("flakyOnChange");
+      expect(flakyOnChangeHoldInput(both)).toBeUndefined();
+      const onlyChange = await withBase(["tests/other.py::test_x"]);
+      expect(flakyOnChangeHoldInput(onlyChange)).toEqual([ID]);
+    });
+
+    it("the switch off is today's behaviour: the same run and file block the task, and the snapshot has no such key", async () => {
+      const entries = [failedEntry(0)];
+      const file = flakyFile([{ checkId: "readiness:0", flaky: [ID] }]);
+      for (const environment of [undefined, { ROVARA_FLAKY_RERUN: "0" }, { ROVARA_FLAKY_RERUN: "true" }] as const) {
+        const r = await run({ ...(environment === undefined ? {} : { environment }), entries, file });
+        expect(r.workflow, JSON.stringify(environment)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+        expect(JSON.stringify(r.workflow)).not.toContain("flakyOnChange");
+        expect((await taskRecord(r.h, r.taskId)).autofixAsk).toMatchObject({ reason: "unclear-fault" });
+      }
+    });
+  });
+
   it("keeps the evidence of a run's checks when they are recorded (write-once, the pack replaced only on a re-check of the same code), and the proof page shows it (lane L12 slice 3)", async () => {
     const h = await launch({ host: true, readiness: true });
     const { taskId, workspaceId, seen, coding } = await toCoding(h);
@@ -2238,6 +2354,306 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     // Objects are write-once: the same pack key cannot be written again without the opt-in that the keeper itself uses for a re-check of the same code.
     const key = `private/${owner.ownerKey}/${workspaceId}/evidence-pack/${taskId}/${digest}.json`;
     await expect(h.runtime.app.blobs.put(key, new Uint8Array([1]), { contentType: "application/json", metadata: {}, retention: "evidence-std" })).rejects.toThrow(/already stored/);
+  });
+
+  it("browser evidence (TE-H1 slice 2): a project whose owner set a recipe asks the rerun of its checks for before and after screenshots, keeps what the worker uploads in a v2 pack, shows it on the proof page behind the session and says it in text on the pull request", async () => {
+    const recipe = { startCommand: "npm run start", port: 4321, readyPath: "/health", routes: [{ path: "/checkout", files: ["src/**"] }] };
+    const h = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" }, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: recipe } } } });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    const digest = createCandidateManifest(candidateOf(tree, h.base, commit)).digest;
+    const check = (after: string, cls: string) => ({ id: "readiness:0", label: "npm test", source: "project", before: "passed", after, class: cls, output: after === "failed" ? "1 failing" : "", durationMs: 5, exitCode: after === "failed" ? 1 : 0 });
+    const withCheck = (entry: object, status: string) => { const r = builtResult(tree, h.base, commit); (r.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status, source: "project", notVerifiedReason: undefined, checks: [entry] }; return r; };
+    const owner = (await taskRecord(h, taskId)) as unknown as { ownerKey: string };
+    await h.callback(coding, "result", withCheck(check("failed", "regression"), "regression"));
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const rerun = await h.nextJob(workspaceId, seen);
+    // The rerun is told the owner's recipe (and only the recipe), and its operation needs a worker that lists the feature.
+    expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe } });
+    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    expect((operation["dispatch"] as { requires: string[] }).requires).toContain(BROWSER_EVIDENCE_FEATURE);
+    // The worker uploads its screenshots in chunks (init, chunk, finalize), as `callback-client` does.
+    const jpeg = (seed: string) => { const bytes = new Uint8Array(70_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
+    const shot = (seed: string) => ({ bytes: jpeg(seed), sha256: createHash("sha256").update(jpeg(seed)).digest("hex") });
+    const run: BrowserEvidenceCaptured = { isolation: "sandbox", durationMs: 4_000, notShown: [], moreNotShown: 0, routes: [{ route: "/checkout", status: "shown", before: shot("a"), after: shot("b"), consoleErrors: { before: 0, after: 0 } }] };
+    const bytes = Buffer.from(encodeBrowserEvidenceUpload(run));
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    const chunkCount = Math.ceil(bytes.byteLength / 65_536);
+    const init = await h.callback(rerun, "browser-evidence", { stage: "init", totalBytes: bytes.byteLength, chunkCount, sha256: sha });
+    expect(init.status).toBe(200);
+    const uploadId = (init.body as unknown as { uploadId: string }).uploadId;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = bytes.subarray(index * 65_536, Math.min((index + 1) * 65_536, bytes.byteLength));
+      expect((await h.callback(rerun, "browser-evidence", { stage: "chunk", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") })).status).toBe(200);
+    }
+    expect((await h.callback(rerun, "browser-evidence", { stage: "finalize", uploadId, sha256: sha })).status).toBe(200);
+    await h.callback(rerun, "result", withCheck(check("passed", "passing"), "verified"));
+    // The pack is a v2 pack with the visual check; the pictures are served on the proof page behind the session, and the v1 view shows no picture as a check.
+    const taskView = { ownerKey: owner.ownerKey, workspaceId, taskId };
+    const panel = await h.runtime.app.evidence.browserEvidencePanelOf(taskView, digest);
+    expect(panel).toMatchObject({ runBy: "Run by Rovara in its sandbox", pairs: [{ route: "/checkout", before: shot("a").sha256, after: shot("b").sha256 }] });
+    expect((await h.runtime.app.evidence.packOf(taskView, digest))?.checks.map((entry) => entry.checkId)).toEqual(["readiness:0"]);
+    const link = await h.browse(`/proof/${taskId}`);
+    const page = await raw_(h, link);
+    expect(page.body).toContain("Before and after screenshots");
+    expect(page.body).toContain(`${link.pathname.replace(/\/proof\/.*$/, "")}/proof/${taskId}/evidence/${shot("a").sha256}`);
+    const image = await raw(h.runtime.pagesUrl, { path: `${link.pathname.replace(/\/proof\/.*$/, "")}/proof/${taskId}/evidence/${shot("a").sha256}`, headers: { host: link.host } });
+    expect(image.status).toBe(200);
+    expect(image.headers["content-type"]).toBe("image/jpeg");
+    expect(image.headers["content-length"]).toBe("70000");
+    // A picture that is not in the pack is not served, and the same address without the session is a page that is not there.
+    expect((await raw(h.runtime.pagesUrl, { path: `${link.pathname.replace(/\/proof\/.*$/, "")}/proof/${taskId}/evidence/${"e".repeat(64)}`, headers: { host: link.host } })).status).toBe(404);
+    expect((await raw(h.runtime.pagesUrl, { path: `/proof/${taskId}/evidence/${shot("a").sha256}`, headers: { host: link.host } })).status).toBe(404);
+    // The pull request says it in text only: no picture, no address of one, no digest.
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const body = (publish.payload as { body?: string }).body ?? "";
+    expect(body).toContain("## Browser evidence");
+    expect(body).toContain("Browser evidence: Run by Rovara in its sandbox. Visual evidence only: it does not count as change proof.");
+    expect(body).toContain("`/checkout`: before and after screenshots (on the task page, behind sign-in)");
+    expect(body).not.toContain(shot("a").sha256);
+    expect(body).not.toMatch(/!\[|<img|\/evidence\//u);
+  });
+
+  it("browser evidence slice 4: a recipe with video asks for the video feature too, keeps the video of a failed page, serves it only as a download behind the session, and says in text that one is kept; an older worker without the video feature is refused", async () => {
+    const recipe = { startCommand: "npm run start", port: 4321, readyPath: "/health", routes: [{ path: "/checkout", files: ["src/**"] }, { path: "/settings", files: ["src/**"] }], video: { fixtureDataOnly: true } };
+    const h = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" }, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: recipe } } } });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    const digest = createCandidateManifest(candidateOf(tree, h.base, commit)).digest;
+    const check = (after: string, cls: string) => ({ id: "readiness:0", label: "npm test", source: "project", before: "passed", after, class: cls, output: after === "failed" ? "1 failing" : "", durationMs: 5, exitCode: after === "failed" ? 1 : 0 });
+    const withCheck = (entry: object, status: string) => { const r = builtResult(tree, h.base, commit); (r.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status, source: "project", notVerifiedReason: undefined, checks: [entry] }; return r; };
+    const owner = (await taskRecord(h, taskId)) as unknown as { ownerKey: string };
+    await h.callback(coding, "result", withCheck(check("failed", "regression"), "regression"));
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const rerun = await h.nextJob(workspaceId, seen);
+    expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", browserEvidence: recipe } });
+    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    expect((operation["dispatch"] as { requires: string[] }).requires).toEqual(expect.arrayContaining([BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE]));
+    const jpeg = (seed: string) => { const bytes = new Uint8Array(70_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
+    const webm = (seed: string) => { const bytes = new Uint8Array(90_000); bytes.set([0x1a, 0x45, 0xdf, 0xa3]); bytes.fill(seed.charCodeAt(0), 4); return bytes; };
+    const shot = (seed: string) => ({ bytes: jpeg(seed), sha256: createHash("sha256").update(jpeg(seed)).digest("hex") });
+    const clip = { bytes: webm("v"), sha256: createHash("sha256").update(webm("v")).digest("hex") };
+    const run: BrowserEvidenceCaptured = { isolation: "sandbox", durationMs: 4_000, notShown: [], moreNotShown: 0, routes: [
+      { route: "/checkout", status: "shown", before: shot("a"), after: shot("b"), consoleErrors: { before: 0, after: 0 } },
+      { route: "/settings", status: "not_run", reason: "page_did_not_load", video: clip }] };
+    const bytes = Buffer.from(encodeBrowserEvidenceUpload(run));
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    const chunkCount = Math.ceil(bytes.byteLength / 65_536);
+    const init = await h.callback(rerun, "browser-evidence", { stage: "init", totalBytes: bytes.byteLength, chunkCount, sha256: sha });
+    expect(init.status).toBe(200);
+    const uploadId = (init.body as unknown as { uploadId: string }).uploadId;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = bytes.subarray(index * 65_536, Math.min((index + 1) * 65_536, bytes.byteLength));
+      expect((await h.callback(rerun, "browser-evidence", { stage: "chunk", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") })).status).toBe(200);
+    }
+    expect((await h.callback(rerun, "browser-evidence", { stage: "finalize", uploadId, sha256: sha })).status).toBe(200);
+    await h.callback(rerun, "result", withCheck(check("passed", "passing"), "verified"));
+    const taskView = { ownerKey: owner.ownerKey, workspaceId, taskId };
+    const panel = await h.runtime.app.evidence.browserEvidencePanelOf(taskView, digest);
+    expect(panel).toMatchObject({ pairs: [{ route: "/checkout", before: shot("a").sha256, after: shot("b").sha256 }], videos: [{ route: "/settings", sha256: clip.sha256 }] });
+    const link = await h.browse(`/proof/${taskId}`);
+    const prefix = link.pathname.replace(/\/proof\/.*$/, "");
+    const page = await raw_(h, link);
+    expect(page.body).toContain(`${prefix}/proof/${taskId}/evidence-video/${clip.sha256}`);
+    expect(page.body).not.toMatch(/<video/iu);
+    // The video is a download behind the session, of the right type, and the picture route never serves it.
+    const download = await raw(h.runtime.pagesUrl, { path: `${prefix}/proof/${taskId}/evidence-video/${clip.sha256}`, headers: { host: link.host } });
+    expect(download.status).toBe(200);
+    expect(download.headers["content-type"]).toBe("video/webm");
+    expect(String(download.headers["content-disposition"])).toMatch(/^attachment/u);
+    expect(download.headers["content-length"]).toBe("90000");
+    expect((await raw(h.runtime.pagesUrl, { path: `${prefix}/proof/${taskId}/evidence/${clip.sha256}`, headers: { host: link.host } })).status).toBe(404);
+    expect((await raw(h.runtime.pagesUrl, { path: `${prefix}/proof/${taskId}/evidence-video/${shot("a").sha256}`, headers: { host: link.host } })).status).toBe(404);
+    expect((await raw(h.runtime.pagesUrl, { path: `/proof/${taskId}/evidence-video/${clip.sha256}`, headers: { host: link.host } })).status).toBe(404);
+    // The pull request says it in text only.
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const body = (publish.payload as { body?: string }).body ?? "";
+    expect(body).toContain("`/settings`: Not run: the page did not load Video of the failure: kept (download behind sign-in).");
+    expect(body).not.toContain(clip.sha256);
+    expect(body).not.toMatch(/webm|<video|!\[|\/evidence-video\//iu);
+    // An older worker (it lists browser evidence but not the video feature) is refused the rerun, never sent a field it cannot read.
+    const older = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" }, features: [...WORKER_INVOCATION_FEATURES].filter((feature) => feature !== BROWSER_EVIDENCE_VIDEO_FEATURE), config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: recipe } } } });
+    const o = await toCoding(older);
+    const oCommit = older.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const oFailing = builtResult(older.model.revision(oCommit).tree, older.base, oCommit);
+    (oFailing.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: "regression", source: "project", notVerifiedReason: undefined, checks: [check("failed", "regression")] };
+    await older.callback(o.coding, "result", oFailing);
+    await older.api(`/v1/dev/tasks/${o.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
+    await older.nextJob(o.workspaceId, o.seen).catch(() => undefined);
+    const operations = await older.runtime.registry.require("storage").query({ pk: `WORKSPACE#${o.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("this worker is too old to run this step; upgrade it");
+  });
+
+  it("browser evidence is off without the owner's recipe, and a worker that does not list the feature is refused the step cleanly", async () => {
+    const plain = await launch({ host: true, readiness: true });
+    const t = await toCoding(plain);
+    const commit = plain.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = plain.model.revision(commit).tree;
+    const failing = builtResult(tree, plain.base, commit);
+    (failing.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: "regression", source: "project", notVerifiedReason: undefined, checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "failed", class: "regression", output: "1 failing", durationMs: 5, exitCode: 1 }] };
+    await plain.callback(t.coding, "result", failing);
+    await plain.api(`/v1/dev/tasks/${t.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
+    const rerun = await plain.nextJob(t.workspaceId, t.seen);
+    expect(rerun.payload).not.toHaveProperty("browserEvidence");
+    const operation = (await plain.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    expect((operation["dispatch"] as { requires: string[] }).requires).not.toContain(BROWSER_EVIDENCE_FEATURE);
+    // A recipe without an executor image on this machine is not asked for (the worker could not start the capture): the rerun is the plain one.
+    const noImage = await launch({ host: true, readiness: true, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["src/**"] }] } } } } });
+    const n = await toCoding(noImage);
+    const nCommit = noImage.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const nFailing = builtResult(noImage.model.revision(nCommit).tree, noImage.base, nCommit);
+    (nFailing.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: "regression", source: "project", notVerifiedReason: undefined, checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "failed", class: "regression", output: "1 failing", durationMs: 5, exitCode: 1 }] };
+    await noImage.callback(n.coding, "result", nFailing);
+    await noImage.api(`/v1/dev/tasks/${n.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
+    expect((await noImage.nextJob(n.workspaceId, n.seen)).payload).not.toHaveProperty("browserEvidence");
+    // A recipe the owner's file holds that does not parse is no recipe.
+    const bad = await launch({ host: true, readiness: true, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: { startCommand: "x", port: 80, routes: [] } } } } }).catch((error: unknown) => error);
+    expect(bad).toBeInstanceOf(Error);
+    // An older worker (no feature) is refused the rerun with the fixed sentence, never sent a field it cannot read.
+    const recipe = { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["src/**"] }] };
+    const older = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" }, features: [...WORKER_INVOCATION_FEATURES].filter((feature) => feature !== BROWSER_EVIDENCE_FEATURE), config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: recipe } } } });
+    const o = await toCoding(older);
+    const oCommit = older.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const oTree = older.model.revision(oCommit).tree;
+    const oFailing = builtResult(oTree, older.base, oCommit);
+    (oFailing.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: "regression", source: "project", notVerifiedReason: undefined, checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "failed", class: "regression", output: "1 failing", durationMs: 5, exitCode: 1 }] };
+    await older.callback(o.coding, "result", oFailing);
+    await older.api(`/v1/dev/tasks/${o.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
+    await older.nextJob(o.workspaceId, o.seen).catch(() => undefined);
+    const operations = await older.runtime.registry.require("storage").query({ pk: `WORKSPACE#${o.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("this worker is too old to run this step; upgrade it");
+  });
+
+  it("browser evidence slice 3: a recipe saved on the page, with a saved sign-in, is what the rerun is told; the sign-in is answered to that run alone and read at that moment, and no value is in anything the run or the task keeps", async () => {
+    const h = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" } });
+    const be = h.runtime.app.browserEvidence!;
+    expect(be).toBeDefined();
+    /** Built at runtime: a fixture that looks like a real credential is refused by the public repository's push protection. */
+    const values = { username: ["tester", "example"].join("@") + ".test", password: ["pw", "Zq7", "Lm2", "Xv9"].join("-") };
+    const recipe = { startCommand: "npm run start", port: 4321, readyPath: "/health", routes: [{ path: "/checkout", files: ["src/**"] }],
+      signIn: { path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard", credentialRef: "be-payments-signin" } };
+    // No recipe yet: nothing is asked for. (The page's recipe is read when the step starts, so it is saved before the rerun.)
+    expect(await be.recipeFor("payments")).toBeUndefined();
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    expect(await be.action({ op: "save", project: "payments", recipe }, { fresh: true })).toMatchObject({ ok: true });
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    const check = (after: string, cls: string) => ({ id: "readiness:0", label: "npm test", source: "project", before: "passed", after, class: cls, output: after === "failed" ? "1 failing" : "", durationMs: 5, exitCode: after === "failed" ? 1 : 0 });
+    const withCheck = (entry: object, status: string) => { const r = builtResult(tree, h.base, commit); (r.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status, source: "project", notVerifiedReason: undefined, checks: [entry] }; return r; };
+    await h.callback(coding, "result", withCheck(check("failed", "regression"), "regression"));
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const rerun = await h.nextJob(workspaceId, seen);
+    expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe } });
+    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    expect((operation["dispatch"] as { requires: string[] }).requires).toContain(BROWSER_EVIDENCE_FEATURE);
+    // Nothing saved yet: the run is told so, in one fixed word. A run whose recipe has no sign-in (the coding step, which was not asked) cannot ask at all.
+    const none = await h.callback(rerun, "browser-evidence-sign-in", { project: "other", ref: "be-other-signin" });
+    expect(none).toMatchObject({ status: 200, body: { status: "not_set" } });
+    expect((await h.callback(coding, "browser-evidence-sign-in", {})).status).toBeGreaterThanOrEqual(400);
+    // The values are read when asked, not when the recipe was saved or the step started.
+    expect(await be.action({ op: "save-sign-in", project: "payments", ...values }, { fresh: true })).toMatchObject({ ok: true });
+    const answer = await h.callback(rerun, "browser-evidence-sign-in", { project: "other", ref: "be-other-signin", companyId: "org_bbbbbbbbbbbbbbbbbbbb" });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({ status: "ready", values });
+    // Nothing the run, the task or the company keeps holds a value: not the operation, not its payload, not the stored recipe, not the task's page, and not a line the run wrote.
+    const storage = h.runtime.registry.require("storage");
+    const keep = JSON.stringify([operation, rerun.payload, (await storage.query({ pk: `WORKSPACE#${workspaceId}` })).items, (await storage.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#PROJECT#payments` })).items]);
+    for (const text of [values.username, values.password, Buffer.from(values.password).toString("base64"), encodeURIComponent(values.password)]) expect(keep, text).not.toContain(text);
+    expect(keep).toContain("be-payments-signin");
+    // The run ends; a callback after it takes nothing more.
+    await h.callback(rerun, "result", withCheck(check("passed", "passing"), "verified"));
+    expect((await h.callback(rerun, "browser-evidence-sign-in", {})).status).toBeGreaterThanOrEqual(400);
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const everything = JSON.stringify([publish.payload, await h.browse(`/proof/${taskId}`).then((link) => raw_(h, link)).then((reply) => reply.body)]);
+    for (const text of [values.username, values.password]) expect(everything, text).not.toContain(text);
+  });
+
+  it("browser evidence slice 3, on the owner's own page: the recipe and the sign-in are saved in a fresh page, the password is in one 0600 file of the company's folder and nowhere else in the state folder, and a token can neither read nor change either", async () => {
+    const audit: AuditEvent[] = [];
+    const h = await launch({ audit, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" } });
+    expect((await h.api("/v1/admin/projects", { method: "POST", body: h.project })).status).toBe(201);
+    /** Built at runtime: a fixture that looks like a real credential is refused by the public repository's push protection. */
+    const values = { username: ["tester", "example"].join("@") + ".test", password: ["pw", "Zq7", "Lm2", "Xv9"].join("-") };
+    const owner = await ownersPage(h, "/browser-evidence");
+    const drawn = await owner.page("/browser-evidence/payments");
+    expect(drawn).toContain("Browser evidence is off for this project");
+    // The recipe, with the sign-in's form: one verified form.
+    const fields = { startCommand: "npm run start", port: "4321", readyPath: "/health", framework: "", routes: "/checkout src/**", mask: "", signInOn: "yes", signInPath: "/login", signInUsername: "#email", signInPassword: "#password", signInSubmit: "button", signInSuccessPath: "/dashboard", signInSuccessSelector: "" };
+    const save = owner.formWith(drawn, "/browser-evidence/payments/act", "op", "save");
+    const saved = await owner.send("POST", "/browser-evidence/payments/act", { ...save.fields, ...fields });
+    expect(String(saved.headers["location"])).toContain("n=bevsaved");
+    // The sign-in's values: another verified form, in the same fresh page.
+    const sign = owner.formWith(await owner.page("/browser-evidence/payments"), "/browser-evidence/payments/act", "op", "save-sign-in");
+    const signed = await owner.send("POST", "/browser-evidence/payments/act", { ...sign.fields, username: values.username, password: values.password });
+    expect(String(signed.headers["location"])).toContain("n=bevsignin");
+    const after = await owner.page("/browser-evidence/payments");
+    expect(after).toContain("A sign-in is saved for this project. Its values are never shown.");
+    expect(await h.runtime.app.browserEvidence!.recipeFor("payments")).toMatchObject({ startCommand: "npm run start", port: 4321, signIn: { credentialRef: "be-payments-signin", successPath: "/dashboard" } });
+    // The password is in ONE file, 0600, in the company's folder; no other file of the state folder, no page, no row and no audit event holds it.
+    const folder = join(h.stateDirectory, "connection-secrets", IMPLICIT_COMPANY_ID);
+    const files = await readdir(folder);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^be-payments-signin\./u);
+    expect((await lstat(join(folder, files[0]!))).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await readFile(join(folder, files[0]!), "utf8"))).toEqual(values);
+    const holders: string[] = [];
+    const walk = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) await walk(path);
+        else if (entry.isFile() && (await readFile(path)).includes(values.password)) holders.push(path);
+      }
+    };
+    await walk(h.stateDirectory);
+    expect(holders).toEqual([join(folder, files[0]!)]);
+    const rows = await h.runtime.registry.require("storage").query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#PROJECT#payments` });
+    expect(JSON.stringify([rows.items, audit, drawn, after])).not.toContain(values.password);
+    expect(JSON.stringify([rows.items, audit])).not.toContain(values.username);
+    expect(audit.map((event) => event.action)).toEqual(expect.arrayContaining(["browser_evidence.recipe_saved", "browser_evidence.sign_in_saved"]));
+    // A token neither reads nor changes the recipe or the sign-in: the page's own sentence (the local server takes GET and POST only).
+    for (const method of ["GET", "POST"]) {
+      const refused = await h.api("/v1/app/projects/payments/browser-evidence", { method, ...(method === "GET" ? {} : { body: { username: values.username, password: values.password } }) });
+      expect(refused.status, method).toBe(403);
+      expect(JSON.stringify(refused.body)).toContain("rovara open browser-evidence");
+      expect(JSON.stringify(refused.body)).not.toContain(values.password);
+    }
+    // Removing it takes the file with it.
+    const clear = owner.formWith(await owner.page("/browser-evidence/payments"), "/browser-evidence/payments/act", "op", "clear-sign-in");
+    expect(String((await owner.send("POST", "/browser-evidence/payments/act", clear.fields)).headers["location"])).toContain("n=bevsigninoff");
+    expect(await readdir(folder)).toEqual([]);
+  });
+
+  it("browser evidence slice 3: `rovara open browser-evidence` opens the page in a fresh session", async () => {
+    const h = await launch({ environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" } });
+    const printed: string[] = [];
+    const program = new Command().exitOverride().option("--json", "", false);
+    registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
+    const before = h.opened.length;
+    await program.parseAsync(["node", "rovara", "open", "browser-evidence", "--state-dir", h.stateDirectory]);
+    expect(printed.join("")).toMatch(/^Opened /u);
+    expect(h.opened).toHaveLength(before + 1);
+    const once = new URL(h.opened.at(-1)!);
+    const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
+    expect(link.pathname).toMatch(/\/browser-evidence$/u);
+    expect((await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } })).status).toBe(200);
+  });
+
+  it("browser evidence slice 3: a recipe whose sign-in names another project's saved sign-in is no recipe, and a recipe on the page needs the executor image like the owner's config does", async () => {
+    // The owner's config names a sign-in that is not this project's: the stronger source said something unreadable, so browser evidence is off (the page's own recipe does not stand in).
+    const wrong = { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["src/**"] }], signIn: { path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard", credentialRef: "be-other-signin" } };
+    const h = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" }, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: wrong } } } });
+    expect(await h.runtime.app.browserEvidence!.recipeFor("payments")).toBeUndefined();
+    // Without an executor image on this machine there is no browser evidence page at all, and no recipe is asked for.
+    const bare = await launch({ host: true, readiness: true });
+    expect(bare.runtime.app.browserEvidence).toBeUndefined();
   });
 
   it("retries a review whose run was lost once by itself, and asks when it is lost again; a review that failed for its own reasons is asked about at once", async () => {

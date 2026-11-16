@@ -1,11 +1,13 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import "./broker-environment-init.js"; import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { S3Client } from "@aws-sdk/client-s3";
+import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
-import { Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
+import { CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
@@ -18,13 +20,23 @@ import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatc
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
 import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
+import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
+import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
+import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
+import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js";
+import { taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
+import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
 interface SqsRecord {
   messageId: string;
   body: string;
-  attributes?: { ApproximateReceiveCount?: string };
+  attributes?: { ApproximateReceiveCount?: string; SentTimestamp?: string };
+  /** Read only by the core router (worker-machines/dispatcher-core.ts): which queue the record came from, and its handle for a visibility change. */
+  receiptHandle?: string;
+  eventSourceARN?: string;
 }
 
 export interface SqsEvent {
@@ -434,7 +446,7 @@ function taskPersonRuntimePorts(input: {
     taskPersonProof: (request, admission) => taskPersonProofThroughLambda({
       admission,
       now: () => Date.now(),
-      expectedTeamId: input.slackTeamId,
+      expectedTeamId: request.workspace?.teamId ?? input.slackTeamId,
       async invoke(payload, options) {
         const response = await taskPersonProofLambdaClient.send(taskPersonProofInvokeCommand(input.proofArn, payload), { abortSignal: options.abortSignal });
         return { ...(response.FunctionError === undefined ? {} : { FunctionError: response.FunctionError }), ...(response.Payload === undefined ? {} : { Payload: response.Payload }) };
@@ -443,12 +455,13 @@ function taskPersonRuntimePorts(input: {
   };
 }
 
-const taskDispatchGuard = (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
+export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">) => (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
   const stateTableName = tableName ?? requiredEnvironment("STATE_TABLE_NAME");
   const admission = createTaskAuthorityAdmission({ now: () => Date.now(), lambdaRemainingMs: context?.remainingTimeMs() ?? 60_000 });
   const proofArn = process.env.TASK_PERSON_PROOF_FUNCTION_ARN;
   const slackTeamId = process.env.SLACK_TEAM_ID ?? "";
-  const personRuntime = proofArn === undefined || proofArn.trim() === "" || !SlackTeamIdSchema.safeParse(slackTeamId).success ? undefined : createTaskPersonRuntime({
+  const personRuntime = proofArn === undefined || proofArn.trim() === "" || (workspaces === undefined && !SlackTeamIdSchema.safeParse(slackTeamId).success) ? undefined : createTaskPersonRuntime({
+    ...(workspaces === undefined ? {} : { workspaces }),
     admission,
     ports: taskPersonRuntimePorts({
       admission,
@@ -472,6 +485,8 @@ const taskDispatchGuard = (record: DurableOutboxRecord, context?: { remainingTim
     ...(personRuntime === undefined ? {} : { stateAuthorityWitnessForOwnerActor: (task, ownerActorId) => personRuntime.stateAuthorityWitnessForOwnerActor(task, ownerActorId) }),
   }, record);
 };
+const taskDispatchGuard = createTaskDispatchGuard();
+
 
 const setupDomainRow = (item: Record<string, unknown> | undefined, key: { pk: string; sk: string }, entityType: string): Record<string, unknown> | undefined => {
   if (!item || item.pk !== key.pk || item.sk !== key.sk || item.entityType !== entityType) return undefined;
@@ -551,6 +566,8 @@ async function guardProjectSetupDispatch(record: DurableOutboxRecord): Promise<"
 const WORKER_POST_TIMEOUT_MS = 10_000;
 /** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
 const WORKER_PING_TIMEOUT_MS = 3_000;
+/** A /ping answer is a few fields and a feature list; a longer one is not read. */
+const WORKER_PING_MAX_CHARS = 65_536;
 
 /**
  * Spec 053: the invocation features a worker reports on GET /ping; none for a worker built before
@@ -565,39 +582,46 @@ export async function workerPingFeatures(url: string, fetchPing: typeof fetch = 
   return Array.isArray(features) ? features.filter((feature): feature is string => typeof feature === "string") : [];
 }
 
-const deliverEc2 = createEc2Delivery({
-  sessions: new SessionManager({
-    documentClient,
-    tableName: tableName ?? "",
-    executions: {
-      provisionerArn: process.env.PROVISIONER_ARN ?? "",
-      deleterArn: process.env.DELETER_ARN ?? "",
-      async start(input) {
-        return (await sfn.send(new StartExecutionCommand(input))).executionArn!;
-      },
+const dispatcherSessions = new SessionManager({
+  documentClient,
+  tableName: tableName ?? "",
+  executions: {
+    provisionerArn: process.env.PROVISIONER_ARN ?? "",
+    deleterArn: process.env.DELETER_ARN ?? "",
+    async start(input) {
+      return (await sfn.send(new StartExecutionCommand(input))).executionArn!;
     },
-  }),
+  },
+});
+
+/** KMS Sign with the invoke signing key, which only this function's role may use. */
+async function signWithInvokeKey(message: Uint8Array): Promise<Uint8Array> {
+  const response = await kms.send(new SignCommand({
+    KeyId: requiredEnvironment("INVOKE_SIGNING_KEY_ARN"),
+    Message: message,
+    MessageType: "RAW",
+    SigningAlgorithm: "ECDSA_SHA_256",
+  }));
+  return response.Signature!;
+}
+
+async function postToWorker(url: string, init: { authorization: string; body: string }): Promise<{ status: number; body: string }> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { authorization: init.authorization, "content-type": "application/json" },
+    body: init.body,
+    signal: AbortSignal.timeout(WORKER_POST_TIMEOUT_MS),
+  });
+  return { status: response.status, body: await response.text() };
+}
+
+const deliverEc2 = createEc2Delivery({
+  sessions: dispatcherSessions,
   projectSetupSessions: new ProjectSetupSessionManager({ documentClient, tableName: tableName ?? "" }),
   projectSetupBinding: createProjectSetupBindingReader({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   binding: (workspaceId) => workspaceBinding(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), workspaceId),
-  async sign(message) {
-    const response = await kms.send(new SignCommand({
-      KeyId: requiredEnvironment("INVOKE_SIGNING_KEY_ARN"),
-      Message: message,
-      MessageType: "RAW",
-      SigningAlgorithm: "ECDSA_SHA_256",
-    }));
-    return response.Signature!;
-  },
-  async post(url, init) {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { authorization: init.authorization, "content-type": "application/json" },
-      body: init.body,
-      signal: AbortSignal.timeout(WORKER_POST_TIMEOUT_MS),
-    });
-    return { status: response.status, body: await response.text() };
-  },
+  sign: signWithInvokeKey,
+  post: postToWorker,
   workerFeatures: (url) => workerPingFeatures(url),
   // Reads the admission a CHECKS reference names to hold its `kind` to it. Without the artifact bucket (a deployment that has not granted it) only the kind decides.
   ...(process.env.ARTIFACT_BUCKET_NAME === undefined || process.env.ARTIFACT_BUCKET_NAME === "" ? {} : {
@@ -626,7 +650,8 @@ const deliverEc2 = createEc2Delivery({
   },
 });
 
-export const handler = createDispatcherHandler({
+/** Today's dispatch handler (the spec 056 DispatchQueue). */
+const workflowHandler = createDispatcherHandler({
   guardTaskDispatch: taskDispatchGuard,
   guardProjectSetupDispatch,
   projectSetupLifecycle: {
@@ -713,6 +738,72 @@ export const handler = createDispatcherHandler({
   completeWorkflowE2EReadiness: createWorkflowE2EReadinessCompleter({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
 });
 
+/**
+ * Engine host step 4: the core dispatch queue's records are served by the core (worker-machines/dispatcher-core.ts), never by today's handler. Where the core queue is not configured
+ * (the legacy template) this is today's handler itself. The core is built on the first core batch while the switch serves; an off dispatcher builds nothing.
+ */
+let coreDispatch: Promise<CoreDispatchHost> | undefined;
+export const handler = withCoreDispatch(workflowHandler, {
+  coreQueueArn: coreDispatchQueueArn(process.env),
+  serves: () => coreEngineServes(readCoreEngineFlags(process.env)),
+  host: () => {
+    coreDispatch ??= Promise.resolve().then(() => {
+      const sqs = new SQSClient(awsClientConfiguration);
+      const queueUrl = process.env[CORE_DISPATCH_QUEUE_URL_VARIABLE] ?? "";
+      const flow = hostedDispatcherFlow(process.env);
+      const offeredReader = offeredModelsReaderFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
+      return createDispatcherCoreHost({
+        env: process.env,
+        documentClient,
+        clients: { dynamo: new DynamoDBClient(awsClientConfiguration), sqs, s3: new S3Client(awsClientConfiguration) },
+        machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker },
+        changeVisibility: async (receiptHandle, seconds) => { await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds })); },
+        // Lane E2 step 6: the declared flow inputs (none while lessons are switched on anywhere: then nothing is declared and every core record comes back) and the step 5 points.
+        // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.
+        ...(flow === undefined ? {} : { flow }),
+        // DEC 243c: the company's chosen model, from the gateway's offered list: the same reader as the broker's, wired only where ROVARA_CORE_AGENT_MODEL_CHOICE=on, the model gateway is configured AND this function can sign with the task key (the key policy lets only the broker; until infra grants it, none).
+        ...(offeredReader === undefined ? {} : { offeredModels: offeredReader }),
+        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env) }), ...gatewayModelKeysModules(process.env)],
+        // The per-run stop's dispatch side (core-money-stop): each model run is admitted and goes only to a worker that reports its usage while it runs; a queued cancel is delivered.
+        moneyStop: (registry, companyId) => {
+          const read = readHostedAdmissionSettings(process.env);
+          return createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: "settings" in read ? read.settings : undefined, now: () => new Date() });
+        },
+        log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); }, // one JSON line on stderr, as logDispatchFailure's fallback (fixed fields only)
+      }).host;
+    }).catch((error: unknown) => {
+      // Not kept: the next core batch tries again.
+      coreDispatch = undefined;
+      throw error;
+    });
+    return coreDispatch;
+  },
+});
+
+/** The worker's /ping, read for the core's machines adapter (any HTTP status: a failed boot answers 503 with its status). Undefined when the worker does not answer. */
+async function pingWorker(url: string): Promise<SessionWorkerPing | undefined> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WORKER_PING_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      // Read at most WORKER_PING_MAX_CHARS bytes: a worker runs agent code, so a longer answer is cut off (and refused) instead of buffered.
+      if (response.body === null) return undefined;
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+        size += chunk.byteLength;
+        if (size > WORKER_PING_MAX_CHARS) { controller.abort(); return undefined; }
+        chunks.push(chunk);
+      }
+      return sessionWorkerPing(JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return undefined;
+  }
+}
 
 export function createWorkflowE2EReadinessCompleter(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
   return async (record: DurableOutboxRecord, generation: number): Promise<void> => {

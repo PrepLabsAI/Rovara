@@ -29,7 +29,7 @@ import {
   type ModelRouteCheck,
   type RunnerFacts,
 } from "../../scripts/test-deploy-check.js";
-import { CHECK_READ_VERBS, DeployCheckFindingsError, assertCheckAllowsApply, checkExitCode, checkReport, gatherCheckFacts, main, parseTestDeployArgs, readOnlyAws, type CfnTemplate } from "../../scripts/test-deploy.js";
+import { CHECK_READ_VERBS, DeployCheckFindingsError, assertCheckAllowsApply, checkExitCode, checkReport, deployedFeatureCatalogId, gatherCheckFacts, main, parseTestDeployArgs, readOnlyAws, type CfnTemplate } from "../../scripts/test-deploy.js";
 
 const NOW = new Date("2026-10-20T18:00:00.000Z");
 const hoursFromNow = (hours: number) => new Date(NOW.getTime() + hours * 3_600_000).toISOString();
@@ -1955,5 +1955,18 @@ describe("gatherCheckFacts", () => {
       expect(result.findings.filter((finding) => finding.kind.startsWith("requalify"))).toEqual([expect.objectContaining({ kind: "requalify-unreadable", severity: "warning" })]);
       expect(result.findings.filter((finding) => finding.severity === "error" && finding.kind.startsWith("requalify"))).toEqual([]);
     });
+  });
+});
+
+describe("deployedFeatureCatalogId (ENV-ROOM)", () => {
+  const withBroker = (variables: Record<string, unknown>): CfnTemplate => ({ Resources: { BrokerE1355FD6: { Type: "AWS::Lambda::Function", Properties: { Environment: { Variables: variables } } } } });
+  it("reads the literal a Broker is given whole", () => {
+    expect(deployedFeatureCatalogId(withBroker({ AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: "catalog-1" }), "test")).toBe("catalog-1");
+  });
+  it("derives it from the environment's name for a packed Broker (AGENTX_NAMES, no literal), and only then", () => {
+    expect(deployedFeatureCatalogId(withBroker({ AGENTX_NAMES: { "Fn::Join": ["", []] } }), "test")).toBe("agentx-test-e2e-mock-runtime-v1");
+    expect(() => deployedFeatureCatalogId(withBroker({}), "test")).toThrow(/no literal AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID/u);
+    expect(() => deployedFeatureCatalogId(withBroker({ AGENTX_NAMES: "x", AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: { Ref: "P" } }), "test")).toThrow(/no literal/u);
+    expect(() => deployedFeatureCatalogId({ Resources: {} }, "test")).toThrow(/no literal/u);
   });
 });

@@ -40,16 +40,22 @@ export interface AllowedBackings {
   fakeMakesUpAnswers: boolean;
 }
 
-/** The setting as it ships: own images, and fakes that make up answers, are off until a second admin turns them on (9.5). */
-export const DEFAULT_ALLOWED_BACKINGS: AllowedBackings = { real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false };
+/**
+ * The setting as it ships: own images are off until a second admin turns them on (9.5). Fakes that make up answers are ON since TE-A3 (owner O11, DECISIONS 155(b)): made-up answers are used at once, labelled
+ * "Made by Rovara" and never counted toward the proof that a change works, so a project is no longer left with "not run" for want of a recording (a fake that makes up answers still needs a second person's approval).
+ * DECISIONS 169: every company gets this default, including companies from before 0.5.18a, and none is stored as "off" for made-up answers; only a person's own saved choice turns it off.
+ */
+export const DEFAULT_ALLOWED_BACKINGS: AllowedBackings = { real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: true };
 const ALLOWED_KEYS = Object.keys(DEFAULT_ALLOWED_BACKINGS) as Array<keyof AllowedBackings>;
 
 /**
- * The backings allowed after a company's setting and every narrower layer (a project's own setting, a lock). The company's layer sets each box (a missing one is the default); every later layer can only
- * turn a box OFF: a box it leaves out, or turns on, changes nothing. A value that is not exactly `false` or `true` is read as off (a mistake errs on the safe side). The order of the narrower layers does not matter.
+ * The backings allowed after a company's setting and every narrower layer (a project's own setting, a lock). The company's layer sets each box; a box it leaves out (or no setting at all, or an empty `{}`) is the
+ * default (DECISIONS 169). Every later layer can only turn a box OFF: a box it leaves out, or turns on, changes nothing. A value that is not exactly `false` or `true` is read as off (a mistake errs on the safe side), and
+ * so is made-up answers for a company setting that is not an object at all. The order of the narrower layers does not matter.
  */
 export function effectiveAllowedBackings(company: Partial<AllowedBackings> | undefined, ...narrower: ReadonlyArray<Partial<AllowedBackings> | undefined>): AllowedBackings {
-  const result = { ...DEFAULT_ALLOWED_BACKINGS };
+  const malformed = company !== undefined && (typeof company !== "object" || company === null || Array.isArray(company));
+  const result = { ...DEFAULT_ALLOWED_BACKINGS, ...(malformed ? { fakeMakesUpAnswers: false } : {}) };
   for (const key of ALLOWED_KEYS) {
     const set = company?.[key];
     if (set !== undefined) result[key] = set === true;

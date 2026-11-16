@@ -1,9 +1,13 @@
+import { SlackWorkspaceScopeSchema } from "@agentx/contracts";
+import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
+import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
 // packages/broker/src/aws/developer-identity.ts
 // The DeveloperIdentity Lambda (spec 025 phase 25a): wires the sign-in server to AWS. The only
 // new role that reads the Slack secret (R2); it never logs a secret, and never repeats a secret's
 // text in an error (a JSON parse error can quote it, so parse errors are replaced).
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient } from "@aws-sdk/client-kms";
+import { SESv2Client } from "@aws-sdk/client-sesv2";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
@@ -15,8 +19,10 @@ import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js"
 import { DeveloperSignInStore, methodSince } from "../developer/store.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { companyIssuerProvider } from "../developer/company-issuer.js";
-import { kmsTokenSigner } from "../developer/tokens.js";
+import type { StepUpDependencies } from "../developer/step-up.js";
+import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
+import { sesStepUpEmailSender, stepUpEmailSenderAddress } from "./step-up-email.js";
 
 const SECRET_CACHE_MS = 5 * 60 * 1000;
 const SLACK_JWKS_URI = "https://slack.com/openid/connect/keys";
@@ -184,9 +190,45 @@ export function taskPublicKeysFromEnvironment(env: NodeJS.ProcessEnv, kms: Param
   return keyId === undefined || keyId === "" ? [] : [kmsTokenSigner({ kms, keyId })];
 }
 
+/**
+ * Hosted wiring (c): every extra key the JWKS publishes, with its purpose: the task key (as before, first) and, where the install has one, the policy hook's question key
+ * (POLICY_HOOK_KEY_ARN, purpose `policy-question`). Only the public half is read here; this function may not sign with either (each key's policy says so).
+ */
+export interface PublishedExtraKey { purpose: "task" | typeof POLICY_QUESTION_KEY_PURPOSE; publicJwk: ReturnType<typeof kmsTokenSigner>["publicJwk"] }
+export function extraPublicKeysFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameters<typeof kmsTokenSigner>[0]["kms"]): PublishedExtraKey[] {
+  const policyKey = env.POLICY_HOOK_KEY_ARN;
+  const keys: PublishedExtraKey[] = taskPublicKeysFromEnvironment(env, kms).map((key) => ({ purpose: "task", publicJwk: () => key.publicJwk() }));
+  if (policyKey !== undefined && policyKey !== "") {
+    const policy = kmsTokenSigner({ kms, keyId: policyKey });
+    keys.push({ purpose: POLICY_QUESTION_KEY_PURPOSE, publicJwk: () => policy.publicJwk() });
+  }
+  return keys;
+}
+
+/** The name passkeys show for this install (WebAuthn's relying-party name). */
+export const PASSKEY_RP_NAME = "AgentX";
+
+/**
+ * Hosted wiring (a) and (b): the factors Code owns for a step-up, from the function's environment.
+ *   - STEP_UP_EMAIL_FROM: the verified SES identity the code is sent from. Empty or not one plain address: no email factor (logged once, in fixed words).
+ *   - DEVELOPER_PASSKEYS=enabled: passkeys on, with the relying-party id the API's own host (the sign-in issuer's host), so the expected origin is always the issuer's.
+ * Neither set: undefined, and a step-up is refused for everyone, exactly as before.
+ */
+export function stepUpFromEnvironment(env: NodeJS.ProcessEnv, issuer: string, ses: () => Pick<SESv2Client, "send">, log: (entry: Record<string, unknown>) => void): StepUpDependencies | undefined {
+  const configured = env.STEP_UP_EMAIL_FROM ?? "";
+  const from = stepUpEmailSenderAddress(configured);
+  if (configured !== "" && from === undefined) log({ event: "signin.step_up_email_not_configured", detail: "STEP_UP_EMAIL_FROM is not one plain address" });
+  const passkeys = env.DEVELOPER_PASSKEYS === "enabled" ? { rpId: new URL(issuer).hostname, rpName: PASSKEY_RP_NAME } : undefined;
+  if (from === undefined && passkeys === undefined) return undefined;
+  return {
+    ...(from === undefined ? {} : { email: sesStepUpEmailSender({ ses: ses(), from }) }),
+    ...(passkeys === undefined ? {} : { passkeys }),
+  };
+}
+
 let built: ReturnType<typeof createDeveloperIdentityHandler> | undefined;
 
-function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentityHandler> {
+export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, workspaces?: SlackCallerWorkspaces): ReturnType<typeof createDeveloperIdentityHandler> {
   const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
   const config = developerIdentityConfigFromEnvironment(env);
   const secrets = new SecretsManagerClient(region);
@@ -209,6 +251,8 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
   const company = env.COMPANY_SIGNIN === "enabled" ? new CompanySignInStore({ documentClient, tableName, now }) : undefined;
   const readCompanySecret = companySecretReader(secrets);
   const companyJwksFor = remoteJwksCache(undefined, 50);
+  const directory = slackDirectory({ teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now, ...directoryCall(secrets),
+    report: (problem) => log({ event: "signin.slack_problem", ...problem }) });
   return createDeveloperIdentityHandler({
     config,
     store: new DeveloperSignInStore({
@@ -218,20 +262,21 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
     }),
     ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }) }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
-    extraPublicKeys: taskPublicKeysFromEnvironment(env, new KMSClient(region)),
+    extraPublicKeys: extraPublicKeysFromEnvironment(env, new KMSClient(region)),
     providers: {
       slack: slackSignInProvider({ teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
       ...(oidc === undefined ? {} : { oidc }),
     },
-    directory: slackDirectory({
-      teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now,
-      // Spec 062 Phase 7c1b: through the Slack adapter when Slack goes through the channel API.
-      ...directoryCall(secrets),
-      report: (problem) => log({ event: "signin.slack_problem", ...problem }),
-    }),
+    directory,
+    ...(workspaces === undefined ? {} : { directoryForWorkspace: createWorkspaceSlackDirectory({ legacy: directory, workspaces, fetch, now }) }),
     now,
     log,
+    ...stepUpOf(stepUpFromEnvironment(env, config.issuer, () => new SESv2Client(region), log)),
   });
+}
+
+function stepUpOf(stepUp: StepUpDependencies | undefined): { stepUp?: StepUpDependencies } {
+  return stepUp === undefined ? {} : { stepUp };
 }
 
 function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Parameters<typeof slackDirectory>[0]["call"]> } {
@@ -241,6 +286,32 @@ function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Para
 
 export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
   | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest) => {
-  built ??= build(process.env);
+  built ??= createAwsDeveloperIdentityHandler(process.env);
   return built(event);
 };
+
+/** One directory per company/team, with a TOTAL bound across all workspaces in this process. */
+export function createWorkspaceSlackDirectory(options: {
+  legacy: ReturnType<typeof slackDirectory>;
+  workspaces?: SlackCallerWorkspaces;
+  fetch: typeof fetch;
+  now(): number;
+}) {
+  const cache = new Map<string, ReturnType<typeof slackDirectory>>();
+  return async (value: unknown): Promise<ReturnType<typeof slackDirectory>> => {
+    if (options.workspaces === undefined) return options.legacy;
+    const workspaces = options.workspaces;
+    try {
+      const parsed = SlackWorkspaceScopeSchema.safeParse(value);
+      if (!parsed.success || await workspaces.requireCompany(parsed.data.teamId) !== parsed.data.companyId) throw new SlackWorkspaceRefused();
+      const scope = parsed.data;
+      const key = `${scope.companyId}/${scope.teamId}`;
+      const cached = cache.get(key);
+      if (cached !== undefined) return cached;
+      const directory = slackDirectory({ teamId: scope.teamId, botToken: () => slackCallerToken(workspaces, scope), fetch: options.fetch, now: () => options.now() });
+      if (cache.size >= 50) cache.delete(cache.keys().next().value!);
+      cache.set(key, directory);
+      return directory;
+    } catch { throw new SlackWorkspaceRefused(); }
+  };
+}

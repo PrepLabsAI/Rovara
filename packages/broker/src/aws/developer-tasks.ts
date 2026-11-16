@@ -1,3 +1,6 @@
+import type { SlackWorkspaceScope } from "@agentx/contracts";
+import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
+import type { CallerStepUp } from "./step-up-check.js";
 import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
@@ -42,7 +45,7 @@ import {
   SlackUserIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
-  agentXError,
+  agentXError, IMPLICIT_COMPANY_ID,
   cleanClientName,
   developerTaskPolicy,
   diffStat,
@@ -208,6 +211,7 @@ import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/p
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
+import { requireWebPageForSecurityAccept } from "./security-accept.js";
 import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader, type TaskReaderPerson } from "./task-readers.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
@@ -242,6 +246,7 @@ import {
 } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
+import { TASK_ENTRY_AREAS, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -265,6 +270,10 @@ export interface DeveloperTaskRouteDependencies {
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
   companyId?: string;
+  /** Lane W: the merge core wired for this deployment's tasks (lane E2); absent, `POST .../merge` answers a fixed "not set up". */
+  taskMerge?: TaskMergeWiring;
+  /** Lane W: the caller's step-up as the verified token states it (step-up-check.ts); the merge route checks its age. Never from a header, a query or a body. */
+  stepUp?: CallerStepUp;
   /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
   readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
@@ -273,16 +282,20 @@ export interface DeveloperTaskRouteDependencies {
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
   taskReaderPerson?(developerId: string, project: string): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
-  boundChannels?(channelIds: readonly string[]): Promise<BoundChannel[]>;
+  workspaceForTask?(task: DeveloperTaskRecord): Promise<SlackWorkspaceScope | undefined>;
+  workspaceForProject?(project: string): Promise<SlackWorkspaceScope | undefined>;
+  boundChannels?(channelIds: readonly string[], workspace?: SlackWorkspaceScope): Promise<BoundChannel[]>;
   /**
    * Q10: whether this Slack user is a member of this channel, through the access check's own Slack
    * lookup; SLACK_UNAVAILABLE when the lookup fails. Without it no private-channel share is allowed.
    */
-  channelMember?(slackUserId: string, channelId: string): Promise<boolean>;
+  channelMember?(slackUserId: string, channelId: string, workspace?: SlackWorkspaceScope): Promise<boolean>;
   /** C5: the project's bound channel IDs, sorted, for sharing a task that already exists (R11: no access check). */
   projectChannelIds(project: string): Promise<string[]>;
   /** The developer sign-in issuer; the task page the draft pull request links to is on its origin. */
   issuer?: string;
+  /** Lane E2: the core's own handlers, for a task stamped `core` (engine-boundary.ts). Absent: a core task reads exactly like a missing one here. */
+  coreTasks?: CoreTaskEntry;
   /** Spec 061 slice 2: the Slack service's request queue, for "Ask AgentX to reply to this comment"; without it the page says AgentX can't answer here. */
   slackRequestQueue?: SlackRequestQueue;
   now(): number;
@@ -567,6 +580,8 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
     // A malformed ID is never echoed back: it could be long or carry markup.
     throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
+  // Lane E2: a task the core owns is never read here (engine-boundary.ts); it answers exactly like a missing one.
+  if (await ownerOfExistingTask(deps, taskId) === "core") throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
   return task;
 }
 
@@ -580,7 +595,7 @@ async function loadReadableTask(deps: DeveloperTaskRouteDependencies, caller: De
   } catch (error) {
     if (!TASK_ID.test(taskId) || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (task !== undefined && recordInCompany(task, deps.companyId) && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
+    if (task !== undefined && recordInCompany(task, deps.companyId) && await ownerOfExistingTask(deps, taskId) === "workflow" && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
     throw error;
   }
 }
@@ -1437,10 +1452,11 @@ async function shareFor(
   wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
 ): Promise<ShareDecision | undefined> {
   if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
+  const workspace = await deps.workspaceForProject?.(project);
   const linked = caller.slackUserId !== undefined;
   const looked: BoundChannel[] = deps.boundChannels === undefined
     ? access.channelIds.map((channelId) => ({ channelId }))
-    : await deps.boundChannels(access.channelIds);
+    : workspace === undefined ? await deps.boundChannels(access.channelIds) : await deps.boundChannels(access.channelIds, workspace);
   // R10: a caller with no Slack link keeps each channel's privacy, never its name.
   const bound: BoundChannel[] = linked ? looked : looked.map(({ channelId, isPrivate }) => (isPrivate === undefined ? { channelId } : { channelId, isPrivate }));
   let decision: ShareDecision | undefined;
@@ -1459,7 +1475,7 @@ async function shareFor(
     }
     throw error;
   }
-  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId });
+  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId }, workspace);
   return decision;
 }
 
@@ -1473,14 +1489,14 @@ const PRIVACY_NOT_SET_UP = CHANNEL_PRIVACY_NOT_SET_UP;
  * channel-info lookup is configured) is treated as private unless the caller is a member, and a
  * failed membership lookup refuses: nothing here lets a share through on doubt.
  */
-async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel): Promise<void> {
+async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel, workspace?: SlackWorkspaceScope): Promise<void> {
   if (channel.isPrivate === false) return;
   const refusal = () => channel.isPrivate === true
     ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER)
     : agentXError("SLACK_UNAVAILABLE", deps.boundChannels === undefined ? PRIVACY_NOT_SET_UP : PRIVACY_UNKNOWN);
   // A caller with no Slack link cannot be confirmed as a member.
   if (caller.slackUserId === undefined || deps.channelMember === undefined) throw refusal();
-  if (!(await deps.channelMember(caller.slackUserId, channel.channelId))) throw refusal();
+  if (!(workspace === undefined ? await deps.channelMember(caller.slackUserId, channel.channelId) : await deps.channelMember(caller.slackUserId, channel.channelId, workspace))) throw refusal();
 }
 
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
@@ -1532,11 +1548,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   }
   let share: TaskShare | undefined;
   if (decision !== undefined) {
+    const teamId = (await deps.workspaceForProject?.(request.project))?.teamId ?? deps.slackTeamId;
     // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
-    if (deps.slackTeamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
+    if (teamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
     share = {
-      ...taskShare(decision, deps.slackTeamId, receivedAt),
-      ...(deps.initialSlackThread !== undefined && deps.initialSlackThread.teamId === deps.slackTeamId
+      ...taskShare(decision, teamId, receivedAt),
+      ...(deps.initialSlackThread !== undefined && deps.initialSlackThread.teamId === teamId
         && deps.initialSlackThread.channelId === decision.channelId ? { threadTs: deps.initialSlackThread.threadTs } : {}),
     };
   }
@@ -1745,7 +1762,8 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
         const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
         const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
         if ((row.status !== "CLOSED" || deps.companyId !== undefined) && visible) {
-          if (task !== undefined && task.developerId === caller.developerId) {
+          // Lane E2: a core task's row is listed as its index row says; the workflow never works out (or rewrites) its status.
+          if (task !== undefined && task.developerId === caller.developerId && await ownerOfExistingTask(deps, row.taskId) === "workflow") {
             // Checked lists finish each read before starting the next, so a budget
             // continuation leaves no unfinished reads or partially rendered task.
             const loaded = deps.companyId === undefined ? undefined : {
@@ -2937,6 +2955,8 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
     if (prior.source !== "FINDINGS") throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
     return { task: await taskView(deps, task, { events: 0, details: false }) };
   }
+  // DEC 236h: accepting a security finding is the web page's, the Rovara web app's own sign-in client with a fresh step-up; a token of the CLI, an AI tool, a scoped client or another full-access client may accept only the code review's findings.
+  await requireWebPageForSecurityAccept(caller, workflow, request, deps.now());
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) {
     throw agentXError("IDEMPOTENCY_CONFLICT", "these findings are out of date; refresh the task and try again");
   }
@@ -6122,8 +6142,9 @@ async function nextShare(
   if (task.share === undefined) {
     // R11: sharing an existing task does not recheck project access; it uses the latest policy.
     const decision = await shareFor(deps, caller, task.project, { revision: project.definition.revision, policy, access: "granted", channelIds: await deps.projectChannelIds(task.project) }, { shareToChannel: true, shareMode: request.shareMode, channel: request.channel });
-    if (decision === undefined || deps.slackTeamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
-    return taskShare(decision, deps.slackTeamId, now);
+    const teamId = (await deps.workspaceForProject?.(task.project))?.teamId ?? deps.slackTeamId;
+    if (decision === undefined || teamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
+    return taskShare(decision, teamId, now);
   }
   const current = task.share;
   if (request.channel !== undefined) {
@@ -6318,9 +6339,47 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 }
 
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
+const TASK_PATH_PREFIX = "/v1/dev/tasks/";
+
+/**
+ * Lane E2: what this route answers for an id with no task behind it, said for a core task the caller may not see here. The same request is routed with a fresh id that has no rows (so
+ * nothing of the core task is read), and the real id is put back in the answer: its input checks, wrong-method answer and words are exactly a missing task's.
+ */
+async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL, taskId: string, rest: string): Promise<unknown> {
+  const stand = randomUUID();
+  const swap = (text: string) => text.replaceAll(stand, taskId);
+  // Rebuilt from the parts the route matched (never a search for the id in the raw path, which may be percent-encoded): the stand-in path always names the stand-in id.
+  const path = `/v1/dev/tasks/${stand}${rest}${url.search}`;
+  const standUrl = new URL(path, url);
+  // The stand-in has no stamp, so this can never come back here; checked anyway, failing closed.
+  if (await ownerOfTaskId(deps, stand) !== "workflow") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  try {
+    const value = await routeDeveloperTaskRequest(deps, caller, { ...request, path, ...(request.body === undefined ? {} : { body: request.body.replaceAll(taskId, stand) }) }, standUrl);
+    return JSON.parse(swap(JSON.stringify(value ?? null))) as unknown;
+  } catch (error) {
+    if (error instanceof Error) error.message = swap(error.message);
+    throw error;
+  }
+}
+
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
+  if (request.method === "POST" && url.pathname === "/v1/dev/tasks") {
+    // Lane E2 step 6: where the switch sends the caller's company to the core, the core starts the task; anywhere else (and with no core entry, the default) the start below, unchanged.
+    const core = await startOnCore(deps.coreTasks, request, caller);
+    if (core !== undefined) return core.value;
+    return startTask(deps, caller, body(request));
+  }
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
+  // Lane E2: a task's route goes by the task's stored engine. A task the core owns is answered by the core's own handlers (or refused), never by the readers below.
+  // Matched by string, not by a path pattern, so the route inventory (named-scopes) reads no new route here.
+  const entryPath = url.pathname.startsWith(TASK_PATH_PREFIX) ? url.pathname.slice(TASK_PATH_PREFIX.length) : undefined;
+  const entrySlash = entryPath === undefined ? -1 : entryPath.indexOf("/");
+  const entry = entryPath === undefined || entryPath === "" ? null : [url.pathname, entrySlash < 0 ? entryPath : entryPath.slice(0, entrySlash), entrySlash < 0 ? "" : entryPath.slice(entrySlash)] as const;
+  const operation = entry === null ? undefined : taskEntryOperation(entry[2]);
+  if (entry !== null && operation !== undefined) {
+    const entryTaskId = safeDecode(entry[1]);
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]));
+  }
   const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
   if (publicationContextRoute !== null && request.method === "POST") {
     return e2ePublicationContext(deps, caller, safeDecode(publicationContextRoute[1]!), body(request));
@@ -6333,7 +6392,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
   if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -6368,5 +6427,9 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "share") return shareTask(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "merge") {
+    // Lane W: every merge rule is the merge core's (task-merge.ts); this only refuses earlier.
+    return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, stepUp: deps.stepUp, body: body(request), now: deps.now() });
+  }
   throw agentXError("NOT_FOUND", "route not found");
 }

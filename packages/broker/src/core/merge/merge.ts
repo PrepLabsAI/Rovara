@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
+  withoutOwnRovaraCheck,
   MERGE_CLAIM_SECONDS,
   MERGE_NOT_READY_MESSAGES as M,
   MERGE_VIEW_MESSAGE_MAX,
@@ -47,6 +48,7 @@ import {
   type MergeResult,
   type MergeRisk,
   type MergeTrackingItem,
+  type MergeOrderView,
   type MergeView,
   type OrgId,
   type TransactItem,
@@ -60,13 +62,14 @@ import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { scopeHoldOf } from "../build-step/scope-question.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
+import { ownCheckSourceOf } from "./summary-check.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-read.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, isHostRateLimit, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
 import { DEFAULT_CI_MODE, PERMISSION_LOOKUPS_MAX, ciAllowsMerge, ciCountsAsPassing, readBranch, readCi, tracksMerge, unreadableSinceOf, type ProjectCiMode } from "./merge-tracking.js";
 import type { MergePeople } from "./people.js";
-import { heldAfterHalfMerge, mergeOrderOf, MERGE_ORDER_WORDS, type MergeOrder } from "./merge-order.js";
+import { heldAfterHalfMerge, mergeOrderOf, mergeOrderStateLines, MERGE_ORDER_WORDS, type MergeOrder } from "./merge-order.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergeTask, SessionTimeline } from "./seams.js";
 import { plain, readMergeTracking, taskRecordKey } from "./store.js";
@@ -247,6 +250,11 @@ export interface MergeDependencies {
    * facts, and the merge order, digest and words are the ones the merge core always had. A read that throws is "unreadable" (no safe order until a person confirms the override).
    */
   repositoryEdges?(task: MergeTask): unknown;
+  /**
+   * MR3b: whether the task view's `merge` carries the order (`MergeView.order`). Off by default: the field is added readers first (DEC 152a), so a client built before it, which reads the view strictly, never meets
+   * it. An install turns it on one release after the readers shipped.
+   */
+  orderInView?: boolean;
 }
 
 const byRepository = <T extends { repositoryId: string; number: number }>(list: readonly T[]): T[] =>
@@ -332,8 +340,17 @@ async function readinessFromItems(
 /** The task view's `merge`: whether the viewer pressing Merge now would be allowed to, from what tracking last read. Undefined where nothing is tracked. */
 export async function mergeViewOf(deps: MergeDependencies, task: MergeTask, items: readonly MergeTrackingItem[], viewerPersonId: string | undefined): Promise<MergeView | undefined> {
   if (items.length === 0 || task.orgId === undefined || !tracksMerge(task.workflow)) return undefined;
-  const { readiness } = await readinessFromItems(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, items, viewerPersonId);
-  return { ...mergeViewFromReadiness(readiness), risk: riskOfTask(task.workflow, items) };
+  const tracked = task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot };
+  const { readiness } = await readinessFromItems(deps, tracked, items, viewerPersonId);
+  const order = deps.orderInView === true ? await orderViewOf(deps, tracked) : undefined;
+  return { ...mergeViewFromReadiness(readiness), risk: riskOfTask(task.workflow, items), ...(order === undefined ? {} : { order }) };
+}
+
+/** MR3b: the order the Merge section shows, from the same facts the press reads. Nothing for today's repository order. Lines are cut to the view's bound, and a read that fails says "no safe order" (never a guessed order). */
+async function orderViewOf(deps: MergeDependencies, task: MergeTask & { workflow: WorkflowSnapshot }): Promise<MergeOrderView | undefined> {
+  const found = await mergeOrderOfTask(deps, task);
+  const lines = mergeOrderStateLines(found, requiredPullRequests(task.workflow)).slice(0, 4).map((line) => mergeViewFromReadiness({ ready: false, message: line }).message!);
+  return lines.length === 0 ? undefined : { lines, ...(found.kind === "no_safe_order" ? { needsOverride: true as const } : {}) };
 }
 
 /**
@@ -592,7 +609,8 @@ async function mergeableNow(
     // The pull request must be the one Rovara linked to this task: nothing a stored field says moves it to another.
     const linked = await deps.links.find({ hostKind: providerOf(home.codeHost), connectionKind: home.codeHost.kind, repositoryAddress: url, id: String(entry.number) });
     if (linked === undefined || linked.taskId !== task.taskId || linked.repositoryId !== entry.repositoryId || linked.url !== entry.url) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
-    const status = await home.codeHost.changeRequestStatus(changeRequestRef(url, entry.number), scope);
+    // TE-B4: Rovara's own "Rovara" Check is not the customer's CI here either (summary-check.ts).
+    const status = withoutOwnRovaraCheck(await home.codeHost.changeRequestStatus(changeRequestRef(url, entry.number), scope), await ownCheckSourceOf(home.codeHost, scope));
     if (status.id !== String(entry.number)) throw agentXError("RUNTIME_UNAVAILABLE", "The code host answered for another pull request");
     if (status.state !== "merged" && status.headRevision !== wanted[index]!.headSha) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     const item = items.get(key);

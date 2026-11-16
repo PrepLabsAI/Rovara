@@ -131,6 +131,11 @@ export interface OperationRecord extends Operation {
   /** The worker machine and delivery time, once the operation was handed to a machine. */
   deliveredAt?: string;
   machineId?: string;
+  /** A run stopped for money (money-stop.ts): the cap it reached, and when the stop was asked for. Its CANCELLED end blocks the step with the fixed reason. */
+  stopReason?: string;
+  stopRequestedAt?: string;
+  /** The run ended without its usage reaching the broker (its worker did not answer a stop in time, or was lost): its task's whole hold was kept, marked estimated. */
+  usageUnflushed?: true;
 }
 
 /** What a push to an open pull request was started with. */

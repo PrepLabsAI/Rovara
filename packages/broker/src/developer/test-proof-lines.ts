@@ -84,7 +84,7 @@ export async function loadTestProofLines(
       if (!parsed.success && typeof raw === "object" && raw !== null && ("scriptedReplies" in raw || "madeByRovara" in raw)) return [];
       if (parsed.success && parsed.data.candidateDigest === candidateDigest) {
         const proving = new Set(parsed.data.items.filter((item) => item.verdict === "proves_change").map((item) => item.checkId));
-        const taskMade = parsed.data.scriptedReplies?.some((facts) => facts.taskMade > 0 && proving.has(facts.checkId)) === true;
+        const taskMade = parsed.data.scriptedReplies?.some((facts) => (facts.taskMade > 0 || (facts.independent ?? 0) > 0) && proving.has(facts.checkId)) === true;
         // This v1 path has no real-model reader. The shared v2 renderer retains its own agreement qualifier.
         // General fakes (DEC 234): a proving check a Rovara-made fake answered is never proof; the line says so first.
         const fakeAnswered = parsed.data.madeByRovara?.some((facts) => proving.has(facts.checkId)) === true;

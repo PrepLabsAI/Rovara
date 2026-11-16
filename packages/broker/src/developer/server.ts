@@ -75,7 +75,7 @@ import type { SlackDirectory } from "./slack-directory.js";
 import { createFactorAdmin } from "./factor-admin.js";
 import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
-import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk } from "./tokens.js";
+import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { SelectedCompanyIssuer } from "./company-issuer.js";
 import { companyOperator, type CompanyOperatorRequest, type CompanyOperatorResponse } from "./company-operator.js";
@@ -87,9 +87,11 @@ export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
   signer: TokenSigner;
-  extraPublicKeys?: ReadonlyArray<{ publicJwk(): Promise<PublicSigningJwk> }>;
+  /** Other keys the JWKS publishes, each with its purpose (absent: `task`, as before). A key whose public half cannot be read is left out with a fixed log line; sign-in stays up. */
+  extraPublicKeys?: ReadonlyArray<{ purpose?: Exclude<SigningKeyPurpose, "developer">; publicJwk(): Promise<PublicSigningJwk> }>;
   providers: Partial<Record<DeveloperSignInMethod, SignInProvider>>;
   directory: SlackDirectory;
+  directoryForWorkspace?: (workspace: unknown) => Promise<SlackDirectory>;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
   /** Lane ID part 2: the factors Code owns for a step-up. Absent: a step-up is refused for everyone (no code is issued), and every other sign-in is as before. */
@@ -777,10 +779,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           if (extras.length === 0) return publicJson({ keys: [developerKey] });
           const keys = [{ ...developerKey, rovara_purpose: "developer" }];
           for (const extra of extras) {
+            const purpose = extra.purpose ?? "task";
             try {
-              keys.push({ ...await extra.publicJwk(), rovara_purpose: "task" });
+              keys.push({ ...await extra.publicJwk(), rovara_purpose: purpose });
             } catch {
-              deps.log({ event: "developer.jwks_task_key_failed" });
+              deps.log({ event: purpose === "task" ? "developer.jwks_task_key_failed" : "developer.jwks_policy_key_failed" });
             }
           }
           return publicJson({ keys });
@@ -830,6 +833,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
+        // DEC 236h: the web app marker is never set by an applied admin change; the operator or the install seeds it.
+        if (parsed.data.client.webApp === true) return { ok: false, error: "invalid_request" };
         if (deps.company !== undefined) {
           try {
             await store.putClient(parsed.data.client, parsed.data.companyId ?? IMPLICIT_COMPANY_ID, { ...(parsed.data.keepSecret === true ? { keepSecret: true } : {}) });
@@ -892,48 +897,56 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           throw error;
         }
       }
+      if (deps.company !== undefined && deps.directoryForWorkspace === undefined) return { ok: false, error: "slack_unavailable" };
+      let directory = deps.directory;
+      if (deps.directoryForWorkspace !== undefined) {
+        try {
+          const scoped = event.kind === "task-people-display-read" ? event.request : event;
+          directory = await deps.directoryForWorkspace((scoped as { workspace?: unknown }).workspace);
+        } catch { return { ok: false, error: "slack_unavailable" }; }
+      }
       if (event.kind === "channel-by-name") {
         const parsed = ChannelByNameRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.channelByName(parsed.data.name);
+        return directory.channelByName(parsed.data.name);
       }
       if (event.kind === "slack-user-by-email") {
         const parsed = SlackUserByEmailRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        const found = await deps.directory.lookupByEmail(parsed.data.email);
+        const found = await directory.lookupByEmail(parsed.data.email);
         if (found === "unavailable") return { ok: false, error: "slack_unavailable" };
         return found === "none" ? { ok: true } : { ok: true, userId: found.userId };
       }
       if (event.kind === "slack-auth-check") {
         if (!SlackAuthCheckRequestSchema.safeParse(event).success) return { ok: false, error: "invalid_request" };
-        return deps.directory.authTest();
+        return directory.authTest();
       }
       if (event.kind === "channel-info") {
         const parsed = ChannelInfoRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.channelInfo(parsed.data.channelIds);
+        return directory.channelInfo(parsed.data.channelIds);
       }
       if (event.kind === "task-person-proof") {
         const parsed = TaskPersonProofRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.taskPersonProof(parsed.data.slackUserId, parsed.data.channelIds);
+        return directory.taskPersonProof(parsed.data.slackUserId, parsed.data.channelIds);
       }
       if (event.kind === "task-channel-people") {
         const parsed = TaskChannelPeopleRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.taskChannelPeople(parsed.data.channelIds);
+        return directory.taskChannelPeople(parsed.data.channelIds);
       }
       if (event.kind === "task-people-display-read") {
         const parsed = TaskPeopleDisplayReadRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.taskPeopleDisplayRead({
+        return directory.taskPeopleDisplayRead({
           ...parsed.data,
           admission: { ...parsed.data.admission, deadlineAt: Math.min(parsed.data.admission.deadlineAt, deps.now() + 20_000) },
         });
       }
       const parsed = ChannelMembersRequestSchema.safeParse(event);
       if (!parsed.success) return { ok: false, error: "invalid_request" };
-      return deps.directory.channelMembers(parsed.data.slackUserId, parsed.data.channelIds);
+      return directory.channelMembers(parsed.data.slackUserId, parsed.data.channelIds);
     }
     const request = adaptHttpApiEvent(event);
     const url = new URL(request.path, "https://agentx.invalid");

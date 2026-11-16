@@ -23,6 +23,18 @@ export async function projectBaseBranch(deps: StoreOnly, orgId: OrgId, project: 
   }
 }
 
+/** TE-MR2b: the repository names of the project's latest revision (the ids a task's repositories carry), each once; undefined when they cannot be read or are none. */
+export async function projectRepositoryNames(deps: StoreOnly, orgId: OrgId, project: string): Promise<string[] | undefined> {
+  try {
+    const page = await deps.store.query({ pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: PROJECT_REVISION_SK_PREFIX }, descending: true, limit: 1 });
+    const definition = page.items[0]?.["definition"] as { repositories?: Array<{ name?: unknown }> } | undefined;
+    const names = (definition?.repositories ?? []).map((repository) => repository.name);
+    return names.length > 0 && names.every((name): name is string => typeof name === "string" && name !== "") && new Set(names).size === names.length ? names : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The branches the task's open pull requests target (distinct), read from its merge-tracking rows. Empty when it has no open pull request yet (it is then based on the project's default branch) or the rows cannot be read.
  */
@@ -33,6 +45,16 @@ export async function taskBaseBranches(deps: StoreOnly, taskId: string): Promise
   } catch {
     return [];
   }
+}
+
+/**
+ * TE-C1: the branch a task's baseline is looked up on, by the same rule as `nightlyBaselineUsable`: the one branch its open pull requests target when they all agree, else (no open pull request, or the rows cannot be read)
+ * the project's default branch. Undefined when its pull requests target different branches, or the default cannot be read: such a task gets no candidates and no words.
+ */
+export async function taskBaselineBranch(deps: StoreOnly, orgId: OrgId, project: string, taskId: string): Promise<string | undefined> {
+  const own = await taskBaseBranches(deps, taskId);
+  if (own.length > 1) return undefined;
+  return own[0] ?? projectBaseBranch(deps, orgId, project);
 }
 
 /** Reads a project's default-branch head from its code host: for a project, a function from a branch to its head now (undefined when it cannot be read). */

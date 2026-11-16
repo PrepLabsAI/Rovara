@@ -1,8 +1,12 @@
+import { slackCallerToken, slackRecordScope, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
+import type { SlackWorkspaceScope } from "./slack-workspace-tokens.js";
 // Spec 025 FR-032, FR-034, C7 to C9: the DeveloperTaskNotifier, the only new reader of the Slack
 // secret. The state table's stream (filtered in infra) brings changes, which become notices on the
 // notifier's own queue; the queue brings each notice back, and it is posted once. Logs carry event
 // names, IDs, notice kinds and Slack error codes only: never a token, a post's text or a task's text.
 // Spec 025 E13: it also posts an admin change's Slack Confirm message, and edits it when the change ends.
+import { LambdaClient } from "@aws-sdk/client-lambda";
+import { invokeCoreOutbox, outboxCompanyOf, streamFailures, type StreamBatchResponse } from "./core-outbox-stream.js";
 import { chatGptFallbackText } from "../chatgpt/fallback-notice.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { createHash } from "node:crypto";
@@ -33,10 +37,13 @@ import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "..
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
 interface QueueRecord { eventSource: "aws:sqs"; messageId: string; receiptHandle: string; body: string; attributes?: { ApproximateReceiveCount?: string } }
-interface PostInput { channel: string; threadTs?: string; text: string; blocks?: unknown[] }
-interface UpdateInput { channel: string; ts: string; text: string; blocks: unknown[] }
+interface PostInput { workspace?: SlackWorkspaceScope; channel: string; threadTs?: string; text: string; blocks?: unknown[] }
+interface UpdateInput { workspace?: SlackWorkspaceScope; channel: string; ts: string; text: string; blocks: unknown[] }
 
 export interface NotifierDependencies {
+  /** Named environments reuse this stream reader for core outbox inserts. */
+  relayCoreOutbox?: (records: unknown[], remainingMs?: number) => Promise<StreamBatchResponse>;
+  workspaces?: SlackCallerWorkspaces;
   documentClient: Client;
   tableName: string;
   enqueue(notices: readonly Notice[]): Promise<void>;
@@ -48,12 +55,12 @@ export interface NotifierDependencies {
   /** Trusted same-origin API base used for authenticated AgentX task detail links. */
   reviewUrlBase?: string;
   /** Creates a channel-readable detail page and returns Slack's verified link. */
-  createPlanCanvas?(input: { channel: string; taskId: string; title: string; version: number; markdown: string }, onCreated?: (canvasId: string) => Promise<void>): Promise<{ canvasId: string; permalink: string }>;
+  createPlanCanvas?(input: { workspace?: SlackWorkspaceScope; channel: string; taskId: string; title: string; version: number; markdown: string }, onCreated?: (canvasId: string) => Promise<void>): Promise<{ canvasId: string; permalink: string }>;
   closeTaskCanvases?(taskId: string, expectedManifestDigest?: string, expectedWorkflowRevision?: number): Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
   /** Spec 025 E13: chat.update, to edit an admin change's message when it ends. */
   update?(input: UpdateInput): Promise<void>;
   /** Task 19: chat.postEphemeral, to tell one member privately, in a thread, why their Slack press was refused. */
-  postEphemeral?(input: { channel: string; threadTs: string; user: string; text: string }): Promise<void>;
+  postEphemeral?(input: { workspace?: SlackWorkspaceScope; channel: string; threadTs: string; user: string; text: string }): Promise<void>;
   now(): number;
   log(entry: Record<string, unknown>): void;
   /** One `SlackDeliveryFailed` count (spec 015 FR-045's alarm sums it). */
@@ -61,6 +68,12 @@ export interface NotifierDependencies {
   peopleChangesEnabled?: boolean;
   /** Revalidates the current CHECKS admission and evidence before adding a read-only Slack projection. */
   workflowE2EBlocks?(task: DeveloperTaskRecord, operations: readonly unknown[]): Promise<unknown[] | undefined>;
+}
+
+function taskScope(deps: NotifierDependencies, task: unknown, teamId?: unknown): { workspace?: SlackWorkspaceScope } {
+  if (deps.workspaces === undefined) return {};
+  const shareTeam = (task as { share?: { teamId?: unknown } } | undefined)?.share?.teamId;
+  return { workspace: slackRecordScope(task, teamId ?? shareTeam) };
 }
 
 /** The start message is still being posted: a reply waits for its thread (C9). */
@@ -119,7 +132,7 @@ async function deliverPeopleNotification(deps: NotifierDependencies, notice: Not
   const taskUrl = base === undefined ? undefined : new URL(`/review/${notice.taskId}/task`, base).href;
   const text = `You now have the ${row.role} role on an AgentX task.${taskUrl === undefined ? "" : ` ${taskUrl}`}`;
   try {
-    const posted = await deps.post({ channel: row.slackUserId, text });
+    const posted = await deps.post({ ...taskScope(deps, await noticeTask(deps, notice)), channel: row.slackUserId, text });
     try {
       await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key,
         UpdateExpression: "SET #status = :sent, postedTs = :ts, postedChannel = :channel REMOVE claimUntil",
@@ -381,7 +394,7 @@ async function updateWorkflowApprovalCard(deps: NotifierDependencies, task: Deve
   // context block, and the next workflow notice reports the new step separately.
   const text = marker.postedText;
   try {
-    await deps.update({ channel: marker.postedChannelId, ts: marker.postedTs, text, blocks: [
+    await deps.update({ ...taskScope(deps, task), channel: marker.postedChannelId, ts: marker.postedTs, text, blocks: [
       ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
       { type: "context", elements: [{ type: "mrkdwn", text: decisionStatusLine(decision, task.slackUserId) }] },
     ] });
@@ -446,7 +459,7 @@ async function retireButtonCards(deps: NotifierDependencies, task: DeveloperTask
     if (marker.workflowDecisionRevision !== undefined || (marker.postedArtifactDigest !== undefined
       && (workflow.decisions ?? []).some((decision) => decision.workflowRevision === marker.postedWorkflowRevision && decision.artifactDigest === marker.postedArtifactDigest))) continue;
     try {
-      await deps.update({ channel: marker.postedChannelId, ts: marker.postedTs, text: marker.postedText,
+      await deps.update({ ...taskScope(deps, task), channel: marker.postedChannelId, ts: marker.postedTs, text: marker.postedText,
         blocks: answeredWorkflowCard(marker.postedText, movedOnStatusLine(workflow, closed)) });
     } catch (error) {
       if (passingSlackError(error)) throw error;
@@ -710,7 +723,7 @@ async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTa
   if (attempting === undefined || attempting.state !== "CREATE_OUTCOME_UNKNOWN") throw new Error("Canvas create attempt could not be fenced");
   let canvas: { canvasId: string; permalink: string };
   try {
-    canvas = await deps.createPlanCanvas({ channel: task.share.channelId, taskId: task.taskId, title: task.title, version: plan.version, markdown }, async (canvasId) => {
+    canvas = await deps.createPlanCanvas({ ...taskScope(deps, task), channel: task.share.channelId, taskId: task.taskId, title: task.title, version: plan.version, markdown }, async (canvasId) => {
       const recorded = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
         key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
         artifactRef: artifact.objectKey, artifactDigest: artifact.sha256, state: "CREATED", canvasId,
@@ -1250,7 +1263,7 @@ async function deliverRefusal(deps: NotifierDependencies, notice: Notice): Promi
     deps.log({ event: "developer_notifier.refusal_not_configured", taskId });
     return "stale";
   }
-  await deps.postEphemeral({ channel: refusal.channelId, threadTs: refusal.threadTs, user: refusal.slackUserId, text: refusal.message });
+  await deps.postEphemeral({ ...taskScope(deps, await noticeTask(deps, notice), refusal.teamId), channel: refusal.channelId, threadTs: refusal.threadTs, user: refusal.slackUserId, text: refusal.message });
   await putMarker(deps, marker);
   return "posted";
 }
@@ -1313,7 +1326,7 @@ async function deliverNudge(deps: NotifierDependencies, task: DeveloperTaskRecor
   const page = taskPageUrl(deps, task.taskId);
   const anchor = places[0]!.document.anchor;
   const link = page === undefined ? "" : ` <${slackText(`${page}?doc=${anchor}#${anchor}`)}|Open review>`;
-  await deps.post({ channel: share.channelId, threadTs: share.threadTs, text: `${name} left ${total === 1 ? "a comment" : `${total} comments`} on ${joined}.${link}` });
+  await deps.post({ ...taskScope(deps, task), channel: share.channelId, threadTs: share.threadTs, text: `${name} left ${total === 1 ? "a comment" : `${total} comments`} on ${joined}.${link}` });
   await putMarker(deps, marker);
   return "posted";
 }
@@ -1327,7 +1340,7 @@ const chatGptNoticeMarker = (operationId: string) => ({ pk: `CHATGPT_NOTICE#${op
  */
 async function deliverChatGptFallback(deps: NotifierDependencies, notice: Notice, task: DeveloperTaskRecord | undefined): Promise<Outcome> {
   if (notice.workspaceId === undefined || notice.operationId === undefined) return "skipped";
-  const operation = await getItem<{ chatgptFallback?: unknown; chatgptDeveloperId?: unknown; chatgptThread?: { channelId?: unknown; threadTs?: unknown }; requestedBy?: { userId?: unknown } }>(
+  const operation = await getItem<{ chatgptFallback?: unknown; chatgptDeveloperId?: unknown; chatgptThread?: { teamId?: unknown; channelId?: unknown; threadTs?: unknown }; requestedBy?: { userId?: unknown } }>(
     deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: `OPERATION#${notice.operationId}` });
   const reason = operation?.chatgptFallback;
   if (reason !== "limit" && reason !== "revoked" && reason !== "model") return "skipped";
@@ -1343,7 +1356,9 @@ async function deliverChatGptFallback(deps: NotifierDependencies, notice: Notice
   const asker = typeof operation?.requestedBy?.userId === "string" ? operation.requestedBy.userId : undefined;
   const slackUserId = task !== undefined && task.developerId === owner ? task.slackUserId
     : asker !== undefined && developerIdForSlackUser(asker) === owner ? asker : undefined;
-  await deps.post({ ...thread, text: chatGptFallbackText(reason, slackUserId) });
+  const scope = deps.workspaces === undefined ? {} : ownThread === undefined ? taskScope(deps, task)
+    : taskScope(deps, await getItem(deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: "META" }), ownThread.teamId);
+  await deps.post({ ...scope, ...thread, text: chatGptFallbackText(reason, slackUserId) });
   await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) } }));
   return "posted";
 }
@@ -1403,6 +1418,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
     let ts: string;
     try {
       ({ ts } = await deps.post({
+        ...taskScope(deps, task),
         channel: share.channelId,
         text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
       }));
@@ -1453,7 +1469,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   // "closed". The checks above read the task before the post; at most one reply per notice lands late.
   let posted: { ts: string };
   try {
-    posted = await deps.post({ channel: share.channelId, threadTs: share.threadTs, text: reply.text, ...(reply.blocks === undefined ? {} : { blocks: reply.blocks }) });
+    posted = await deps.post({ ...taskScope(deps, task), channel: share.channelId, threadTs: share.threadTs, text: reply.text, ...(reply.blocks === undefined ? {} : { blocks: reply.blocks }) });
   } catch (error) {
     // Nothing was posted: the words are free for the next delivery. A post that may have landed keeps the claim
     // until its lease ends, as the start message does.
@@ -1595,15 +1611,32 @@ async function recordDeliveryFailure(deps: NotifierDependencies, notice: Notice,
 }
 
 export function createNotifierHandler(deps: NotifierDependencies) {
-  return async (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
+  return async (event: { Records?: unknown[] }, context?: { getRemainingTimeInMillis(): number }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
     const records = event.Records ?? [];
     const queued = records.filter((record): record is QueueRecord => (record as { eventSource?: unknown }).eventSource === "aws:sqs");
     if (queued.length === 0) {
-      const { notices, skipped } = readStream(records as StreamRecord[]);
-      // Named by event ID and name only: a record's content could hold a task's text.
-      for (const record of skipped) deps.log({ event: "developer_notifier.record_unreadable", ...record });
-      if (notices.length > 0) await deps.enqueue(notices);
-      return { batchItemFailures: [] };
+      const coreRecords = deps.relayCoreOutbox === undefined ? [] : records.filter((record) => outboxCompanyOf(record) !== undefined);
+      const coreSet = new Set(coreRecords);
+      const noticeRecords = records.filter((record) => !coreSet.has(record));
+      const batchItemFailures: StreamBatchResponse["batchItemFailures"] = [];
+      try {
+        const { notices, skipped } = readStream(noticeRecords as StreamRecord[]);
+        for (const record of skipped) deps.log({ event: "developer_notifier.record_unreadable", ...record });
+        if (notices.length > 0) await deps.enqueue(notices);
+      } catch (error) {
+        // The legacy mapping retries thrown failures; named mappings use sequence numbers.
+        if (deps.relayCoreOutbox === undefined) throw error;
+        batchItemFailures.push(...streamFailures(noticeRecords));
+      }
+      if (coreRecords.length > 0) {
+        try {
+          const answer = context === undefined ? await deps.relayCoreOutbox!(coreRecords) : await deps.relayCoreOutbox!(coreRecords, context.getRemainingTimeInMillis());
+          batchItemFailures.push(...answer.batchItemFailures);
+        } catch {
+          batchItemFailures.push(...streamFailures(coreRecords));
+        }
+      }
+      return { batchItemFailures };
     }
     const batchItemFailures: Array<{ itemIdentifier: string }> = [];
     for (const record of queued) {
@@ -1690,16 +1723,16 @@ export function cachedBotToken(loadToken: () => Promise<string>, now: () => numb
 }
 
 /** chat.postMessage and chat.update on one cached bot token (E13). */
-export function cachedSlackClient(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch): {
+export function cachedSlackClient(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch, workspaces?: SlackCallerWorkspaces): {
   post: (input: PostInput) => Promise<{ ts: string; channel?: string }>;
   update: (input: UpdateInput) => Promise<void>;
-  postEphemeral: (input: { channel: string; threadTs: string; user: string; text: string }) => Promise<void>;
+  postEphemeral: (input: { workspace?: SlackWorkspaceScope; channel: string; threadTs: string; user: string; text: string }) => Promise<void>;
 } {
   const withToken = cachedBotToken(loadToken, now);
   return {
-    post: (input) => withToken((token) => chatPostMessage(token, input, fetchImplementation)),
-    update: (input) => withToken((token) => chatUpdate(token, input, fetchImplementation)),
-    postEphemeral: (input) => withToken((token) => chatPostEphemeral(token, input, fetchImplementation)),
+    post: (input) => workspaces === undefined ? withToken((token) => chatPostMessage(token, input, fetchImplementation)) : slackCallerToken(workspaces, input.workspace).then((token) => chatPostMessage(token, input, fetchImplementation)),
+    update: (input) => workspaces === undefined ? withToken((token) => chatUpdate(token, input, fetchImplementation)) : slackCallerToken(workspaces, input.workspace).then((token) => chatUpdate(token, input, fetchImplementation)),
+    postEphemeral: (input) => workspaces === undefined ? withToken((token) => chatPostEphemeral(token, input, fetchImplementation)) : slackCallerToken(workspaces, input.workspace).then((token) => chatPostEphemeral(token, input, fetchImplementation)),
   };
 }
 
@@ -1820,30 +1853,48 @@ export function canvasCloseoutService(store: CanvasCloseoutStore): NonNullable<N
   };
 }
 
+/** Scoped Canvas transport shared by creation/readback and closeout; legacy calls keep their old token path. */
+export function createNotifierCanvasDelivery(legacyToken: () => Promise<string>, workspaces?: SlackCallerWorkspaces, fetchImplementation: typeof fetch = fetch) {
+  return {
+    create(input: Parameters<typeof createTaskPlanCanvas>[1] & { workspace?: SlackWorkspaceScope }, onCreated?: (canvasId: string) => Promise<void>) {
+      if (workspaces !== undefined) return slackCallerToken(workspaces, input.workspace).then((token) => createTaskPlanCanvas(token, input, fetchImplementation, onCreated));
+      return cachedBotToken(legacyToken)((token) => createTaskPlanCanvas(token, input, fetchImplementation, onCreated));
+    },
+    async delete(workspace: SlackWorkspaceScope | undefined, canvasId: string) {
+      const token = workspaces === undefined ? await legacyToken() : await slackCallerToken(workspaces, workspace);
+      return deleteTaskPlanCanvas(token, canvasId, fetchImplementation);
+    },
+  };
+}
+
 /** The Lambda's own dependencies, built on first use: the environment is read only then. */
-function createAwsNotifierHandler() {
+export function createAwsNotifierHandler(workspaces?: SlackCallerWorkspaces) {
   const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
   const sqs = new SQSClient(awsClientConfiguration);
   const secretsManager = new SecretsManagerClient(awsClientConfiguration);
   const s3 = new S3Client(awsClientConfiguration);
   const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
-  const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
-    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+  const legacyToken = () => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
+  const slack = cachedSlackClient(legacyToken, Date.now, fetch, workspaces);
+  const canvases = createNotifierCanvasDelivery(legacyToken, workspaces);
   // Spec 062 Phase 7c: with SlackViaChannel on, every post, edit and Canvas goes through the Slack adapter's commands.
-  const viaChannel = slackNoticeChannelFromEnvironment(secretsManager);
-  const closeoutStore = createCanvasCloseoutStore({ documentClient, s3,
+  const viaChannel = workspaces === undefined ? slackNoticeChannelFromEnvironment(secretsManager) : undefined;
+  const closeoutStore = (scope?: SlackWorkspaceScope) => createCanvasCloseoutStore({ documentClient, s3,
     tableName: () => requiredEnvironment("STATE_TABLE_NAME"), bucketName: () => requiredEnvironment("ARTIFACT_BUCKET_NAME"),
     async deleteCanvas(canvasId) {
       if (viaChannel !== undefined) return viaChannel.deleteCanvas(canvasId);
-      const token = await secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
-        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
-      return deleteTaskPlanCanvas(token, canvasId);
+      return canvases.delete(scope, canvasId);
     },
     now: () => new Date().toISOString(),
   });
   const reviewUrlBase = process.env.CONTROL_PLANE_URL;
+  const coreBroker = process.env.BROKER_FUNCTION_NAME;
+  const coreLambda = coreBroker === undefined ? undefined : new LambdaClient({});
   return createNotifierHandler({
+    ...(coreBroker === undefined ? {} : { relayCoreOutbox: (records: unknown[], remainingMs?: number) => invokeCoreOutbox(coreLambda!, coreBroker, records, remainingMs) }),
+    ...(workspaces === undefined ? {} : { workspaces }),
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
     async enqueue(notices) {
@@ -1873,10 +1924,16 @@ function createAwsNotifierHandler() {
     },
     createPlanCanvas(input, onCreated) {
       if (viaChannel !== undefined) return viaChannel.createPlanCanvas(input, onCreated);
-      return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
-        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input, fetch, onCreated));
+      return canvases.create(input, onCreated);
     },
-    closeTaskCanvases: canvasCloseoutService(closeoutStore),
+    closeTaskCanvases: async (taskId, digest, revision) => {
+      let scope: SlackWorkspaceScope | undefined;
+      if (workspaces !== undefined) {
+        const row = await documentClient.send(new GetCommand({ TableName: requiredEnvironment("STATE_TABLE_NAME"), Key: taskKey(taskId), ConsistentRead: true }));
+        scope = slackRecordScope(row.Item, (row.Item as { share?: { teamId?: unknown } } | undefined)?.share?.teamId);
+      }
+      return canvasCloseoutService(closeoutStore(scope))(taskId, digest, revision);
+    },
     update: viaChannel?.update ?? slack.update,
     postEphemeral: viaChannel?.postEphemeral ?? slack.postEphemeral,
     now: Date.now,
@@ -1920,7 +1977,7 @@ export async function workflowE2ENotifierBlocks(input: { task: Pick<DeveloperTas
 let awsHandler: ReturnType<typeof createNotifierHandler> | undefined;
 
 /** The Lambda entry: the state table's stream and the notice queue both invoke it. */
-export const handler = (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
+export const handler = (event: { Records?: unknown[] }, context?: { getRemainingTimeInMillis(): number }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
   awsHandler ??= createAwsNotifierHandler();
-  return awsHandler(event);
+  return awsHandler(event, context);
 };

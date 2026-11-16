@@ -10,18 +10,20 @@
 import type { TierReviewCall } from "../../core/build-step/tier-review-calls.js";
 import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type Metering, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type BrowserEvidenceRecipe, type Metering, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import { registryModelPrices } from "../model-prices.js";
 import { LOCAL_MODEL_PROVIDER_ORDER, chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
 import { createSecondReview, type SecondReview } from "../../core/second-review/index.js";
 import { createLocalSecondReviewSeams } from "./second-review.js";
 import { SecondReviewerSchema } from "@agentx/contracts";
+import type { TaskRecord } from "../../core/task-flow/records.js";
 import type { ProxyRoute } from "../model-proxy/types.js";
 import { OneShotOperations, capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, withOneShotOperations, type LocalModelProxy, type LoopbackProxy, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { estimatePathOf, recordRunCost, runCostInputOf } from "../../core/cost/estimate.js";
 import { remainingUsd, taskLimitUsd } from "../../core/cost/limits.js";
+import { createTaskActions } from "../../core/task-flow/task-actions.js";
 import { createModelSelection, type ModelSelectionService } from "../../core/model-selection/service.js";
 import { createUsableModels } from "../../core/model-selection/usable-models.js";
 import { createLocalModelSelectionSeams } from "./model-selection.js";
@@ -30,6 +32,7 @@ import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-
 import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js";
 import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
 import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
+import { createCiWaitLines, createMergeOrderLines, createTaskRepositoryEdgesSeam } from "../../core/merge/repository-edges.js";
 import { createAsk } from "../../core/sessions/ask.js";
 import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
 import { createLocalAskModel } from "../ask-model.js";
@@ -61,6 +64,7 @@ import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { attachCitedCode } from "../../core/plan/store.js";
 import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
+import { createLocalFlakyChecks } from "./flaky-checks.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
 import { createLessonRoutes } from "./lessons-routes.js";
@@ -80,7 +84,11 @@ import { createSessionRoutes } from "./session-routes.js";
 import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens.js";
 import { createLocalPlaybook } from "./playbook.js";
 import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
-import { createLocalConnections } from "./connections.js";
+import { LOCAL_SECRET_ENV, createLocalConnections } from "./connections.js";
+import { createLocalBrowserEvidence, type LocalBrowserEvidence } from "./browser-evidence-settings.js";
+import { createBrowserEvidenceSignIn } from "../../core/proof/browser-evidence-sign-in.js";
+import { createLocalConnectionSecrets } from "../../connections/local-secrets.js";
+import { createRegistrySecretStore } from "../../ports/secret-stores.js";
 import type { TaskEndRegistrar } from "../../context-sources/quotes.js";
 
 import { createSessionStartExtras } from "./session-start.js";
@@ -165,6 +173,10 @@ export interface LocalAppOptions {
   sandboxModelHostsAllowed?: (project: string) => boolean;
   /** FIX-0518: the state a task's worker machine was created with (`denied` or `allowed`; undefined when it cannot say). The evidence reads this first, so it says what really applied, not what the config says now. */
   sandboxModelHostsOf?: (machineId: string) => Promise<"denied" | "allowed" | undefined>;
+  /** TE-H1 (DEC 241c): the project's browser evidence recipe from the owner's own config (`projectSettings.<project>.browserEvidence`), read fail-closed (undefined is off). It is the stronger source: the recipe page's own saved recipe is used only for a project it names nothing for. */
+  browserEvidenceFromConfig?: (project: string) => BrowserEvidenceRecipe | undefined;
+  /** TE-H1: whether a run could take the pictures on this machine now (the executor image is here and the pinned profile verifies). Absent: browser evidence is never asked for, and its page is not there. */
+  browserEvidenceCanRun?: () => Promise<boolean>;
   /** FIX-0518: the names a project's test sandbox is denied (empty when the owner allowed model hosts for it): a setup run's website ask for one is refused, and an owner's approval of one is refused. */
   sandboxDenied?: (project: string) => readonly string[];
   /** For tests: the fetch under a connection's check, and the check that refuses an address that must not be called. */
@@ -230,6 +242,8 @@ export interface LocalApp {
   readonly playbook: PlaybookService;
   /** The setup agent: its routes, its page and the hosts the owner approved. */
   readonly setupAgent: LocalSetupAgent;
+  /** TE-H1 browser evidence, slice 3: the project's recipe in force and its page. Undefined when this machine cannot run browser evidence at all. */
+  readonly browserEvidence: LocalBrowserEvidence | undefined;
   /** Chains, triggers, automatic runs and custom agents: hidden, off unless the owner switched them on. */
   readonly automation: LocalAutomation;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
@@ -343,7 +357,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
-  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs, ...(options.sandboxModelHostsAllowed === undefined ? {} : { sandboxModelHostsAllowed: options.sandboxModelHostsAllowed }), ...(options.sandboxModelHostsOf === undefined ? {} : { sandboxModelHostsOf: options.sandboxModelHostsOf }) });
+  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs, testEnv: { store, now: () => clock().getTime(), env: options.environment ?? process.env }, ...(options.sandboxModelHostsAllowed === undefined ? {} : { sandboxModelHostsAllowed: options.sandboxModelHostsAllowed }), ...(options.sandboxModelHostsOf === undefined ? {} : { sandboxModelHostsOf: options.sandboxModelHostsOf }) });
   // The project's approved test environment: tasks pin it when they start, a coding or verification run is told its plan, and the owner approves a change on a page (the gate decides it).
   // `pages` and `gate` are made below; the module asks for them when it is used, never when it is built.
   const pagesServer: { current?: LocalPagesServer } = {};
@@ -402,6 +416,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.connectionsFetch === undefined ? {} : { fetch: options.connectionsFetch }), ...(options.connectionsCheckEndpoint === undefined ? {} : { checkEndpoint: options.connectionsCheckEndpoint }),
     ...(options.connectionsServerPort === undefined ? {} : { serverPort: options.connectionsServerPort }),
   });
+  // TE-H1 browser evidence (slice 3): the recipe in force (the owner's config file, else the page's saved one) and the saved sign-in. The setup agent that makes the suggestion is built after the flow, so it is read late.
+  const browserSuggestion: { current?: (project: string) => ReturnType<LocalSetupAgent["browserEvidenceSuggestion"]> } = {};
+  const browserEvidence: LocalBrowserEvidence | undefined = options.browserEvidenceCanRun === undefined ? undefined : createLocalBrowserEvidence({
+    store, companyId, now: () => clock().getTime(), fromConfig: options.browserEvidenceFromConfig ?? (() => undefined),
+    signIn: createBrowserEvidenceSignIn({ secrets: createLocalConnectionSecrets({ directory: join(options.stateDirectory, "connection-secrets"), secrets: createRegistrySecretStore(registry), companyId, env: LOCAL_SECRET_ENV, now: () => clock().getTime() }), env: LOCAL_SECRET_ENV }),
+    canRun: options.browserEvidenceCanRun, suggestion: (project) => browserSuggestion.current?.(project) ?? Promise.resolve(undefined), audit: registry.require("audit-sink"),
+  });
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
     testEnvironment: testEnvironment.taskEnvironment,
@@ -445,6 +466,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
+    // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
+    flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
+    // TE-H1: the recipe is the owner's (config); the pull request's lines are text only and say "on the task page, behind sign-in" (the laptop's own address is http, so no link is written).
+    ...(browserEvidence === undefined || options.browserEvidenceCanRun === undefined ? {} : { browserEvidence: {
+      // The recipe is asked for only when the worker can take it: a worker without the executor image would be refused the step.
+      recipe: async (task: TaskRecord) => ((await options.browserEvidenceCanRun!().catch(() => false)) ? browserEvidence.recipeFor(task.project) : undefined),
+      linesOf: (task: TaskRecord, digest: string) => evidence.browserEvidenceLinesOf(task, digest, {}),
+    } }),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
@@ -464,7 +493,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   // Lane L12: merge tracking by polling. The publish step enrols a task's tracking row; a timer reads the due rows and calls the core's pass for each (pull request status, CI fix, branch sync, ready for review).
-  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log });
+  // MR3b: the dependency facts TE-MR2 recorded for a task's code (kept beside its evidence), read for the merge order: the tracking pass's warning and hold, and the order lines of the descriptions and the task page.
+  const repositoryEdges = createTaskRepositoryEdgesSeam({ flow: flow.deps, blobs, companyId });
+  flow.deps.mergeOrderLines = createMergeOrderLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
+  flow.deps.ciWaitLines = createCiWaitLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
+  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
@@ -568,6 +601,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   flow.deps.learned = (input) => lessons.learnedFor(input);
   flow.deps.lessonsUsed = (task, repositoryId) => lessons.usedInPullRequest(task, repositoryId);
+  flow.deps.lessonsSentBack = (taskId) => lessons.noteSentBack(taskId);
   // The setup agent: a run that sets a project up by running its commands in a sandbox, its journal, the websites it asks for and the owner's use of what it found. Its decisions go through the gate above.
   const setupAgent = createLocalSetupAgent({
     flow: flow.deps, registry, gate, owner, companyId, now: () => clock().getTime(), enabled: options.setupAgent ?? true,
@@ -605,11 +639,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       getChatPage: () => chat.view(),
       previewChatLink: (code) => chat.preview(code),
       ...(setupAgent.enabled ? { listSetupProjects: () => setupAgent.page.projects(), getSetupPage: (project: string) => setupAgent.page.view(project) } : {}),
+      ...(browserEvidence === undefined ? {} : { listBrowserEvidenceProjects: () => browserEvidence.projects(), getBrowserEvidencePage: (project: string) => browserEvidence.page(project) }),
       ...automation.pageData,
     },
     actions: {
       ...chat.actions,
       ...automation.pageActions,
+      ...(browserEvidence === undefined ? {} : { browserEvidence: (input: Parameters<LocalBrowserEvidence["action"]>[0], context: { fresh: boolean }) => browserEvidence.action(input, context) }),
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
       approveServiceImage: (input) => testEnvironment.approveServiceImage(input), removeServiceImage: (input) => testEnvironment.removeServiceImage(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, modelSelection, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
@@ -649,8 +685,15 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     replay: (taskId, key) => readWorkflowE2EReplayRecord({ store }, taskId, key),
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
-  const callbackHandler = createCallbackService({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
+  browserSuggestion.current = (project) => setupAgent.browserEvidenceSuggestion(project);
+  const callbackHandler = createCallbackService({
+    flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}),
+    // The saved sign-in is read only for a run whose recipe has one, from the company's own secret path (`browser-evidence-sign-in-callback.ts`).
+    ...(browserEvidence === undefined ? {} : { browserEvidenceSignIn: browserEvidence.signInReader }),
+  });
+  // The owner's moves on a task already running (send back, review findings, continue): with a run limit held, a round is not started on a task that has spent its limit (or whose spend cannot be told); the limit is the one the model proxy holds the task to.
+  const taskActions = createTaskActions(flow.deps, options.runLimit === false ? {} : { roundCap: async (task) => ({ limitUsd: taskLimitUsd(task), spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) }) });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, taskActions, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
     store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,
@@ -662,7 +705,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => sessionService.refresh(orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await sessionService.start().catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -745,7 +788,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation,
+    flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation, browserEvidence,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

@@ -8,11 +8,13 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
-  type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, RepositoryEdgesSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText, EvidenceBaselineSchema,
+  addBrowserEvidenceToPack, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
+  type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening, type EvidenceBaseline, type RawBaseline, type RawRepositoryBaseline,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
-import { storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
+import { deleteEvidenceArtifacts, statEvidenceArtifacts, storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
+import { browserEvidenceCapturedDigests, browserEvidenceStoredRefs, storeBrowserEvidence } from "./browser-evidence-store.js";
 import type { EvidenceBlobStore } from "./evidence-blob-store.js";
 import type { PinnedDependency } from "./dependency-evidence.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
@@ -23,6 +25,14 @@ export interface EvidenceTask { ownerKey: string; workspaceId: string; taskId: s
 
 /** The pack is kept at a key that names its task and the exact code it is for; a reader asks for the current candidate's digest only. */
 export const evidencePackKey = (task: EvidenceTask, candidateDigest: string): string => `private/${task.ownerKey}/${task.workspaceId}/evidence-pack/${task.taskId}/${candidateDigest}.json`;
+/** TE-C1: the words of the baseline the task was compared with, beside its pack (the pack's own shape is unchanged). The same prefix, so a task's or a workspace's evidence erase deletes it, and the same retention class. */
+export const evidenceBaselineKey = (task: EvidenceTask, candidateDigest: string): string => `private/${task.ownerKey}/${task.workspaceId}/evidence-pack/${task.taskId}/${candidateDigest}.baseline.json`;
+
+/**
+ * MR3b: the dependency facts TE-MR2 recorded for this code (`EvidenceRaw.repositoryEdges.edges`), kept beside the pack for the merge order to read. Under the task's own evidence prefix, so the task's erase takes it with the pack
+ * (`evidence-erase.ts`), bound to the candidate digest, and inside the blob store's company scope like every evidence object. Only the edges (consumer, provider, language) are kept, never the worker's notes.
+ */
+export const repositoryEdgesKey = (task: EvidenceTask, candidateDigest: string): string => `private/${task.ownerKey}/${task.workspaceId}/evidence-pack/${task.taskId}/${candidateDigest}.repository-edges.json`;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const PACK_READ_BYTES = 4 * 1_048_576;
@@ -32,6 +42,17 @@ export const DEFAULT_EVIDENCE_ENVIRONMENT: EvidenceEnvironment = { tier: "sandbo
 const NO_ENVIRONMENT_ITEM: EvidenceNotTested = { kind: "environment", id: "test_environment", text: "No approved test environment: the project's own test setup was used", reason: "not set up" };
 const NOT_CAPTURED_ITEM: EvidenceNotTested = { kind: "environment", id: "evidence_capture", text: "Test details were not captured for this run", reason: "the worker reported none" };
 const WITHHELD_ITEM: EvidenceNotTested = { kind: "environment", id: "data_guard", text: "Some test details were left out", reason: "personal or production data found" };
+
+/**
+ * TE-C1: what the keeper may do with the worker's baseline claim. `offered` are the shas THIS task's plan sent to the worker: a claim for any other sha is ignored. `resolve` looks the row up (the engine's own, for this task's
+ * company, project, revision and branch) and says the words, or nothing. Absent (the switch off, or a plan with no candidates): the claim is not looked at.
+ */
+export interface KeepEvidenceBaseline {
+  offered: readonly string[];
+  resolve(claim: RawBaseline): Promise<EvidenceBaseline | undefined>;
+  /** TE-MR2b: the same for a task with several repositories: one claim per repository, ONE baseline for all of them or nothing. */
+  resolveAll?(claims: readonly RawRepositoryBaseline[]): Promise<EvidenceBaseline | undefined>;
+}
 
 export interface KeepEvidenceInput {
   /** The org the task belongs to: the first pack an org keeps marks it, so an erase for an org that never kept evidence costs one read. */
@@ -53,6 +74,14 @@ export interface KeepEvidenceInput {
   writer?: EvidenceWriter | undefined;
   /** FIX-0518: fixed items the broker adds to the pack's "not tested" list as they are (the laptop's "model hosts allowed in the test sandbox by project setting"). Words from code, never from a repository. */
   extraNotTested?: readonly EvidenceNotTested[] | undefined;
+  /** TE-C1: see `KeepEvidenceBaseline`. */
+  baseline?: KeepEvidenceBaseline | undefined;
+  /**
+   * TE-H1 slice 2 (DEC 241): what the worker's browser-evidence run captured for THIS operation (the keeper read it from the operation's own upload: `readBrowserEvidenceUpload`). Absent: the pack is exactly what it was (a v1 pack
+   * when no writer says otherwise, byte for byte). Present: the pictures are stored (`storeBrowserEvidence`), the pack is written as a v2 pack, and it gets the `visual` check with the before and after pairs.
+   * Visual evidence only: the check never counts toward the change proof (kind `visual`).
+   */
+  browserEvidence?: BrowserEvidenceCaptured | undefined;
 }
 
 export interface KeepEvidenceDeps {
@@ -80,6 +109,46 @@ async function readRaw(deps: KeepEvidenceDeps, input: KeepEvidenceInput): Promis
 }
 
 const TEST_PROOF_READ_BYTES = 256 * 1024;
+
+/** The most bytes the kept edges are read from: 64 edges of two 200-character ids is under 40 KB. */
+const REPOSITORY_EDGES_READ_BYTES = 64 * 1024;
+
+/** Keeps the worker's repository edges for this code. Informational: a fault is logged by name only and leaves no facts (the merge then orders as it always did). Never throws. */
+async function keepRepositoryEdges(deps: KeepEvidenceDeps, input: KeepEvidenceInput, edges: NonNullable<EvidenceRaw["repositoryEdges"]>["edges"]): Promise<void> {
+  try {
+    if (deps.late?.() === true) return;
+    await deps.markStored?.(input.orgId);
+    const record = { schemaVersion: 1, candidateDigest: input.candidateDigest, edges };
+    await deps.store.blobs.put(repositoryEdgesKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(record), "utf8"), { contentType: "application/json", metadata: { kind: "repository-edges" }, retention: "evidence-std" }, { overwrite: true });
+  } catch (error) {
+    deps.log?.("evidence.repository_edges_not_kept", { error: error instanceof Error ? error.name : "unknown" });
+  }
+}
+
+/** What the kept dependency facts say for one task's code: `none` (nothing was recorded), the edges, or `unreadable` (something is kept that cannot be trusted, or the store could not answer). */
+export type KeptRepositoryEdges = { kind: "none" } | { kind: "edges"; edges: Array<{ consumer: string; provider: string }> } | { kind: "unreadable" };
+
+/**
+ * The dependency facts kept for exactly this code of this task (MR3b). Read as a whole: a record that is not exactly what `keepEvidence` writes (another version, other code, a self-edge, a repeated edge, more than 64 edges, an id
+ * with control characters, a size over the bound) is `unreadable`, never a partial list and never `none`, so a merge refuses its order until a person confirms (DEC 209) instead of merging in an order nobody checked. Never throws.
+ */
+export async function loadRepositoryEdges(blobs: Pick<EvidenceBlobStore, "get" | "stat">, task: EvidenceTask, candidateDigest: string): Promise<KeptRepositoryEdges> {
+  if (!DIGEST.test(candidateDigest) || !TASK_ID.test(task.taskId)) return { kind: "unreadable" };
+  try {
+    const key = repositoryEdgesKey(task, candidateDigest);
+    const bytes = await blobs.get(key, REPOSITORY_EDGES_READ_BYTES);
+    // `get` answers nothing both for an object that is not there and for one over the bound: only `stat` tells them apart.
+    if (bytes === undefined) return (await blobs.stat(key)) === undefined ? { kind: "none" } : { kind: "unreadable" };
+    const record = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+    if (typeof record !== "object" || record === null || Array.isArray(record)) return { kind: "unreadable" };
+    const { schemaVersion, candidateDigest: boundTo, edges, ...rest } = record as Record<string, unknown>;
+    if (schemaVersion !== 1 || boundTo !== candidateDigest || Object.keys(rest).length > 0) return { kind: "unreadable" };
+    const parsed = RepositoryEdgesSchema.safeParse({ edges, notes: [] });
+    return parsed.success ? { kind: "edges", edges: parsed.data.edges.map((edge) => ({ consumer: edge.consumer, provider: edge.provider })) } : { kind: "unreadable" };
+  } catch {
+    return { kind: "unreadable" };
+  }
+}
 
 /**
  * TE-B3: what the worker's run on the original code showed about each check's untouched tests (skips that rose, tests that ran before and are gone), read from the operation's `test-proof.json`: an object under the operation's own
@@ -118,6 +187,8 @@ function withWeakeningFacts(raw: EvidenceRaw, facts: ReadonlyMap<string, TestPro
 
 /** Assembles and keeps the pack for a verification run. Never throws. */
 export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceInput): Promise<KeepEvidenceResult> {
+  // TE-H1: deletes the browser evidence pictures this keep stored, for every way out that writes no pack.
+  let abandonBrowser: () => Promise<void> = async () => undefined;
   try {
     if (!DIGEST.test(input.candidateDigest) || !TASK_ID.test(input.task.taskId)) return { kept: false, reason: "invalid" };
     // A scan that finds nothing for a card number, a credential and an address is not the data guard: nothing is kept unscanned.
@@ -134,6 +205,15 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
       try { const parsed = EvidenceRawSchema.safeParse(JSON.parse(rawText)); parsedRaw = parsed.success ? parsed.data : undefined; } catch { parsedRaw = undefined; }
     }
     if (parsedRaw !== undefined && parsedRaw.candidateDigest !== input.candidateDigest) return { kept: false, reason: "not_bound" };
+    // TE-C1: the worker's claim is used only for a commit this task's plan offered; the engine then looks the row up itself. Anything else (a sha it did not offer, no offer, no row) is no baseline.
+    const claim = parsedRaw?.baseline;
+    const claims = parsedRaw?.baselines;
+    const baselineWords = claims !== undefined
+      // TE-MR2b: every repository's claimed commit must be one this task's plan offered; one that was not makes the whole claim void.
+      ? input.baseline?.resolveAll === undefined || !claims.every((part) => input.baseline!.offered.includes(part.sha)) ? undefined : await input.baseline.resolveAll(claims).catch(() => undefined)
+      : claim === undefined || input.baseline === undefined || !input.baseline.offered.includes(claim.sha) ? undefined : await input.baseline.resolve(claim).catch(() => undefined);
+    // MR3b: the dependency facts for this code are kept on their own, before the pack work (a pack that is withheld or fails must not take the merge order's facts with it).
+    if (parsedRaw?.repositoryEdges !== undefined && parsedRaw.repositoryEdges.edges.length > 0) await keepRepositoryEdges(deps, input, parsedRaw.repositoryEdges.edges);
     if (parsedRaw !== undefined) {
       // TE-B3: the facts from the run on the original code join the raw file first, so the data guard and the builder check them like every other test name.
       parsedRaw = withWeakeningFacts(parsedRaw, await readWeakeningFacts(deps, input));
@@ -172,27 +252,69 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
       void _lost;
       return withoutTail;
     }) };
+    // TE-H1: the browser evidence run's pictures go into the store (a run the check refuses stores nothing and the pack goes without it). Whatever stops this keep from writing the pack deletes them again, so no picture is left that no pack names.
+    let browser: BrowserEvidenceOutcome | undefined;
+    // Pictures this task's store already held (a re-keep of the same candidate, whose earlier pack may name them) are never deleted by this keep's own clean-up.
+    let heldBefore = new Map<string, unknown>();
+    if (input.browserEvidence !== undefined) {
+      try {
+        heldBefore = await statEvidenceArtifacts(deps.store, owner, browserEvidenceCapturedDigests(input.browserEvidence));
+        browser = await storeBrowserEvidence(deps.store, owner, input.browserEvidence);
+      } catch { deps.log?.("evidence.browser_not_stored", {}); }
+    }
+    const abandon = async (): Promise<void> => {
+      if (browser === undefined) return;
+      const refs = browserEvidenceStoredRefs(browser).filter((ref) => !heldBefore.has(ref.sha256));
+      if (refs.length > 0) await deleteEvidenceArtifacts(deps.store, owner, refs);
+    };
+    abandonBrowser = abandon;
     const checked = EvidencePackSchema.safeParse(pack);
-    if (!checked.success) return { kept: false, reason: "invalid" };
+    if (!checked.success) { await abandon(); return { kept: false, reason: "invalid" }; }
     // TE-A2b: a version 2 writer keeps the same pack as a v2 pack (every v1 part kept); a pack the strict v2 schema refuses is not kept at all.
+    // A browser evidence outcome needs a v2 pack (the `visual` check and its pairs have no v1 form): Code's producer is Rovara's sandbox, as the outcome says.
     const droppedPaths = { droppedPaths: 0 };
-    let toKeep = input.writer?.version === 2 ? evidencePackV2Of(checked.data, input.writer, droppedPaths) : checked.data;
-    if (toKeep === undefined) return { kept: false, reason: "invalid" };
+    const writer: EvidenceWriter | undefined = browser === undefined || input.writer?.version === 2 ? input.writer : { version: 2, producer: { edition: "code", isolation: browser.isolation } };
+    // The v2 form was forced only for the pictures: when it cannot be had, the task keeps the plain pack it would have had without them, never less.
+    const forced = browser !== undefined && input.writer?.version !== 2;
+    const withoutBrowser = async (): Promise<void> => { await abandon(); browser = undefined; deps.log?.("evidence.browser_not_added", {}); };
+    let toKeep = writer?.version === 2 ? evidencePackV2Of(checked.data, writer, droppedPaths) : checked.data;
+    if (toKeep === undefined && forced) { await withoutBrowser(); toKeep = checked.data; }
+    if (toKeep === undefined) { await abandon(); return { kept: false, reason: "invalid" }; }
     if (droppedPaths.droppedPaths > 0) deps.log?.("evidence.paths_dropped", { count: droppedPaths.droppedPaths });
     // The v1 pack went through the data guard above; what only a v2 pack adds (override reason, file names, branch names, meters) goes through it here, and a part with a finding is left out with the same "left out" line.
     if (toKeep.schemaVersion === 2) {
       const v2 = guardV2Parts(toKeep, deny, deps.scan);
+      if (forced && browser !== undefined && v2.dropped.parts > 0) { await withoutBrowser(); toKeep = checked.data; }
+      else {
       guarded += v2.dropped.parts;
       toKeep = v2.dropped.parts === 0 || v2.pack.notTested.some((item) => item.id === WITHHELD_ITEM.id) ? v2.pack
         : { ...v2.pack, notTested: [...v2.pack.notTested, { kind: WITHHELD_ITEM.kind, id: WITHHELD_ITEM.id, what: WITHHELD_ITEM.text, reason: WITHHELD_ITEM.reason }].slice(0, EVIDENCE_NOT_TESTED_MAX) };
+      }
     }
-    if (deps.late?.() === true) return { kept: false, reason: "fault" };
+    // The browser evidence check joins the finished pack: fixed words and refs the store holds (the data guard looked at everything else). A pack that refuses it (another producer, a check of that id, a limit) is kept without it, and its pictures go.
+    if (browser !== undefined && toKeep.schemaVersion === 2) {
+      try { toKeep = addBrowserEvidenceToPack(toKeep, browser); } catch { await withoutBrowser(); if (forced) toKeep = checked.data; }
+    }
+    if (deps.late?.() === true) { await abandon(); return { kept: false, reason: "fault" }; }
     // The stored pack is kept like the tails (`evidence-std`): it expires with them and is deleted with them on erasure.
     await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(toKeep), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" },
       // One pack per task and candidate digest: re-keeping the same candidate (a re-check, a retried keep) writes the pack again, so this caller overwrites on purpose.
       { overwrite: true });
+    // TE-C1: the words beside the pack, replaced (or removed) with every keep of the same code, so they never describe a run this keep did not compare with. Informational: a fault here is only a missing line.
+    // Only for a keep that was given baseline input (the switch on): with it off nothing here runs, so the keeper is byte for byte what it was.
+    if (input.baseline !== undefined) {
+      try {
+        // An abandoned call (its time has run out) writes nothing more.
+        if (deps.late?.() === true) return { kept: true, problems: built.problems, guardedParts: guarded };
+        if (baselineWords === undefined) await deps.store.blobs.delete(evidenceBaselineKey(input.task, input.candidateDigest));
+        else await deps.store.blobs.put(evidenceBaselineKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(EvidenceBaselineSchema.parse(baselineWords)), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-baseline" }, retention: "evidence-std" }, { overwrite: true });
+      } catch (error) {
+        deps.log?.("evidence.baseline_not_kept", { error: error instanceof Error ? error.name : "unknown" });
+      }
+    }
     return { kept: true, problems: built.problems, guardedParts: guarded };
   } catch (error) {
+    await abandonBrowser().catch(() => undefined);
     deps.log?.("evidence.keep_failed", { error: error instanceof Error ? error.name : "unknown" });
     return { kept: false, reason: "fault" };
   }
@@ -226,9 +348,24 @@ export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, ta
   if (read.status === "v1") return read.pack;
   if (read.status !== "v2") return undefined;
   // `evidencePackV2ToV1` picks only the fields v1 has (an unknown part or kind is left behind, a kind v1 lacks is `other`), and the result must still parse as a v1 pack: a value this build does not know ("newer") does not.
-  const v1 = evidencePackV2ToV1(read.pack as unknown as EvidencePackV2);
+  // TE-H1: browser evidence is visual evidence only. Its `visual` check has no place in the v1 view that the proof page and the evidence risk read: it is left out, so a picture never reads as a passed check.
+  const pack = read.pack as unknown as EvidencePackV2;
+  const v1 = evidencePackV2ToV1({ ...pack, checks: pack.checks.filter((entry) => entry.kind !== "visual") });
   const parsed = v1 === undefined ? undefined : EvidencePackReadSchema.safeParse(v1);
   return parsed?.success === true ? parsed.data : undefined;
+}
+
+/** The words kept beside the pack for exactly this code of this task; undefined when there are none or they do not parse. Never throws. */
+export async function loadEvidenceBaseline(blobs: Pick<EvidenceBlobStore, "get">, task: EvidenceTask, candidateDigest: string | undefined): Promise<EvidenceBaseline | undefined> {
+  if (candidateDigest === undefined || !DIGEST.test(candidateDigest) || !TASK_ID.test(task.taskId)) return undefined;
+  try {
+    const bytes = await blobs.get(evidenceBaselineKey(task, candidateDigest), 4_096);
+    if (bytes === undefined) return undefined;
+    const parsed = EvidenceBaselineSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The kinds the approved check policy names, by the id the worker reports (`readiness:<index>`, in selected order). */

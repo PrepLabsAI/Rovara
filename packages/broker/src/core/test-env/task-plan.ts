@@ -10,11 +10,14 @@
 import { agentXError, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvTaskPlan } from "@agentx/contracts";
 import { DEPENDENCY_PLAN_REFUSAL_WORDS, taskDependencyPlansOf, type ServiceCatalogSource } from "./dependency-plan.js";
 import { lastNightlyFailures } from "./nightly.js";
+import { baselineCandidatesOf } from "./baseline-cache.js";
+import { taskBaselineBranch } from "./nightly-usable.js";
+import { baselineCacheEnabled } from "./switch.js";
 import type { TestEnvDeps } from "./deps.js";
 import { readApprovedSeedFiles } from "./environment.js";
 import { selectionFieldsAreSafe } from "./prove-from-setup-check.js";
 import { readTestEnvPin, usableTestEnvironment } from "./usable.js";
-import { testEnvironmentEnabled } from "./switch.js";
+import { flakyRerunEnabled, testEnvironmentEnabled } from "./switch.js";
 import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS, projectUsesDevcontainer } from "./devcontainer-check.js";
 import { approvedFixturesOf, recordsOf, type FixtureStoreFactory } from "./fixture-lookup.js";
 import { testServicesEnabled } from "./test-services-switch.js";
@@ -41,16 +44,20 @@ export async function testEnvPlanFor(
  * nothing is read). The pinning, the catalog trust and the dev container refusal are the same as for the checks (`planOf`); there are no readiness commands to match on a coding run.
  */
 export async function testEnvImplementPlanFor(
-  deps: TestEnvPlanDeps, input: { orgId: OrgId; project: string; taskId: string }, env: NodeJS.ProcessEnv = process.env,
+  deps: TestEnvPlanDeps, input: { orgId: OrgId; project: string; taskId: string; readiness?: readonly ProjectCommand[] }, env: NodeJS.ProcessEnv = process.env,
 ): Promise<TestEnvTaskPlan | undefined> {
-  if (!testServicesEnabled(env) || !testEnvironmentEnabled(env)) return undefined;
-  const plan = await planOf(deps, input, env);
-  return plan?.dependencies === undefined ? undefined : plan;
+  // TE-C6: with the flaky-rerun switch on and the run's readiness given, a coding run is also told the plan (without dependencies when the environment has none) so its settle round can rerun a failing test once. The readiness
+  // is only used to prove the run's first commands ARE the environment's checks (`flakyRerun` is planned only then); it never decides the dependencies, which are planned as they always were.
+  const flaky = flakyRerunEnabled(env) && input.readiness !== undefined && input.readiness.length > 0;
+  if (!testEnvironmentEnabled(env) || (!testServicesEnabled(env) && !flaky)) return undefined;
+  const { readiness, ...scope } = input;
+  const plan = await planOf(deps, scope, env, flaky ? readiness : undefined);
+  return plan?.dependencies === undefined && plan?.flakyRerun !== true ? undefined : plan;
 }
 
 /** The plan of the task's pinned environment. `readiness` is given for a verification run (its first commands must be the environment's checks, and the last nightly's failures ride along); a coding run gives none. */
 async function planOf(
-  deps: TestEnvPlanDeps, input: { orgId: OrgId; project: string; taskId: string; readiness?: readonly ProjectCommand[] }, env: NodeJS.ProcessEnv,
+  deps: TestEnvPlanDeps, input: { orgId: OrgId; project: string; taskId: string; readiness?: readonly ProjectCommand[] }, env: NodeJS.ProcessEnv, flakyReadiness: readonly ProjectCommand[] | undefined = input.readiness,
 ): Promise<TestEnvTaskPlan | undefined> {
   const pin = await readTestEnvPin(deps, input.orgId, input.project, input.taskId);
   if (pin === undefined || pin.unused !== undefined) return undefined;
@@ -77,12 +84,21 @@ async function planOf(
     if (!planned.ok) throw agentXError("RUNTIME_UNAVAILABLE", DEPENDENCY_PLAN_REFUSAL_WORDS[planned.reason]);
     dependencies = planned.dependencies;
   }
+  // TE-C6: the rerun is planned only with the switch on and only when the run's first commands are exactly the environment's checks (the worker pairs `checks[i]` with command `i`), so a command is never paired with another's template.
+  const flakyRerun = flakyRerunEnabled(env) && flakyReadiness !== undefined && checks.length <= flakyReadiness.length && checks.every((check, index) => sameCommand(check.command, flakyReadiness[index]!));
   const failures = readiness === undefined ? [] : await lastNightlyFailures(deps, input.orgId, input.project).catch(() => []);
+  // TE-C1 (switch `ROVARA_BASELINE_CACHE`): the newest trusted baseline commits on the task's base branch, for the worker to find the nearest ancestor of the task's base commit. Shas only; none (or off) leaves the plan as it was.
+  const baseBranch = readiness !== undefined && baselineCacheEnabled(env) ? await taskBaselineBranch(deps, input.orgId, input.project, input.taskId) : undefined;
+  const candidates = baseBranch === undefined ? [] : await baselineCandidatesOf(deps, { orgId: input.orgId, project: input.project, envRevision: found.environment.revision, branch: baseBranch });
   return {
     revision: found.environment.revision, digest: pin.digest, roundBudgetMin: body.roundBudgetMin,
     selection: { method: body.selection.method, ...(body.selection.declared === undefined ? {} : { declared: body.selection.declared }), alwaysRun: body.selection.alwaysRun, fullSuiteOn: body.selection.fullSuiteOn },
     checks: checks.map((check) => ({ id: check.id, kind: check.kind, ...(check.coveragePath === undefined ? {} : { coveragePath: check.coveragePath }), ...(check.selectArgs === undefined ? {} : { selectArgs: check.selectArgs }) })),
     ...(failures.length === 0 ? {} : { lastNightlyFailures: failures.slice(0, 500) }),
     ...(dependencies === undefined ? {} : { dependencies }),
+    ...(flakyRerun ? { flakyRerun: true as const } : {}),
+    ...(candidates.length === 0 ? {} : { baselineCandidates: candidates.map((sha) => ({ sha })) }),
+    // TE-MR2b: a project with several repositories asks for one claim per repository (the engine reads `EvidenceRaw.baselines`).
+    ...(candidates.length === 0 || body.repos.length < 2 ? {} : { repositoryBaselines: true as const }),
   };
 }

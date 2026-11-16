@@ -8,8 +8,10 @@
 //   secrets         Secrets Manager under the install's prefix; a company's own secrets (`org-connectors/<company>/...`) are read only for that company (the adapter's company paths).
 //   code-host       GitHub (the GitHub App provider the deployment builds).
 //   check-runner    GitHub Actions, when the deployment gives its provider.
+//   worker-machines The EC2 workspace sessions (aws/worker-machines/session-worker-machines.ts), when the deployment gives their operations: ONE fleet for every company, which answers
+//                   only through `forCompany` (the core runtime binds it per company, core-runtime.ts). Only the dispatcher may start, sign for and post to a worker.
 //
-// Points this list never fills (each stays empty, so `buildCoreRegistry` refuses the switch by name, the intended fail-closed state): worker-machines (step 4, new aws/ files), model-keys
+// Points this list never fills (each stays empty, so `buildCoreRegistry` refuses the switch by name, the intended fail-closed state): model-keys
 // (lane G moves model keys out of Code), and the NEVER_DEFAULT points admission, metering, identity, approvers and audit-sink (security-list lanes G, ID, T, AU). `owedPoints` names them.
 //
 // Nothing here makes an AWS call when it is built: the SDK clients are made lazily by the adapters (or given by tests), and the registry is built only while the switch serves (app.ts).
@@ -22,6 +24,7 @@ import { STATE_TABLE_INDEXES } from "@rovara/aws-adapters";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import { githubCodeHost } from "../plugins/code-host/github/index.js";
 import { GITHUB_ACTIONS_RUNNER_KIND, githubActionsCheckRunner, type GitHubActionsProvider } from "../plugins/check-runner/github-actions/index.js";
+import { SessionWorkerFleet, type SessionWorkerFleetDependencies } from "../aws/worker-machines/session-worker-machines.js";
 import { appliesCodeRetention, codeRetentionStore, type RetentionLog } from "./retention.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
@@ -61,6 +64,8 @@ export interface CodeModuleDeps {
   codeHost: { provider: Parameters<typeof githubCodeHost>[0]; options: Parameters<typeof githubCodeHost>[1] };
   /** GitHub Actions. Absent: the check-runner point stays empty and the registry refuses the switch. */
   checkRunner?: { githubActions: GitHubActionsProvider };
+  /** The EC2 workspace sessions (what this function may do with a worker). Absent: the worker-machines point stays empty and the registry refuses the switch. */
+  workerMachines?: SessionWorkerFleetDependencies;
 }
 
 const refuseHollow = (what: string, missing: readonly string[]): never => { throw new Error(`the ${what} input is hollow: ${missing.join(", ")} missing`); };
@@ -121,12 +126,21 @@ export function codeAdapterModules(deps: CodeModuleDeps): CoreAdapterModule[] {
         return { kind: GITHUB_ACTIONS_RUNNER_KIND, create: () => githubActionsCheckRunner(deps.checkRunner!.githubActions) };
       },
     })]),
+    ...(deps.workerMachines === undefined ? [] : [coreAdapter({
+      point: "worker-machines", name: "ec2-sessions", owner: "E2 (Code's AWS deployment)",
+      create: () => {
+        const given = deps.workerMachines!;
+        requireFunctions("workerMachines", given, ["companyOfWorkspace", "binding", "stopInstance", "sign", "post", "ping"]);
+        requireFunctions("workerMachines.sessions", given.sessions, ["get", "ensureSession", "deleteSession", "claimStop", "markStopped"]);
+        return new SessionWorkerFleet(given);
+      },
+    })]),
   ];
 }
 
 /** Why a point stays empty on Code's deployment, and who fills it. Shown with a refused switch and in the lane report. */
 export const OWED_POINTS = {
-  "worker-machines": "E2 step 4: the EC2 session machines (new aws/ files)",
+  "worker-machines": "give `workerMachines` (the EC2 session operations) in the module deps",
   "model-keys": "lane G: model keys leave Code for the model gateway",
   "check-runner": "give `checkRunner.githubActions` in the module deps",
   admission: "lane G (money at the gateway); never Code's allow-all default",
@@ -137,6 +151,8 @@ export const OWED_POINTS = {
 } as const satisfies Partial<Record<PluginPoint, string>>;
 
 /** The points `codeAdapterModules(deps)` leaves empty, with what each needs. */
-export function owedPoints(deps: Pick<CodeModuleDeps, "checkRunner">): Array<{ point: keyof typeof OWED_POINTS; needs: string }> {
-  return (Object.keys(OWED_POINTS) as Array<keyof typeof OWED_POINTS>).filter((point) => point !== "check-runner" || deps.checkRunner === undefined).map((point) => ({ point, needs: OWED_POINTS[point] }));
+export function owedPoints(deps: Pick<CodeModuleDeps, "checkRunner" | "workerMachines">): Array<{ point: keyof typeof OWED_POINTS; needs: string }> {
+  return (Object.keys(OWED_POINTS) as Array<keyof typeof OWED_POINTS>)
+    .filter((point) => (point !== "check-runner" || deps.checkRunner === undefined) && (point !== "worker-machines" || deps.workerMachines === undefined))
+    .map((point) => ({ point, needs: OWED_POINTS[point] }));
 }

@@ -34,7 +34,7 @@ export interface SessionService {
   readonly deps: SummaryDependencies;
   /** Subscribes the projector to the store's change feed. */
   start(): Promise<{ stop(): Promise<void> } | undefined>;
-  sweep(options?: { budgetMs?: number; pageSize?: number }): Promise<SweepResult>;
+  sweep(options?: { budgetMs?: number; pageSize?: number; companyId?: OrgId; maxItems?: number; scan?: { cursor: string | undefined } }): Promise<SweepResult>;
   refresh(orgId: OrgId, sessionId: SessionId): Promise<"unchanged" | "updated">;
 }
 

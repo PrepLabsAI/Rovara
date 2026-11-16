@@ -118,6 +118,12 @@ Managing factors (through the sign-in service, by the caller's own verified sess
 can set a person's factor email (the old address is told first; if it cannot be told, nothing changes) and remove all
 of a person's passkeys (the person is told). Ending a person's sessions does not remove their passkeys.
 
+On AWS (named environments): passkeys are on, with the relying-party id the API's own host. The email code is sent
+through Amazon SES from the address in the control plane's `StepUpEmailSender` stack parameter, which must be a
+verified SES email identity in the install's account and region; the sign-in function may send only as that identity.
+While the parameter is empty there is no email sender, so no step-up code is sent and no passkey can be added. While the
+account is in the SES sandbox, SES also accepts only verified recipient addresses.
+
 ## Check what a person can do
 
 `POST <api>/v1/dev/access` answers who the person is, whether they are a Rovara administrator, and which projects

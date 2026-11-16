@@ -1,0 +1,46 @@
+// Agents can pick the models Rovara's AI serves (DEC 243c, DEC 236j). Cloud's model gateway names every model it serves a company's agents
+// exactly by the id it calls: an engine model name for Claude (`claude-sonnet-5-5`) and the Bedrock model or profile id for every other model
+// (`qwen.qwen3-coder-480b-a35b-v1:0`, `us.amazon.nova-2-lite-v1:0`). The gateway publishes the list it offers one company as OfferedAgentModels;
+// Code reads it, offers exactly those models on the company's page, and refuses any model that is not on it.
+//
+// No gateway API publishes this yet: Code defines the shape here and reads it through the `OfferedModelsReader` port (docs/architecture/agent-model-choice.md
+// says what Cloud's side must answer).
+import { z } from "zod";
+import { ModelSelectionStateSchema } from "./app-model-selection.js";
+import type { ModelIdentifier } from "./models-node.js";
+
+/** A model name as the gateway serves it: a Claude engine name or a Bedrock id. No path, space, quote or control character. */
+export const AGENT_MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+/** The most models one company's list may hold. */
+export const OFFERED_AGENT_MODELS_MAX = 64;
+
+export const OfferedAgentModelSchema = z.object({ model: z.string().regex(AGENT_MODEL_NAME) }).strict();
+export type OfferedAgentModel = z.infer<typeof OfferedAgentModelSchema>;
+
+/** What the gateway offers one company's agents. Never empty (a gateway that offers none answers a refusal instead), and a model is listed once. */
+export const OfferedAgentModelsSchema = z.object({
+  version: z.literal(1),
+  models: z.array(OfferedAgentModelSchema).min(1).max(OFFERED_AGENT_MODELS_MAX),
+}).strict().superRefine((list, context) => {
+  if (new Set(list.models.map((entry) => entry.model)).size !== list.models.length) context.addIssue({ code: "custom", path: ["models"], message: "a model is listed once" });
+});
+export type OfferedAgentModels = z.infer<typeof OfferedAgentModelsSchema>;
+
+/** A Claude model is named by its engine name (Anthropic's own); every other model is a Bedrock id. */
+export const isClaudeAgentModel = (name: string): boolean => name.startsWith("claude-");
+
+/** The model identity Code's model catalog and per-step rule know a gateway name by. */
+export function agentModelIdentity(name: string): ModelIdentifier {
+  return isClaudeAgentModel(name) ? { provider: "anthropic", modelId: name } : { provider: "amazon-bedrock", modelId: name };
+}
+
+/** The gateway name of a model identity, or undefined when the identity is not one the gateway names (another provider, or a name that is not valid). */
+export function agentModelName(model: ModelIdentifier): string | undefined {
+  if (!AGENT_MODEL_NAME.test(model.modelId)) return undefined;
+  // The two providers are told apart by the name alone, so one name is one model: a Claude name under Bedrock (or a Bedrock id under Anthropic, or any other provider's model) is not on the list.
+  return agentModelIdentity(model.modelId).provider === model.provider ? model.modelId : undefined;
+}
+
+/** What the company's page reads: its per-step model setting, and every model the gateway offers it now (the picker's whole list). */
+export const AgentModelPageSchema = z.object({ state: ModelSelectionStateSchema, offered: OfferedAgentModelsSchema }).strict();
+export type AgentModelPage = z.infer<typeof AgentModelPageSchema>;

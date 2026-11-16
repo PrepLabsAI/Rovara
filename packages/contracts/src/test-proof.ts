@@ -76,6 +76,8 @@ const replyShape = {
   checkId: z.string().min(1).max(64),
   taskMade: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   counted: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  /** Independent replies (parked by DEC 192a: they never count). Absent when there were none, so a proof without them keeps its bytes. */
+  independent: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
 };
 const boundedReplies = z.unknown().refine((items) => Array.isArray(items) && items.length <= 200, "unsupported");
 const uniqueReplies = (items: { checkId: string }[]) => new Set(items.map((item) => item.checkId)).size === items.length;

@@ -17,16 +17,18 @@
 //
 // Nothing here names a provider; the code host is whatever the repository's record names, and a host that cannot read a merge (`mergeObservation`) is simply never seen merged.
 import {
-  blockWorkflow, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, when,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped, blockWorkflow, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, when,
   type OrgId, type ReadBudget, type RegistryView, type TransactItem,
 } from "@agentx/contracts";
 import { SWEEP_INTERVAL_MS, type MergeRecoveryResult } from "../core/merge/budget.js";
+import type { RepositoryResolver } from "../core/merge/host-port.js";
 import { changeRequestRef } from "../core/merge/host-port.js";
 import { storeLinkedChangeRequests } from "../core/merge/linked.js";
 import { mergedMilestoneItems, mergedStateItems } from "../core/merge/merged.js";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
 import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
 import type { MergePeople } from "../core/merge/people.js";
+import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
 import type { CodeMilestones, CodeSettingsReader, MergeTask, SessionTimeline } from "../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
@@ -141,6 +143,13 @@ export interface MergeTrackingServiceOptions {
   /** The project's code settings (self-approval, merge method, reviewers). Not defaulted: a host with fixed settings passes `fixedCodeSettings(...)`. */
   settings: CodeSettingsReader;
   timeline?: SessionTimeline;
+  /** Deployed hosts inject a company-scoped resolver; no provider is constructed here. */
+  repository?: RepositoryResolver;
+  /** Retained by a short-lived pass composer, per company; never stored or shared between companies. */
+  scan?: { cursor: string | undefined; complete?: boolean };
+  ciMode?: MergeTrackingDependencies["ciMode"];
+  /** MR3b: the dependency facts between a task's repositories (`createRepositoryEdgesSeam`). Absent: a pull request merged out of order is not warned about, and no pull request is held for the order. */
+  repositoryEdges?: ((task: MergeTask) => unknown) | undefined;
   /** Milliseconds since the epoch. The host's clock, so a test can move it. */
   now: () => number;
   log?: Log;
@@ -153,7 +162,7 @@ export interface MergeTrackingService {
   /** The dependencies of one tracking pass (the same a test may call `trackPullRequest` with). */
   readonly deps: TrackingReconcileDependencies;
   /** One sweep: the due tracking rows, at most `SWEEP_MAX_ROWS`, each reconciled once. Never throws; one sweep at a time. */
-  sweep(): Promise<{ attempted: number }>;
+  sweep(options?: { budgetMs: number }): Promise<{ attempted: number }>;
   /** Makes a task's tracking row due now (a push of Rovara's, the owner's Retry). Does nothing for a task with no row. */
   wake(taskId: string): Promise<void>;
   /** When every row is paused until, if the code host asked Rovara to slow down (milliseconds since the epoch). */
@@ -168,6 +177,7 @@ export interface MergeTrackingService {
 
 export function createMergeTrackingService(options: MergeTrackingServiceOptions): MergeTrackingService {
   const { flow, registry, companyId, milestones, now, people, settings } = options;
+  if (!OrgIdSchema.safeParse(companyId).success) throw new Error("the merge tracking company is invalid");
   const store = flow.store;
   const log = options.log ?? (() => undefined);
   const timeline = options.timeline ?? sessionTimeline();
@@ -179,10 +189,15 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     return record === undefined ? undefined : mergeTaskOf(record, companyId);
   };
 
-  const resolver = createRepositoryResolver(flow, registry);
+  const givenResolver = options.repository ?? createRepositoryResolver(flow, registry);
+  const resolver: RepositoryResolver = (project, revision, repositoryId, orgId) => {
+    if (orgId !== companyId) return Promise.resolve(undefined);
+    return givenResolver(project, revision, repositoryId, companyId);
+  };
 
   const base: MergeTrackingDependencies = {
     store, now,
+    ...(options.ciMode === undefined ? {} : { ciMode: options.ciMode }),
     settings, milestones, timeline, people, links: storeLinkedChangeRequests(store),
     scope: (orgId) => ({ orgId }),
     loadTask,
@@ -192,6 +207,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     recordedHead: recordedHeadOf(flow),
     // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
     readyHold: (task, current) => scopeHoldOf(flow, task, current),
+    ...(options.repositoryEdges === undefined ? {} : { repositoryEdges: options.repositoryEdges }),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 
@@ -232,6 +248,26 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
         ...await mergedStateItems({ store, timeline, audit: flow.audit, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
       ];
+      // MR3b: a pull request merged by hand ahead of the one it depends on is said once, on the session and in the chat, naming every pull request of the task.
+      if (state === "MERGED") {
+        // Informational: a fault while building the warning never stops the merge from being recorded (a host's "slow down" still goes up to the sweep).
+        try {
+          items.push(...await outOfOrderMilestoneItems({
+            milestones, repositoryEdges: options.repositoryEdges, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
+            providerState: async (repositoryId) => {
+              const provider = workflow.pullRequests?.find((entry) => entry.repositoryId === repositoryId && entry.required);
+              const providerHome = provider === undefined ? undefined : await resolver(task.project, task.startingRevision, repositoryId, companyId);
+              if (provider === undefined || providerHome?.codeHost.mergeObservation === undefined) return "unknown";
+              // A provider closed without merging is not "waiting to merge": it is not said about.
+              const read = (await providerHome.codeHost.mergeObservation(changeRequestRef(providerHome.url, provider.number), { orgId: companyId }, budget)).state;
+              return read === "merged" ? "merged" : read === "open" ? "not_merged" : "unknown";
+            },
+          }, { ...task, orgId: companyId, workflow: next }, workflow, next, at));
+        } catch (error) {
+          if (hostRateLimitRetryAt(error) !== undefined) throw error;
+          log({ component: "merge_tracking", event: "merge_tracking.order_warning_failed", error: error instanceof Error ? error.name : "unknown" });
+        }
+      }
       const written = await store.transact(items);
       if (written.applied) await milestones.deliver(taskId).catch(() => undefined);
       // The merge completed the task: the host is told it ended, right after the merge's own commit and once (a later close does not tell it again, and a merge seen twice commits once).
@@ -247,22 +283,39 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   // ---- the sweep
 
   let cooldownUntil: number | undefined;
-  const COOLDOWN_KEY = { pk: "WORKFLOW_MERGE_SWEEP", sk: "COOLDOWN" };
+  const COOLDOWN_KEY = companyId === IMPLICIT_COMPANY_ID
+    ? { pk: "WORKFLOW_MERGE_SWEEP", sk: "COOLDOWN" }
+    : { pk: companyScoped(companyId, "WORKFLOW_MERGE_SWEEP"), sk: "COOLDOWN" };
   /** The pause a code host asked for is kept, so a restart of `rovara up` inside it does not ask the host again at once. */
-  const remember = (until: number | undefined): void => {
-    void (until === undefined ? store.delete({ key: COOLDOWN_KEY }) : store.put({ item: { ...COOLDOWN_KEY, entityType: "WORKFLOW_MERGE_SWEEP", until, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(until / 1000) + 86_400 } })).catch(() => undefined);
+  const remember = async (until: number | undefined): Promise<void> => {
+    await (until === undefined ? store.delete({ key: COOLDOWN_KEY }) : store.put({ item: { ...COOLDOWN_KEY, entityType: "WORKFLOW_MERGE_SWEEP", until, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(until / 1000) + 86_400 } })).catch(() => undefined);
   };
   let cooldownRead = false;
   let sweeping: Promise<{ attempted: number }> | undefined;
 
-  const dueRows = async (): Promise<Array<{ taskId: string; attempts: number; quiet: number }>> => {
-    const rows = await queryAll(store, { pk: "WORKFLOW_MERGE_RECOVERY", sk: { op: "beginsWith", prefix: "TASK#" } });
-    const at = now();
-    return rows
-      .filter((row) => row["kind"] === "tracking" && typeof row["taskId"] === "string" && typeof row["nextAttemptAt"] === "number" && row["nextAttemptAt"] <= at)
-      .sort((left, right) => (left["nextAttemptAt"] as number) - (right["nextAttemptAt"] as number))
-      .slice(0, SWEEP_MAX_ROWS)
-      .map((row) => ({ taskId: row["taskId"] as string, attempts: typeof row["attempts"] === "number" ? row["attempts"] : 0, quiet: typeof row["quiet"] === "number" ? row["quiet"] : 0 }));
+  const scan = options.scan ?? { cursor: undefined as string | undefined, complete: false };
+  const dueRows = async (deadline: number): Promise<Array<{ taskId: string; attempts: number; quiet: number }>> => {
+    const due: Array<{ taskId: string; attempts: number; quiet: number }> = [];
+    let read = 0;
+    do {
+      if (now() >= deadline || read >= 1000 || due.length >= SWEEP_MAX_ROWS) break;
+      const page = await store.query({ pk: "WORKFLOW_MERGE_RECOVERY", sk: { op: "beginsWith", prefix: "TASK#" }, limit: Math.min(100, 1000 - read), ...(scan.cursor === undefined ? {} : { cursor: scan.cursor }) });
+      for (const row of page.items) {
+        if (now() >= deadline || read >= 1000) break;
+        read += 1;
+        if (row["kind"] !== "tracking" || typeof row["taskId"] !== "string" || typeof row["nextAttemptAt"] !== "number" || row["nextAttemptAt"] > now()) continue;
+        // Shared recovery index: establish ownership BEFORE reading tracking state, calling a host, or settling/deleting a row.
+        if (await loadTask(row["taskId"]) === undefined) continue;
+        due.push({ taskId: row["taskId"], attempts: typeof row["attempts"] === "number" ? row["attempts"] : 0, quiet: typeof row["quiet"] === "number" ? row["quiet"] : 0 });
+        if (due.length >= SWEEP_MAX_ROWS) break;
+      }
+      // A full due batch may end inside this page: revisit it next pass, never skip unprocessed due rows.
+      if (due.length < SWEEP_MAX_ROWS) scan.cursor = page.cursor;
+      else break;
+      if (due.length > 0) break;
+    } while (scan.cursor !== undefined);
+    scan.complete = scan.cursor === undefined && due.length < SWEEP_MAX_ROWS && now() < deadline;
+    return due;
   };
 
   const settle = async (row: { taskId: string; attempts: number; quiet: number }, result: MergeRecoveryResult, changed: boolean): Promise<void> => {
@@ -282,7 +335,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       }
       case "RETRY": {
         const attempts = row.attempts + 1;
-        if (result.scope === "github-global") { cooldownUntil = Math.max(cooldownUntil ?? 0, result.retryAt); remember(cooldownUntil); }
+        if (result.scope === "github-global") { cooldownUntil = Math.max(cooldownUntil ?? 0, result.retryAt); await remember(cooldownUntil); }
         await set({ nextAttemptAt: Math.max(result.retryAt, at + Math.min(pollMs * attempts, TRACKING_FAILURE_MAX_MS)), attempts, updatedAt: new Date(at).toISOString() });
         return;
       }
@@ -297,9 +350,11 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
    * The tasks the sweep found owing the lighter flow's checks are kept as rows (`TIER_CHECKS_DUE`), so a host that only sweeps (or a short-lived one) still runs the tier pass later. The pass takes them oldest
    * run first (round robin), each with its own allowance and a share of the pass's time; a row goes only once its task was checked (or owes nothing), never before a code host's pause is honoured.
    */
-  const tierDueKey = (taskId: string) => ({ pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` });
+  const tierDueKey = (taskId: string) => companyId === IMPLICIT_COMPANY_ID
+    ? { pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` }
+    : { pk: companyScoped(companyId, "TIER_CHECKS_DUE"), sk: `TASK#${taskId}` };
   const markTierDue = async (taskId: string): Promise<void> => {
-    await store.put({ item: { ...tierDueKey(taskId), entityType: "TIER_CHECKS_DUE", taskId, lastRunAt: 0, dueAt: now() }, condition: when.absent() }).catch(() => undefined);
+    await store.put({ item: { ...tierDueKey(taskId), entityType: "TIER_CHECKS_DUE", companyId, taskId, lastRunAt: 0, dueAt: now() }, condition: when.absent() }).catch(() => undefined);
     // A host that sweeps but never runs the tier pass (`tierChecks`) leaves every lighter-flow task held: say so loudly, once per task and hour.
     const row = await store.get(tierDueKey(taskId)).catch(() => undefined);
     const dueAt = typeof row?.["dueAt"] === "number" ? row["dueAt"] : now();
@@ -312,7 +367,9 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const stallLogged = new Map<string, number>();
   let tierRunning: Promise<number> | undefined;
   const runTierPass = async (): Promise<number> => {
-    const rows = (await queryAll(store, { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
+    const rows = (await queryAll(store, companyId === IMPLICIT_COMPANY_ID
+      ? { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }
+      : { pk: companyScoped(companyId, "TIER_CHECKS_DUE"), sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
       .sort((left, right) => Number(left["lastRunAt"] ?? 0) - Number(right["lastRunAt"] ?? 0));
     const passEnds = now() + TIER_PASS_MAX_MS;
     let ran = 0;
@@ -321,8 +378,16 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       const left = passEnds - now();
       if (left <= 0) break;
       const taskId = typeof row["taskId"] === "string" ? row["taskId"] : "";
+      // Fail closed on legacy, malformed, or foreign rows before reading a task or touching the queue item.
+      // Rows written before tier rows carried a company exist only in the implicit company's shared partition: read them as implicit there (as reads.ts does), never elsewhere.
+      const rowCompany = row["companyId"] === undefined && companyId === IMPLICIT_COMPANY_ID ? IMPLICIT_COMPANY_ID : row["companyId"];
+      if (rowCompany !== companyId) {
+        log({ component: "merge_tracking", event: "tier_checks.unowned_item", companyId, taskId });
+        continue;
+      }
       if (taskId === "") continue;
-      const task = await readTask(flow, taskId).catch(() => undefined);
+      const taskRecord = await readTask(flow, taskId).catch(() => undefined);
+      const task = taskRecord?.companyId === companyId ? taskRecord : undefined;
       if (task === undefined || task.closedAt !== undefined) { await store.delete({ key: tierDueKey(taskId) }).catch(() => undefined); continue; }
       // Each task's share: its own requests, and at most a fixed part of the pass's time, so one slow task cannot hold the others back.
       const { budget, stop } = createReadBudget(now, { requests: TIER_CHECKS_MAX_REQUESTS, ms: Math.min(TIER_CHECKS_MAX_MS, left) });
@@ -332,7 +397,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
         ran += 1;
       } catch (error) {
         const limitedUntil = hostRateLimitRetryAt(error);
-        if (limitedUntil !== undefined) { cooldownUntil = Math.max(cooldownUntil ?? 0, limitedUntil); remember(cooldownUntil); break; }
+        if (limitedUntil !== undefined) { cooldownUntil = Math.max(cooldownUntil ?? 0, limitedUntil); await remember(cooldownUntil); break; }
         log({ component: "merge_tracking", event: "tier_checks.failed", taskId, error: error instanceof Error ? error.name : "unknown" });
       } finally {
         stop();
@@ -343,29 +408,35 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     return ran;
   };
 
-  const runSweep = async (): Promise<{ attempted: number }> => {
+  const runSweep = async (budgetMs: number): Promise<{ attempted: number }> => {
+    if (!Number.isFinite(budgetMs) || budgetMs <= 0) return { attempted: 0 };
+    const deadline = now() + Math.min(budgetMs, SWEEP_MAX_MS);
+    scan.complete = false;
     if (!cooldownRead) {
       cooldownRead = true;
       const kept = await store.get(COOLDOWN_KEY).catch(() => undefined);
       if (typeof kept?.["until"] === "number") cooldownUntil = Math.max(cooldownUntil ?? 0, kept["until"]);
     }
     if (cooldownUntil !== undefined && now() < cooldownUntil) return { attempted: 0 };
-    if (cooldownUntil !== undefined) remember(undefined);
+    if (cooldownUntil !== undefined) await remember(undefined);
     cooldownUntil = undefined;
     let rows: Awaited<ReturnType<typeof dueRows>>;
     try {
-      rows = await dueRows();
+      rows = await dueRows(deadline);
     } catch (error) {
       log({ component: "merge_tracking", event: "sweep.read_failed", error: error instanceof Error ? error.name : "unknown" });
       return { attempted: 0 };
     }
     if (rows.length === 0) return { attempted: 0 };
-    const { budget, stop } = createReadBudget(now);
+    const left = deadline - now();
+    if (left <= 0) return { attempted: 0 };
+    const { budget, stop } = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: left });
     let attempted = 0;
     try {
       for (const row of rows) {
         // A code host that said "slow down" in this sweep pauses the rest of it.
-        if (cooldownUntil !== undefined || budget.signal.aborted) break;
+        if (cooldownUntil !== undefined || budget.signal.aborted || now() >= deadline) { scan.complete = false; break; }
+        if (await loadTask(row.taskId) === undefined) continue;
         attempted += 1;
         const versionBefore = await trackingVersions(row.taskId);
         let result: MergeRecoveryResult;
@@ -402,15 +473,15 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
 
   return {
     deps,
-    sweep() {
+    sweep(sweepOptions) {
       // One sweep at a time: a second call while one runs is the same sweep.
-      sweeping ??= runSweep().finally(() => { sweeping = undefined; });
+      sweeping ??= runSweep(sweepOptions?.budgetMs ?? SWEEP_MAX_MS).finally(() => { sweeping = undefined; });
       return sweeping;
     },
     async wake(taskId) {
       await store.update({ key: recoveryRowKey(taskId), ops: [change.set("nextAttemptAt", now()), change.set("quiet", 0)], condition: when.and(when.present(), when.eq("kind", "tracking")) }).catch(() => undefined);
     },
-    pauseUntil(retryAt) { cooldownUntil = Math.max(cooldownUntil ?? 0, retryAt); remember(cooldownUntil); },
+    pauseUntil(retryAt) { cooldownUntil = Math.max(cooldownUntil ?? 0, retryAt); void remember(cooldownUntil); },
     pausedUntil: () => (cooldownUntil !== undefined && now() < cooldownUntil ? cooldownUntil : undefined),
     async idle() { await sweeping?.catch(() => undefined); await tierRunning?.catch(() => undefined); },
     tierChecks() {
