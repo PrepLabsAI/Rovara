@@ -23,6 +23,18 @@ export async function projectBaseBranch(deps: StoreOnly, orgId: OrgId, project: 
   }
 }
 
+/** TE-MR2b: the repository names of the project's latest revision (the ids a task's repositories carry), each once; undefined when they cannot be read or are none. */
+export async function projectRepositoryNames(deps: StoreOnly, orgId: OrgId, project: string): Promise<string[] | undefined> {
+  try {
+    const page = await deps.store.query({ pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: PROJECT_REVISION_SK_PREFIX }, descending: true, limit: 1 });
+    const definition = page.items[0]?.["definition"] as { repositories?: Array<{ name?: unknown }> } | undefined;
+    const names = (definition?.repositories ?? []).map((repository) => repository.name);
+    return names.length > 0 && names.every((name): name is string => typeof name === "string" && name !== "") && new Set(names).size === names.length ? names : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The branches the task's open pull requests target (distinct), read from its merge-tracking rows. Empty when it has no open pull request yet (it is then based on the project's default branch) or the rows cannot be read.
  */

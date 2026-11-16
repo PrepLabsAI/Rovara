@@ -38,6 +38,7 @@ export function taskPersonProofThroughLambda(input: {
       const envelope = TaskDispatchProofRequestSchema.parse({
         kind: "task-dispatch-person-proof",
         request,
+        ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
         admission: {
           version: 1,
           id: input.admission.id,

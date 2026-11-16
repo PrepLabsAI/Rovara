@@ -9,6 +9,7 @@
 import { z } from "zod";
 import { CoverageMapSchema } from "./test-env-nightly.js";
 import { BASELINE_CANDIDATES_MAX, BaselineCandidateSchema } from "./test-env-baseline.js";
+import { RepositoryCoverageMapSchema, RepositoryIdSchema } from "./test-env-multi-repo.js";
 import { CheckKindSchema } from "./evidence.js";
 import { ProjectCommandSchema, RelativeWorkspacePathSchema } from "./project.js";
 import { SeedScriptLockSchema } from "./seed-script-lock.js";
@@ -297,7 +298,7 @@ export const TestEnvTaskPlanSchema = z
       })
       .strict(),
     /** Readiness command `i` of the run is the environment's check `checks[i]`, for `i < checks.length`: the run's first commands are the environment's checks, in order. */
-    checks: z.array(z.object({ id: Id, kind: CheckKindSchema, coveragePath: RelativeWorkspacePathSchema.optional(), selectArgs: z.array(z.string().min(1).max(256)).max(8).optional() }).strict()
+    checks: z.array(z.object({ id: Id, kind: CheckKindSchema, /** TE-MR2b: the repository whose tests this check runs. Present only with `repositoryCoverageMap` (or by a producer that will send it); a worker without `TEST_ENV_MULTI_REPO_FEATURE` is never sent it. */ repositoryId: RepositoryIdSchema.optional(), coveragePath: RelativeWorkspacePathSchema.optional(), selectArgs: z.array(z.string().min(1).max(256)).max(8).optional() }).strict()
       .superRefine((check, context) => {
         if (check.selectArgs !== undefined && check.selectArgs.filter((arg) => arg === TEST_ENV_SELECT_PLACEHOLDER).length !== 1) context.addIssue({ code: "custom", path: ["selectArgs"], message: "selectArgs holds {tests} exactly once" });
       })).min(1).max(32),
@@ -317,9 +318,23 @@ export const TestEnvTaskPlanSchema = z
      * is on and there is at least one; sent only to a worker that lists `TEST_ENV_BASELINE_FEATURE`. Absent: today's plan byte for byte. Never empty.
      */
     baselineCandidates: z.array(BaselineCandidateSchema).min(1).max(BASELINE_CANDIDATES_MAX).optional(),
+    /**
+     * TE-MR2b: the coverage map across repositories (every path and every test names its repository). Never beside the repository-less `coverageMap`, and only with a repository on every check. Absent: today's plan byte for byte.
+     * Sent only to a worker that lists `TEST_ENV_MULTI_REPO_FEATURE`. Nothing sends it yet: the nightly is single-repository; a producer comes with the multi-repository nightly.
+     */
+    repositoryCoverageMap: RepositoryCoverageMapSchema.optional(),
+    /**
+     * TE-MR2b: this engine reads a combined baseline claim (`EvidenceRaw.baselines`) for a task with several repositories. Only with `baselineCandidates`; a worker writes the claim only when it is set, so an engine without it
+     * never receives a raw file with the field (its strict parse would refuse the whole file). Sent only to a worker that lists `TEST_ENV_MULTI_REPO_FEATURE`. Absent: today's plan byte for byte.
+     */
+    repositoryBaselines: z.literal(true).optional(),
   })
   .strict()
   .refine((plan) => plan.coverageMap === undefined || JSON.stringify(plan.coverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["coverageMap"] })
+  .refine((plan) => plan.repositoryCoverageMap === undefined || JSON.stringify(plan.repositoryCoverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["repositoryCoverageMap"] })
+  .refine((plan) => plan.repositoryBaselines === undefined || plan.baselineCandidates !== undefined, { message: "combined baselines need baseline candidates", path: ["repositoryBaselines"] })
+  .refine((plan) => plan.repositoryCoverageMap === undefined || plan.coverageMap === undefined, { message: "one coverage map, not two", path: ["repositoryCoverageMap"] })
+  .refine((plan) => plan.repositoryCoverageMap === undefined || plan.checks.every((check) => check.repositoryId !== undefined), { message: "a repository-qualified map needs a repository on every check", path: ["checks"] })
   .superRefine((plan, context) => {
     const dependencies = plan.dependencies ?? [];
     const unique = <T>(values: readonly T[]) => new Set(values).size === values.length;

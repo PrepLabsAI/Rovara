@@ -56,6 +56,11 @@ describe("company Slack entry points", () => {
     expect(h.claim).not.toHaveBeenCalled(); expect(h.queue).not.toHaveBeenCalled(); expect(h.pending).not.toHaveBeenCalled(); expect(h.post).not.toHaveBeenCalled();
     expect(h.notice).toHaveBeenCalledTimes(1); expect(h.notice.mock.calls[0]?.[0].user).toBe(USER); expect(h.notice.mock.calls[0]?.[0].text).toContain("link your account: Open in Rovara");
   });
+  it("does not ask an unlinked person to link in an ordinary unrelated thread", async () => {
+    const h = ingress(); h.members.clear(); h.deps.threadContinuation = async () => undefined as never;
+    await h.send("ordinary unrelated conversation", TEAM, "message");
+    expect(h.notice).not.toHaveBeenCalled(); expect(h.claim).not.toHaveBeenCalled();
+  });
   it("linked member's ordinary request runs, but model/settings commands never queue", async () => {
     const h = ingress(); await h.send(); expect(h.queue).toHaveBeenCalledOnce();
     h.claim.mockClear(); h.queue.mockClear(); await h.send("use fast");
@@ -72,8 +77,8 @@ describe("company Slack entry points", () => {
   it("company settings form refuses before submission", async () => {
     const w = world(), submit = vi.fn();
     const handler = createSlackInteractivityHandler({ ...w, now: () => NOW, secrets: async () => ({ signingSecret: SECRET, botToken: slackTokens("legacy").bot }), handlers: [], routeSubmission: submit });
-    const response = await handler(signed({ type: "view_submission", team: { id: TEAM }, user: { id: USER, team_id: TEAM }, view: { callback_id: "agentx_task_people_submission", blocks: [] } }, true));
-    expect(response.body).toContain(WEB); expect(submit).not.toHaveBeenCalled();
+    const response = await handler(signed({ type: "view_submission", team: { id: TEAM }, user: { id: USER, team_id: TEAM }, view: { callback_id: "agentx_task_people_submission", blocks: [{ type: "input", block_id: "" }] } }, true));
+    expect(JSON.parse(response.body)).toEqual({ response_action: "errors", errors: { form: WEB } }); expect(submit).not.toHaveBeenCalled();
   });
 });
 
@@ -196,6 +201,7 @@ describe("company link and front boundaries", () => {
   it("adapter front refuses unlinked input before handing off", async () => {
     const w = world(); w.members.clear(); const handOff = vi.fn(), notice = vi.fn();
     const handler = createSlackAdapterFront({ ...w, secrets: async () => ({ signingSecret: SECRET }), now: () => NOW,
+      getBinding: async () => ({ teamId: TEAM, channelId: CHANNEL, projectName: "payments", updatedAt: new Date(NOW).toISOString() }),
       isRovaraThread: async () => true, handOff, postEphemeral: notice });
     await handler(signed({ type: "event_callback", event_id: "EvFRONT1234", team_id: TEAM, event: { type: "app_mention", channel: CHANNEL, user: USER, ts: TS, text: "hello" } }));
     expect(handOff).not.toHaveBeenCalled(); expect(notice).toHaveBeenCalledOnce();
@@ -320,7 +326,7 @@ it("secondary workspace starts for a linked person with an explicit project gran
   const h = await brokerWorld(); grantProject(h.db, { developerId: person, name: "Member", provider: "oidc", sessionId: "fixture" });
   const response = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: { ...h.currentThread, threadTs: "1700000000.000006" },
     userId: USER, instructions: "explicit grant", workflowPath: "QUICK", requestId: randomUUID() });
-  expect(response.statusCode).toBe(200);
+  expect(response.statusCode, response.body).toBe(200);
   const task = h.db.get(`DEVTASK#${(JSON.parse(response.body) as { taskId: string }).taskId}`, "META");
   expect(task?.developerId).toBe(person); expect(task?.share).toMatchObject({ teamId: SLACK_TEAM });
 });
@@ -391,4 +397,25 @@ it.each([
   const w = world(); w.members.clear(); const h = createBroker({ extra: w });
   const response = await h.handler({ source: "agentx.slack-ingress", teamId: TEAM, ...input });
   expect(response.body).toContain(WEB); expect(h.db.commandNames()).toEqual([]);
+});
+
+it("press-path missing and foreign tasks have identical status and sentence", async () => {
+  const h = await brokerWorld(); const task = h.db.get(`DEVTASK#${h.taskId}`, "META")!;
+  const request = { source: "agentx.slack-ingress", action: "workflow-close", taskId: h.taskId, userId: USER, thread: h.currentThread, requestId: randomUUID() };
+  h.db.set({ ...task, companyId: B }); const foreign = await h.handler(request);
+  h.db.delete(`DEVTASK#${h.taskId}`, "META"); const missing = await h.handler(request);
+  expect(foreign).toEqual(missing);
+});
+it("binding PUT authenticates administrators before looking up a project company", async () => {
+  const h = await brokerWorld(); const project = vi.fn(async () => ({ companyId: B })); h.workspaces.getProject = project;
+  const write = await call(h.handler, { method: "PUT", path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${SLACK_CHANNEL}`, user: { subject: "non-admin", admin: false }, body: { projectName: "payments" } });
+  expect(write.status).toBe(403); expect(project).not.toHaveBeenCalled();
+});
+it.each([false, true])("front only gives link notices for a bound Rovara conversation (bound=%s)", async (bound) => {
+  const w = world(); w.members.clear(); const notice = vi.fn(); const handOff = vi.fn();
+  const handler = createSlackAdapterFront({ ...w, secrets: async () => ({ signingSecret: SECRET }), now: () => NOW,
+    getBinding: async () => bound ? { teamId: TEAM, channelId: CHANNEL, projectName: "payments", updatedAt: new Date(NOW).toISOString() } : undefined,
+    isRovaraThread: async () => false, handOff, postEphemeral: notice });
+  await handler(signed({ type: "event_callback", event_id: "EvFRONT1234", team_id: TEAM, event: { type: bound ? "message" : "app_mention", channel: CHANNEL, user: USER, ts: TS, thread_ts: TS, text: "hello" } }));
+  expect(notice).not.toHaveBeenCalled(); expect(handOff).not.toHaveBeenCalled();
 });

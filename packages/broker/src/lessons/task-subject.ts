@@ -45,6 +45,8 @@ export interface SendBackFact {
   /** The actor's standing in the project; anything but "member" keeps the span out of the lesson (an outsider's words are removed before any model call). */
   actorTrust?: TrustClass | undefined;
   reasonText?: string | undefined;
+  /** The only words on record are code's own (a findings answer's "N accepted, M to fix", or a fixed sentence), not the person's: the send-back is counted but its text is never read as a correction or recorded as theirs. */
+  fixedText?: boolean | undefined;
 }
 
 export interface TaskSubjectFacts {
@@ -76,7 +78,7 @@ export function buildTaskReflectSubject(facts: TaskSubjectFacts): ReflectSubject
     // An automatic send-back carries a fixed code, no person and no words: it is structured data about the run, not evidence a person gave.
     if (back.origin !== "human") return [];
     const authorId = idOf(back.actorDeveloperId);
-    const reason = back.reasonText?.trim();
+    const reason = back.fixedText === true ? undefined : back.reasonText?.trim();
     return [{
       kind: "send_back" as const, text: reason === undefined || reason === "" ? NO_REASON_TEXT : reason,
       // Unknown standing is an outsider's: its words are removed, and it never counts for a lesson.

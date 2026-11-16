@@ -9,7 +9,7 @@
 // LOOKUP (`baselineFor`): the exact (revision, branch, commit) row first; else the nearest row among the ancestors the WORKER verified (a list of `{ sha, commitsBack }`, at most 50 commits back), labelled partial. Else
 // nothing: today's behaviour (the nightly baseline). Never "the latest row". A row is used only when it parses, says the same revision, branch and commit as its key, has a whole failing set, is not from the future and
 // has not expired; a store that cannot be read is a miss, never "no failures". Age is reported, not limited: a row of last month is still the run at that commit, and the line says how old it is.
-import { BASELINE_ANCESTOR_MAX, BASELINE_CANDIDATES_MAX, BaselineRowSchema, baselineSetIsWhole, projectPk, queryAll, type BaselineRow, type OrgId } from "@agentx/contracts";
+import { BASELINE_ANCESTOR_MAX, BASELINE_CANDIDATES_MAX, BASELINE_REPOSITORIES_MAX, BaselineRowSchema, RawRepositoryBaselinesSchema, baselineSetIsWhole, projectPk, queryAll, type BaselineRow, type OrgId, type RawRepositoryBaseline } from "@agentx/contracts";
 import { documentOf, expired, expiryOf, type TestEnvDeps } from "./deps.js";
 
 /** How long a row is kept: the nightly's own history rows keep 90 days. */
@@ -109,6 +109,39 @@ export async function baselineFor(deps: Pick<TestEnvDeps, "store" | "now">, quer
     if (row !== undefined) return found(deps, row, entry.commitsBack);
   }
   return undefined;
+}
+
+export interface CombinedBaselinePart { repositoryId: string; found: FoundBaseline }
+export interface FoundCombinedBaseline {
+  /** One part per repository, in the order given. */
+  parts: CombinedBaselinePart[];
+  /** The farthest any repository's commit is behind its base. */
+  commitsBack: number;
+  /** True when any repository's run is of an ancestor, not of its base commit. */
+  partial: boolean;
+  /** The oldest run's age in whole hours. */
+  ageHours: number;
+}
+
+/**
+ * TE-MR2b, ONE baseline for a task that holds several repositories: each repository's part is its own `baselineFor` (the row of the commit the WORKER verified for it, on this revision and branch, whole failing set, not from
+ * the future). It exists only when EVERY repository has a usable row, the rows are of one kind of writer and no two repositories name one commit (one row would count twice). With fewer than two repositories, a claim
+ * out of range, or any repository without a row: undefined, which is today's behaviour. Never a baseline of some of the repositories. The rows' failing sets are repository-less, so the combination reports counts and
+ * commits only: it excuses no failure (`alreadyFailingFromBaseline` gives nothing for it).
+ */
+export async function combinedBaselineFor(
+  deps: Pick<TestEnvDeps, "store" | "now">, query: Pick<BaselineQuery, "orgId" | "project" | "envRevision" | "branch"> & { parts: ReadonlyArray<RawRepositoryBaseline> },
+): Promise<FoundCombinedBaseline | undefined> {
+  const claims = RawRepositoryBaselinesSchema.safeParse(query.parts);
+  if (!claims.success || query.parts.length > BASELINE_REPOSITORIES_MAX) return undefined;
+  const parts: CombinedBaselinePart[] = [];
+  for (const part of claims.data) {
+    const found = await baselineFor(deps, { orgId: query.orgId, project: query.project, envRevision: query.envRevision, branch: query.branch, ancestry: [{ sha: part.sha, commitsBack: part.commitsBack }] });
+    if (found === undefined) return undefined;
+    parts.push({ repositoryId: part.repositoryId, found });
+  }
+  if (new Set(parts.map((part) => part.found.row.writer)).size !== 1) return undefined;
+  return { parts, commitsBack: Math.max(...parts.map((part) => part.found.commitsBack)), partial: parts.some((part) => part.found.partial), ageHours: Math.max(...parts.map((part) => part.found.ageHours)) };
 }
 
 /** The commits a task plan offers the worker: the newest usable rows of this revision and branch (at most five), newest first. An unreadable store offers none. */
