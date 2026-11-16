@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { NightlyBaselineSchema, type NightlyBaseline } from "./test-env-nightly.js";
+import { RepositoryIdSchema } from "./test-env-multi-repo.js";
 
 /** A worker lists this when it checks the engine's candidates against the task's base commit (verification/baseline-ancestry.ts). The plan carries `baselineCandidates` only for a worker that lists it. */
 export const TEST_ENV_BASELINE_FEATURE = "task.testEnvBaseline.v1" as const;
@@ -38,6 +39,19 @@ export const BaselineCandidateSchema = z.object({ sha: Sha40 }).strict();
 /** What the worker found: one of the offered shas and how far back it is. The engine uses it only for a sha it offered itself. */
 export const RawBaselineSchema = z.object({ sha: Sha40, commitsBack: z.number().int().min(0).max(BASELINE_ANCESTOR_MAX) }).strict();
 export type RawBaseline = z.infer<typeof RawBaselineSchema>;
+/** TE-MR2b: the most repositories one combined baseline covers (a project's maximum). */
+export const BASELINE_REPOSITORIES_MAX = 32;
+/** One repository's part of a combined claim: its own nearest trusted commit and how far back it is. */
+export const RawRepositoryBaselineSchema = z.object({ repositoryId: RepositoryIdSchema, sha: Sha40, commitsBack: z.number().int().min(0).max(BASELINE_ANCESTOR_MAX) }).strict();
+export type RawRepositoryBaseline = z.infer<typeof RawRepositoryBaselineSchema>;
+/**
+ * TE-MR2b: the worker's claim for a task that holds two or more repositories: one part per repository, a repository once and a commit once (two repositories never share one row). Present only when EVERY repository
+ * has a part; with fewer the worker claims nothing. The engine uses it only for shas it offered itself.
+ */
+export const RawRepositoryBaselinesSchema = z.array(RawRepositoryBaselineSchema).min(2).max(BASELINE_REPOSITORIES_MAX).superRefine((parts, context) => {
+  if (new Set(parts.map((part) => part.repositoryId)).size !== parts.length) context.addIssue({ code: "custom", message: "a repository appears once" });
+  if (new Set(parts.map((part) => part.sha)).size !== parts.length) context.addIssue({ code: "custom", message: "a commit appears once" });
+});
 
 /** What the pull request and the task page read back for a task: the run the task was compared with, in numbers only. Kept beside the evidence pack (the pack's own shape is unchanged). */
 export const EvidenceBaselineSchema = z
@@ -51,6 +65,8 @@ export const EvidenceBaselineSchema = z
     ageHours: z.number().int().min(0).max(1_000_000),
     knownFailing: Count,
     flaky: Count,
+    /** TE-MR2b: present for a combined baseline (a task with several repositories): each repository's own commit. Then `sha` is the first repository's, `commitsBack` the farthest, `ageHours` the oldest, the counts are sums. */
+    repositories: RawRepositoryBaselinesSchema.optional(),
   })
   .strict();
 export type EvidenceBaseline = z.infer<typeof EvidenceBaselineSchema>;
@@ -61,6 +77,8 @@ const number = (count: number): string => count.toLocaleString("en-US");
 export interface BaselineLineInput {
   branch: string;
   shortSha: string;
+  /** A combined baseline: each repository and its commit (the line names them all). */
+  repositories?: ReadonlyArray<{ repositoryId: string; shortSha: string }> | undefined;
   writer: BaselineWriter;
   ageHours: number;
   commitsBack: number;
@@ -78,9 +96,12 @@ export function baselineLine(input: BaselineLineInput): string {
   const sha = /^[a-f0-9]{7,40}$/u.test(input.shortSha) ? input.shortSha.slice(0, 7) : undefined;
   const age = input.ageHours < 1 ? "under 1 h old" : `${number(input.ageHours)} h old`;
   const back = input.partial ? `, ${number(input.commitsBack)} ${input.commitsBack === 1 ? "commit" : "commits"} back; partial` : "";
-  return `Compared with ${branch === "" ? "the base branch" : branch} at ${sha ?? "an unknown commit"} (${WRITER_WORDS[input.writer]}, ${age}${back}): ${number(input.knownFailing)} known failing, ${number(input.flaky)} flaky`;
+  const at = input.repositories === undefined
+    ? sha ?? "an unknown commit"
+    : input.repositories.map((part) => `${inertEvidenceText(part.repositoryId, 60) || "a repository"} ${/^[a-f0-9]{7,40}$/u.test(part.shortSha) ? part.shortSha.slice(0, 7) : "an unknown commit"}`).join(", ");
+  return `Compared with ${branch === "" ? "the base branch" : branch} at ${at} (${WRITER_WORDS[input.writer]}, ${age}${back}): ${number(input.knownFailing)} known failing, ${number(input.flaky)} flaky`;
 }
 
 /** The line for the words a task kept (`EvidenceBaseline`). */
 export const baselineWords = (stored: EvidenceBaseline): string =>
-  baselineLine({ branch: stored.branch, shortSha: stored.sha.slice(0, 7), writer: stored.writer, ageHours: stored.ageHours, commitsBack: stored.commitsBack, partial: stored.commitsBack > 0, knownFailing: stored.knownFailing, flaky: stored.flaky });
+  baselineLine({ branch: stored.branch, shortSha: stored.sha.slice(0, 7), ...(stored.repositories === undefined ? {} : { repositories: stored.repositories.map((part) => ({ repositoryId: part.repositoryId, shortSha: part.sha.slice(0, 7) })) }), writer: stored.writer, ageHours: stored.ageHours, commitsBack: stored.commitsBack, partial: stored.commitsBack > 0, knownFailing: stored.knownFailing, flaky: stored.flaky });

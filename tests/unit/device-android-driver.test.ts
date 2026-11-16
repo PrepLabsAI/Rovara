@@ -86,6 +86,20 @@ describe("createAndroidEmulatorDriver", () => {
       expect(setupped.runs.some((row) => row.args.includes("install"))).toBe(false);
     });
 
+    it("asks for the emulator's last output only when it talks (diag on), and gives it to the diagnostic line when the emulator exits", async () => {
+      const talking = setup({ boot: ["", "", "", ""] });
+      const racing = talking.driver.prepare("before", { timeoutMs: 600_000 });
+      const emulator = talking.starts.find((row) => row.file === EMULATOR)!;
+      emulator.printed = "emulator: ERROR: x86 emulation currently requires hardware acceleration";
+      emulator.running = false;
+      expect(await racing).toBe("device_did_not_start");
+      expect(emulator.capture).toBe(true);
+      expect(talking.diag.find(([stage, note]) => stage === "boot" && note === "emulator exited")?.[2]).toBe("emulator: ERROR: x86 emulation currently requires hardware acceleration");
+      const quiet = setup({ boot: ["", "", "", ""] }, { diag: undefined });
+      void quiet.driver.prepare("before", { timeoutMs: 600_000 });
+      expect(quiet.starts.find((row) => row.file === EMULATOR)!.capture).toBeUndefined();
+    });
+
     it("says the device did not start when adb's server cannot stay up (its port was taken first), and believes nothing it said", async () => {
       const setupped = setup({ boot: ["", "", "", ""] });
       const racing = setupped.driver.prepare("before", { timeoutMs: 600_000 });

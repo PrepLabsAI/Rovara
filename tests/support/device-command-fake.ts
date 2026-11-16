@@ -3,7 +3,7 @@
 import type { DeviceBackground, DeviceCommandOptions, DeviceCommandPort, DeviceCommandResult } from "../../packages/verifier/src/executor/device-process.js";
 
 export type RecordedRun = { file: string; args: string[]; options: DeviceCommandOptions };
-export type RecordedStart = { file: string; args: string[]; env?: Readonly<Record<string, string>> | undefined; stops: number[]; running: boolean };
+export type RecordedStart = { file: string; args: string[]; env?: Readonly<Record<string, string>> | undefined; stops: number[]; running: boolean; capture?: boolean | undefined; printed?: string };
 
 const bytes = (text: string | Uint8Array) => (typeof text === "string" ? new TextEncoder().encode(text) : text);
 export const answer = (stdout: string | Uint8Array = "", exitCode: number | null = 0, extra: Partial<DeviceCommandResult> = {}): DeviceCommandResult => ({ exitCode, stdout: bytes(stdout), timedOut: false, tooLarge: false, ...extra });
@@ -15,9 +15,9 @@ export function scriptedPort(handler: (file: string, args: readonly string[], op
   const port: DeviceCommandPort = {
     async run(file, args, options) { runs.push({ file, args: [...args], options }); return handler(file, args, options); },
     start(file, args, options) {
-      const row: RecordedStart = { file, args: [...args], env: options.env, stops: [], running: true };
+      const row: RecordedStart = { file, args: [...args], env: options.env, capture: options.capture, stops: [], running: true };
       starts.push(row);
-      const background: DeviceBackground = { running: () => row.running, stop: (graceMs) => { row.stops.push(graceMs); row.running = false; return Promise.resolve(); } };
+      const background: DeviceBackground = { running: () => row.running, ...(options.capture === true ? { tail: () => row.printed ?? "" } : {}), stop: (graceMs) => { row.stops.push(graceMs); row.running = false; return Promise.resolve(); } };
       return background;
     },
   };

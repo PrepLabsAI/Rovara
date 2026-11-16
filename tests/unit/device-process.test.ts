@@ -87,6 +87,18 @@ describe("createNodeCommandPort.start", () => {
     expect(background.running()).toBe(false);
   });
 
+  it("keeps the last of a program's output and errors only when asked to (for the CI log), at most 2,000 characters", async () => {
+    const program = "process.stdout.write('a'.repeat(5000)); process.stderr.write('the end\\n')";
+    const asked = port.start(NODE, ["-e", program], { env: {}, capture: true });
+    for (let i = 0; i < 100 && asked.running(); i += 1) await new Promise((resolve) => { setTimeout(resolve, 50); });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    expect(asked.tail?.().length).toBe(2_000);
+    expect(asked.tail?.().endsWith("the end\n") || asked.tail?.().includes("the end")).toBe(true);
+    const quiet = port.start(NODE, ["-e", program], { env: {} });
+    expect(quiet.tail).toBeUndefined();
+    await quiet.stop(200);
+  });
+
   it("is not running for a program that cannot start", async () => {
     const background = port.start("/nonexistent/program", [], { env: {} });
     for (let i = 0; i < 100 && background.running(); i += 1) await new Promise((resolve) => { setTimeout(resolve, 50); });

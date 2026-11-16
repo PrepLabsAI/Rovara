@@ -37,6 +37,7 @@ import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
 import type { MoneyStop } from "../../core/task-flow/money-stop.js";
 import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
+import { agentModelChoiceFromRegistry, type AgentModelChoice, type OfferedModelsReader } from "../../core-host/gateway-model-selection.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
 export interface DispatcherRecord extends CoreDispatchRecord {
@@ -119,17 +120,19 @@ export type DispatcherFlowWiring = { [K in (typeof DISPATCHER_FLOW_DECLARATIONS)
 /** The words a company's runtime on the dispatcher refuses with while a flow input is not declared. Fixed. */
 export const DISPATCHER_FLOW_NOT_DECLARED = "the dispatcher's flow inputs are not declared (standing instructions, model route, lessons): no worker job is built without them";
 /**
- * The flow inputs the deployment declares on the dispatcher for the first staging run: no standing instructions (no company rules seam on AWS yet), no model route (a worker uses the
- * model keys it is given), and no lessons. Lessons cannot be carried on the dispatcher yet, so while ROVARA_CORE_LESSONS covers any company nothing is declared: every company's runtime
- * is refused and its records come back, rather than a worker job going out without the lessons its company has switched on.
+ * The flow inputs the deployment declares on the dispatcher: no standing instructions (no company rules seam on AWS yet), the model gateway route where it is configured, and lessons
+ * only through the reader L6 supplies (createDispatcherLearned) for this company's runtime while ROVARA_CORE_LESSONS covers it; a missing reader still refuses declaration.
  */
-export function hostedDispatcherFlow(env: NodeJS.ProcessEnv): DispatcherFlowWiring | undefined {
-  if (readCoreLessonsSwitch(env).value.mode !== "off") return undefined;
+export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryTaskFlowOptions["learned"]): DispatcherFlowWiring | undefined {
   // L2b (DEC 236): where the model gateway is configured, every core step goes to the gateway's agent model with a task token (the model-access capability).
   // A broken gateway setting declares nothing (every core record comes back) rather than a job without its model.
   let gateway: ReturnType<typeof gatewayModelAccessFromEnvironment>;
   try { gateway = gatewayModelAccessFromEnvironment(env); } catch { return undefined; }
-  return { standingInstructions: null, modelAccess: gateway === undefined ? null : gatewayModelRoute(gateway), learned: null };
+  const modelAccess = gateway === undefined ? null : gatewayModelRoute(gateway);
+  if (readCoreLessonsSwitch(env).value.mode !== "off") {
+    return typeof learned !== "function" ? undefined : { standingInstructions: null, modelAccess, learned };
+  }
+  return { standingInstructions: null, modelAccess, learned: null };
 }
 
 /** The words a code host call says on the dispatcher. */
@@ -187,7 +190,9 @@ export interface DispatcherCoreInputs {
   /** SQS ChangeMessageVisibility on the core dispatch queue. */
   changeVisibility: (receiptHandle: string, seconds: number) => Promise<void>;
   /** The flow inputs every worker job carries, each declared (see DISPATCHER_FLOW_DECLARATIONS). Absent, or any key missing: every company's runtime is refused and its records come back. */
-  flow?: DispatcherFlowWiring;
+  flow?: DispatcherFlowWiring | ((registry: AdapterRegistry, companyId: OrgId) => DispatcherFlowWiring | undefined);
+  /** DEC 243c: what the model gateway offers one company's agents. With it each company's chosen model (made on its web page) is the step's model, refused when it is not on the list; without it every step runs on the declared route. */
+  offeredModels?: OfferedModelsReader;
   /** The points Code's AWS modules do not fill (admission, metering, identity, approvers, audit-sink, model keys: lane E2 step 5), added after them. Absent: the registry refuses by name. */
   extraModules?: readonly CoreAdapterModule[];
   /** Wraps the registry's store (the deployment's retention rule, core-host/retention.ts, is applied by the storage module itself). */
@@ -200,6 +205,9 @@ export interface DispatcherCoreInputs {
   log: (entry: Record<string, unknown>) => void;
   now?: () => Date;
 }
+
+/** The flow option a company's step rule gives (none without a reader). */
+const stepModelsOf = (choice: AgentModelChoice | undefined): Partial<RegistryTaskFlowOptions> => (choice === undefined ? {} : { stepModels: choice.stepModels });
 
 const required = (value: string | undefined): string | undefined => (value === undefined || value.trim() === "" ? undefined : value);
 
@@ -250,13 +258,15 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     dispatchOnly: true,
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     runtime: (registry, companyId) => {
-      const flow = inputs.flow;
+      const flow = typeof inputs.flow === "function" ? inputs.flow(registry, companyId) : inputs.flow;
       // Declared means present AND `null` (an explicit none) or a value: a key that is there with `undefined` in it is not a declaration.
       if (flow === undefined || flow === null || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name) || flow[name] === undefined)) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
       const { standingInstructions, modelAccess, learned } = flow;
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
+        // DEC 243c: the company's own model rule (its choice on the gateway's list), the same rule the broker's pages change; absent a reader or a model route, every step runs on the declared route.
+        ...(modelAccess === null || modelAccess === undefined ? {} : stepModelsOf(agentModelChoiceFromRegistry({ registry, companyId, reader: inputs.offeredModels, modelAccess, now: () => now().getTime() }))),
         ...(learned === null || learned === undefined ? {} : { learned }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
       };

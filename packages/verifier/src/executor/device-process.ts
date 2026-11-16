@@ -12,13 +12,15 @@ export type DeviceCommandResult = Readonly<{ exitCode: number | null; stdout: Ui
 export type DeviceBackground = Readonly<{
   /** Whether the program is still running. */
   running(): boolean;
+  /** The end of what the program printed (output and errors), only when it was started with `capture`: for the CI test's diagnostic lines, never kept anywhere else. */
+  tail?(): string;
   /** Asks the program's group to end, then forces it after `graceMs`; resolves when it is gone (or after the force, at most `graceMs` + 2 s). */
   stop(graceMs: number): Promise<void>;
 }>;
 export type DeviceCommandPort = Readonly<{
   run(file: string, args: readonly string[], options: DeviceCommandOptions): Promise<DeviceCommandResult>;
-  /** Starts a program that keeps running (the emulator). Its output is discarded. */
-  start(file: string, args: readonly string[], options: { env?: Readonly<Record<string, string>> }): DeviceBackground;
+  /** Starts a program that keeps running (the emulator). Its output is discarded, unless `capture` asks for the last 2,000 characters of it (see `tail`). */
+  start(file: string, args: readonly string[], options: { env?: Readonly<Record<string, string>>; capture?: boolean }): DeviceBackground;
 }>;
 
 const NO_BYTES = new Uint8Array(0);
@@ -65,10 +67,17 @@ export function createNodeCommandPort(): DeviceCommandPort {
     },
     start(file, args, options) {
       let exited = false;
-      const child = spawn(file, [...args], { detached: true, stdio: "ignore", env: { ...(options.env ?? {}) } });
+      let last = "";
+      const child = spawn(file, [...args], { detached: true, stdio: options.capture === true ? ["ignore", "pipe", "pipe"] : "ignore", env: { ...(options.env ?? {}) } });
+      if (options.capture === true) {
+        const keep = (chunk: Buffer) => { last = (last + chunk.toString("utf8")).slice(-2_000); };
+        child.stdout?.on("data", keep);
+        child.stderr?.on("data", keep);
+      }
       const gone = new Promise<void>((resolve) => { child.once("exit", () => { exited = true; resolve(); }); child.once("error", () => { exited = true; resolve(); }); });
       return {
         running: () => !exited,
+        ...(options.capture === true ? { tail: () => last } : {}),
         async stop(graceMs) {
           if (exited) return;
           endGroup(child.pid, "SIGTERM");

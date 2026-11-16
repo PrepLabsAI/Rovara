@@ -2,7 +2,8 @@ import { MissingProviderSecret, type ModelRole } from "./config.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
 import { ROUTE_PROVIDER, bedrockClaudeModelIds, catalogModel, catalogModelByName, proxyGeographyOfModelId } from "./catalog.js";
 export { ROUTE_PROVIDER };
-import { TRANSPORTS, requestCompat } from "./transport.js";
+import { TRANSPORTS, carriesUnsignedReasoning, requestCompat } from "./transport.js";
+import { TOOL_DECLARATIONS_MISSING_WORDS, toolBlocksWithoutTools } from "./tool-history.js";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedMarker, budgetScopeOfProxyBody, modelNotAllowedMarker, type ModelBudgetScope } from "./budget.js";
 export { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedFromMarker, modelNotAllowedFromMarker, type ModelBudgetScope } from "./budget.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
@@ -288,7 +289,7 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
       reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow, maxTokens: base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
-      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined),
+      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),
     }],
     streamSimple: (entry, context, streamOptions) => safeProviderStream(route.api === "anthropic-messages" ? "anthropic" : "openai", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, requestKey, { api: route.api, identity }),
   });
@@ -297,9 +298,12 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
   return runtime;
 }
 
-/** The request a routed model gets: the shared rules of requestCompat, and no session-affinity header for a company's endpoint. */
-function routeCompat(api: InvocationModelRoute["api"], compat: unknown) {
-  if (api === "anthropic-messages") return requestCompat("anthropic", compat);
+/**
+ * The request a routed model gets: the shared rules of requestCompat, and no session-affinity header for a company's endpoint. A routed Anthropic-format model that
+ * needs its earlier reasoning sent back (carriesUnsignedReasoning) also keeps its unsigned thinking blocks as thinking blocks.
+ */
+function routeCompat(api: InvocationModelRoute["api"], compat: unknown, catalogName: string) {
+  if (api === "anthropic-messages") return { ...requestCompat("anthropic", compat), ...(carriesUnsignedReasoning(catalogName) ? { allowEmptySignature: true } : {}) };
   if (api === "openai-responses") return requestCompat("openai", compat);
   return { ...(compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false, supportsMidConvoSystemMessages: false };
 }
@@ -324,6 +328,9 @@ function upstreamStream(provider: KeyedModelProvider, model: Model<Api>, context
 function eventModel(data: { model?: unknown; message?: { model?: unknown }; response?: { model?: unknown } }): unknown {
   return data.model ?? data.message?.model ?? data.response?.model;
 }
+
+/** A routed call that holds tool calls or results and declares no tools (tool-history.ts). Never sent. */
+class ToolDeclarationsMissing extends Error {}
 
 function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), plan?: ChatGptPlan, proxyKey?: () => Promise<string>,
   /** A routed model (Task 27): its API, which picks the client, and the catalog identity its usage is reported under. */
@@ -397,6 +404,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   };
   void (async () => {
     try {
+      // DEC 243c: a routed model may be served through Converse, which refuses tool calls and results without declared tools. Such a call is refused here, before a key is asked for or anything is sent.
+      if (route !== undefined && toolBlocksWithoutTools(context)) throw new ToolDeclarationsMissing();
       if (plan?.fallback?.reason !== undefined) return await fallBack(plan.fallback, plan.fallback.reason);
       // A ChatGPT task's token is asked for each time, so a refreshed one replaces an expiring one. A token the
       // control plane will not give (the connection was revoked) sends the request to the fallback.
@@ -443,7 +452,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     } catch (error) {
       const aborted = options?.signal?.aborted === true;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider, model: model.id,
-        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled),
+        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });

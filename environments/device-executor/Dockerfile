@@ -50,13 +50,18 @@ RUN yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses > /dev
 # API 34, the plain Android Open Source Project image (no Google apps, no accounts), for x86-64.
 RUN /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "emulator" "system-images;android-34;default;x86_64" \
     && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --list_installed
-RUN echo no | /opt/android-sdk/cmdline-tools/latest/bin/avdmanager create avd --force --name rovara --package "system-images;android-34;default;x86_64" --device pixel_5 \
-    && cfg=/opt/android-avd/rovara.avd/config.ini \
+# The AVD goes to an explicit --path: the first CI run (2026-11-16) showed this avdmanager (command-line tools 23.0.0) exits 0 without creating it under ANDROID_AVD_HOME. If its own rovara.ini is not in
+# ANDROID_AVD_HOME afterwards, this writes the three-line pointer the emulator reads; a missing config.ini lists where avdmanager did put things and fails the build.
+RUN mkdir -p /opt/android-avd \
+    && echo no | /opt/android-sdk/cmdline-tools/latest/bin/avdmanager create avd --force --name rovara --package "system-images;android-34;default;x86_64" --device pixel_5 --path /opt/android-avd/rovara.avd \
+    ; cfg=/opt/android-avd/rovara.avd/config.ini \
+    && if [ ! -f "$cfg" ]; then echo "avdmanager did not create $cfg; found:"; find / -xdev \( -name 'rovara.avd' -o -name 'rovara.ini' \) 2>/dev/null; ls -la /opt/android-avd "$HOME/.android" 2>&1; exit 1; fi \
+    && if [ ! -f /opt/android-avd/rovara.ini ]; then printf 'avd.ini.encoding=UTF-8\npath=/opt/android-avd/rovara.avd\ntarget=android-34\n' > /opt/android-avd/rovara.ini; fi \
     && for kv in hw.lcd.width=720 hw.lcd.height=1280 hw.lcd.density=320 hw.ramSize=2048 disk.dataPartition.size=2G hw.gpu.enabled=yes hw.gpu.mode=swiftshader_indirect hw.keyboard=yes \
                  hw.audioInput=no hw.audioOutput=no hw.camera.back=none hw.camera.front=none showDeviceFrame=no; do \
          key="${kv%%=*}"; sed -i "/^${key}=/d" "$cfg"; echo "$kv" >> "$cfg"; \
        done \
-    && cat "$cfg"
+    && cat "$cfg" /opt/android-avd/rovara.ini
 # No command-line tools in the final image: nothing can install anything at run time.
 RUN rm -rf /opt/android-sdk/cmdline-tools
 
@@ -87,9 +92,12 @@ COPY --from=android /opt/android-avd /opt/android-avd
 COPY --from=android /opt/maestro /opt/maestro
 
 # Fail the BUILD, not the first run, when the emulator or adb cannot load: every shared library the headless emulator needs must be found, and the tools must start (no KVM is needed to print a version).
+# The emulator's own libraries (emulator/lib64) are found by the `emulator` launcher, which sets LD_LIBRARY_PATH before it starts qemu; the qemu ldd below sets the same one (the first CI run listed 13 of them as not found without it).
 RUN test -x /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless && test -x /opt/android-sdk/emulator/emulator && test -x /opt/android-sdk/platform-tools/adb \
+    && export LD_LIBRARY_PATH=/opt/android-sdk/emulator/lib64 \
     && ! ldd /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless | grep "not found" \
     && ! ldd /opt/android-sdk/emulator/emulator | grep "not found" \
+    && unset LD_LIBRARY_PATH \
     && /opt/android-sdk/emulator/emulator -version | head -n 3 \
     && /opt/android-sdk/platform-tools/adb version \
     && JAVA_HOME=/opt/java /opt/maestro/bin/maestro --version

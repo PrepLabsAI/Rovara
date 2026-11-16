@@ -16,6 +16,7 @@ import { ownerNoteItem, ownerRoundPlaceOf } from "./owner-note.js";
 import { CLOSED_TASK, NEVER_STARTED_TASK, WAITING_FOR_SPEND, admitRound, loadTaskAsOwner, ownerWords, parseBody, waitingForSpend, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
 import { readWorkspace, commitWorkflow, runDispatchRow } from "./stage-machine.js";
+import { tellLessons } from "./lessons-tell.js";
 import { iso, log } from "./support.js";
 
 export const NO_SEND_BACK_FOR_NOW = "there is no current failed check or review finding to send back to coding";
@@ -65,6 +66,9 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
     if (fresh !== undefined && again?.source === "SEND_BACK" && again.reason === words.slice(0, 500).trim()) return taskViewOf(deps, fresh);
     throw agentXError("IDEMPOTENCY_CONFLICT", SEND_BACK_OUT_OF_DATE);
   }
+  // Learn on send-back (lessons seam, filled by the lessons host): the person's correction can help the next task while this one is open. Told once, by the call that committed, with only the task's id; the lessons
+  // host reads the task itself and checks the switch, the company and the mode. Best effort: a seam that fails or throws never fails or delays the send-back (a failure is one fixed log line, no cause).
+  await tellLessons(deps, task.taskId);
   // The coding run starts now; a start that fails leaves the row for the recovery sweep, and the send-back stands.
   await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: returned.revision, kind: "IMPLEMENT" })
     .catch((error: unknown) => log(deps, { event: "task_actions.send_back_start_deferred", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));

@@ -12,18 +12,19 @@ const PROJECT = "payments";
 const HOUR = 3_600_000;
 const sha = (n: number): string => n.toString(16).padStart(40, "0");
 const cmd = (executable: string, args: string[] = []) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });
-const body = (): TestEnvironmentBody => TestEnvironmentBodySchema.parse({
-  tier: "sandbox", repos: [{ repositoryId: "demo", setupCommands: [cmd("npm", ["ci"])], checks: [{ id: "unit", label: "Unit tests", command: cmd("npm", ["test"]), kind: "test" }] }],
+const body = (twoRepositories = false): TestEnvironmentBody => TestEnvironmentBodySchema.parse({
+  tier: "sandbox", repos: [{ repositoryId: "demo", setupCommands: [cmd("npm", ["ci"])], checks: [{ id: "unit", label: "Unit tests", command: cmd("npm", ["test"]), kind: "test" }] },
+    ...(twoRepositories ? [{ repositoryId: "second", setupCommands: [], checks: [{ id: "second-unit", label: "Second tests", command: cmd("npm", ["run", "second"]), kind: "test" }] }] : [])],
   roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, nightly: { enabled: true, cronUtc: "0 6 * * *", branch: "main" },
   services: [], data: { seeds: [], generator: "faker_seeded", seed: 7 }, accounts: [], prodDeny: { accountIds: ["111122223333"], hosts: ["*.prod.example.com"], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false },
 });
 
-async function world(env: NodeJS.ProcessEnv) {
+async function world(env: NodeJS.ProcessEnv, twoRepositories = false) {
   const harness = createHarness();
   await harness.registerProject();
   const deps: TestEnvDeps = { store: harness.store, now: () => harness.clock.now, env };
   harness.deps.testEnvironment = createTaskTestEnvironment(deps, { orgId: COMPANY });
-  const environment = body();
+  const environment = body(twoRepositories);
   const digest = testEnvDigest(environment);
   await deps.store.put({ item: documentOf({ ...testEnvRevisionKey(COMPANY, PROJECT, 1), entityType: "TEST_ENV_REVISION", orgId: COMPANY, project: PROJECT, revision: 1, approvedAt: "2026-11-09T09:00:00.000Z", approvedBy: "owner", digest, requestId: "r1", lessSafe: [], environment }) });
   await deps.store.put({ item: documentOf({ ...testEnvLatestKey(COMPANY, PROJECT), entityType: "TEST_ENV_LATEST", orgId: COMPANY, project: PROJECT, revision: 1, digest }) });
@@ -31,7 +32,7 @@ async function world(env: NodeJS.ProcessEnv) {
   const keep = (over: Record<string, unknown>) => recordBaselineRow(deps, mintTrustedBaselineRun({ orgId: COMPANY, project: PROJECT, row: BaselineRowSchema.parse({
     recordedAt: new Date(harness.clock.now - HOUR).toISOString(), envRevision: 1, branch: "main", headSha: sha(1), finishedAt: new Date(harness.clock.now - 2 * HOUR).toISOString(), writer: "nightly",
     tests: { total: 4, passed: 3, failed: 1, skipped: 0 }, failed: ["a.test.ts::x"], flaky: [], ...over }) }));
-  const plan = (mode: "CHECKS" | "IMPLEMENT" = "CHECKS") => harness.deps.testEnvironment!.stepPlan({ project: PROJECT, taskId: started.task.taskId, mode, ...(mode === "CHECKS" ? { readiness: [cmd("npm", ["test"])] } : {}) });
+  const plan = (mode: "CHECKS" | "IMPLEMENT" = "CHECKS") => harness.deps.testEnvironment!.stepPlan({ project: PROJECT, taskId: started.task.taskId, mode, ...(mode === "CHECKS" ? { readiness: twoRepositories ? [cmd("npm", ["test"]), cmd("npm", ["run", "second"])] : [cmd("npm", ["test"])] } : {}) });
   const track = (n: number, baseBranch: string, state = "open") => deps.store.put({ item: { pk: `DEVTASK#${started.task.taskId}`, sk: `MERGE_TRACKING#${n}`, state, baseBranch } });
   return { keep, plan, track, store: deps.store };
 }
@@ -69,6 +70,23 @@ describe("baseline candidates in the task plan", () => {
     expect([...planned!.requires].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_BASELINE_FEATURE].sort());
     // A coding run is never told: candidates are for the verification run.
     expect(await on.plan("IMPLEMENT")).toBeUndefined();
+  });
+
+  it("TE-MR2b: a project with several repositories also asks for one claim per repository (and needs the feature); one repository does not", async () => {
+    const one = await world({ ROVARA_BASELINE_CACHE: "1" });
+    await one.keep({});
+    expect((await one.plan())?.plan.repositoryBaselines).toBeUndefined();
+    const two = await world({ ROVARA_BASELINE_CACHE: "1" }, true);
+    await two.keep({});
+    const planned = await two.plan();
+    expect(planned?.plan.baselineCandidates).toEqual([{ sha: sha(1) }]);
+    expect(planned?.plan.repositoryBaselines).toBe(true);
+    expect(TestEnvTaskPlanSchema.safeParse(planned?.plan).success).toBe(true);
+    expect([...planned!.requires].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_BASELINE_FEATURE, "task.testEnvMultiRepo.v1"].sort());
+    // Without candidates (switch off) nothing is asked.
+    const off = await world({}, true);
+    await off.keep({});
+    expect((await off.plan())?.plan.repositoryBaselines).toBeUndefined();
   });
 
   it("the branch is the task's own base branch: another branch, or two different ones, offers nothing from the default branch's rows; the same branch (or its own rows) still works", async () => {
