@@ -207,17 +207,17 @@ describe("the task page", () => {
     await passing.seedTracking();
     const okTask = (await passing.task()) as never;
     const plain = await attentionOf({ store: passing.store, companyId: ORG }, okTask);
-    expect((await attentionOf({ store: passing.store, companyId: ORG, ciWaitLines } as never, okTask)).view).toEqual(plain.view);
+    expect((await attentionOf({ store: passing.store, companyId: ORG, ciWaitLines }, okTask)).view).toEqual(plain.view);
     expect(asked).toEqual([]);
     const world = await mergeWorld({ pullRequests: [{ repositoryId: "app", number: 1 }, { repositoryId: "payments-lib", number: 1 }] });
     await world.seedTracking({ ci: "failing", failingChecks: ["unit"] });
     const task = (await world.task()) as never;
-    const shown = await attentionOf({ store: world.store, companyId: ORG, ciWaitLines } as never, task);
+    const shown = await attentionOf({ store: world.store, companyId: ORG, ciWaitLines }, task);
     expect(shown.view.merge?.lines).toContain(MERGE_ORDER_WORDS.ciFailureWaits("payments-lib #1"));
     expect(new Set(asked)).toEqual(new Set(["app", "payments-lib"]));
     // A seam that fails leaves the page as it was.
     const base = await attentionOf({ store: world.store, companyId: ORG }, task);
-    const broken = await attentionOf({ store: world.store, companyId: ORG, ciWaitLines: async () => { throw new Error("down"); } } as never, task);
+    const broken = await attentionOf({ store: world.store, companyId: ORG, ciWaitLines: async () => { throw new Error("down"); } }, task);
     expect(broken.view).toEqual(base.view);
   });
 });
