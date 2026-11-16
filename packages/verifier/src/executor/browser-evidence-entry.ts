@@ -3,6 +3,7 @@
 // sandbox's own loopback; Chromium (the executor's own, with its sandbox on, under the pinned seccomp profile) opens each page through the same driver slice 1 built and tested (browser-evidence-chromium.ts: masking, freezing, the
 // verify passes), and the program prints one JSON line for the app's state and one per page. It starts no app and writes no file. The worker holds the result to the run's caps again (the runner) before anything is kept.
 import { realpathSync } from "node:fs";
+import type { Browser } from "playwright-core";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
 import { BrowserEvidenceExecutorLineSchema, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, decodeBrowserEvidenceExecutorPlan, withDefaultMasks, type BrowserEvidenceExecutorLine, type BrowserEvidenceExecutorPlan } from "@agentx/contracts";
@@ -72,14 +73,29 @@ export async function runCapture(plan: BrowserEvidenceExecutorPlan, deps: Captur
   return lines;
 }
 
+/**
+ * The executor's Chromium for THIS program, driven over a PIPE (`--remote-debugging-pipe`, Playwright's own launch), never over a DevTools port. This container shares the task sandbox's network namespace, so a TCP debugging port on its loopback
+ * would be reachable by whatever runs in the sandbox (the project's own app, a daemon a test left behind) and would hand it the browser: its masked pages, its other origins. With a pipe there is no address to connect to at all. Chromium's own sandbox
+ * stays on (`chromiumSandbox: true`: the pinned seccomp profile lets it create its namespaces), and it sees only what it needs of the environment.
+ */
+async function openPipeChromium(): Promise<{ browser: Browser; close(): Promise<void> }> {
+  const { chromium } = await import("playwright-core");
+  const browser = await chromium.launch({
+    executablePath: chromium.executablePath(), headless: false, chromiumSandbox: true, timeout: 30_000,
+    args: ["--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-extensions",
+      "--metrics-recording-only", "--mute-audio", "--password-store=basic", "--use-mock-keychain"],
+    env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: process.env["TMPDIR"] ?? "/tmp", TMPDIR: process.env["TMPDIR"] ?? "/tmp", LANG: "C.UTF-8", ...(process.env["PLAYWRIGHT_BROWSERS_PATH"] === undefined ? {} : { PLAYWRIGHT_BROWSERS_PATH: process.env["PLAYWRIGHT_BROWSERS_PATH"] }) },
+  });
+  return { browser, close: () => browser.close().catch(() => undefined) };
+}
+
 /** The program: the plan is the one argument; the output is the lines; anything wrong is one fixed sentence on stderr and exit code 2. */
 async function main(): Promise<void> {
   const plan = decodeBrowserEvidenceExecutorPlan(process.argv[2]);
   if (plan === undefined || process.argv.length !== 3) { process.stderr.write("browser evidence plan is not valid\n"); process.exit(2); }
-  const { createChromiumEvidenceDriver, openEvidenceChromium } = await import("./browser-evidence-chromium.js");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("browser evidence run timed out")), plan.runMs + 20_000);
-  const chromium = await openEvidenceChromium({ signal: controller.signal });
+  const { createChromiumEvidenceDriver } = await import("./browser-evidence-chromium.js");
+  const timer = setTimeout(() => { process.stderr.write("browser evidence run timed out\n"); process.exit(1); }, plan.runMs + 20_000);
+  const chromium = await openPipeChromium();
   let code = 0;
   try {
     const driver = createChromiumEvidenceDriver({ browser: chromium.browser, origin: `http://127.0.0.1:${String(plan.port)}`, app: { start: () => Promise.resolve("ready" as const), stop: () => Promise.resolve() } });

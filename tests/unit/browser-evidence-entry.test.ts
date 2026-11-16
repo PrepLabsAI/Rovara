@@ -1,5 +1,6 @@
 // TE-H1 slice 2: the capture program that runs in the executor image. It reads one plan, waits for the app the worker started in the sandbox, takes each page through the slice-1 driver, and prints bounded lines. Tested here with a
 // fake driver (the real Chromium runs in the Linux test); what it must never do is print something the worker would have to guess about.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, BrowserEvidenceExecutorLineSchema, type BrowserEvidenceExecutorPlan } from "../../packages/contracts/src/index.js";
 import { runCapture, type CaptureDeps } from "../../packages/verifier/src/executor/browser-evidence-entry.js";
@@ -55,5 +56,15 @@ describe("the capture program", () => {
     expect(lines.slice(1).map((line) => (line.t === "shot" && !line.ok ? line.reason : "shown"))).toEqual(["shown", "shown", "time_limit"]);
     // A page is never given more than what is left of the run.
     expect(d.asked.map((entry) => entry.timeoutMs)).toEqual([15_000, 10_000]);
+  });
+});
+
+describe("the capture program's browser", () => {
+  const source = readFileSync("packages/verifier/src/executor/browser-evidence-entry.ts", "utf8");
+  it("is driven over a pipe, never a DevTools port: the program shares the sandbox's network namespace, and a debugging port there would hand the browser to whatever runs in the sandbox", () => {
+    const code = source.split("\n").filter((row) => !row.trimStart().startsWith("//") && !row.trimStart().startsWith("*") && !row.trimStart().startsWith("/*")).join("\n");
+    expect(code).toContain("chromium.launch(");
+    expect(code).toContain("chromiumSandbox: true");
+    for (const forbidden of ["remote-debugging-port", "remote-debugging-address", "connectOverCDP", "launchLocalChromium", "openEvidenceChromium", "--no-sandbox"]) expect(code, forbidden).not.toContain(forbidden);
   });
 });

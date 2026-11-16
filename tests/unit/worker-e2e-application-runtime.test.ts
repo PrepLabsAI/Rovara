@@ -125,6 +125,28 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     monitor.stop();
   });
 
+  it("lists browser evidence on its own (no shared runtime directory needed), keeps it through one failed look and withholds it after two in a row (TE-H1)", async () => {
+    const BROWSER = "task.browserEvidence.v1";
+    let code = 0;
+    const docker = { run: vi.fn(async () => ({ code, stdout: "", stderr: "" })) };
+    // A platform with no shared runtime directory: application CHECKS cannot be listed, browser evidence still can.
+    const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "darwin", arch: "arm64", docker, intervalMs: 25 });
+    monitor.start();
+    await vi.waitFor(async () => expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER));
+    expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(FEATURE);
+    code = 1;
+    const looks = docker.run.mock.calls.length;
+    await vi.waitFor(() => expect(docker.run.mock.calls.length).toBeGreaterThan(looks + 3));
+    await vi.waitFor(async () => expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(BROWSER));
+    monitor.stop();
+    // An image reference that is not one is never listed.
+    const bad = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: "-v /:/host" }, platform: "linux", arch: "arm64", docker: { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) }, intervalMs: 60_000 });
+    bad.start();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((await pingOf(bad)).body.invocationFeatures).not.toContain(BROWSER);
+    bad.stop();
+  });
+
   it("refreshes in the background: a host that loses the image stops listing the feature, and one that gets it lists it again", async () => {
     vi.useFakeTimers();
     try {
@@ -201,7 +223,8 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
       const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker, intervalMs: 1_000 });
       monitor.start();
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(docker.run).toHaveBeenCalledTimes(1);
+      // One look at the image for application CHECKS and one for browser evidence (TE-H1), and no second round while the first still waits.
+      expect(docker.run).toHaveBeenCalledTimes(2);
       monitor.stop();
     } finally { vi.useRealTimers(); }
   });

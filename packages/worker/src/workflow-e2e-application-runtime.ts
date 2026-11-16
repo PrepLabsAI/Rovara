@@ -132,6 +132,7 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
   sharedConfigCheck?: () => void }) {
   let latest: WorkflowE2EApplicationChecksAvailability = { status: "unavailable", reason: "not-yet-checked" };
   let browserLatest: BrowserEvidenceAvailability = { status: "unavailable", reason: "not-yet-checked" };
+  let browserMisses = 0;
   const judgeAgentSteps = (checks: WorkflowE2EApplicationChecksAvailability): AgentStepsAvailability => {
     // A judgement that fails is never "available".
     try {
@@ -149,6 +150,15 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     if (running) return;
     running = true;
     try {
+      // Browser evidence is judged apart from the application checks and at the same time: one quick look, known as soon as the worker starts, and one slow or failed look does not take it away from a worker that had it (it goes after two in a row).
+      const browserLook = Promise.race([browserEvidenceAvailability(input.environment ?? process.env, { ...(input.docker === undefined ? {} : { docker: input.docker }) }),
+        new Promise<BrowserEvidenceAvailability>((resolve) => { setTimeout(() => resolve({ status: "unavailable", reason: "executor-image-not-on-host" }), AVAILABILITY_CHECK_LIMIT_MS).unref?.(); })]);
+      const judgeBrowser = async (): Promise<void> => {
+        const fresh = await browserLook;
+        browserMisses = fresh.status === "ready" ? 0 : browserMisses + 1;
+        if (fresh.status === "ready" || browserLatest.status !== "ready" || browserMisses >= 2) browserLatest = fresh;
+      };
+      void judgeBrowser();
       let limit: ReturnType<typeof setTimeout> | undefined;
       const answer = await Promise.race([
         workflowE2EApplicationChecksAvailability(input.environment ?? process.env, { ...(input.platform === undefined ? {} : { platform: input.platform }),
@@ -156,7 +166,6 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
         new Promise<WorkflowE2EApplicationChecksAvailability>((resolve) => { limit = setTimeout(() => resolve({ status: "unavailable", reason: "executor-image-not-on-host" }), AVAILABILITY_CHECK_LIMIT_MS); }),
       ]).finally(() => clearTimeout(limit));
       latest = answer;
-      browserLatest = await browserEvidenceAvailability(input.environment ?? process.env, { ...(input.docker === undefined ? {} : { docker: input.docker }) });
       sessionSyncImage = answer.status === "ready" && await executorImageSyncsSession(workflowE2EApplicationRuntimeConfig(input.environment ?? process.env, input.platform, input.arch).executorImage,
         input.docker ?? createProcessDockerCli()).catch(() => false);
     } catch {

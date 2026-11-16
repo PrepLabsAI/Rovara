@@ -70,25 +70,42 @@ describe("the browser-evidence callback", () => {
     expect(await readBrowserEvidenceUpload(w.stores, { workspaceId, id: otherOperation })).toBeUndefined();
   });
 
-  it("refuses an object that is not the digest the row names, and an object outside the operation's prefix", async () => {
+  it("refuses an object that is not the digest the row names, an object outside the operation's prefix even when it is really there, and a row of another workspace", async () => {
     const w = await world();
     const sent = await w.upload();
     await sent.finalize();
-    const row = await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `BROWSER_EVIDENCE_UPLOAD#${operationId}` });
-    await w.store.put({ item: { ...row!, objectKey: `browser-evidence/${randomUUID()}/${operationId}/${sent.digest}` } });
+    const rowKey = { pk: `WORKSPACE#${workspaceId}`, sk: `BROWSER_EVIDENCE_UPLOAD#${operationId}` };
+    const row = (await w.store.get(rowKey))!;
+    const objectKey = row["objectKey"] as string;
+    // The object really exists at a key outside the operation's own prefix: the row naming it is still refused.
+    const foreign = `browser-evidence/${randomUUID()}/${operationId}/${sent.digest}`;
+    await w.objects.put(foreign, new Uint8Array(sent.bytes), { contentType: "application/octet-stream", metadata: {}, retention: "evidence-short" });
+    await w.store.put({ item: { ...row, objectKey: foreign } });
     expect(await readBrowserEvidenceUpload(w.stores, { workspaceId, id: operationId })).toBeUndefined();
-    await w.store.put({ item: { ...row!, sha256: sha("other") } });
+    // A row that names another workspace is refused though its key and operation are the right ones.
+    await w.store.put({ item: { ...row, workspaceId: randomUUID() } });
+    expect(await readBrowserEvidenceUpload(w.stores, { workspaceId, id: operationId })).toBeUndefined();
+    // Bytes that are not the digest the row names (the object swapped under its own key) are not believed.
+    await w.store.put({ item: row });
+    expect(await readBrowserEvidenceUpload(w.stores, { workspaceId, id: operationId })).toEqual(run());
+    await w.objects.delete(objectKey);
+    await w.objects.put(objectKey, new Uint8Array(Buffer.from(encodeBrowserEvidenceUpload({ ...run(), durationMs: 1 }))), { contentType: "application/octet-stream", metadata: {}, retention: "evidence-short" });
     expect(await readBrowserEvidenceUpload(w.stores, { workspaceId, id: operationId })).toBeUndefined();
   });
 
-  it("refuses every operation that is not the live CHECKS operation the broker sent the recipe to", async () => {
-    const stage = (operation: Record<string, unknown>) => world({ operation }).then((w) => handleBrowserEvidenceUpload(w.stores, { ...w.stores, id: operationId, workspaceId, fence: 1, kind: "task", status: "RUNNING", ...operation }, { stage: "init", totalBytes: 10, chunkCount: 1, sha256: "a".repeat(64) }));
+  it("refuses every operation that is not the live CHECKS operation the broker sent the recipe to, each for its own reason", async () => {
+    // The operation is the broker's own record, as the callback layer reads it: one field is changed at a time, so each refusal is for that field alone.
+    const stage = async (operation: Record<string, unknown>) => { const w = await world({ operation }); return handleBrowserEvidenceUpload(w.stores, await w.operation(), { stage: "init", totalBytes: 10, chunkCount: 1, sha256: "a".repeat(64) }); };
+    await expect(stage({})).resolves.toMatchObject({ chunkCount: 1 });
     await rejects(stage({ workflowMode: "IMPLEMENT" }), "CALLBACK_FORBIDDEN");
+    await rejects(stage({ workflowMode: "REVIEW" }), "CALLBACK_FORBIDDEN");
     await rejects(stage({ status: "SUCCEEDED" }), "CALLBACK_FORBIDDEN");
+    await rejects(stage({ status: "FAILED" }), "CALLBACK_FORBIDDEN");
     await rejects(stage({ kind: "publish" }), "CALLBACK_FORBIDDEN");
-    // Never asked: the invocation carried no recipe, or one the schema refuses.
+    // Never asked: the invocation carried no recipe, or one the schema refuses, or no invocation at all.
     await rejects(stage({ dispatch: { kind: "task", payload: { workflowMode: "CHECKS", evidenceCapture: true } } }), "CALLBACK_FORBIDDEN");
     await rejects(stage({ dispatch: { kind: "task", payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: { ...RECIPE, port: 80 } } } }), "CALLBACK_FORBIDDEN");
+    await rejects(stage({ dispatch: { kind: "task", payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: "yes" } } }), "CALLBACK_FORBIDDEN");
     await rejects(stage({ dispatch: { kind: "task" } }), "CALLBACK_FORBIDDEN");
   });
 
@@ -117,6 +134,16 @@ describe("the browser-evidence callback", () => {
     await rejects(handleBrowserEvidenceUpload(w.stores, op, { stage: "finalize", uploadId: init.uploadId, sha256: sha(junk) }), "CONFIG_INVALID");
     expect(await readBrowserEvidenceUpload(w.stores, { workspaceId, id: operationId })).toBeUndefined();
     expect((await w.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#EVIDENCE_BLOB` })).items.map((item) => item.sk).filter((key) => key.startsWith("browser-evidence"))).toEqual([]);
+  });
+
+  it("takes no chunk and no other bytes once the upload has finished", async () => {
+    const w = await world();
+    const sent = await w.upload();
+    await sent.finalize();
+    await rejects(handleBrowserEvidenceUpload(w.stores, sent.op, { stage: "chunk", uploadId: sent.uploadId, index: 0, bytesBase64: Buffer.from("x").toString("base64"), sha256: sha("x") }), "STALE_FENCE");
+    await rejects(handleBrowserEvidenceUpload(w.stores, sent.op, { stage: "finalize", uploadId: sent.uploadId, sha256: sha("other bytes") }), "CALLBACK_FORBIDDEN");
+    await rejects(handleBrowserEvidenceUpload(w.stores, sent.op, { stage: "finalize", uploadId: randomUUID(), sha256: sent.digest }), "CALLBACK_FORBIDDEN");
+    expect(await readBrowserEvidenceUpload(w.stores, { workspaceId, id: operationId })).toEqual(run());
   });
 
   it("refuses a second, different upload for the same operation", async () => {

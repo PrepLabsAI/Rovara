@@ -18,7 +18,7 @@ const shotLine = (route: string, seed: string, size = 500, consoleErrors = 0): B
 const unsafe = (error: Error) => error;
 
 /** A scripted world: the runners (the sandbox's), the original-code swap, and the docker CLI, each writing down what it was asked. */
-function world(over: { capture?: (side: "before" | "after", routes: string[], index: number) => string | Uint8Array; probes?: number[]; appFails?: boolean; changed?: string[] | undefined; stopError?: Error; restoreError?: Error; execFault?: { exitCode?: number | null; timedOut?: boolean; tooLarge?: boolean } } = {}) {
+function world(over: { capture?: (side: "before" | "after", routes: string[], index: number) => string | Uint8Array; probes?: number[]; appFails?: boolean; changed?: string[] | undefined; stopError?: Error; restoreError?: Error; execFault?: { exitCode?: number | null; timedOut?: boolean; tooLarge?: boolean }; execDelayMs?: number } = {}) {
   const log: string[] = [];
   let swapped = false;
   let execs = 0;
@@ -57,6 +57,7 @@ function world(over: { capture?: (side: "before" | "after", routes: string[], in
       const plan = decodeBrowserEvidenceExecutorPlan(args.at(-1));
       log.push(`exec:${side}:${args.join(" ").slice(0, 0)}${plan?.routes.join(",") ?? "?"}`);
       calls.push({ side, args: [...args] });
+      if (over.execDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, over.execDelayMs));
       const index = execs; execs += 1;
       const out = over.capture !== undefined ? over.capture(side, plan?.routes ?? [], index)
         : line({ t: "app", status: "ready" }) + (plan?.routes ?? []).map((route) => line(shotLine(route, side === "before" ? "a" : "b"))).join("");
@@ -156,6 +157,11 @@ describe("taking the screenshots", () => {
     const busy = world({ probes: [1] });
     expect((await collectBrowserEvidence(busy.input())).notRun).toBe("app_did_not_start");
     expect(busy.log.some((entry) => entry.startsWith("app:"))).toBe(false);
+    // The app we started is gone by the time the capture answers (it could not bind the port, a program that held it first answered instead): nothing it showed is kept.
+    const forged = world({ appFails: true, execDelayMs: 10 });
+    const stolen = await collectBrowserEvidence(forged.input());
+    expect(stolen.notRun).toBe("app_did_not_start");
+    expect(stolen.routes).toEqual([]);
     // A leftover app on the port after the base side stopped: the candidate's side must not be photographed through it.
     const leftover = world({ probes: [0, 0, 1] });
     const left = await collectBrowserEvidence(leftover.input());
@@ -189,6 +195,13 @@ describe("taking the screenshots", () => {
     const w = world({ changed: ["README.md"] });
     await collectBrowserEvidence(w.input());
     expect(w.log).toEqual([]);
+    // The recipe names no repository, so a workspace of several is not guessed at, and one whose folder is the workspace itself has no plain folder to start in.
+    const several = world();
+    expect((await collectBrowserEvidence(several.input({ repositories: [{ repositoryId: "demo", directory: "/work/repo/demo", baseCommitSha: COMMIT }, { repositoryId: "lib", directory: "/work/repo/lib", baseCommitSha: COMMIT }], candidateTrees: new Map([["demo", "2".repeat(40)], ["lib", "3".repeat(40)]]) }))).notRun).toBe("capture_failed");
+    expect(several.log).toEqual([]);
+    const atRoot = world();
+    expect((await collectBrowserEvidence(atRoot.input({ repositories: [{ repositoryId: "demo", directory: "/work", baseCommitSha: COMMIT }] }))).notRun).toBe("capture_failed");
+    expect(atRoot.log).toEqual([]);
     // A repository without a start commit has no "before": nothing is shown in only some.
     const noBase = world();
     expect((await collectBrowserEvidence(noBase.input({ repositories: [{ repositoryId: "demo", directory: "/work/repo/demo" }] }))).notRun).toBe("capture_failed");

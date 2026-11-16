@@ -107,6 +107,17 @@ describe("keeping browser evidence", () => {
     expect(await held(failing.blobs, "a")).toBeUndefined();
   });
 
+  it("a re-keep of the same code that fails does not delete pictures the earlier pack of that code names", async () => {
+    const w = world();
+    expect(await keepEvidence(w.deps, input({ browserEvidence: captured() }))).toMatchObject({ kept: true });
+    let calls = 0;
+    expect(await keepEvidence({ ...w.deps, late: () => { calls += 1; return calls >= 2; } }, input({ browserEvidence: captured() }))).toEqual({ kept: false, reason: "fault" });
+    // The earlier pack is still there and its pictures are still served.
+    expect(await held(w.blobs, "a")).toBeDefined();
+    expect(await held(w.blobs, "b")).toBeDefined();
+    expect((await storedPack(w.blobs)).checks.some((check) => check.id === "browser_evidence")).toBe(true);
+  });
+
   it("a v2 writer that names another place than the outcome keeps the pack without the picture check, and the pictures go", async () => {
     const w = world();
     const laptop = { version: 2 as const, producer: { edition: "code" as const, isolation: "developer_machine" as const } };

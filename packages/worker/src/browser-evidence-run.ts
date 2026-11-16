@@ -201,7 +201,9 @@ async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCap
   } catch { return "app_did_not_start"; }
   const stopApp = new AbortController();
   // The app is one long command of the sandbox's runners, ended by aborting it (the runners stop its whole process group). It ending by itself before the pages are taken is an app that did not stay up.
-  const appRun = input.runners.runProjectCommand(command, AbortSignal.any([signal, stopApp.signal])).then(() => "ended" as const, (error: unknown) => { if (isWorkspaceUnsafe(error)) throw error; return "ended" as const; });
+  // `ended` is set the moment the app's command ends, whatever the reason: an app that is gone (it could not bind the port, it crashed) is not what answered the capture, whatever answered it.
+  let ended = false;
+  const appRun = input.runners.runProjectCommand(command, AbortSignal.any([signal, stopApp.signal])).then(() => { ended = true; return "ended" as const; }, (error: unknown) => { ended = true; if (isWorkspaceUnsafe(error)) throw error; return "ended" as const; });
   appRun.catch(() => undefined);
   const name = input.newName?.() ?? `rovara-be-${randomBytes(6).toString("hex")}`;
   let answer: Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit";
@@ -215,7 +217,9 @@ async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCap
     const args = browserEvidenceExecutorArgs({ image: input.executorImage, sandbox: input.sandboxName, name, seccompProfile: input.seccompPath, plan });
     const run = await input.docker.execBytes(args, { signal, timeoutMs: captureMs + START_MARGIN_MS, maxStdoutBytes: BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES });
     const parsed = run.exitCode === 0 && run.tooLarge !== true && run.timedOut !== true && run.aborted !== true ? parseCaptureOutput(run.stdout, input.routes) : undefined;
-    if (parsed === undefined) answer = run.timedOut === true ? "time_limit" : "app_did_not_start";
+    // Pictures taken while the app we started was not running were taken of something else (a program that held the port first): no picture is kept.
+    if (ended) answer = "app_did_not_start";
+    else if (parsed === undefined) answer = run.timedOut === true ? "time_limit" : "app_did_not_start";
     else if (parsed.app !== "ready") answer = parsed.app;
     else {
       const picked = new Map<string, BrowserEvidenceCaptureAnswer>();
