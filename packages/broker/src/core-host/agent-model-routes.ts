@@ -4,7 +4,7 @@
 //   POST  the company's change (`ModelSelectionBody`): ONLY on the web page, right after a fresh step-up the route checks itself (a tool with an API token or a script token has none: fixed words), and only by
 //         an owner or an administrator of the company (the live role from membership, never a claim). The model must be on the gateway's list now; a less-safe change needs the company's approval rule.
 //
-// The company is the caller's membership (the dev routes read it); the rule, the list and the setting are that company's own. Every refusal is a fixed sentence: no model name, company id or cause is echoed.
+// The company is the caller's membership (the dev routes read it); the rule, the list and the setting are that company's own. Every refusal is a fixed sentence: no company id or cause is echoed (a refused model is named only back to the caller who named it).
 import { agentXError, type AuditSink, type OrgRole, type Principal } from "@agentx/contracts";
 import type { BrokerResponse } from "../handler.js";
 import { OfferedModelsUnavailable, OFFERED_MODELS_UNAVAILABLE, type AgentModelChoice } from "./gateway-model-selection.js";

@@ -90,7 +90,7 @@ export const HOSTED_MODEL_WORDS = {
     LOCK_UNSATISFIABLE: "This step's locked model is not offered to this company by Rovara's AI now.",
     NO_MODEL: "Rovara's AI has no model to run this step.",
   },
-  unavailable: (label: string): string => `${label} is not offered to this company by Rovara's AI now.`,
+  unavailable: (label: string): string => `${label} is not offered to this company by Rovara's AI now, or the list of offered models could not be read just now.`,
   reauth: "That change needs a recent sign-in. Confirm it's you on the sign-in page, then make the change within a few minutes.",
 } as const;
 
@@ -152,4 +152,26 @@ export function agentModelChoiceFromRegistry(input: {
       return declared.alias;
     },
   });
+}
+
+/**
+ * Every company's step rule in one deployment root (the broker's): one rule per company, built on its own registry and kept for that company's page routes, so the engine and the page of a
+ * company always read the same rule and no company ever reaches another's.
+ */
+export function createCompanyModelChoices(input: { reader: OfferedModelsReader | undefined; now: () => number }): {
+  /** The flow options of a company's runtime: the gateway wiring's own object while no reader is wired (nothing changes), else a copy with the company's step rule. */
+  flowOptionsFor<O extends { modelAccess: { route(): Promise<InvocationModelRoute | undefined> } }>(registry: Parameters<typeof agentModelChoiceFromRegistry>[0]["registry"], companyId: OrgId, options: O): O & { stepModels?: AgentModelChoice["stepModels"] };
+  /** The company's rule for its page's routes (undefined until its runtime was built, and without a reader). */
+  choiceFor(companyId: string): AgentModelChoice | undefined;
+} {
+  const choices = new Map<string, AgentModelChoice>();
+  return {
+    flowOptionsFor(registry, companyId, options) {
+      const choice = agentModelChoiceFromRegistry({ registry, companyId, reader: input.reader, modelAccess: options.modelAccess, now: input.now });
+      if (choice === undefined) return options;
+      choices.set(companyId, choice);
+      return { ...options, stepModels: choice.stepModels };
+    },
+    choiceFor: (companyId) => choices.get(companyId),
+  };
 }

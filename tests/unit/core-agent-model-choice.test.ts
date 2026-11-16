@@ -8,7 +8,7 @@ import {
 import { chooseStepModel } from "../../packages/broker/src/core/task-flow/step-model.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import {
-  HOSTED_MODEL_WORDS, OFFERED_MODELS_TTL_MS, OFFERED_MODELS_UNAVAILABLE, agentModelChoiceFromRegistry, createAgentModelChoice, gatewayModelSelectionSeams, createOfferedModelsView, gatewayRouteOf,
+  HOSTED_MODEL_WORDS, OFFERED_MODELS_TTL_MS, OFFERED_MODELS_UNAVAILABLE, agentModelChoiceFromRegistry, createAgentModelChoice, createCompanyModelChoices, gatewayModelSelectionSeams, createOfferedModelsView, gatewayRouteOf,
 } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -293,5 +293,37 @@ describe("the step rule over a registry", () => {
     expect(await stepOf(made)).toMatchObject({ ok: true, step: { route: { alias: DEFAULT } } });
     const none = agentModelChoiceFromRegistry({ registry: registry(w), companyId: ORG_A, reader: w.reader, modelAccess: { route: async () => undefined }, now: () => 1 })!;
     expect(await stepOf(none)).toMatchObject({ ok: false });
+  });
+});
+
+describe("the broker root's companies", () => {
+  const registryOf = (w: ReturnType<typeof world>) => ({
+    require: ((point: string) => point === "storage" ? w.store : point === "audit-sink" ? { stage: () => [], async record() {} } : { async requirement() { return { methods: [], minApprovers: 1, selfApprovalAllowed: true }; }, async verify() { return { approved: false, reason: "" }; } }) as never,
+  });
+  const options = { modelAccess: { route: async () => gatewayRouteOf(DEFAULT) } };
+  it("without a reader: the gateway wiring's own options object, and no company has a rule", () => {
+    const w = world();
+    const choices = createCompanyModelChoices({ reader: undefined, now: () => 1 });
+    expect(choices.flowOptionsFor(registryOf(w), ORG_A, options)).toBe(options);
+    expect(choices.choiceFor(ORG_A)).toBeUndefined();
+  });
+  it("with a reader: one rule per company, the engine's and the page's the same one, each over its own list and its own setting", async () => {
+    const w = world();
+    w.reader.set(ORG_A, GATEWAY_OFFERED_MODELS);
+    w.reader.set(ORG_B, ["claude-sonnet-5-5"]);
+    const choices = createCompanyModelChoices({ reader: w.reader, now: () => 1 });
+    const a = choices.flowOptionsFor(registryOf(w), ORG_A, options);
+    const b = choices.flowOptionsFor(registryOf(w), ORG_B, options);
+    expect(choices.choiceFor(ORG_A)!.stepModels).toBe(a.stepModels);
+    expect(choices.choiceFor(ORG_B)!.stepModels).toBe(b.stepModels);
+    expect(a.stepModels).not.toBe(b.stepModels);
+    expect(choices.choiceFor("org_neverbuilt000000000x")).toBeUndefined();
+    expect(options).not.toHaveProperty("stepModels");
+    // A's page changes A's setting only: A's engine rule follows, B's does not.
+    expect(await setBuild(choices.choiceFor(ORG_A)!, ORG_A, "zai.glm-5")).toMatchObject({ ok: true });
+    expect(await a.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "zai.glm-5" } } });
+    expect(await b.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: DEFAULT } } });
+    expect(await setBuild(choices.choiceFor(ORG_B)!, ORG_B, "zai.glm-5")).toMatchObject({ ok: false, code: "model_unavailable" });
+    expect((await choices.choiceFor(ORG_B)!.offered()).map((entry) => entry.model)).toEqual(["claude-sonnet-5-5"]);
   });
 });

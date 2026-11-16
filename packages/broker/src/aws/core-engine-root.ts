@@ -50,7 +50,7 @@ import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskKeySigner } from "../core-host/gateway-model-access.js";
-import { agentModelChoiceFromRegistry, type AgentModelChoice, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
+import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
@@ -254,17 +254,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
-  const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => {
-    const wiring = modelGateway()!;
-    const choice = agentModelChoiceFromRegistry({ registry, companyId, reader: inputs.offeredModels, modelAccess: wiring.flowOptions.modelAccess, now: () => now().getTime() });
-    if (choice === undefined) return wiring.flowOptions;
-    modelChoices.set(companyId, choice);
-    return { ...wiring.flowOptions, stepModels: choice.stepModels };
-  };
+  const modelChoices = createCompanyModelChoices({ reader: inputs.offeredModels, now: () => now().getTime() });
+  const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => modelChoices.flowOptionsFor(registry, companyId, modelGateway()!.flowOptions);
   const lessonsSwitch = readCoreLessonsSwitch(env);
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
-  const modelChoices = new Map<string, AgentModelChoice>();
 
   const app = createCoreHostApp({
     env,
@@ -329,7 +323,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         origin: inputs.origin,
         sessionCapSeconds: hostedSessionCapSeconds(),
         scriptTokens: {},
-        ...(modelChoices.get(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.get(runtime.companyId)! }),
+        ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
         canReadProject: (personId, project) => projectGrant(personId, project),
         auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
         // Not wired yet (each answers "not on the core yet"): the session levels and the decision cards (lanes ID and T, #662), how we work (the company's code host).
