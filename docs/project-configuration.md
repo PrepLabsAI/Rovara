@@ -461,8 +461,10 @@ generalFakes:
   from its 2xx JSON answer schema (no example values are copied).
 - Every check a fake answered is labelled **Made by Rovara** and **never counts as change proof**. The label is on the
   check's own result: the pull request's Checks section says it on the check's line, and the Proof section shows the
-  check as "with a Rovara-made mock; not Proven" (also when no test proof was saved). The Tests section, the status
-  lines, the task page and the chat message say "Made by Rovara, never change proof" beside it too.
+  check as "with a Rovara-made mock; not Proven" (also when no test proof was saved). The Tests section (and the
+  Testing section), the status lines, the task page, the chat messages and the answers about a task say "Made by
+  Rovara, never change proof" beside it too. Known limit: the evidence pack's own check rows and totals (its "passed"
+  counts) do not carry the label yet.
 - A result a fake answered is never kept as a check's earlier result, so the next task does not read a real failure
   as a regression against it.
 - A check that fails after a call the fake could not answer reads **Not run** with the reason (no description found,
