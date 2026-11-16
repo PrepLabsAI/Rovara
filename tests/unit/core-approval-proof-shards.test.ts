@@ -140,13 +140,17 @@ describe("approval proof markers: sharded, with the old key still honoured", () 
   it("a proof used under the NEW key cannot be used again, and a second request id does not get past it", async () => {
     const { store, gate, attempt, revision } = await world();
     expect(await gate.decide(attempt())).toMatchObject({ status: "decided" });
-    const after = await revision();
-    expect(await gate.decide(attempt())).toMatchObject({ status: "refused" });
-    expect(await revision()).toBe(after);
+    // Put the task back to waiting, so the only thing left to stop a second decision is the used-proof marker (otherwise the refusal would be `not_waiting`, which proves nothing about the marker).
+    const rewind = () => store.put({ item: { ...workflowTaskKey(TASK_ID), entityType: "DEVELOPER_TASK", orgId: COMPANY, project: "web", workflow: JSON.parse(JSON.stringify(waiting())) } });
+    await rewind();
+    const before = await revision();
+    expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "proof_already_used" });
+    expect(await revision()).toBe(before);
     // Take the old-key marker away: the refusal then comes from the new key alone.
     await store.delete({ key: legacyApprovalProofMarkerKey(COMPANY, sessionProofKey()) });
-    expect(await gate.decide(attempt())).toMatchObject({ status: "refused" });
-    expect(await revision()).toBe(after);
+    expect(await store.get(approvalProofMarkerKey(COMPANY, sessionProofKey()))).toBeDefined();
+    expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "proof_already_used" });
+    expect(await revision()).toBe(before);
   });
 
   it("a fresh proof works, and the decision an older release made under the old key is still replayed to its holder", async () => {
