@@ -4372,7 +4372,7 @@ export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: Wor
     PULL_REQUEST_STATUS_END,
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
-    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed. Merge it on GitHub.`,
+    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`,
   ];
   const body = lines.join("\n");
   if (Buffer.byteLength(body, "utf8") <= WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES) return body;

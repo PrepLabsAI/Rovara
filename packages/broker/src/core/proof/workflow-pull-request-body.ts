@@ -105,7 +105,7 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
     ...attributionBodyLines(context?.attribution),
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
-    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed. Merge it on GitHub.`,
+    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`,
   ];
   return fitPullRequestBody(lines.join("\n"));
 }
