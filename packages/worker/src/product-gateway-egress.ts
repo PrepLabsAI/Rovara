@@ -116,7 +116,7 @@ const GATEWAY_REFUSALS: Readonly<Record<string, ModelEgressRefusal>> = {
   provider_limited: "rate_limit", provider_quota: "quota", provider_overloaded: "overloaded",
   authentication_error: "not_allowed", task_ended: "not_allowed",
   not_set_up: "not_found", not_found: "not_found",
-  invalid_request: "bad_request", request_too_large: "too_large", too_large: "too_large",
+  invalid_request: "bad_request", provider_refused: "bad_request", request_too_large: "too_large", too_large: "too_large",
 };
 const OVER_BY_ONE_CALL = "budget exceeded by one call";
 
