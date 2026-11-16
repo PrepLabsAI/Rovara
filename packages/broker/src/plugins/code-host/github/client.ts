@@ -2150,7 +2150,14 @@ export class GitHubAppCredentialProvider {
     const read = async (url: string): Promise<{ body: unknown; hasNext: boolean }> => {
       beforeRequest?.();
       const response = await this.fetchImplementation(url, { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" });
-      if (!response.ok) { await response.body?.cancel(); throw agentXError("RUNTIME_UNAVAILABLE", `GitHub deployment read failed with HTTP ${response.status}`); }
+      if (!response.ok) {
+        // A limited caller is told to slow down with the neutral signal (never a plain failure that is asked again a minute later).
+        const limitedBody: unknown = response.status === 403 ? await response.json().catch(() => undefined) : undefined;
+        const retryAt = compareRateLimitRetryAt(response, limitedBody, this.now());
+        await response.body?.cancel().catch(() => undefined);
+        if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
+        throw agentXError("RUNTIME_UNAVAILABLE", `GitHub deployment read failed with HTTP ${response.status}`);
+      }
       return { body: await response.json(), hasNext: (response.headers.get("link") ?? "").split(",").some((link) => /;\s*rel="next"/u.test(link)) };
     };
     const listed = await read(`${base}?sha=${commitSha}&per_page=${String(DEPLOYMENTS_LISTED_MAX)}`);
@@ -2162,19 +2169,23 @@ export class GitHubAppCredentialProvider {
       return { id: record.id, environment: typeof record.environment === "string" ? record.environment : undefined };
     }).sort((left, right) => right.id - left.id);
     const byEnvironment = new Map<string, DeploymentState>();
+    // The newest deployment of an environment is the one that says, whatever its newest status is: an environment seen is never overruled by an older deployment.
+    const seen = new Set<string>();
     for (const deployment of deployments) {
       const answered = await read(`${base}/${String(deployment.id)}/statuses?per_page=1`);
       if (!Array.isArray(answered.body) || answered.body.length > 1) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid deployment read.");
-      // A deployment with no status yet is not known to have started: it is neither a state nor a failure of the read.
-      if (answered.body.length === 0) continue;
+      // A deployment with no status yet is not known to have started: it says nothing, and it still holds its environment (an older deployment never answers for it).
+      if (answered.body.length === 0) { if (deployment.environment !== undefined) seen.add(deployment.environment); continue; }
       const status = feedbackRecord(answered.body[0]);
       const environment = typeof status.environment === "string" && status.environment !== "" ? status.environment : deployment.environment;
       if (typeof status.state !== "string" || environment === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid deployment read.");
+      if (seen.has(environment)) continue;
+      seen.add(environment);
       const state = DEPLOYMENT_STATES_OF_GITHUB[status.state];
       // An environment the port cannot name (too long, empty) cannot be watched: left out, and the answer is then not the whole of it.
       if (!DeploymentEnvironmentSchema.safeParse(environment).success) { complete = false; continue; }
       if (state === undefined) continue;
-      if (!byEnvironment.has(environment)) byEnvironment.set(environment, state);
+      byEnvironment.set(environment, state);
     }
     return { statuses: [...byEnvironment].map(([environment, state]) => ({ environment, state })), complete };
   }

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   AfterMergeWatchSettingSchema, DocumentStoreError, INDEX_EXPIRY_ATTRIBUTE, ProjectDefinitionSchema, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, workerProjectDefinition,
-  type AuditEvent, type AuditSink, type ChannelEvent, type CodeHost, type OrgId, type RepositoryRef, type TransactItem, type TriggerEvent,
+  type AuditEvent, type AuditSink, type ChannelEvent, type CodeHost, type OrgId, type TransactItem, type TriggerEvent,
 } from "@agentx/contracts";
 import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -18,6 +18,7 @@ import {
   closeDueWatches, createAfterMergeReporter, createAfterMergeService, createProjectAfterMergeSettings, createStoreAfterMergeTasks, createTaskHosts, deployFactOfEvent, deployFactsOfRead, githubRepositoryOfUrl,
   pullRequestLineOf, reconcileDeployments, signalKeyOf, RECONCILE_TARGETS_MAX, type AfterMergeDeps, type AfterMergeHosts, type AfterMergeReport, type AfterMergeService,
 } from "../../packages/broker/src/core/after-merge/index.js";
+import { HostRateLimitError } from "@agentx/contracts";
 import { CORE_JOBS } from "../../packages/broker/src/core-host/jobs.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -36,21 +37,24 @@ const CANARY = "canary-secret-host-words";
 class CountingHost extends FakeCodeHost {
   statusCalls = 0;
   commentCalls = 0;
+  scopes: unknown[] = [];
   failStatuses: Error | undefined;
   failComments = 0;
   answer: unknown;
   override async deploymentStatuses(...args: Parameters<NonNullable<CodeHost["deploymentStatuses"]>>) {
     this.statusCalls += 1;
+    this.scopes.push(args[2]);
     if (this.failStatuses !== undefined) throw this.failStatuses;
     if (this.answer !== undefined) return this.answer as Awaited<ReturnType<NonNullable<CodeHost["deploymentStatuses"]>>>;
     return super.deploymentStatuses(...args);
   }
   override async postComment(...args: Parameters<NonNullable<CodeHost["postComment"]>>) {
     this.commentCalls += 1;
+    this.scopes.push(args[2]);
     if (this.failComments > 0) { this.failComments -= 1; throw new Error(CANARY); }
     return super.postComment(...args);
   }
-  comments(): string[] {
+  postedComments(): string[] {
     return this.model.changeRequests.flatMap((request) => request.comments.map((comment) => comment.body));
   }
 }
@@ -115,7 +119,7 @@ function createWorld() {
       name, revision: 1, repositories: [{ name: "payments", url: REPO_URL, path: "repo/payments", defaultBranch: "main", credentialRef: "github", host: { kind: "fake" } }],
       setup: [], readiness: [], orchestratorInstructions: "Build it.", ...(setting === "absent" ? {} : { afterMergeWatch: setting }),
     };
-    await store.put({ item: { ...projectRevisionKey(orgId, name, 1), definition } });
+    await store.put({ item: { ...projectRevisionKey(orgId, name, 1), definition: definition as never } });
     await store.put({ item: { ...orgProjectCatalogKey(orgId, name), latestRevision: 1 } });
   }
 
@@ -145,7 +149,7 @@ const deployEvent = (over: Record<string, unknown> = {}) => ({ eventId: "d-1", h
 const alarm = (over: Record<string, unknown> = {}): TriggerEvent => ({
   source: "cloudwatch", type: "alarm.fired", eventKey: "evt-1", occurredAt: at(minutes(5)), project: PROJECT,
   subject: { kind: "alert", id: "HighLatency", title: "High latency on checkout" }, fields: {}, actor: { kind: "unknown" }, ...over,
-}) as TriggerEvent;
+});
 const watchRows = async (world: World, orgId: OrgId): Promise<unknown[]> => (await world.store.query({ pk: `ORG#${orgId}#AFTER_MERGE`, sk: { op: "beginsWith", prefix: "WATCH#" } })).items;
 const allRows = async (world: World): Promise<number> => {
   let total = 0;
@@ -230,9 +234,9 @@ describe("the deployment event: the ingress opens a watch for the company's own 
     expect(await service.codeHostEvent(deployEvent({ state: "in_progress" }))).toEqual({ kind: "ignored", reason: "in_progress" });
     expect(await watchRows(world, A)).toEqual([]);
     expect((await service.codeHostEvent(deployEvent({ state: "failure" }))).kind).toBe("deploy_failed");
-    expect(world.company(A).host.comments()).toEqual([expect.stringContaining("Deploy to staging failed")]);
+    expect(world.company(A).host.postedComments()).toEqual([expect.stringContaining("Deploy to staging failed")]);
     expect(await service.codeHostEvent(deployEvent({ state: "failure" }))).toBeDefined();
-    expect(world.company(A).host.comments()).toHaveLength(1);
+    expect(world.company(A).host.postedComments()).toHaveLength(1);
     expect(world.company(A).model.changeRequests.map((request) => Number(request.id))).toContain(number);
   });
 
@@ -290,9 +294,9 @@ describe("the alarm ingress", () => {
     await service.codeHostEvent(deployEvent());
     world.clock.ms = T0 + minutes(5);
     expect(await service.triggerEvent(alarm())).toMatchObject({ kind: "recorded", watches: 1, reported: 1 });
-    expect(world.company(A).host.comments()).toEqual([expect.stringContaining("High latency on checkout")]);
+    expect(world.company(A).host.postedComments()).toEqual([expect.stringContaining("High latency on checkout")]);
     expect(await service.triggerEvent(alarm())).toMatchObject({ kind: "recorded", reported: 0 });
-    expect(world.company(A).host.comments()).toHaveLength(1);
+    expect(world.company(A).host.postedComments()).toHaveLength(1);
     expect(world.company(A).model.changeRequests.map((request) => Number(request.id))).toContain(number);
     expect(await service.triggerEvent({ nonsense: true })).toEqual({ kind: "ignored", reason: "invalid_event" });
   });
@@ -324,7 +328,7 @@ describe("the reporter", () => {
     const { taskId } = await opened(world);
     expect(await closeWindow(world)).toMatchObject({ closed: 1 });
     const c = world.company(A);
-    expect(c.host.comments()).toEqual(["Rovara: Deployed to staging, healthy for 30 min.\n\n<!-- rovara-reply -->"]);
+    expect(c.host.postedComments()).toEqual(["Rovara: Deployed to staging, healthy for 30 min.\n\n<!-- rovara-reply -->"]);
     expect((await sessionLines(world, A, taskId)).map((line) => line["text"])).toEqual(["Deployed to staging, healthy for 30 min."]);
     expect(c.chat).toHaveLength(1);
     expect(c.chat[0]).toMatchObject({ type: "progress", channel: "chat", conversation: { channel: "chat", tenant: "t1", space: "c1", thread: "th1" } });
@@ -332,7 +336,7 @@ describe("the reporter", () => {
     expect((await sentRows(world, A)).map((row) => [row["surface"], row["state"]]).sort()).toEqual([["chat", "done"], ["pull_request", "done"], ["task", "done"]]);
     // Told again, nothing more is posted anywhere.
     await closeWindow(world);
-    expect(c.host.comments()).toHaveLength(1);
+    expect(c.host.postedComments()).toHaveLength(1);
     expect(c.chat).toHaveLength(1);
     expect(await sessionLines(world, A, taskId)).toHaveLength(1);
   });
@@ -344,14 +348,14 @@ describe("the reporter", () => {
     // The close tries the report, and the same sweep tries the pending report once more: the chat fails both times.
     c.options.chatFails = 2;
     expect(await closeWindow(world)).toMatchObject({ closed: 1, delivered: 0 });
-    expect(c.host.comments()).toHaveLength(1);
+    expect(c.host.postedComments()).toHaveLength(1);
     expect(c.chat).toEqual([]);
     expect(await sessionLines(world, A, taskId)).toHaveLength(1);
     expect(JSON.stringify(c.logs)).not.toContain(CANARY);
     // The pending queue row is still there: the next pass sends the chat line only.
     expect(await world.company(A).service.pass({ budgetMs: 5_000 })).toMatchObject({ delivered: 1 });
     expect(c.chat).toHaveLength(1);
-    expect(c.host.comments()).toHaveLength(1);
+    expect(c.host.postedComments()).toHaveLength(1);
     expect(c.host.commentCalls).toBe(1);
     expect(await sessionLines(world, A, taskId)).toHaveLength(1);
     expect((await world.store.query({ pk: `ORG#${A}#AFTER_MERGE_QUEUE`, sk: { op: "beginsWith", prefix: "PENDING#" } })).items).toEqual([]);
@@ -364,9 +368,9 @@ describe("the reporter", () => {
     c.host.failComments = 2;
     await closeWindow(world);
     expect(c.chat).toHaveLength(1);
-    expect(c.host.comments()).toEqual([]);
+    expect(c.host.postedComments()).toEqual([]);
     await world.company(A).service.pass({ budgetMs: 5_000 });
-    expect(c.host.comments()).toHaveLength(1);
+    expect(c.host.postedComments()).toHaveLength(1);
     expect(c.chat).toHaveLength(1);
     expect(JSON.stringify(c.logs)).not.toContain(CANARY);
   });
@@ -388,7 +392,7 @@ describe("the reporter", () => {
     await opened(world);
     world.clock.ms = T0 + minutes(5);
     await world.company(A).service.triggerEvent(alarm({ subject: { kind: "alert", id: "X", title: "@everyone [click](https://evil.example.test) #123 ![img](https://evil.example.test/x.png)" } }));
-    const comment = world.company(A).host.comments()[0]!;
+    const comment = world.company(A).host.postedComments()[0]!;
     expect(comment).not.toMatch(/@(?!‍)/u);
     expect(comment).not.toContain("evil.example.test/x.png");
     expect(comment).not.toMatch(/#\d/u);
@@ -428,7 +432,7 @@ describe("the reporter", () => {
     const { taskId } = await opened(world, A, { thread: false, session: false });
     expect(await closeWindow(world)).toMatchObject({ closed: 1, delivered: 0 });
     const c = world.company(A);
-    expect(c.host.comments()).toHaveLength(1);
+    expect(c.host.postedComments()).toHaveLength(1);
     expect(c.chat).toEqual([]);
     expect(await sessionLines(world, A, taskId)).toEqual([]);
     expect((await world.store.query({ pk: `ORG#${A}#AFTER_MERGE_QUEUE`, sk: { op: "beginsWith", prefix: "PENDING#" } })).items).toEqual([]);
@@ -445,7 +449,7 @@ describe("the reporter", () => {
       change(world.company(A));
       expect(await closeWindow(world)).toMatchObject({ closed: 1, delivered: 0 });
       expect(world.company(A).chat).toEqual([]);
-      expect(world.company(A).host.comments()).toHaveLength(1);
+      expect(world.company(A).host.postedComments()).toHaveLength(1);
     }
   });
 
@@ -454,7 +458,7 @@ describe("the reporter", () => {
     const { taskId } = await opened(world);
     world.company(A).options.surfaces = { pull_request: false, chat: false };
     await closeWindow(world);
-    expect(world.company(A).host.comments()).toEqual([]);
+    expect(world.company(A).host.postedComments()).toEqual([]);
     expect(world.company(A).chat).toEqual([]);
     expect(await sessionLines(world, A, taskId)).toHaveLength(1);
   });
@@ -487,7 +491,7 @@ describe("the reporter", () => {
     expect(second).toMatchObject({ delivered: 0 });
     release();
     await first;
-    expect(c.host.comments()).toHaveLength(1);
+    expect(c.host.postedComments()).toHaveLength(1);
   });
 
   it("uses the claim rows of the company only: the same report id in two companies is two rows", async () => {
@@ -593,7 +597,7 @@ describe("the deploy read (the code host's deployment statuses)", () => {
     const world = createWorld();
     await setupOn(world);
     const c = world.company(A);
-    const without = { forTask: async () => ({ codeHost: { kind: "fake" } as never, repository: { url: REPO_URL } as RepositoryRef, scope: { orgId: A } }) };
+    const without = { forTask: async () => ({ codeHost: { kind: "fake" } as never, repository: { url: REPO_URL }, scope: { orgId: A } }) };
     expect(await reconcileDeployments(c.deps, A, without, targets(SHA))).toEqual([{ kind: "skipped", reason: "unsupported" }]);
     c.host.failStatuses = new Error(CANARY);
     expect(await reconcileDeployments(c.deps, A, c.hosts, targets(SHA))).toEqual([{ kind: "unavailable" }]);
@@ -655,12 +659,150 @@ describe("the deploy read (the code host's deployment statuses)", () => {
     supply = async () => { throw new Error(CANARY); };
     expect(await service.pass({ budgetMs: 5_000 })).toMatchObject({ closed: 1 });
     expect(JSON.stringify(c.logs)).not.toContain(CANARY);
-    expect(c.host.comments()).toHaveLength(1);
+    expect(c.host.postedComments()).toHaveLength(1);
     // No supplier, or an empty list: no read at all.
     c.host.statusCalls = 0;
     expect(await createAfterMergeService({ companyId: A, deps: c.deps, hosts: c.hosts }).pass({ budgetMs: 5_000 })).not.toHaveProperty("read");
     expect(await createAfterMergeService({ companyId: A, deps: c.deps, hosts: c.hosts, recentMerges: async () => [] }).pass({ budgetMs: 5_000 })).toMatchObject({ read: 0 });
     expect(c.host.statusCalls).toBe(0);
+  });
+});
+
+describe("review fixes: rate limits, retries, claims and bounds", () => {
+  const targets = (...shas: string[]) => shas.map((revision) => ({ repository: REPO, revision }));
+  const opened = async (world: World, orgId: OrgId = A) => { await world.seedProject(orgId); const merged = await world.seedMerge(orgId); await world.company(orgId).service.codeHostEvent(deployEvent()); return merged; };
+
+  it("stops the pass at a host that said slow down, and leaves it alone until its time", async () => {
+    const world = createWorld();
+    await world.seedProject(A);
+    for (const sha of [SHA, SHA2, "3".repeat(40)]) await world.seedMerge(A, { taskId: `t-${sha[0]!}`, sha });
+    const c = world.company(A);
+    c.host.failStatuses = new HostRateLimitError(T0 + 5 * 60_000);
+    expect(await reconcileDeployments(c.deps, A, c.hosts, targets(SHA, SHA2, "3".repeat(40)))).toEqual([{ kind: "rate_limited", retryAt: T0 + 5 * 60_000 }]);
+    expect(c.host.statusCalls).toBe(1);
+    expect(JSON.stringify(c.logs)).not.toContain("retryAt");
+    // The service keeps off the host until the time it named.
+    c.host.statusCalls = 0;
+    const service = createAfterMergeService({ companyId: A, deps: c.deps, hosts: c.hosts, recentMerges: async () => targets(SHA) });
+    expect(await service.pass({ budgetMs: 5_000 })).toMatchObject({ rateLimited: true });
+    expect(c.host.statusCalls).toBe(1);
+    world.clock.ms = T0 + minutes(2);
+    expect(await service.pass({ budgetMs: 5_000 })).toMatchObject({ rateLimited: false });
+    expect(c.host.statusCalls).toBe(1);
+    c.host.failStatuses = undefined;
+    world.clock.ms = T0 + minutes(6);
+    await service.pass({ budgetMs: 5_000 });
+    expect(c.host.statusCalls).toBe(2);
+  });
+
+  it("asks nothing more once the allowance or the time is spent, not even for the host, and keeps inside the pass's time", async () => {
+    const world = createWorld();
+    await world.seedProject(A);
+    for (const sha of [SHA, SHA2]) await world.seedMerge(A, { taskId: `t-${sha[0]!}`, sha });
+    const c = world.company(A);
+    let forTaskCalls = 0;
+    const hosts: AfterMergeHosts = { forTask: async (...args) => { forTaskCalls += 1; return c.hosts.forTask(...args); } };
+    const outcomes = await reconcileDeployments(c.deps, A, hosts, targets(SHA, SHA2), { requests: 1 });
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["read", "skipped"]);
+    expect(forTaskCalls).toBe(1);
+    forTaskCalls = 0;
+    expect((await reconcileDeployments(c.deps, A, hosts, targets(SHA), { ms: 0 }))).toEqual([{ kind: "skipped", reason: "budget" }]);
+    expect(forTaskCalls).toBe(0);
+    // The service hands the pass's remaining time to the read: a pass with no time left reads nothing.
+    const service = createAfterMergeService({ companyId: A, deps: { ...c.deps, now: (() => { let tick = 0; return () => new Date(T0 + (tick += 600)); })() }, hosts, recentMerges: async () => targets(SHA, SHA2), limits: { ms: 60_000 } });
+    c.host.statusCalls = 0;
+    await service.pass({ budgetMs: 1_000 });
+    expect(c.host.statusCalls).toBeLessThanOrEqual(1);
+  });
+
+  it("tells every host call the company's own scope, even when two companies share one registry and one host", async () => {
+    const world = createWorld();
+    await opened(world, A);
+    await world.seedProject(B);
+    const shared = world.company(A);
+    await world.seedMerge(B, { taskId: "task-b-7" });
+    const forB = createTaskHosts({ store: world.store, registry: { get: (point: string, name: string) => (point === "code-host" && name === "fake" ? shared.host : undefined), names: () => ["fake"] } as never });
+    const found = await forB.forTask(B, "task-b-7", REPO);
+    expect(found?.scope).toEqual({ orgId: B });
+    // A's task id asked for under B's company reads as nothing: B never gets A's host binding.
+    expect(await forB.forTask(B, "task-A-7", REPO)).toBeUndefined();
+    expect(await forB.forTask(B, world.company(A) && "task-A-7".replace("A", "a"), REPO)).toBeUndefined();
+    await world.company(A).service.pass({ budgetMs: 1_000 });
+    world.clock.ms = T0 + minutes(31);
+    await world.company(A).service.pass({ budgetMs: 5_000 });
+    expect(shared.host.scopes.length).toBeGreaterThan(0);
+    for (const scope of shared.host.scopes) expect(scope).toEqual({ orgId: A });
+  });
+
+  it("answers a host that is not registered yet with a retry, not a permanent skip: the report stays pending and is told once the host is there", async () => {
+    const world = createWorld();
+    await opened(world);
+    const c = world.company(A);
+    let registered = false;
+    const registry = { get: (point: string, name: string) => (point === "code-host" && name === "fake" && registered ? c.host : undefined), names: () => (registered ? ["fake"] : []) };
+    const hosts = createTaskHosts({ store: world.store, registry: registry as never });
+    await expect(hosts.forTask(A, "task-a-7", REPO)).rejects.toBeDefined();
+    const deps: AfterMergeDeps = { ...c.deps, reporter: createAfterMergeReporter({ store: world.store, hosts, now: () => world.clock.ms, log: () => undefined }) };
+    world.clock.ms = T0 + minutes(31);
+    expect(await closeDueWatches(deps, A)).toMatchObject({ closed: 1, delivered: 0 });
+    expect(c.host.commentCalls).toBe(0);
+    registered = true;
+    expect(await closeDueWatches(deps, A)).toMatchObject({ delivered: 1 });
+    expect(c.host.postedComments()).toHaveLength(1);
+  });
+
+  it("never deletes or marks the claim another pass took over, and an expired claim is taken again", async () => {
+    const world = createWorld();
+    await opened(world);
+    const c = world.company(A);
+    const key = { pk: `ORG#${A}#AFTER_MERGE_SENT`, sk: "" };
+    // A pass that is slow: while its comment is in flight its lease runs out and another pass claims the surface.
+    const original = c.host.postComment.bind(c.host);
+    const steal = async (): Promise<void> => {
+      const rows = (await world.store.query({ pk: key.pk })).items.filter((row) => row["surface"] === "pull_request");
+      expect(rows).toHaveLength(1);
+      world.clock.ms += 200_000;
+      await world.store.put({ item: { ...rows[0]!, claimId: "other-pass", leaseUntil: world.clock.ms + 120_000, state: "sending" } });
+    };
+    c.host.postComment = async () => { await steal(); throw new Error(CANARY); };
+    world.clock.ms = T0 + minutes(31);
+    await c.service.pass({ budgetMs: 5_000 });
+    const after = (await world.store.query({ pk: key.pk })).items.find((row) => row["surface"] === "pull_request")!;
+    expect(after["claimId"]).toBe("other-pass");
+    expect(after["state"]).toBe("sending");
+    // Its lease runs out: the surface is claimed again and told.
+    c.host.postComment = original;
+    world.clock.ms += 300_000;
+    await c.service.pass({ budgetMs: 5_000 });
+    expect(c.host.postedComments()).toHaveLength(1);
+    expect((await world.store.query({ pk: key.pk })).items.find((row) => row["surface"] === "pull_request")!["state"]).toBe("done");
+  });
+
+  it("says in fixed words when a surface was told but could not be marked", async () => {
+    const world = createWorld();
+    await opened(world);
+    const c = world.company(A);
+    const update = world.store.update.bind(world.store);
+    world.store.update = async (request) => { if (request.key.pk.endsWith("AFTER_MERGE_SENT")) throw new DocumentStoreError("unavailable", `mark ${CANARY}`); return update(request); };
+    world.clock.ms = T0 + minutes(31);
+    await c.service.pass({ budgetMs: 5_000 });
+    expect(c.logs.some((entry) => entry.event === "after_merge.sent_mark_failed")).toBe(true);
+    expect(JSON.stringify(c.logs)).not.toContain(CANARY);
+  });
+
+  it("drops a report whose task record names another task id, and reads no repository for a task with no starting revision", async () => {
+    const world = createWorld();
+    await opened(world);
+    const c = world.company(A);
+    await world.store.put({ item: { ...taskKey("task-a-7"), taskId: "someone-else", companyId: A, project: PROJECT, startingRevision: 1 } });
+    const reporter = createAfterMergeReporter({ store: world.store, hosts: c.hosts, now: () => world.clock.ms });
+    await reporter.report(A, { reportId: "e".repeat(64), kind: "healthy", taskId: "task-a-7", repository: REPO, number: 1, url: `${REPO_URL}/pull/1`, environment: "staging", text: "x", actions: { revert: false, expected: false } });
+    expect(c.host.commentCalls).toBe(0);
+    expect(await c.hosts.forTask(A, "task-a-7", REPO)).toBeUndefined();
+    await world.store.put({ item: { ...taskKey("task-a-7"), taskId: "task-a-7", companyId: A, project: PROJECT, startingRevision: "1" } });
+    expect(await c.hosts.forTask(A, "task-a-7", REPO)).toBeUndefined();
+    await world.store.put({ item: { ...taskKey("task-a-7"), taskId: "task-a-7", companyId: A, project: PROJECT, startingRevision: 1 } });
+    expect((await c.hosts.forTask(A, "task-a-7", REPO))?.repository).toEqual({ url: REPO_URL });
   });
 });
 

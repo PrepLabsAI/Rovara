@@ -2,7 +2,7 @@
 // beyond which commit and environment to look at), and the read-only, bounded `deploymentStatuses` read over a fake GitHub HTTP server (tests/support/ports/github-fixture-api.ts; never the real GitHub). Every fake here proves
 // the adapter's own mapping and bounds only; it does not prove GitHub answers this way.
 import { describe, expect, it } from "vitest";
-import { CodeHostEventSchema, DEPLOYMENT_STATES } from "@agentx/contracts";
+import { CodeHostEventSchema, DEPLOYMENT_STATES, hostRateLimitRetryAt } from "@agentx/contracts";
 import { FakeHostModel } from "@agentx/broker/fakes";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { DEPLOYMENT_STATES_OF_GITHUB, githubCodeHostEvents, neutralEventsOfGithub } from "../../packages/broker/src/plugins/code-host/github/events.js";
@@ -154,9 +154,38 @@ describe("the deploymentStatuses read", () => {
     await expect(host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
+  it("tells a rate limit from a refusal with the neutral signal, so nothing asks again at once", async () => {
+    const { api, host, sha, repository } = world();
+    api.deploymentReads.rows = [{ id: 1, environment: "staging", statuses: [{ state: "success" }] }];
+    api.deploymentReads.listHttp = 429;
+    api.deploymentReads.listHeaders = { "retry-after": "120" };
+    const limited = await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE).catch((error: unknown) => error);
+    expect(hostRateLimitRetryAt(limited)).toBe(NOW + 120_000);
+    api.deploymentReads.listHttp = 403;
+    api.deploymentReads.listHeaders = {};
+    api.deploymentReads.listMessage = "You have exceeded a secondary rate limit.";
+    expect(hostRateLimitRetryAt(await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE).catch((error: unknown) => error))).toBeGreaterThan(NOW);
+    // A plain refusal (an App without the permission) is not a rate limit.
+    api.deploymentReads.listMessage = undefined;
+    expect(hostRateLimitRetryAt(await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE).catch((error: unknown) => error))).toBeUndefined();
+  });
+
+  it("lets the newest deployment of an environment speak even when it has no status yet or its newest status says nothing", async () => {
+    const { api, host, sha, repository } = world();
+    api.deploymentReads.rows = [
+      { id: 9, environment: "staging", statuses: [] },
+      { id: 5, environment: "staging", statuses: [{ state: "failure" }] },
+      { id: 8, environment: "qa", statuses: [{ state: "inactive" }] },
+      { id: 4, environment: "qa", statuses: [{ state: "success" }] },
+      { id: 3, environment: "prod", statuses: [{ state: "weird" }] },
+      { id: 2, environment: "prod", statuses: [{ state: "failure" }] },
+    ];
+    expect(await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).toEqual({ statuses: [], complete: true });
+  });
+
   it("refuses a malformed answer", async () => {
     const { api, host, sha, repository } = world();
-    for (const rows of [[{ id: 0, environment: "x", statuses: [] }], [{ id: 1.5, environment: "x", statuses: [] }]]) {
+    for (const rows of [[{ id: 0, environment: "x", statuses: [] }], [{ id: 1.5, environment: "x", statuses: [] }], [{ id: "7" as never, environment: "x", statuses: [] }], [{ id: 2 ** 60, environment: "x", statuses: [] }]]) {
       api.deploymentReads.rows = rows;
       await expect(host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     }

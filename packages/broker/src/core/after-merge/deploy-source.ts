@@ -5,7 +5,7 @@
 //
 // The read is the backstop for a deployment event that was never delivered, and the laptop's only way to learn of a deploy. It is read only and bounded in TOTAL (targets, requests, time), runs only for a
 // merge the company's index holds and whose project has the watcher switched on (a project that is off costs no request), and reads the host the task's own project pins for that repository, in the company's scope.
-import { CodeHostEventSchema, DeploymentStatusReadSchema, type CodeHost, type DeploymentStatusRead, type HostScope, type OrgId, type PageBudget, type RepositoryRef } from "@agentx/contracts";
+import { CodeHostEventSchema, DeploymentStatusReadSchema, hostRateLimitRetryAt, type CodeHost, type DeploymentStatusRead, type HostScope, type OrgId, type PageBudget, type RepositoryRef } from "@agentx/contracts";
 import { findMergeCommit } from "../proof/revert/merge-commit-index.js";
 import { isRepositoryName } from "./facts.js";
 import { guarded, observeDeployment, type DeploymentOutcome } from "./watch.js";
@@ -53,6 +53,8 @@ export type ReconcileOutcome =
   | { kind: "off" }
   | { kind: "unavailable" }
   | { kind: "skipped"; reason: "not_ours" | "no_host" | "unsupported" | "budget" }
+  /** The host told Rovara to slow down: the pass stopped, and nothing asks it again before `retryAt` (milliseconds since the epoch). */
+  | { kind: "rate_limited"; retryAt: number }
   | { kind: "read"; deployments: DeploymentOutcome[]; complete: boolean };
 
 /** The most targets and requests one reconcile pass spends, and its time: one TOTAL bound across every target. A pass that runs out stops and leaves the rest for the next pass. */
@@ -63,7 +65,7 @@ export const RECONCILE_MS_MAX = 20_000;
 export interface ReconcileLimits { targets?: number; requests?: number; ms?: number }
 
 /** A budget over a number of requests and a deadline. `beforeRequest` throws (a fixed-word error) when either is used up. */
-function pageBudgetOf(now: () => Date, limits: { requests: number; ms: number }): PageBudget & { spent: () => number } {
+function pageBudgetOf(now: () => Date, limits: { requests: number; ms: number }): PageBudget & { exhausted: () => boolean } {
   const startedAt = now().getTime();
   let requests = 0;
   return {
@@ -75,7 +77,7 @@ function pageBudgetOf(now: () => Date, limits: { requests: number; ms: number })
       }
       requests += 1;
     },
-    spent: () => requests,
+    exhausted: () => requests >= limits.requests || now().getTime() >= startedAt + limits.ms,
   };
 }
 
@@ -89,7 +91,12 @@ export async function reconcileDeployments(deps: AfterMergeDeps, orgId: OrgId, h
   const budget = pageBudgetOf(deps.now, { requests: limits.requests ?? RECONCILE_REQUESTS_MAX, ms: limits.ms ?? RECONCILE_MS_MAX });
   const outcomes: ReconcileOutcome[] = [];
   for (const target of targets.slice(0, limits.targets ?? RECONCILE_TARGETS_MAX)) {
-    outcomes.push(await reconcileOne(deps, orgId, hosts, target, budget));
+    // Out of allowance or time: nothing more is asked, not even the installation lookup and token mint that come before a host's first counted request.
+    if (budget.exhausted()) { outcomes.push({ kind: "skipped", reason: "budget" }); continue; }
+    const outcome = await reconcileOne(deps, orgId, hosts, target, budget);
+    outcomes.push(outcome);
+    // A host that said slow down is not asked again by this pass.
+    if (outcome.kind === "rate_limited") break;
   }
   return outcomes;
 }
@@ -129,6 +136,11 @@ async function reconcileOne(deps: AfterMergeDeps, orgId: OrgId, hosts: AfterMerg
   try {
     read = await host.codeHost.deploymentStatuses(host.repository, revision, host.scope, budget);
   } catch (error) {
+    const retryAt = hostRateLimitRetryAt(error);
+    if (retryAt !== undefined) {
+      deps.log?.("after_merge.deployment_read_rate_limited", { level: "warn" });
+      return { kind: "rate_limited", retryAt };
+    }
     // Fixed words and the error's class only: its message may carry the host's text.
     deps.log?.("after_merge.deployment_read_failed", { level: "warn", error: error instanceof Error ? error.name : "unknown" });
     return (error instanceof Error && error.name === "AfterMergeBudgetExhausted") ? { kind: "skipped", reason: "budget" } : { kind: "unavailable" };

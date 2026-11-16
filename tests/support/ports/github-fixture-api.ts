@@ -55,7 +55,7 @@ export class GitHubFixtureApi {
    * M7 slice 2: how the deployment reads answer (`GET /repos/../deployments?sha=` and `GET /repos/../deployments/<id>/statuses`). By default one deployment per environment the model knows a state of, newest status
    * only. `rows` replaces that with explicit deployments (a newest-first status list each); `next` adds a "next" link to the list; `statusHttp` answers every status read with that HTTP status; `listHttp` the list.
    */
-  readonly deploymentReads: { rows?: Array<{ id: number; sha?: string; environment: string; statuses: Array<{ state: string; environment?: string }> }>; next?: boolean; statusHttp?: number; listHttp?: number } = {};
+  readonly deploymentReads: { rows?: Array<{ id: number; sha?: string; environment: string; statuses: Array<{ state: string; environment?: string }> }>; next?: boolean; statusHttp?: number | undefined; listHttp?: number | undefined; listHeaders?: Record<string, string> | undefined; listMessage?: string | undefined } = {};
 
   private deploymentRows(sha: string): Array<{ id: number; sha: string; environment: string; statuses: Array<{ state: string; environment?: string }> }> {
     if (this.deploymentReads.rows !== undefined) return this.deploymentReads.rows.map((row) => ({ ...row, sha: row.sha ?? sha }));
@@ -271,7 +271,7 @@ export class GitHubFixtureApi {
         all.length > page * size ? { link: `<${API}${ROOT}/commits/${revision.sha}?per_page=100&page=${page + 1}>; rel="next"` } : {});
     }
     if (method === "GET" && path === `${ROOT}/deployments`) {
-      if (this.deploymentReads.listHttp !== undefined) return json(this.deploymentReads.listHttp, { message: "Resource not accessible by integration" });
+      if (this.deploymentReads.listHttp !== undefined) return json(this.deploymentReads.listHttp, { message: this.deploymentReads.listMessage ?? "Resource not accessible by integration" }, this.deploymentReads.listHeaders ?? {});
       const sha = url.searchParams.get("sha") ?? "";
       const rows = this.deploymentRows(sha).slice(0, Number(url.searchParams.get("per_page") ?? "30")).map((row) => ({ id: row.id, sha: row.sha, environment: row.environment }));
       return json(200, rows, this.deploymentReads.next === true ? { link: `<${API}${ROOT}/deployments?sha=${sha}&per_page=10&page=2>; rel="next"` } : {});

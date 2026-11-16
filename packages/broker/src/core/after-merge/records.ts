@@ -107,6 +107,6 @@ export const sentPartition = (orgId: OrgId): string => companyScoped(orgId, "AFT
 export const SURFACES = ["pull_request", "task", "chat"] as const;
 export type Surface = (typeof SURFACES)[number];
 export const sentKey = (orgId: OrgId, reportId: string, surface: Surface): DocumentKey => ({ pk: sentPartition(orgId), sk: `${reportId}#${surface}` });
-export const SentRowSchema = z.looseObject({ ...base, entityType: z.literal(SENT_ENTITY), reportId: z.string().regex(/^[0-9a-f]{64}$/u), surface: z.enum(SURFACES), state: z.enum(["sending", "done"]), leaseUntil: z.number().optional() });
+export const SentRowSchema = z.looseObject({ ...base, entityType: z.literal(SENT_ENTITY), reportId: z.string().regex(/^[0-9a-f]{64}$/u), surface: z.enum(SURFACES), state: z.enum(["sending", "done"]), claimId: z.string().optional(), leaseUntil: z.number().optional() });
 export type SentRow = z.infer<typeof SentRowSchema>;
 export const readSent = (stored: StoredDocument | undefined, orgId: OrgId): SentRow | undefined => readRow(SentRowSchema, stored, orgId, (row) => sentKey(orgId, row.reportId, row.surface));

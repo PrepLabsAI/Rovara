@@ -11,7 +11,7 @@
 //
 // Company binding: the task must be this company's (the record names it), the host and the repository come from that task's pinned project (`AfterMergeHosts`), the pull request address must be the one the report's repository and
 // number name, the session and the thread are read under the company's keys, and every row written is under `ORG#<company>#AFTER_MERGE_SENT`. A report for a task that is not this company's is dropped without telling anyone.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, agentSessionKey, change, when, type ChannelEvent, type DocumentStore, type OrgId, type RegistryView } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import { taskSessionId } from "../sessions/create.js";
@@ -72,32 +72,42 @@ export function createAfterMergeReporter(options: AfterMergeReporterOptions): Af
   const log: AfterMergeLog = options.log ?? (() => undefined);
   const surfacesOn = (): Partial<Record<Surface, boolean>> => (typeof options.surfaces === "function" ? options.surfaces() : options.surfaces ?? {});
 
-  /** Claims one surface of one report: "claimed" (go), "done" (already told), "busy" (another pass is telling it now). */
-  async function claim(orgId: OrgId, reportId: string, surface: Surface): Promise<"claimed" | "done" | "busy"> {
+  /** Claims one surface of one report: "claimed" (go, with the claim's own id), "done" (already told), "busy" (another pass is telling it now). */
+  async function claim(orgId: OrgId, reportId: string, surface: Surface): Promise<{ kind: "claimed"; claimId: string } | { kind: "done" } | { kind: "busy" }> {
     const key = sentKey(orgId, reportId, surface);
     const nowMs = options.now();
+    const claimId = randomUUID();
     const written = await store.put({
-      item: { ...key, entityType: SENT_ENTITY, orgId, reportId, surface, state: "sending", leaseUntil: nowMs + LEASE_MS, [INDEX_EXPIRY_ATTRIBUTE]: expiryOf(nowMs, WATCH_KEPT_DAYS) },
+      item: { ...key, entityType: SENT_ENTITY, orgId, reportId, surface, state: "sending", claimId, leaseUntil: nowMs + LEASE_MS, [INDEX_EXPIRY_ATTRIBUTE]: expiryOf(nowMs, WATCH_KEPT_DAYS) },
       condition: when.or(when.absent(), when.and(when.eq("state", "sending"), when.lt("leaseUntil", nowMs))),
     });
-    if (written.applied) return "claimed";
-    return readSent(await store.get(key), orgId)?.state === "sending" ? "busy" : "done";
+    if (written.applied) return { kind: "claimed", claimId };
+    return readSent(await store.get(key), orgId)?.state === "sending" ? { kind: "busy" } : { kind: "done" };
   }
 
   async function tell(orgId: OrgId, reportId: string, surface: Surface, deliver: () => Promise<Told>): Promise<"told" | "busy" | "failed"> {
     const claimed = await claim(orgId, reportId, surface);
-    if (claimed === "done") return "told";
-    if (claimed === "busy") return "busy";
+    if (claimed.kind === "done") return "told";
+    if (claimed.kind === "busy") return "busy";
     const key = sentKey(orgId, reportId, surface);
+    // Only this pass's own claim is ever deleted or marked done: a pass that ran past its lease never touches the claim another pass took over.
+    const mine = when.and(when.eq("state", "sending"), when.eq("claimId", claimed.claimId));
     try {
       await deliver();
     } catch (error) {
       // Fixed words and the error's class only: its message may carry the host's or the chat's own text.
       log("after_merge.surface_failed", { level: "warn", surface, error: error instanceof Error ? error.name : "unknown" });
-      await store.delete({ key, condition: when.eq("state", "sending") }).catch(() => undefined);
+      await store.delete({ key, condition: mine }).catch(() => undefined);
       return "failed";
     }
-    await store.update({ key, ops: [change.set("state", "done"), change.remove(["leaseUntil"])] }).catch(() => undefined);
+    let marked: boolean;
+    try {
+      marked = (await store.update({ key, ops: [change.set("state", "done"), change.remove(["leaseUntil"])], condition: mine })).applied;
+    } catch {
+      marked = false;
+    }
+    // The surface was told but not marked (or the claim was taken over meanwhile): the claim runs out and it is told once more. Said in fixed words, so the repeat is not a mystery.
+    if (!marked) log("after_merge.sent_mark_failed", { level: "warn", surface });
     return "told";
   }
 

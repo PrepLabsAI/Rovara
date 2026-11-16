@@ -86,7 +86,7 @@ export class FakeHostModel {
   }
 
   deploymentStates(revision: string): Array<{ environment: string; state: "success" | "failure" | "in_progress" }> {
-    return [...(this.deployments.get(revision) ?? new Map())].map(([environment, state]) => ({ environment, state }));
+    return [...(this.deployments.get(revision)?.entries() ?? [])].map(([environment, state]) => ({ environment, state }));
   }
 
   constructor(options: FakeModelOptions) {

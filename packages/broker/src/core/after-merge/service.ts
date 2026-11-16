@@ -9,7 +9,7 @@
 // installation or the alarm source's own company mapping, never by anything in the event. Every entry point is OFF unless the project's `afterMergeWatch` setting says on (the watcher checks that itself), and a store or
 // host fault never throws out of an entry point: it answers `unavailable` with fixed words and the next delivery or pass tries again.
 import { CodeHostEventSchema, OrgIdSchema, type OrgId } from "@agentx/contracts";
-import { deployFactOfEvent, reconcileDeployments, type AfterMergeHosts, type DeploymentTarget, type ReconcileLimits, type ReconcileOutcome } from "./deploy-source.js";
+import { RECONCILE_MS_MAX, deployFactOfEvent, reconcileDeployments, type AfterMergeHosts, type DeploymentTarget, type ReconcileLimits, type ReconcileOutcome } from "./deploy-source.js";
 import { closeDueWatches, observeDeployment, observeSignal, type DeploymentOutcome, type SignalOutcome, type SweepOutcome } from "./watch.js";
 import type { AfterMergeDeps } from "./ports.js";
 
@@ -40,6 +40,8 @@ export function createAfterMergeService(options: AfterMergeServiceOptions): Afte
   const { companyId, deps } = options;
   // Checked when the service is made, not at the first event: a bad company is a wiring bug.
   if (!OrgIdSchema.safeParse(companyId).success) throw new Error("the after-merge service needs a company id");
+  /** When the host last said slow down, until (milliseconds since the epoch). */
+  let pausedUntil = 0;
   return {
     companyId,
     async codeHostEvent(event: unknown): Promise<CodeHostEventOutcome> {
@@ -73,7 +75,11 @@ export function createAfterMergeService(options: AfterMergeServiceOptions): Afte
         } catch {
           deps.log?.("after_merge.recent_merges_failed", { level: "warn" });
         }
-        const outcomes: ReconcileOutcome[] = targets.length === 0 ? [] : await reconcileDeployments(deps, companyId, options.hosts, targets, options.limits);
+        // The deploy read stays inside the pass's own time, and a host that said slow down is left alone until its time (at most an hour, at least a minute).
+        const nowMs = deps.now().getTime();
+        const outcomes: ReconcileOutcome[] = targets.length === 0 || nowMs < pausedUntil ? [] : await reconcileDeployments(deps, companyId, options.hosts, targets, { ...options.limits, ms: Math.min(options.limits?.ms ?? RECONCILE_MS_MAX, Math.max(0, deadline - nowMs)) });
+        for (const outcome of outcomes) if (outcome.kind === "rate_limited") pausedUntil = Math.min(Math.max(outcome.retryAt, nowMs + 60_000), nowMs + 3_600_000);
+        report["rateLimited"] = outcomes.some((outcome) => outcome.kind === "rate_limited");
         report["read"] = outcomes.filter((outcome) => outcome.kind === "read").length;
         report["readSkipped"] = outcomes.filter((outcome) => outcome.kind === "skipped").length;
         report["readUnavailable"] = outcomes.filter((outcome) => outcome.kind === "unavailable").length;

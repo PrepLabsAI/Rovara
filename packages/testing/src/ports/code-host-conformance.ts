@@ -343,7 +343,7 @@ const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
       // Another revision has none of them.
       expect((await host.deploymentStatuses!(repository, other, scope)).statuses).toEqual([]);
       expect(await rejection(() => host.deploymentStatuses!(unregistered, sha, scope))).toBeDefined();
-      expect(await rejection(() => host.deploymentStatuses!(repository, sha, { orgId: "not-a-company" } as unknown as HostScope))).toBeDefined();
+      expect(await rejection(() => host.deploymentStatuses!(repository, sha, { orgId: "not-a-company" }))).toBeDefined();
     },
   },
   {

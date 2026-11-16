@@ -64,12 +64,8 @@ export function createTaskHosts(options: TaskHostsOptions): AfterMergeHosts {
       const wanted = repositoryFullName.toLowerCase();
       const entry = pinned.definition.repositories.find((candidate) => githubRepositoryOfUrl(candidate.url.replace(/\.git$/u, "")) === wanted);
       if (entry === undefined) return undefined;
-      let codeHost: CodeHost;
-      try {
-        codeHost = codeHostForRecord(options.registry as RegistryView, { host: (entry as { host?: { kind: PluginKind } }).host });
-      } catch {
-        return undefined;
-      }
+      // A host the install has not registered (yet) throws, with the registry's fixed words: that is not "no host" for good, so the caller tries again (a report stays pending, a read answers unavailable).
+      const codeHost: CodeHost = codeHostForRecord(options.registry as RegistryView, { host: (entry as { host?: { kind: PluginKind } }).host });
       return { codeHost, repository: { url: entry.url }, scope: { orgId } };
     },
   };
