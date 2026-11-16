@@ -22,7 +22,7 @@
 // What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices)
 // refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use. The admission's hold sweep is the root's own (lane L8),
 // and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
-import { relayCoreOutboxStream } from "./core-outbox-stream.js";
+import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, isContextSourceStage,
@@ -70,7 +70,6 @@ import { ownerOfWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
-import { CallbackCapabilities } from "../callbacks.js";
 import { handleCoreContextTools } from "../core-host/context-tools.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
@@ -276,7 +275,7 @@ export function deployedCallerFromMembership(membershipOf: (personId: string) =>
 }
 
 // ---- the stream hook (shared with the notifier's existing reader)
-export { outboxCompaniesOf } from "./core-outbox-stream.js";
+export { outboxCompaniesOf };
 
 // ---- money (lane L8)
 

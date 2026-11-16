@@ -299,6 +299,7 @@ export interface TaskFlowDeps {
    * (undefined when it is not known: then no test is flaky on the base). Read BEFORE the verification is recorded; a fault, a missing answer or an empty one changes nothing (the check stays failed). Absent: nothing is excused.
    */
   flakyChecks?: (input: { task: TaskRecord; operation: OperationRecord; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<{ byCheck: ReadonlyMap<string, readonly string[]>; baseFlaky: readonly string[] | undefined } | undefined>;
+  /**
    * TE-H1 browser evidence (DEC 241), Code only (Cloud leaves it absent: browser evidence is not on Cloud yet). `recipe`: the project's recipe from the owner's own settings, or undefined for off; it is read fail-closed, so anything
    * unreadable is off. A rerun of the checks that carries it asks the worker for before and after screenshots of the changed pages. `linesOf`: the text lines the pull request description adds about them (never an image).
    * Absent: nothing is asked, and the description is exactly what it was.

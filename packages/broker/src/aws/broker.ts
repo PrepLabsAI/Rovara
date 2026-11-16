@@ -2,7 +2,6 @@ import "./broker-environment-init.js"; import { companyMembershipFromDynamo, res
 import { createBrokerCoreServices } from "./core-job-services.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
-import { recordInCompany } from "./company-check.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
