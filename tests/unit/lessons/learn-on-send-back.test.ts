@@ -140,9 +140,13 @@ describe("queueing: a person's send-back, behind the switch and the mode, for th
   it("the second send-back is round 2; a findings request-changes counts as a send-back; past the round bound nothing is queued", async () => {
     const { world: fake, companies, logs } = await world({ [CORE_LESSONS_VARIABLE]: "on" });
     const a = companies.get(A)!;
-    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "first" }, { source: "FINDINGS", reason: "Fix the null check the reviewer found." }]);
+    // A findings answer's reason is code's own summary, never the person's words: it counts as round 2 but queues nothing itself.
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "first" }, { source: "FINDINGS", reason: "0 accepted, 1 to fix" }]);
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
-    expect((await queued(fake)).map((m) => m["round"])).toEqual([2]);
+    expect(await queued(fake)).toEqual([]);
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "third, in a person's words" }]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect((await queued(fake)).map((m) => m["round"])).toEqual([3]);
     await decide(fake, a.taskId, Array.from({ length: SEND_BACK_REFLECTIONS_MAX - 1 }, (_, i) => ({ source: "SEND_BACK" as const, reason: `again ${String(i)}` })));
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
     expect(await queued(fake)).toEqual([]);

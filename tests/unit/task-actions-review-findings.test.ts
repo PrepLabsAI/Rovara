@@ -5,7 +5,7 @@
 //   3. only the findings to fix reach the coder, with the owner's instruction for each; an accepted one is recorded for that code, with who and why;
 //   4. the money: a fix is a round of paid coding (cap, admission, access); accepting everything starts only the draft pull request, which needs access but no model money;
 //   5. the same request id once.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll, redactText, returnWorkflowToImplementationAutomatically, when, wholeTaskSpendUsd, type WorkflowSnapshot } from "@agentx/contracts";
 import type { Admission } from "@agentx/contracts";
 import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
@@ -14,6 +14,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import type { TaskCaller, TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { acceptedByOf, findingAcceptItem } from "../../packages/broker/src/core/task-flow/finding-accept.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
+import { LESSONS_TELL_LIMIT_MS } from "../../packages/broker/src/core/task-flow/lessons-tell.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import type { TaskActionsOptions } from "../../packages/broker/src/core/task-flow/owner-round.js";
 import { SECURITY_ACCEPT_ON_THE_PAGE } from "../../packages/broker/src/core/task-flow/security-accept.js";
@@ -371,5 +372,85 @@ describe("a second answer by another id", () => {
     await actions.resolveFindings(caller, TASK_ID, mixed());
     await expect(actions.resolveFindings(caller, TASK_ID, { ...mixed(), requestId: REQUEST_B })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(await codingOperations(h)).toHaveLength(1);
+  });
+});
+
+// Learn on send-back (the lessons hook line), findings: a fix sends the task back to coding, so the lessons seam (`lessonsSentBack`) is told once with only the task id, after the decision is committed. An answer that
+// only accepts findings is an approval and tells nothing. Best effort and bounded; a refused, repeated or lost-race answer tells nothing.
+describe("the lessons hook after a findings fix", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("tells the lessons seam once with only the task id after a fix is committed and before the coding run starts; accepting every finding tells nothing", async () => {
+    const { h, caller } = await seed({ workflow: both() });
+    const calls: unknown[][] = [];
+    const seen: Array<{ source?: string | undefined; decision: string } | undefined> = [];
+    const runsAtTell: number[] = [];
+    h.deps.lessonsSentBack = async (...args: unknown[]) => {
+      calls.push(args);
+      runsAtTell.push((await codingOperations(h)).length);
+      const decision = (await taskOf(h)).workflow!.decisions.at(-1);
+      seen.push(decision === undefined ? undefined : { source: decision.source, decision: decision.decision });
+    };
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
+    expect(calls).toEqual([[TASK_ID]]);
+    expect(seen).toEqual([{ source: "FINDINGS", decision: "REQUEST_CHANGES" }]);
+    expect(runsAtTell).toEqual([0]);
+    const approval = await seed({ workflow: both() });
+    const approvalCalls: string[] = [];
+    approval.h.deps.lessonsSentBack = async (taskId) => { approvalCalls.push(taskId); };
+    await pageActions(approval.h.deps).resolveFindings(approval.caller, TASK_ID, acceptAll());
+    expect(approvalCalls).toEqual([]);
+  });
+
+  it("does not fail the answer when the seam rejects, throws or never answers: the decision stands and the coding run starts", async () => {
+    for (const seam of [async () => { throw new Error("lessons queue down"); }, () => { throw new Error("sync fault"); }]) {
+      const { h, caller } = await seed({ workflow: both() });
+      h.deps.lessonsSentBack = seam;
+      const view = await pageActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
+      expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+      expect(await codingOperations(h)).toHaveLength(1);
+    }
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { h, caller } = await seed({ workflow: both() });
+    h.deps.lessonsSentBack = () => new Promise<void>(() => undefined);
+    const pending = pageActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
+    await vi.advanceTimersByTimeAsync(LESSONS_TELL_LIMIT_MS + 1);
+    expect((await pending).workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    expect(await codingOperations(h)).toHaveLength(1);
+  });
+
+  it("tells nothing for a refused answer (not the owner, a stale revision or code, a missing answer, a closed task, a fix over the cap or refused admission)", async () => {
+    const calls: string[] = [];
+    const seam = async (taskId: string): Promise<void> => { calls.push(taskId); };
+    const guest = await seed({ workflow: both() }); guest.h.deps.lessonsSentBack = seam;
+    await expect(pageActions(guest.h.deps).resolveFindings(guest.h.guest, TASK_ID, mixed())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    const stale = await seed({ workflow: both() }); stale.h.deps.lessonsSentBack = seam;
+    await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, { ...mixed(), expectedRevision: 5 })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, { ...mixed(), candidateDigest: "f".repeat(64) })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, request([answer(parserId, "FIX")]))).rejects.toBeDefined();
+    const closed = await seed({ workflow: both(), task: { closedAt: NOW } }); closed.h.deps.lessonsSentBack = seam;
+    await expect(pageActions(closed.h.deps).resolveFindings(closed.caller, TASK_ID, mixed())).rejects.toBeDefined();
+    const capped = await seed({ workflow: both() }); capped.h.deps.lessonsSentBack = seam;
+    await expect(pageActions(capped.h.deps, { roundCap: async () => ({ limitUsd: 6, spentUsd: 6 }) }).resolveFindings(capped.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    const refusing: Admission = { ...createAllowAllAdmission(), async admit() { return { allowed: false, code: "budget_exhausted", message: "The monthly budget is used up." }; } };
+    const refused = await seed({ workflow: both(), harness: { admission: refusing } }); refused.h.deps.lessonsSentBack = seam;
+    await expect(pageActions(refused.h.deps).resolveFindings(refused.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    expect(calls).toEqual([]);
+  });
+
+  it("tells once for a repeat of the same answer and once for two arriving at once", async () => {
+    const repeat = await seed({ workflow: both() });
+    const repeatCalls: string[] = [];
+    repeat.h.deps.lessonsSentBack = async (taskId) => { repeatCalls.push(taskId); };
+    const actions = pageActions(repeat.h.deps);
+    await actions.resolveFindings(repeat.caller, TASK_ID, mixed());
+    await actions.resolveFindings(repeat.caller, TASK_ID, mixed());
+    expect(repeatCalls).toEqual([TASK_ID]);
+    const race = await seed({ workflow: both() });
+    const raceCalls: string[] = [];
+    race.h.deps.lessonsSentBack = async (taskId) => { raceCalls.push(taskId); };
+    const racing = pageActions(race.h.deps);
+    await Promise.all([racing.resolveFindings(race.caller, TASK_ID, mixed()), racing.resolveFindings(race.caller, TASK_ID, mixed())]);
+    expect(raceCalls).toEqual([TASK_ID]);
   });
 });
