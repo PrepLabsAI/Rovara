@@ -319,7 +319,7 @@ async function endToEnd(options: { adapter?: boolean; head?: Record<string, stri
   const parts = { company: A, project, baseCommit: repo.baseSha, codeHash: evalCodeHash(repo.baseSha), judgePin, commandFingerprint: inputs.commandFingerprint, catalogRowId: "model", model: "model", modelVersion: "version-1", evalSetHash: inputs.evalSetHash, hiddenSetHash: "none", settingsFingerprint: inputs.settingsFingerprint };
   await createDocumentBaseScoreCache(store, { companyId: A }).write(parts, RECORD, { writer: "rovara_base_round", baseCommit: repo.baseSha });
   const handler = createCallbackHandler({ flow: { store, companyId: A, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never,
-    evalPlan: createEvalPlanSources({ store, companyId: A, members: a.members, ...(options.adapter === true ? { registry: registryWith(a.adapter) } : {}) }) });
+    evalPlan: createEvalPlanSources({ store, companyId: A, members: a.members, registry: registryWith(options.adapter === true ? a.adapter : undefined) }) });
   const capability = new CallbackCapabilities(KEY).issue({ workspaceId, operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION], expiresInSeconds: 60 });
   const asks: string[] = [];
   // The worker's fetch reaches the broker's callback handler directly (no network).
