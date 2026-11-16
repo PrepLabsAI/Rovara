@@ -1,4 +1,5 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
+import { withEvalChangedPromptClassifier } from "./verification/eval-changed-prompt.js";
 import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
@@ -674,9 +675,12 @@ async function runTask(
         const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
         let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
         try {
-          const running = runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
+          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
             status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
-          }).then(value => { evalArtifact = value; return value; });
+          });
+          const running = (dependencies.evalFinalCheck === undefined || status !== "verified" ? evaluate()
+            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, evaluate))
+            .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
         } catch (error) {
           if (isWorkspaceUnsafe(error) || !stop.signal.aborted) throw error;
