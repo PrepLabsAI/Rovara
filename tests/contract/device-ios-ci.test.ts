@@ -11,7 +11,7 @@ const job = ci.jobs["device-ios"]!;
 const runs = job.steps.map((step) => step.run ?? "").join("\n");
 
 describe("the CI job that runs the iOS simulator", () => {
-  it("runs on macOS behind the same Markdown-only skip as the other heavy jobs, with its own time limit, read-only permissions, and the one gate waits for it", () => {
+  it("runs on macOS behind the same Markdown-only skip as the other heavy jobs, with its own time limit and read-only permissions, and the one gate does NOT wait for it yet (informational until its first real run has been read)", () => {
     expect(job["runs-on"]).toMatch(/^macos-\d+$/u);
     expect(job.needs).toBe("scope");
     expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
@@ -19,7 +19,7 @@ describe("the CI job that runs the iOS simulator", () => {
     expect(job["timeout-minutes"]).toBeLessThanOrEqual(90);
     expect(job.permissions).toBeUndefined();
     expect(ci.permissions).toEqual({ contents: "read" });
-    expect(ci.jobs["local"]!.needs).toContain("device-ios");
+    expect(ci.jobs["local"]!.needs).not.toContain("device-ios");
   });
   it("installs Maestro only with its SHA-256 checked, from its own release host, at the version the device executor image pins, and runs the one macOS test", () => {
     const dockerfile = read("environments/device-executor/Dockerfile");
