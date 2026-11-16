@@ -1,5 +1,6 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
 import { withEvalChangedPromptClassifier } from "./verification/eval-changed-prompt.js";
+import { withEvalPinnedCandidate } from "./verification/eval-plan-source.js";
 import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact, type BrowserEvidenceSignInAnswer } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
@@ -714,8 +715,11 @@ async function runTask(
           });
           // Only a fresh check round reads the plan; a working round refuses first, so the classifier has nothing to classify.
           const fresh = ports?.roundKind === "check_sealed" || ports?.roundKind === "check_unsealed";
-          const running = (ports === undefined || status !== "verified" || !fresh || stop.signal.aborted ? evaluate()
-            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate))
+          // DEC 253j(1): the trusted plan's per-task hashes come from this same pinned candidate. The pin wraps the classifier too,
+          // because the one shared plan read (made first by the classifier) must happen inside it.
+          const running = (ports === undefined || status !== "verified" ? evaluate()
+            : withEvalPinnedCandidate(repositories, candidateBefore, stop.signal, () => !fresh || stop.signal.aborted ? evaluate()
+              : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate)))
             .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
         } catch (error) {

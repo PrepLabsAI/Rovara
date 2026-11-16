@@ -45,6 +45,7 @@ import * as buildSourceExport from "../../packages/worker/src/e2e-build-source-e
 import * as baselineAncestry from "../../packages/worker/src/verification/baseline-ancestry.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
+import { evalPinnedCandidateActive } from "../../packages/worker/src/verification/eval-plan-source.js";
 
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 const bash = (command: string, id: string) => toolUse(fauxToolCall("bash", { command }, { id }));
@@ -2040,6 +2041,18 @@ describe("CHECKS eval hook", () => {
       expect(saved).toMatchObject({ outcome: "done", candidateDigest: before });
       const proof = TestProofSchema.parse(JSON.parse(run.artifacts.find(a => a.name === "test-proof.json")!.content));
       expect(saved.candidateDigest).toBe(proof.candidateDigest);
+    } finally { await w.cleanup(); }
+  });
+  it("the one shared plan read happens inside the pinned candidate, so the pin wraps the changed-prompt classifier", async () => {
+    // The classifier makes the first plan read. The pinned plan reader (#809) works only inside the pin, so a read outside it is not runnable. Either order
+    // looks the same when the plan is a plain fake, which is why the read itself records whether the pin is active.
+    const w = await createEvalFinalCheckWorld(); const pinned: boolean[] = []; const read = w.ports.plan;
+    w.ports.plan = async () => { pinned.push(evalPinnedCandidateActive()); return read(); };
+    try {
+      const fake = fakeRunners();
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+      expect(run.failure).toBeUndefined(); expect(w.calls.length).toBeGreaterThan(0);
+      expect(pinned).toEqual([true]);
     } finally { await w.cleanup(); }
   });
   it("a working round reads no plan at all: the classifier is not started", async () => {

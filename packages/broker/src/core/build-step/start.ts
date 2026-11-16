@@ -4,7 +4,7 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
-  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, generalFakesPayloadOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, generalFakesPayloadOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { evalRequestForChecks } from "../proof/eval-round-reader.js";
@@ -274,7 +274,8 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
     requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(browserRecipe === undefined ? [] : [BROWSER_EVIDENCE_FEATURE, ...(browserRecipe.video === undefined ? [] : [BROWSER_EVIDENCE_VIDEO_FEATURE])]), ...(testPlan === undefined ? [] : testPlan.requires), ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE])],
-    ...(browserRecipe === undefined ? {} : { extraActions: browserRecipe.signIn === undefined ? ["browser-evidence"] : ["browser-evidence", "browser-evidence-sign-in"] }),
+    // A run the broker asked for an eval may ask for its trusted eval plan (DEC 253c `eval-plan`); no other run's capability names it.
+    ...(browserRecipe === undefined && evalRequest === undefined ? {} : { extraActions: [...(browserRecipe === undefined ? [] : browserRecipe.signIn === undefined ? ["browser-evidence"] : ["browser-evidence", "browser-evidence-sign-in"]), ...(evalRequest === undefined ? [] : [EVAL_PLAN_DELIVERY_ACTION])] }),
   });
   return settled(deps, row, accepted.result);
 }

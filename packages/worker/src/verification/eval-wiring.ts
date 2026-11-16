@@ -11,9 +11,9 @@
 // callback capability). It is sent only to the origin it was minted for: a token whose `baseUrl` is not the configured gateway's origin (an install with no gateway,
 // or a proxy key) is never sent anywhere. The token never enters the sandbox (the bridge's egress is the stage's call), a log line, an error or an artifact.
 //
-// WHAT THIS BASE DOES NOT HAVE (each one reads "not run", never a guess, until it is built): the trusted SOURCES (the confirmed plan with its question inventory, the
-// persisted approval, the company-scoped baseline cache), delivered from the control plane (live setup delivery, EVAL-WIRE-SOURCES-NOT-DELIVERED); and the FRESH
-// check sandbox (TE-B1). `evalHostSourcesFor` is the one place a later lane fills in.
+// THE TRUSTED SOURCES (DEC 253j(1)): the confirmed plan with its question inventory, the persisted approval and the company-scoped baseline cache are delivered from the
+// control plane through the signed `eval-plan` callback (`evalPlanSourcesFor`). WHAT THIS BASE DOES NOT HAVE (it reads "not run", never a guess, until it is built): the
+// FRESH check sandbox (TE-B1), which `evalHostSourcesFor`'s `check` takes.
 import type { EvalGatewayTokenSource } from "./eval-gateway-access.js";
 import { createEvalGatewayAccess } from "./eval-gateway-access.js";
 import { createBridgedEvalExec, type FreshEvalSandbox } from "./eval-bridged-exec.js";
@@ -23,6 +23,9 @@ import type { EvalMeterOptions } from "./eval-model-access.js";
 import type { ModelEgressFrame } from "@agentx/contracts";
 import { modelAccessSource } from "../model-access.js";
 import { evalChangedPrompt } from "./eval-changed-prompt.js";
+import { createEvalBaselines } from "./eval-baseline-refresh.js";
+import { evalSourcesFromDelivery, fetchEvalPlanDelivery, type DeliveredEvalSources } from "./eval-plan-delivery.js";
+import { pinnedEvalPlan } from "./eval-plan-source.js";
 
 /** The host's setting that turns the eval on: the model gateway's https origin. Unset (the default), or anything else: the eval stays off. */
 export const EVAL_GATEWAY_URL_VARIABLE = "ROVARA_EVAL_GATEWAY_URL";
@@ -55,14 +58,59 @@ export interface EvalHostSources {
   readonly meter?: EvalMeterOptions;
 }
 
+/** The longest the one eval-plan ask may take. */
+export const EVAL_PLAN_ASK_TIMEOUT_MS = 30_000;
+
+/** The invocation fields the trusted sources are asked with: this operation's own ids and capability. */
+export interface EvalSourceInvocation { readonly workspaceId: string; readonly operationId: string; readonly callbackCapability: string }
+
+/** The check round's own pieces, from the host (TE-B1's fresh sandbox, the worker's socket folder and its model pin). */
+export interface EvalCheckHost {
+  readonly sandbox: FreshEvalSandbox;
+  readonly runDir: string;
+  readonly modelAllowed: (frame: ModelEgressFrame) => boolean;
+  readonly changedPrompt?: (frame: ModelEgressFrame) => boolean;
+  readonly meter?: EvalMeterOptions;
+}
+
 /**
- * The sources for this invocation, or undefined (the eval stays "not connected"). Today none exist on this base: the plan, the approval and the baseline cache are the
- * broker's, and no route delivers them to the worker yet; the fresh sandbox is TE-B1. A later lane replaces the body; its sources must come from the invocation's own
- * capability and company.
+ * DEC 253j(1): the trusted plan, approval and baseline cache of this invocation, through the signed `eval-plan` callback (one ask, made at the first read, with this operation's own
+ * capability). The plan is the broker's stored plan completed with this check's own per-task hashes from the pinned candidate (`pinnedEvalPlan`, inside `withEvalPinnedCandidate`);
+ * the approval and the cache are read-only views of the delivered answer. A refused or failed ask gives no plan, no grant and a cache that misses: "not connected", zero calls.
  */
-export function evalHostSourcesFor(_invocation: { readonly operationId: string; readonly callbackCapability: string }): EvalHostSources | undefined {
-  void _invocation;
-  return undefined;
+export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch }): Pick<EvalHostSources, "plan" | "approval" | "cache" | "baselines"> {
+  let delivery: Promise<DeliveredEvalSources | undefined> | undefined;
+  const delivered = (): Promise<DeliveredEvalSources | undefined> => delivery ??= fetchEvalPlanDelivery({
+    controlPlaneUrl: options.controlPlaneUrl, workspaceId: invocation.workspaceId, operationId: invocation.operationId, capability: invocation.callbackCapability,
+    // One bounded ask: a broker that hangs is "not available" after 30 seconds, never held to the round deadline.
+    signal: AbortSignal.timeout(EVAL_PLAN_ASK_TIMEOUT_MS),
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+  }).then(evalSourcesFromDelivery, () => undefined);
+  return {
+    plan: async () => { try { const found = await delivered(); return found === undefined ? undefined : await pinnedEvalPlan(await found.plan()); } catch { return undefined; } },
+    approval: { read: async () => { try { return await (await delivered())?.approval.read(); } catch { return undefined; } } },
+    cache: {
+      read: async (parts) => { try { return await (await delivered())?.cache.read(parts); } catch { return undefined; } },
+      readMeasurement: async (parts) => { try { return (await (await delivered())?.cache.readMeasurement?.(parts)) ?? "unavailable"; } catch { return "unavailable"; } },
+      // Base rounds are never saved from a worker through this route.
+      write: async () => "refused",
+    },
+    baselines: createEvalBaselines(),
+  };
+}
+
+/**
+ * The sources for this invocation, or undefined (the eval stays "not connected"). The plan, the approval and the baseline cache come from the broker (`evalPlanSourcesFor`); the check
+ * round's sandbox, socket folder and model pin come from `check` (TE-B1). Without a check host there are no sources.
+ */
+export function evalHostSourcesFor(invocation: EvalSourceInvocation, host: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch; readonly check?: EvalCheckHost | undefined }): EvalHostSources | undefined {
+  try {
+    const check = host.check;
+    if (check === undefined || typeof host.controlPlaneUrl !== "string" || host.controlPlaneUrl === "") return undefined;
+    return { ...evalPlanSourcesFor(invocation, { controlPlaneUrl: host.controlPlaneUrl, ...(host.fetch === undefined ? {} : { fetch: host.fetch }) }),
+      sandbox: check.sandbox, runDir: check.runDir, modelAllowed: check.modelAllowed,
+      ...(check.changedPrompt === undefined ? {} : { changedPrompt: check.changedPrompt }), ...(check.meter === undefined ? {} : { meter: check.meter }) };
+  } catch { return undefined; }
 }
 
 export interface EvalTaskBindingInput {
