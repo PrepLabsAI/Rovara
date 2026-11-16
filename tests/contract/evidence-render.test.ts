@@ -353,6 +353,9 @@ describe("callers", () => {
     // v2 export (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
     const proofOnly = ["EvidenceTrustClass", "SCRIPTED_AI_PROOF_WORDS", "AGENT_REPLIES_UNCONFIRMED_WORDS", "AGENT_REPLIES_DISAGREED_WORDS"];
     const writerFiles = [
+      // TE-H1 slice 2 (DEC 241, #756): the reader that serves a browser-evidence picture (`readEvidenceArtifact`) takes the task's v2 pack as `EvidencePackV2` / `EvidencePackV2Read`, so it can serve the pairs of its `visual` check
+      // and nothing else of a v2 pack (the download rule is `servableBrowserEvidenceImage`, in contracts/browser-evidence-wire.ts). It only reads.
+      "packages/broker/src/core/proof/evidence-artifacts.ts",
       "packages/broker/src/core/proof/evidence-guard.ts",
       "packages/broker/src/core/proof/evidence-keep.ts",
       "packages/broker/src/core/proof/evidence-lines.ts",
@@ -390,10 +393,18 @@ describe("nothing turns the version 2 writer on yet", () => {
   it("only the writer's own file and the local wiring name keepEvidence, and the wiring gives it no writer", () => {
     expect(grep("-lE", "keepEvidence\\(").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/local/app/evidence.ts"]);
     expect(readFileSync(`${root}/packages/broker/src/local/app/evidence.ts`, "utf8")).not.toMatch(/\bwriter\b/u);
-    expect(grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2")).toEqual([]);
+    // TE-H1 slice 2 (DEC 241, #756): the one place a writer is given. A pack needs the v2 form only to carry the browser evidence `visual` check and its pairs, so `keepEvidence` makes the v2 writer itself, and ONLY when this run's
+    // `browserEvidence` was uploaded and stored (no browser evidence = no writer = the v1 pack, byte for byte: tests/unit/browser-evidence-keep.test.ts). Every v2 reader is already in place or ships in the same change: the v1 view
+    // (`loadEvidencePack`, which the proof page and the risk input read), the description's reader (`loadEvidenceRead`, off until `evidenceWriter: 2`), the panel, the PR lines and the picture route (local/app/evidence.ts), and the
+    // erase by task prefix; nothing else (Slack, MCP, the CLI, Cloud) reads a pack Code keeps. A failure to build the v2 form falls back to the plain v1 pack. Exactly this one line is approved, by its words.
+    const approvedForcedWriter = (entry: string) => entry.startsWith("packages/broker/src/core/proof/evidence-keep.ts:") && entry.includes("{ version: 2, producer: { edition: \"code\", isolation: browser.isolation } }");
+    const writers = grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2");
+    expect(writers.filter((entry) => !approvedForcedWriter(entry))).toEqual([]);
+    expect(writers.filter(approvedForcedWriter)).toHaveLength(1);
   });
   it("only the evidence keep file and a comment in the evidence lines name loadEvidenceRead", () => {
-    expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts"]);
+    // TE-H1 slice 2 (DEC 241, #756): the local wiring (local/app/evidence.ts) reads the task's v2 pack to show the before/after panel, write the PR's text lines and serve the pictures. It only reads, and only for the current code.
+    expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts", "packages/broker/src/local/app/evidence.ts"]);
   });
 });
 
@@ -427,6 +438,8 @@ describe("no callers", () => {
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
     const approved = new Set([
+      // TE-H1 slice 2 (DEC 241, #756): the reader that serves a browser-evidence picture takes the v2 pack's types (see the callers test above).
+      "packages/broker/src/core/proof/evidence-artifacts.ts",
       "packages/broker/src/core/proof/evidence-guard.ts", "packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts",
       "packages/broker/src/core/proof/evidence-pack.ts", "packages/broker/src/core/proof/evidence-v2-lines.ts", "packages/broker/src/core/proof/proof-table.ts",
       "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts",
