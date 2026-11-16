@@ -172,7 +172,10 @@ describe("answers", () => {
     expect(cancelled).toBe(true);
   });
   it("a transport fault is a 502 provider error in the family's shape", async () => {
-    const out = await run(gateway(() => { throw new Error(`socket ${TOKEN}`); }));
+    const g = gateway(() => { throw new Error(`socket ${TOKEN}`); });
+    const out = await run(g);
+    // ONE attempt, never retried (a retry can double-spend).
+    expect(g.sent).toHaveLength(1);
     expect(out[0]).toMatchObject({ kind: "head", status: 502 });
     expect(settle(out)).toMatchObject({ class: "provider_error", costMicros: 0 });
     expect(text(out)).not.toContain(TOKEN);
@@ -189,13 +192,23 @@ describe("answers", () => {
     [403, "task_ended", "task ended", "refused", "not_allowed"],
     [404, "not_set_up", "product AI is not set up for this project", "refused", "not_found"],
     [400, "invalid_request", "request not allowed", "refused", "bad_request"],
+    [400, "provider_refused", "the provider refused this request", "refused", "bad_request"],
     [413, "request_too_large", "x", "refused", "too_large"],
   ];
   it.each(refusals)("a %i %s is the fixed %s answer, at no cost, with none of the gateway's words", async (status, type, message, cls, word) => {
-    const out = await run(gateway(errorAnswer(status, type, `${message} secret-words`)));
+    const g = gateway(errorAnswer(status, type, `${message} secret-words`));
+    const out = await run(g);
+    expect(g.sent).toHaveLength(1);
     expect(settle(out)).toMatchObject({ class: cls, refusal: word, costMicros: 0, estimated: false });
     expect((out[0] as Extract<ModelEgressEvent, { kind: "head" }>).headers).toContainEqual(["x-rovara-refusal", word]);
     expect(text(out)).not.toContain("secret-words");
+  });
+  it("every refusal the contract lists is a fixed refusal answer here, never a provider error", async () => {
+    const contract = JSON.parse(readFileSync(new URL("../../contracts/shared/model-gateway-product-ai.v1.json", import.meta.url), "utf8")) as { refusals: Array<{ status: number; type: string; message?: string; messagePrefix?: string }> };
+    for (const refusal of contract.refusals) {
+      const out = await run(gateway(errorAnswer(refusal.status, refusal.type, refusal.message ?? `${refusal.messagePrefix ?? ""}x`)));
+      expect(settle(out), refusal.type).not.toMatchObject({ class: "provider_error" });
+    }
   });
   it("the gateway's \"budget exceeded by one call\" is the overrun sentence", async () => {
     const out = await run(gateway(errorAnswer(422, "budget_exceeded", "budget exceeded by one call")));
@@ -211,13 +224,14 @@ describe("answers", () => {
   });
   it.each([
     ["a provider error", errorAnswer(502, "provider_error", "provider unavailable"), 502],
-    ["a provider refusal", errorAnswer(400, "provider_refused", "the provider refused this request"), 400],
     ["an unavailable gateway", errorAnswer(503, "unavailable", "model access unavailable"), 503],
     ["an unknown type", errorAnswer(418, "teapot", "secret"), 418],
     ["a body that is not JSON", () => new Response("<html>secret</html>", { status: 500 }), 500],
     ["an over-long error body", () => new Response(JSON.stringify({ error: { type: "busy", message: "x".repeat(70_000) } }), { status: 429 }), 502],
   ] as Array<[string, () => Response, number]>)("%s is a provider error with fixed words", async (_n, answer, status) => {
-    const out = await run(gateway(answer));
+    const g = gateway(answer);
+    const out = await run(g);
+    expect(g.sent).toHaveLength(1);
     expect(settle(out)).toMatchObject({ class: "provider_error", costMicros: 0 });
     expect(text(out)).not.toContain("secret");
     if (status !== 502) expect(out[0]).toMatchObject({ status });
