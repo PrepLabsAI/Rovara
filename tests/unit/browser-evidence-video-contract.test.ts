@@ -61,8 +61,8 @@ describe("which pages may keep a video", () => {
   it("a page that did not load, or a page with errors after; never a page whose text was not read and verified (it could not be photographed, ran out of time, or was withheld for what it showed)", () => {
     expect(browserEvidenceVideoEligible({ status: "not_run", reason: "page_did_not_load" })).toBe(true);
     for (const reason of ["capture_failed", "time_limit", "masked_content", "over_size_cap", "app_did_not_start", "not_stored", "sign_in_failed", "no_recipe"] as const) expect(browserEvidenceVideoEligible({ status: "not_run", reason })).toBe(false);
-    expect(browserEvidenceVideoEligible({ status: "shown", consoleErrors: { before: 0, after: 1 } })).toBe(true);
-    expect(browserEvidenceVideoEligible({ status: "shown", consoleErrors: { before: 5, after: 0 } })).toBe(false);
+    expect(browserEvidenceVideoEligible({ status: "shown", consoleErrors: { after: 1 } })).toBe(true);
+    expect(browserEvidenceVideoEligible({ status: "shown", consoleErrors: { after: 0 } })).toBe(false);
   });
 
   it("a run that carries a video of a healthy page, or of a withheld page, is refused whole", () => {

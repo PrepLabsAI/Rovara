@@ -135,7 +135,7 @@ describe("video on failure, in the worker", () => {
     const seen: Array<{ side: string; max: number | undefined }> = [];
     const w = world();
     const docker = w.input().docker!;
-    const spying: BrowserEvidenceWorkInput["docker"] = { run: docker.run, execBytes: async (args, options) => { seen.push({ side: seen.length === 0 ? "before" : "after", max: options.maxStdoutBytes }); return docker.execBytes(args, options); } };
+    const spying: BrowserEvidenceWorkInput["docker"] = { run: docker.run, execBytes: async (args, options) => { seen.push({ side: seen.length === 0 ? "before" : "after", max: options.maxStdoutBytes }); return docker.execBytes!(args, options); } };
     await collectBrowserEvidence(w.input({ recipe: VIDEO_RECIPE, docker: spying }));
     expect(seen[0]?.max).toBe(4 * 1024 * 1024);
     expect(seen[1]?.max).toBeGreaterThan(4 * 1024 * 1024);
