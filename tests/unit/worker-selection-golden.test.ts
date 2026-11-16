@@ -144,3 +144,15 @@ describe("source-root priority (REVIEW-1 re-check)", () => {
     }
   });
 });
+
+describe("rare source-root shapes (REVIEW-1 re-check Lows), recorded from the original selection.ts (a389a040d)", () => {
+  const edgesOf = (files: Array<{ path: string; text: string }>, from: string) => [...(buildImportGraph(files).get(from) ?? [])].sort();
+  it("a module named twice in one path counts only its first occurrence", () => {
+    expect(edgesOf([{ path: "tests/test_9.py", text: "import b\nimport pkg\n" }, { path: "a/b.py/b.py", text: "" }, { path: "a/a.pyx/pkg.pyi/pkg.py", text: "" }, { path: "b.py", text: "" }], "tests/test_9.py")).toEqual(EXPECTED_TWICE);
+  });
+  it("a malformed import still falls back to the src/ root", () => {
+    expect(edgesOf([{ path: "tests/test_10.py", text: "from a. import q\nimport a..b\n" }, { path: "src/a/__init__.py", text: "" }, { path: "src/a/b.py", text: "" }], "tests/test_10.py")).toEqual(EXPECTED_FALLBACK);
+  });
+});
+const EXPECTED_TWICE = ["b.py"];
+const EXPECTED_FALLBACK = ["src/a/__init__.py", "src/a/b.py"];

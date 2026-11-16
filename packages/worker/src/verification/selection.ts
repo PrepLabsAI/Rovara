@@ -223,30 +223,31 @@ export function buildImportGraph(files: ReadonlyArray<{ path: string; text: stri
     // once so checking each path segment stays linear in the path length.
     const pythonMarkers: number[] = [];
     for (let marker = path.indexOf(".py"); marker >= 0; marker = path.indexOf(".py", marker + 3)) pythonMarkers.push(marker);
+    // Like the old per-module indexOf: only a module's FIRST occurrence in a path counts, and one at index 0 adds no root.
+    const emittedModules = new Set<string>();
     let pythonMarker = 0;
     let slash = path.indexOf("/");
-    if (slash === 0) slash = path.indexOf("/", 1);
-    while (slash > 0) {
+    while (slash >= 0) {
       while (pythonMarker < pythonMarkers.length && (pythonMarkers[pythonMarker] as number) <= slash) pythonMarker += 1;
       const marker = pythonMarkers[pythonMarker];
       if (marker !== undefined) {
         const module = path.slice(slash + 1, marker);
-        if (module.length > 0) addRoot(module, path.slice(0, marker));
+        if (module.length > 0 && !emittedModules.has(module)) { emittedModules.add(module); if (slash > 0) addRoot(module, path.slice(0, marker)); }
       }
       slash = path.indexOf("/", slash + 1);
     }
 
     const packageMarkers: number[] = [];
     for (let marker = path.indexOf("/__init__.py"); marker >= 0; marker = path.indexOf("/__init__.py", marker + 1)) packageMarkers.push(marker);
+    const emittedPackages = new Set<string>();
     let packageMarker = 0;
     slash = path.indexOf("/");
-    if (slash === 0) slash = path.indexOf("/", 1);
-    while (slash > 0) {
+    while (slash >= 0) {
       while (packageMarker < packageMarkers.length && (packageMarkers[packageMarker] as number) <= slash) packageMarker += 1;
       const marker = packageMarkers[packageMarker];
       if (marker !== undefined) {
         const module = path.slice(slash + 1, marker);
-        if (module.length > 0) addRoot(module, path.slice(0, marker));
+        if (module.length > 0 && !emittedPackages.has(module)) { emittedPackages.add(module); if (slash > 0) addRoot(module, path.slice(0, marker)); }
       }
       slash = path.indexOf("/", slash + 1);
     }
