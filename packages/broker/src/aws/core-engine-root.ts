@@ -26,11 +26,12 @@ import { relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema,
-  type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
+  type PolicySource, type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
-import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
+import { policyCiReporting } from "./core-job-services.js";
+import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { deployedDevWiringParts, stepUpDecisionProofs } from "../core-host/deployed-decisions.js";
@@ -104,14 +105,16 @@ export interface BrokerCoreRootInputs {
   /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   lessonsLearning?: CoreLessonsOptions["learning"];
   /**
-   * The project's own CI mode reader (core-host/switch-blockers.ts, honest CI). Absent: the `honest-ci` switch blocker refuses a company's runtime wherever merge tracking would run
-   * (lane L3 gives it with merge tracking).
+   * Optional explicit CI reader. Otherwise the root adapts policySource (D1 today when no source was supplied).
+   * The runtime validates this reader and passes the same checked function to merge tracking.
    */
   ciReporting?: CiReporting;
   /** Lane L11: the company's code settings (how a project merges and approves), for how we work. Absent: how we work answers "not on the core yet" (never the laptop's fixed settings). */
   codeSettings?: CodeSettingsReader;
+  /** D1 policy resolved per company/project. Absent: D1 today (their_ci_fix); never default on a failed read. */
+  policySource?: PolicySource;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
-  services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry) => Partial<Record<CoreServiceName, CoreService>>;
+  services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry, wiring: CoreServiceWiring) => Partial<Record<CoreServiceName, CoreService>>;
   /**
    * Lane L2b (DEC 236): the task-token signer (the KMS task key, TASK_TOKEN_KEY_ARN) and the token issuer (the install's sign-in issuer, whose JWKS the gateway
    * pins). Asked for only where the model gateway is configured (ROVARA_CORE_MODEL_GATEWAY_URL): a worker's model-access request is then answered with a task token
@@ -343,8 +346,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
       log,
-      ...(inputs.ciReporting === undefined ? {} : { ciReporting: inputs.ciReporting }),
-      services: (flow) => {
+      ciReporting: inputs.ciReporting === undefined ? policyCiReporting(inputs.policySource) : inputs.ciReporting,
+      services: (flow, wiring) => {
         let lessons: CoreLessons | undefined;
         if (inputs.lessonsPeople === undefined) {
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
@@ -368,7 +371,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         }
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
-          ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          ...(inputs.services?.(companyId, flow, registry, wiring) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
           "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
         };

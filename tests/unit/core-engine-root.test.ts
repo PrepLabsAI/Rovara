@@ -259,3 +259,23 @@ describe("core outbox stream partial failures", () => {
     expect(relay.mock.calls).toEqual([[[ORG, OTHER]]]);
   });
 });
+
+it("keeps the off root's serialized answers byte identical with policy and service inputs supplied", async () => {
+  const tables = fakeTables();
+  const resolve = vi.fn(async () => { throw new Error("must not read policy off"); });
+  const services = vi.fn(() => { throw new Error("must not build services off"); });
+  const plain = createBrokerCoreRoot(rootInputs({}, tables.client));
+  const supplied = createBrokerCoreRoot(rootInputs({}, tables.client, { policySource: { resolve }, services }));
+  const answers = async (root: ReturnType<typeof createBrokerCoreRoot>) => JSON.stringify([
+    await root.handleEvent({ source: "agentx.core-job", job: "merge-tracking" }),
+    await root.handleEvent({ source: "agentx.core-job", job: "session-sweep" }),
+    await root.handleEvent({ source: "agentx.core-job", job: "notify-deliver" }),
+    await root.handleEvent({ source: "agentx.core-job", job: "admission-hold-sweep" }),
+  ]);
+  const golden = '[{"skipped":"off"},{"skipped":"off"},{"skipped":"off"},{"skipped":"off"}]';
+  expect(await answers(plain)).toBe(golden);
+  expect(await answers(supplied)).toBe(golden);
+  expect(resolve).not.toHaveBeenCalled();
+  expect(services).not.toHaveBeenCalled();
+  expect(tables.reads).toEqual([]);
+});
