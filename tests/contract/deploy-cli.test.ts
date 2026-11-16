@@ -572,6 +572,26 @@ describe("agentx deploy", () => {
     expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: answers file ${answersPath} is invalid: region Invalid input: expected string, received undefined\n`);
   });
 
+  it("install answers must name the GitHub App id; upgrade answers may leave it out, and neither accepts an empty one (switch-over gap 1)", async () => {
+    const github = (answersJson().github as Record<string, unknown>);
+    const { appId: _appId, ...withoutAppId } = github;
+    const missing = await writeAnswers({ github: withoutAppId });
+    const empty = await writeAnswers({ github: { ...github, appId: "" } });
+    const run = async (mode: string, path: string) => {
+      const io = capture();
+      const code = await executeCli(["deploy", "--mode", mode, "--release", "/nonexistent-release", "--answers", path, "--yes"], { ...io, deploy: safeDeployDeps() });
+      return { code, err: io.err.join("") };
+    };
+    expect(await run("install", missing)).toEqual({ code: 2, err: `AgentX error [CONFIG_INVALID]: answers file ${missing} is invalid: github.appId Invalid input: expected string, received undefined\n` });
+    expect((await run("install", empty)).err).toContain(`answers file ${empty} is invalid: github.appId`);
+    expect((await run("upgrade", empty)).err).toContain(`answers file ${empty} is invalid: github.appId`);
+    // Upgrade accepts the answers and goes on to the release (which does not exist here).
+    const upgrade = await run("upgrade", missing);
+    expect(upgrade.code).not.toBe(0);
+    expect(upgrade.err).not.toContain("is invalid");
+    expect(upgrade.err).toContain("/nonexistent-release");
+  });
+
   it("--engine cdk requires --source", async () => {
     const io = capture();
 

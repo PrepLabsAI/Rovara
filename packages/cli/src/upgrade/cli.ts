@@ -40,11 +40,12 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
     .option("--source <dir>", "the cdk engine only: a clean checkout of the target release's tag; --to or --release, when given, must match it")
     .option("--allow-replace <logical-id>", "accept replacing or deleting this table, user pool, bucket, key or secret; repeat for each", collect, [])
     .option("--export <dir>", "write the upgrade for a platform team's pipeline instead of deploying it")
+    .option("--answers-from-deployed <file>", "write the deploy answers (for agentx deploy --mode upgrade --answers) read from the deployed environment and its settings, and deploy nothing; either engine")
     .option("--worker-image <digest-ref>", "worker image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
     .option("--slack-image <digest-ref>", "Slack service image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
     .option("--yes", "apply without asking; every change and the release notes are still printed", false)
     .option("--region <region>", "AWS region of the environment; defaults to your AWS configuration")
-    .action(async (options: { to?: string; release?: string; source?: string; allowReplace: string[]; export?: string; workerImage?: string; slackImage?: string; yes: boolean; region?: string }, command: Command) => {
+    .action(async (options: { to?: string; release?: string; source?: string; allowReplace: string[]; export?: string; answersFromDeployed?: string; workerImage?: string; slackImage?: string; yes: boolean; region?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ env: string; json: boolean; configDir: string }>();
       const overrides = context.overrides ?? {};
       const aws = options.region === undefined ? {} : { region: options.region };
@@ -80,9 +81,12 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
         env: globals.env, yes: options.yes, allowReplace: options.allowReplace,
         ...(options.to === undefined ? {} : { to: options.to }), ...(options.release === undefined ? {} : { releaseDir: options.release }),
         ...(options.source === undefined ? {} : { source: options.source }), ...(options.export === undefined ? {} : { exportDir: options.export }),
+        ...(options.answersFromDeployed === undefined ? {} : { answersFile: options.answersFromDeployed }),
         ...(images === undefined ? {} : { images }),
       }, deps);
-      context.stdout.write(globals.json ? formatSuccess(result, true) : result.exported !== undefined
+      context.stdout.write(globals.json ? formatSuccess(result, true) : result.answers !== undefined
+        ? `Wrote the deployed answers of ${result.env} (${result.from}) to ${result.answers}; nothing was deployed.\n`
+        : result.exported !== undefined
         ? `Wrote the upgrade of ${result.env} to ${result.to} to ${result.exported}; give it to your platform team.\n`
         : `Upgraded ${result.env} from ${result.from} to ${result.to}.\n`);
     });

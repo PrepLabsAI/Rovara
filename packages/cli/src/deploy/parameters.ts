@@ -34,7 +34,9 @@ export interface InstallAnswers {
         clientId?: string;
       };
   // account and installationId are what `agentx init` set up; the control plane no longer takes them (#123).
-  github: { account?: string; appId: string; installationId?: string; privateKeySecretArn: string; credentialRef?: string };
+  // appId absent: only an upgrade's answers may leave it out, and deployEnvironment then fills in the
+  // control plane's deployed GitHubAppId (possibly "") before any parameters are computed.
+  github: { account?: string; appId?: string; installationId?: string; privateKeySecretArn: string; credentialRef?: string };
   /** The value; the caller reads it from Secrets Manager, never logs it. */
   callbackSigningKey: string;
   permissionsBoundaryArn?: string;
@@ -284,6 +286,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       if (answers.callbackSigningKey.length < MIN_CALLBACK_SIGNING_KEY_LENGTH) {
         // Never include the value: it is a secret.
         throw new Error(`the callback signing key must be at least ${MIN_CALLBACK_SIGNING_KEY_LENGTH} characters`);
+      }
+      if (answers.github.appId === undefined) {
+        throw new Error("the answers name no GitHub App id (github.appId); an install needs one, and an upgrade keeps the deployed one");
       }
       const oidc =
         answers.identity.mode === "cognito"
