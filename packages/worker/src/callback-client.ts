@@ -2,7 +2,6 @@ import {TaskModelFallbackRequestSchema,type TaskModelFallbackRequest,type TaskMo
 import {parseTaskModelFallbackAuthorization,taskModelPolicyBindingsMatch} from "./model-fallback-authority.js";
 import { createHash } from "node:crypto";
 import {
-  BROWSER_EVIDENCE_UPLOAD_MAX_BYTES,
   CodeBuildCheckResultSchema,
   E2EModelDayBudgetRequestSchema,
   E2EModelDayBudgetResponseSchema,
@@ -101,8 +100,6 @@ export function createWorkerCallbackSinks(input: {
   baselineSourceSink: (source: BaselineSourceExport) => Promise<void>;
   workflowE2EAdmissionReader: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
-  /** TE-H1 browser evidence (DEC 241b): the run's before and after screenshots as ONE chunked upload (`encodeBrowserEvidenceUpload`), judged and kept by the broker. Throws when the broker does not accept it. */
-  browserEvidenceSink: (bytes: Uint8Array) => Promise<void>;
   /** M1.4 Task 4.3a: one reserve, settle or release of the project's day budget for a model call (the broker keeps the rows). Only a round whose admission has AI navigation steps holds the claim. */
   workflowE2EModelBudget: (body: E2EModelDayBudgetRequest, signal?: AbortSignal) => Promise<E2EModelDayBudgetResponse>;
   feedbackBundleReader: FeedbackBundleReader;
@@ -250,26 +247,6 @@ export function createWorkerCallbackSinks(input: {
       || (finalized as { sha256?: unknown }).sha256 !== sha256) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence finalization is invalid");
     return { key: (finalized as { key: string }).key, sha256 };
   };
-  const browserEvidenceSink = async (bytes: Uint8Array): Promise<void> => {
-    if (bytes.byteLength <= 0 || bytes.byteLength > BROWSER_EVIDENCE_UPLOAD_MAX_BYTES) throw agentXError("CONFIG_INVALID", "browser evidence exceeds its limit");
-    const chunkBytes = 64 * 1024;
-    const chunkCount = Math.ceil(bytes.byteLength / chunkBytes);
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const initialized = await postForResult("browser-evidence", { stage: "init", totalBytes: bytes.byteLength, chunkCount, sha256 });
-    if (!initialized || typeof initialized !== "object" || typeof (initialized as { uploadId?: unknown }).uploadId !== "string"
-      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "browser evidence upload initialization is invalid");
-    }
-    const uploadId = (initialized as { uploadId: string }).uploadId;
-    for (let index = 0; index < chunkCount; index += 1) {
-      const chunk = Buffer.from(bytes).subarray(index * chunkBytes, Math.min((index + 1) * chunkBytes, bytes.byteLength));
-      await postForResult("browser-evidence", { stage: "chunk", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") });
-    }
-    const finalized = await postForResult("browser-evidence", { stage: "finalize", uploadId, sha256 });
-    if (!finalized || typeof finalized !== "object" || (finalized as { complete?: unknown }).complete !== true || (finalized as { sha256?: unknown }).sha256 !== sha256) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "browser evidence upload finalization is invalid");
-    }
-  };
   const workflowE2EModelBudget = async (body: E2EModelDayBudgetRequest, signal?: AbortSignal): Promise<E2EModelDayBudgetResponse> => {
     const response = await fetchImplementation(`${prefix}/e2e-model-budget`, { method: "POST", ...(signal === undefined ? {} : { signal }),
       headers: { "content-type": "application/json", "x-agentx-callback-capability": input.invocation.callbackCapability }, body: JSON.stringify(E2EModelDayBudgetRequestSchema.parse(body)) });
@@ -375,7 +352,6 @@ export function createWorkerCallbackSinks(input: {
     baselineSourceSink,
     workflowE2EAdmissionReader,
     workflowE2EEvidenceSink,
-    browserEvidenceSink,
     workflowE2EModelBudget,
   };
 }

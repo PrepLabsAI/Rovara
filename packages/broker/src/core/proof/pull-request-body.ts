@@ -88,11 +88,6 @@ export interface PullRequestBodyContext {
    * is read by everyone who can see the repository, so, like the lessons' titles, the block is printed only when this is true. Absent (unknown) or false (public): no block, the v1 lines. The caller sets it from the code host.
    */
   repositoryKnownPrivate?: boolean | undefined;
-  /**
-   * TE-H1 browser evidence (DEC 241d): the text lines about the before and after screenshots of the changed pages (`browserEvidenceLines`: who ran it, that it is visual evidence only, one line per page, "on the task page, behind sign-in").
-   * Text only: no image, no address of one and no digest ever reaches GitHub, because an image a PR reader's browser can fetch would be public. Absent or empty: the description is exactly what it was.
-   */
-  browserEvidenceLines?: readonly string[] | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -267,12 +262,6 @@ function testLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, 
  * The lines between the markers: What changed, Tests, Reviews and Risk, about the code now on the pull request. `reviewLines(listed)` gives the Reviews section's lines (at most `listed` accepted
  * findings named). The lists shrink until the block fits `budgetBytes`.
  */
-/** The "Browser evidence" section: its fixed lines under a heading and a blank line after; nothing for none. Each line is one line (a line with a break in it is dropped, so a section never carries other markup). */
-export function browserEvidenceSection(lines: readonly string[] | undefined): string[] {
-  const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line));
-  return kept.length === 0 ? [] : ["## Browser evidence", ...kept, ""];
-}
-
 export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, reviewLines: (listed: number) => string[], budgetBytes = PULL_REQUEST_BODY_MAX_BYTES - SUMMARY_MAX_BYTES - 2_000): string[] {
   const risk = riskShown(workflow, context);
   const linearKey = normalizeIssueKey(context.linearIssueKey);
@@ -298,7 +287,6 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
       "## What changed", ...changedLines(context, limit), "",
       ...(testing === undefined ? ["## Tests", ...testLines(workflow, context, limit)] : testingSectionLines(testing, level, testingExtraLines(workflow, context, limit))), "",
       ...(proof === undefined ? [] : [...proof(proofLevel), ""]),
-      ...browserEvidenceSection(context.browserEvidenceLines),
       ...lessonsUsedLines(context.lessonsUsed, limit),
       "## Reviews", ...reviewLines(limit), ...reviewModelLines(workflow, context.reviewSameModel === true).map((line) => inertLine(line, ITEM_MAX)), ...(context.secondReviewLines ?? []), "",
       `## Risk: ${riskHeading(risk?.level ?? "medium")}`, ...(risk?.reasons ?? ["Rovara couldn't assess this change."]).map((reason) => `- ${Array.from(reason).slice(0, ITEM_MAX).join("")}`),

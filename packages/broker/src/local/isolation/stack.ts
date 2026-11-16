@@ -194,11 +194,6 @@ export interface GuardInput extends HelperCommon {
   services?: GuardServices | undefined;
   /** The registries a project's dev container may pull its image from (lower-case names). Absent or empty: no dev container (the guard refuses every image but the worker's own). */
   devcontainerRegistries?: readonly string[];
-  /**
-   * TE-H1 browser evidence (DEC 241a): the executor image as a pinned id and the pinned seccomp profile as the docker CLI sends it (compact JSON), so the guard lets the worker start capture containers that share one of its
-   * sandboxes' network (docker-socket-guard-browser-source.ts). Absent: the guard refuses every such container, as it always did.
-   */
-  browserEvidence?: { image: string; seccomp: string } | undefined;
 }
 
 /** The registries a dev container may pull from when the owner says nothing, on a Docker that runs in a virtual machine (the common dev container images live on these). On a Docker host where a container's root is the host's root there is no default. */
@@ -257,7 +252,6 @@ export function guardPolicy(input: GuardInput): Record<string, unknown> {
     maxSandboxes: input.maxSandboxes ?? 16,
     ...(input.services === undefined ? {} : { services: { images: [...input.services.images], guardImage: input.services.guardImage, runDirectory: input.services.runDirectory, bindDirectory: input.services.bindDirectory, socketGroup: input.services.socketGroup, ...(input.services.slots === undefined ? {} : { slots: input.services.slots }), ...(input.services.maxNetworks === undefined ? {} : { maxNetworks: input.services.maxNetworks }), ...(input.services.maxContainers === undefined ? {} : { maxContainers: input.services.maxContainers }), ...(input.services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: input.services.maxMemoryMiB }) } }),
     ...(input.devcontainerRegistries === undefined || input.devcontainerRegistries.length === 0 ? {} : { devcontainer: { registries: [...input.devcontainerRegistries] } }),
-    ...(input.browserEvidence === undefined ? {} : { browserEvidence: { image: input.browserEvidence.image, seccomp: input.browserEvidence.seccomp } }),
   };
 }
 

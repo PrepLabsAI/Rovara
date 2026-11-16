@@ -289,17 +289,10 @@ export function renderLessons(context: PageContext, lessons: readonly LessonView
 export function renderProof(context: PageContext, view: ProofReportView): string {
   const rows = view.rows.map((row) => `<tr><td>${untrusted(row.claim)}</td><td>${untrusted(row.check)}</td><td class="${STATUS_CLASS[row.status]}">${STATUS_WORD[row.status]}</td><td>${row.detail === undefined ? "" : untrusted(row.detail)}</td></tr>`);
   const prs = view.pullRequests.length === 0 ? "" : `<p>${view.pullRequests.map((pr) => externalLink(pr.url, `Pull request #${pr.number}`) + ` <span class="muted">${untrusted(pr.state)}</span>`).join(" · ")}</p>`;
-  // TE-H1: the before and after screenshots, with who took them and that they are not proof. Each picture is served by this task's own route behind the page session; its digest is only the address.
-  const evidence = view.browserEvidence;
-  const shot = (sha: string, alt: string) => `<img src="${esc(context.base)}/proof/${esc(view.taskId)}/evidence/${esc(sha)}" alt="${esc(alt)}" loading="lazy">`;
-  const browser = evidence === undefined ? "" : `<section class="panel" id="browser-evidence"><h2>Before and after screenshots</h2><p class="muted">${esc(evidence.runBy)}. ${esc(evidence.notProof)}</p>`
-    + evidence.pairs.map((pair) => `<figure><figcaption><code>${esc(pair.route)}</code></figcaption><div class="row"><div><p class="muted">Before</p>${shot(pair.before, `${pair.route} before`)}</div><div><p class="muted">After</p>${shot(pair.after, `${pair.route} after`)}</div></div></figure>`).join("")
-    + (evidence.notes.length === 0 ? "" : `<ul>${evidence.notes.map((note) => `<li>${esc(note)}</li>`).join("")}</ul>`) + "</section>";
   return layout({
     title: `Proof: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">Proof report · revision ${esc(view.revision)}${view.cost === undefined ? "" : ` · ${untrusted(view.cost)}`}</p><p>${untrusted(view.summary)}</p>${prs}`
       + `${rows.length === 0 ? "<p class=\"muted\">No claims to prove yet.</p>" : `<table><thead><tr><th>Claim</th><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>${rows.join("")}</tbody></table>`}`
-      + browser
       + `<p><a href="${esc(context.base)}/plan/${esc(view.taskId)}">Back to the plan</a></p>`,
   });
 }

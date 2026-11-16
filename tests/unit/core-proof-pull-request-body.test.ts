@@ -993,37 +993,3 @@ describe("the version 1 pull request description names who asked (I3)", () => {
     expect(body).not.toContain("0123456789abcdef");
   });
 });
-
-// ---- TE-H1 slice 2 (DEC 241d): browser evidence on the pull request is text only, and absent means the description it always was
-
-describe("the browser evidence lines of the description", () => {
-  const lines = [
-    "Browser evidence: Run by Rovara in its sandbox. Visual evidence only: it does not count as change proof.",
-    "- `/checkout`: before and after screenshots (on the task page, behind sign-in)",
-    "- `/settings`: Not run: the page did not load",
-  ];
-  it("version 2 (Rovara Code): one section after the proof, the lines as given; with none, the very same description byte for byte", () => {
-    const without = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context());
-    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: [] }))).toBe(without);
-    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: undefined }))).toBe(without);
-    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: lines }));
-    expect(body).toContain(["## Browser evidence", ...lines].join("\n"));
-    expect(body.indexOf("## Browser evidence")).toBeLessThan(body.indexOf("## Reviews"));
-    expect(body.replace(`${["## Browser evidence", ...lines, ""].join("\n")}\n`, "")).toBe(without);
-  });
-  it("version 1: the lines join the status block after the proof lines; with none, the block it always was", () => {
-    const plain = workflowPullRequestStatusLines(workflowWith({}, "1.0.0"), context());
-    expect(workflowPullRequestStatusLines(workflowWith({}, "1.0.0"), context({ browserEvidenceLines: [] }))).toEqual(plain);
-    expect(workflowPullRequestStatusLines(workflowWith({}, "1.0.0"), context({ browserEvidenceLines: lines }))).toEqual([...plain, ...lines]);
-    const full = workflowPullRequestBody(task, workflowWith({}, "1.0.0"), planOf, SESSION, context({ browserEvidenceLines: lines }));
-    for (const entry of lines) expect(full).toContain(entry);
-    expect(workflowPullRequestBody(task, workflowWith({}, "1.0.0"), planOf, SESSION, context())).not.toContain("Browser evidence");
-  });
-  it("is text only: a line with a break in it is left out, an address a reader could mistake for an image is never added, and an email is hidden", () => {
-    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: ["ok line", "two\nlines", "mail ada@example.com"] }));
-    expect(body).toContain("ok line");
-    expect(body).not.toContain("two\nlines");
-    expect(body).not.toContain("ada@example.com");
-    expect(body).not.toMatch(/!\[|<img/u);
-  });
-});

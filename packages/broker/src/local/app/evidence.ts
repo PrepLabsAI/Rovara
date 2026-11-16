@@ -6,16 +6,14 @@
 //     re-check of the same code replaces, with the documented opt-in (`overwrite: true` in `evidence-keep.ts`: one pack per task and candidate digest).
 // It is informational: a fault or a slow store only means there is no evidence for this code. It never changes a verdict and never holds a callback longer than `EVIDENCE_KEEP_MAX_MS`.
 import { scanText } from "@agentx/verifier";
-import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, SANDBOX_MODEL_HOSTS_ITEM_ID, workflowSelectedChecks, TestEnvTaskPlanSchema, browserEvidenceLines, browserEvidenceOutcomeOfPack, browserEvidencePanelOf, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot, type EvidenceBaseline, type BrowserEvidencePanel } from "@agentx/contracts";
+import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, SANDBOX_MODEL_HOSTS_ITEM_ID, workflowSelectedChecks, TestEnvTaskPlanSchema, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot, type EvidenceBaseline } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
-import { keepEvidence, loadEvidencePack, policyKindsOf, loadEvidenceBaseline, loadEvidenceRead, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
+import { keepEvidence, loadEvidencePack, policyKindsOf, loadEvidenceBaseline, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { taskBaselineOf } from "../../core/test-env/baseline-task.js";
 import { baselineCacheEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { workspaceKey } from "../../core/task-flow/keys.js";
-import { dropBrowserEvidenceUpload, readBrowserEvidenceUpload } from "../../core/proof/browser-evidence-upload.js";
-import { readEvidenceArtifact, type EvidenceRead } from "../../core/proof/evidence-artifacts.js";
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
 import { readVerifiedText } from "./documents.js";
 
@@ -29,12 +27,6 @@ export interface LocalEvidence {
   packOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidencePack | undefined>;
   /** TE-C1: the words of the baseline the checks of exactly this code were compared with, or undefined. */
   baselineOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidenceBaseline | undefined>;
-  /** TE-H1: the task page's before and after panel for exactly this code, or undefined (no browser evidence, another candidate's, or a pack that does not read). */
-  browserEvidencePanelOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<BrowserEvidencePanel | undefined>;
-  /** TE-H1: the pull request's text lines about browser evidence for exactly this code (none when there is none). Text only: never an image, an address of one or a digest. */
-  browserEvidenceLinesOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined, options: { taskLink?: string | undefined }): Promise<string[]>;
-  /** TE-H1: one picture of the task's current browser evidence, for the page that shows it. The caller has already checked the reader's right to the task (its company); only a picture the CURRENT pack names as a pair is returned. */
-  browserEvidenceImageOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined, sha256: string): Promise<EvidenceRead>;
 }
 
 /** FIX-0518: the pack's line when the owner let a project's sandboxes reach the model hosts: the fixed sentence, and the setting named (a name, never a value from the repository). */
@@ -102,7 +94,6 @@ export function createLocalEvidence(options: {
       const { task, operation } = input;
       let late = false;
       const actions = operationArtifactActions({ store: flow.store, blobs }, task, operation);
-      const browser = await readBrowserEvidenceUpload({ store: flow.store, objects: blobs }, { workspaceId: task.workspaceId, id: operation.id });
       const run = keepEvidence({
         scan: scanText, store: { blobs }, late: () => late, log,
         actions,
@@ -112,33 +103,13 @@ export function createLocalEvidence(options: {
         ...(await modelHostsAllowed(task.workspaceId) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
         // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), when the switch is on.
         ...baselineInput(options.testEnv, flow.companyId, task.project, task.taskId, () => operation.dispatch.payload["testEnvironment"]),
-        // TE-H1: what this operation's browser-evidence upload held (none unless the run was asked for it and uploaded), read with the operation's own workspace and id.
-        ...(browser === undefined ? {} : { browserEvidence: browser }),
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => { late = true; resolve(undefined); }, EVIDENCE_KEEP_MAX_MS); timer.unref(); });
-      try {
-        const result = await Promise.race([run, timeout]);
-        // What the upload held is in the store now (or was refused): the hand-off object is not needed any more.
-        if (browser !== undefined) await dropBrowserEvidenceUpload({ store: flow.store, objects: blobs }, { workspaceId: task.workspaceId, id: operation.id });
-        return result;
-      } finally { clearTimeout(timer); }
+      try { return await Promise.race([run, timeout]); } finally { clearTimeout(timer); }
     },
     packOf: (task, candidateDigest) => loadEvidencePack(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest),
     baselineOf: (task, candidateDigest) => loadEvidenceBaseline(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest),
-    async browserEvidencePanelOf(task, candidateDigest) {
-      const read = await loadEvidenceRead(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest);
-      return read?.status === "v2" ? browserEvidencePanelOf(browserEvidenceOutcomeOfPack(read.pack, candidateDigest)) : undefined;
-    },
-    async browserEvidenceLinesOf(task, candidateDigest, linesOptions) {
-      const read = await loadEvidenceRead(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest);
-      return read?.status === "v2" ? browserEvidenceLines(browserEvidenceOutcomeOfPack(read.pack, candidateDigest), linesOptions) : [];
-    },
-    async browserEvidenceImageOf(task, candidateDigest, sha256) {
-      const owner = { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId };
-      const read = await loadEvidenceRead(blobs, owner, candidateDigest);
-      return readEvidenceArtifact({ store: { blobs }, authorize: async () => ({ ...owner, candidateDigest, view: undefined, ...(read?.status === "v2" ? { v2Pack: read.pack } : {}) }) }, sha256);
-    },
   };
 }
 

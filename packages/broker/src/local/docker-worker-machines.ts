@@ -193,12 +193,6 @@ export interface DockerWorkerMachinesOptions {
    */
   sandboxModelHostsAllowed?: ((project: string | undefined) => boolean | Promise<boolean>) | undefined;
   /**
-   * TE-H1 browser evidence (DEC 241a): the executor image the owner named (`ROVARA_EXECUTOR_IMAGE`) and whether a project has a browser evidence recipe (read from the owner's config, fail-closed). A machine for such a project is created with
-   * `EXECUTOR_IMAGE` set to the image's id and a guard that lets the worker start capture containers from it (and nothing else new); any other machine is as it was. `seccomp` is the pinned profile in the docker CLI's compact form, read late
-   * and verified against its digest (a profile that cannot be verified is no browser evidence). A change re-creates an idle machine, like any other change of its configuration.
-   */
-  browserEvidence?: { image: string; enabled(project: string | undefined): boolean | Promise<boolean>; seccomp(): string } | undefined;
-  /**
    * Test services (dependencies on a sealed per-run network): the registry the catalog images were pulled from, the catalog environment, the full references of the images that were pulled (the only helpers the
    * guard lets start) and the run folder. Absent: the worker is not told about test services and the guard is the plain one. A change re-creates an idle machine, like any other change of its configuration.
    */
@@ -328,9 +322,8 @@ export class DockerWorkerMachines implements WorkerMachines {
     const services = this.#options.testServices;
     const runDirectory = services === undefined ? undefined : join(services.runDirectoryParent ?? join(resolve(this.#options.stateDirectory), "test-services"), hash);
     const imageId = services === undefined ? undefined : await this.#imageId(image);
-    const browserExecutor = await this.#browserExecutor(spec.projectName);
-    const environment = { ...this.#environment(spec, workspaceDirectory, image, names, buildSystems), ...(deniedByDefault.length === 0 ? {} : { [SANDBOX_MODEL_HOSTS_ENV]: projectAllowed ? "allowed" : "denied" }), ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : testServicesEnvironment(services, { runDirectory, workerImageId: imageId })), ...(browserExecutor === undefined ? {} : { EXECUTOR_IMAGE: browserExecutor.imageId }) };
-    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, allowed, this.#devcontainerRegistries(), callback.tcpPort, callback.socketDirectory ?? null, services === undefined ? null : localTestServicesDigestPart(services, imageId), ...(sandboxDenied.length === 0 ? [] : [sandboxDenied]), ...(browserExecutor === undefined ? [] : [createHash("sha256").update(browserExecutor.seccomp).digest("hex")])])).digest("hex");
+    const environment = { ...this.#environment(spec, workspaceDirectory, image, names, buildSystems), ...(deniedByDefault.length === 0 ? {} : { [SANDBOX_MODEL_HOSTS_ENV]: projectAllowed ? "allowed" : "denied" }), ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : testServicesEnvironment(services, { runDirectory, workerImageId: imageId })) };
+    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, allowed, this.#devcontainerRegistries(), callback.tcpPort, callback.socketDirectory ?? null, services === undefined ? null : localTestServicesDigestPart(services, imageId), ...(sandboxDenied.length === 0 ? [] : [sandboxDenied])])).digest("hex");
     const run: Run = dockerRun(this.#options.docker);
 
     const existing = await this.#inspect(name);
@@ -393,7 +386,6 @@ export class DockerWorkerMachines implements WorkerMachines {
         workspaceKey: createHash("sha256").update(resolve(workspaceDirectory)).digest("hex").slice(0, 16), owner: hash, sandboxDns: addresses.sandbox,
         ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : { services: { images: services.images, guardImage: imageId, runDirectory, bindDirectory: bindDirectoryOf(runDirectory), socketGroup: Number(group), ...(services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: services.maxMemoryMiB }) } }),
         devcontainerRegistries: this.#devcontainerRegistries(),
-        ...(browserExecutor === undefined ? {} : { browserEvidence: { image: browserExecutor.imageId, seccomp: browserExecutor.seccomp } }),
       });
       const guardStarted = await this.#docker(["start", names.guard]);
       if (guardStarted.exitCode !== 0) throw new MachineError("unavailable", `Docker could not start the Docker socket guard: ${this.#reason(guardStarted.stderr)}`);
@@ -442,19 +434,6 @@ export class DockerWorkerMachines implements WorkerMachines {
       throw error;
     }
     return handle("starting");
-  }
-
-  /** The executor image's id and the pinned seccomp profile, for a project with browser evidence, or undefined: no option, a project without a recipe, an image this machine does not hold, a profile that cannot be verified. Never throws. */
-  async #browserExecutor(project: string | undefined): Promise<{ imageId: string; seccomp: string } | undefined> {
-    const option = this.#options.browserEvidence;
-    if (option === undefined) return undefined;
-    try {
-      if ((await option.enabled(project)) !== true) return undefined;
-      const seccomp = option.seccomp();
-      const found = await this.#docker(["image", "inspect", "--format", "{{.Id}}", option.image]);
-      const id = found.stdout.trim();
-      return found.exitCode === 0 && /^sha256:[a-f0-9]{64}$/.test(id) && seccomp !== "" ? { imageId: id, seccomp } : undefined;
-    } catch { return undefined; }
   }
 
   /** The worker image's id (`sha256:<64 hex>`), the one form of the image a pinned reference may take for a tag. */

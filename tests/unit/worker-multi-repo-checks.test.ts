@@ -884,49 +884,6 @@ describe("MR2 automatic invocation (MR1-LIVE: MR1 on)", () => {
   });
 });
 
-describe("TE-H1 browser evidence hook (DEC 241): the CHECKS run hands the broker's recipe to the capture, only when it was sent one", () => {
-  const recipe = { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["code.cjs"] }] };
-  async function checksRun(payload: Record<string, unknown>, dependencies: Record<string, unknown>) {
-    const f = await fixture();
-    for (const repo of f.input.repositories) git(join(f.root, repo.path), "reset", "--hard", repo.baseCommit);
-    const bases = f.input.repositories.map(repo => ({ repositoryId: repo.repositoryId, baseCommitSha: git(join(f.root, repo.path), "rev-parse", "HEAD") }));
-    await put(f.root, ".agentx/preparation-manifest.json", JSON.stringify({ schemaVersion: 2, projectName: "h1", projectRevision: 1, repositories: f.input.repositories.map(repo => ({ name: repo.repositoryId, path: repo.path, defaultBranch: "main", resolvedCommit: repo.baseCommit })), completedSetupSteps: [], readinessResults: [], readinessCommandKeys: [], complete: true, updatedAt: new Date().toISOString() }));
-    const events: string[] = [];
-    const result = await runTaskInvocation({ protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64), payload: { workflowMode: "CHECKS", workflowBase: bases, conversationId: randomUUID(), prompt: "check", readiness: [command("console.log('ok')")], ...payload } }, {
-      rootPath: f.root, model: FAUX_MODEL, taskShell: { kind: "local" }, stopBeforeReading: { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) },
-      eventSink: async (batch: Array<{ type: string; payload?: unknown }>) => { for (const event of batch) if (event.type === "progress") events.push(String((event.payload as { message?: unknown }).message)); }, artifactSink: async () => undefined, ...dependencies,
-    } as never);
-    return { result, events, root: f.root };
-  }
-  it("asks the capture for the recipe, the task's own repositories and the task sandbox (none under the local shell), and uploads what it took", async () => {
-    const asked: Array<Record<string, unknown>> = [];
-    const uploads: Uint8Array[] = [];
-    const captured = { isolation: "sandbox", durationMs: 5, routes: [], notShown: [], moreNotShown: 0, notRun: "no_changed_page" };
-    const { result, events } = await checksRun({ evidenceCapture: true, browserEvidence: recipe }, {
-      collectBrowserEvidence: async (input: Record<string, unknown>) => { asked.push(input); return captured; }, browserEvidenceSink: async (bytes: Uint8Array) => { uploads.push(bytes); }, browserEvidenceExecutorImage: "executor:test",
-    });
-    expect(result.checks?.checks[0]?.after).toBe("passed");
-    expect(asked).toHaveLength(1);
-    expect(asked[0]).toMatchObject({ recipe, sandboxName: undefined, executorImage: "executor:test", repositories: [{ repositoryId: "app" }, { repositoryId: "lib" }] });
-    expect((asked[0]!["runners"] as { kind?: string }).kind).toBe("local");
-    expect(uploads).toHaveLength(1);
-    expect(events).toContain("AgentX took no screenshots of the changed pages (see the evidence for why).");
-  });
-  it("asks for nothing without the field (even with the evidence capture), or without the capture, and a capture that fails or an upload the broker refuses never fails the round", async () => {
-    let calls = 0;
-    const deps = { collectBrowserEvidence: async () => { calls += 1; return { isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "no_changed_page" }; }, browserEvidenceSink: async () => { calls += 1; } };
-    await checksRun({ evidenceCapture: true }, deps);
-    await checksRun({}, deps);
-    expect(calls).toBe(0);
-    const failing = await checksRun({ evidenceCapture: true, browserEvidence: recipe }, { collectBrowserEvidence: async () => { throw new Error("chromium is missing at /opt/secret"); }, browserEvidenceSink: async () => undefined });
-    expect(failing.result.checks?.checks[0]?.after).toBe("passed");
-    expect(failing.events.join("\n")).not.toContain("secret");
-    const refused = await checksRun({ evidenceCapture: true, browserEvidence: recipe }, { collectBrowserEvidence: async () => ({ isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "no_changed_page" }), browserEvidenceSink: async () => { throw new Error("HTTP 409"); } });
-    expect(refused.result.checks?.checks[0]?.after).toBe("passed");
-    expect(refused.events).toContain("AgentX could not keep the screenshots of the changed pages.");
-  });
-});
-
 describe("MR2 report ownership", () => {
   it("a prune read failure leaves the folder and does not fail the round or leak its cause", async () => {
     const f = await fixture(); const parent = join(f.root, ".agentx/multi-repo-reports"); await mkdir(parent, { recursive: true });
