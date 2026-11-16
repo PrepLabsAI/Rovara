@@ -5,7 +5,7 @@
 //
 // The file is UNTRUSTED by the broker, which binds it to the candidate's digest, checks every count against the check report it holds itself and the data guard before anything is kept
 // (broker/src/rovara-code/evidence-keep.ts). This module only has to be bounded and never throw: a fault leaves the file out, and the round goes on as it would have.
-import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidenceRawSchema, FLAKY_ON_RERUN_MAX, createCandidateManifest, redactText, type CandidateRepository, type CheckEntry, type TestServicesUsageRecord, type EvidenceRaw, type ProjectCommand } from "@agentx/contracts";
+import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidenceRawSchema, FLAKY_ON_RERUN_MAX, createCandidateManifest, redactText, type CandidateRepository, type CheckEntry, type TestServicesUsageRecord, type EvidenceRaw, type ProjectCommand, type RawBaseline } from "@agentx/contracts";
 import type { ArtifactSink } from "../artifacts.js";
 import type { CheckPlan } from "./checks.js";
 import { coveragePart, readChangedCoverage, type RepositoryChanges } from "./cobertura-lcov-coverage.js";
@@ -59,6 +59,11 @@ export interface CollectEvidenceInput {
   testServices?: TestServicesUsageRecord | undefined;
   /** TE-C6: the round's rerun result (`rerunFlaky`), by check id. Present only when the plan asked for the rerun. */
   flaky?: FlakyRerunResult | undefined;
+  /**
+   * TE-C1: the nearest trusted baseline commit that is an ancestor of the task's base (`findBaselineAncestor`), found at the START of the round. Given only when the plan carried candidates (an asked-for field), so a run
+   * that was not asked writes exactly the file it always wrote. It is kept even when no check left a report: the engine compares the task with that baseline whatever was measured.
+   */
+  baseline?: RawBaseline | undefined;
   /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
   repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }
@@ -219,10 +224,11 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
         ...(partial.outputTail === undefined ? {} : { outputTail: partial.outputTail }),
       });
     }
-    if (checks.length === 0 && input.testServices === undefined) return undefined;
+    if (checks.length === 0 && input.testServices === undefined && input.baseline === undefined) return undefined;
     const raw: EvidenceRaw = {
       schemaVersion: 1, candidateDigest: input.candidateDigest, checks,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
+      ...(input.baseline === undefined ? {} : { baseline: input.baseline }),
       ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(selectionOf(input.selection, measured) === undefined ? {} : { selection: selectionOf(input.selection, measured)! }),
     };
@@ -261,6 +267,8 @@ export async function saveEvidenceRaw(input: {
   testServices?: TestServicesUsageRecord | undefined;
   /** TE-C6: see `CollectEvidenceInput.flaky`. */
   flaky?: FlakyRerunResult | undefined;
+  /** TE-C1: see `CollectEvidenceInput.baseline`. */
+  baselineClaim?: RawBaseline | undefined;
   /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
   repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }): Promise<boolean> {
@@ -279,6 +287,7 @@ export async function saveEvidenceRaw(input: {
       selection: input.selection, coveragePaths: input.coveragePaths,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
       ...(input.flaky === undefined ? {} : { flaky: input.flaky }),
+      ...(input.baselineClaim === undefined ? {} : { baseline: input.baselineClaim }),
       ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(baseline === undefined || !complete ? {} : {
         baselineScans: (scans: readonly BaselineScan[]) => runBaselineScans(scans, { ...baseline, rootPath: input.rootPath, repositories: placed.map((repository) => ({ directory: repository.directory, commit: repository.startCommit })) }),

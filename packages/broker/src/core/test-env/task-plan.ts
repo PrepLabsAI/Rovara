@@ -10,6 +10,9 @@
 import { agentXError, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvTaskPlan } from "@agentx/contracts";
 import { DEPENDENCY_PLAN_REFUSAL_WORDS, taskDependencyPlansOf, type ServiceCatalogSource } from "./dependency-plan.js";
 import { lastNightlyFailures } from "./nightly.js";
+import { baselineCandidatesOf } from "./baseline-cache.js";
+import { taskBaselineBranch } from "./nightly-usable.js";
+import { baselineCacheEnabled } from "./switch.js";
 import type { TestEnvDeps } from "./deps.js";
 import { readApprovedSeedFiles } from "./environment.js";
 import { selectionFieldsAreSafe } from "./prove-from-setup-check.js";
@@ -84,6 +87,9 @@ async function planOf(
   // TE-C6: the rerun is planned only with the switch on and only when the run's first commands are exactly the environment's checks (the worker pairs `checks[i]` with command `i`), so a command is never paired with another's template.
   const flakyRerun = flakyRerunEnabled(env) && flakyReadiness !== undefined && checks.length <= flakyReadiness.length && checks.every((check, index) => sameCommand(check.command, flakyReadiness[index]!));
   const failures = readiness === undefined ? [] : await lastNightlyFailures(deps, input.orgId, input.project).catch(() => []);
+  // TE-C1 (switch `ROVARA_BASELINE_CACHE`): the newest trusted baseline commits on the task's base branch, for the worker to find the nearest ancestor of the task's base commit. Shas only; none (or off) leaves the plan as it was.
+  const baseBranch = readiness !== undefined && baselineCacheEnabled(env) ? await taskBaselineBranch(deps, input.orgId, input.project, input.taskId) : undefined;
+  const candidates = baseBranch === undefined ? [] : await baselineCandidatesOf(deps, { orgId: input.orgId, project: input.project, envRevision: found.environment.revision, branch: baseBranch });
   return {
     revision: found.environment.revision, digest: pin.digest, roundBudgetMin: body.roundBudgetMin,
     selection: { method: body.selection.method, ...(body.selection.declared === undefined ? {} : { declared: body.selection.declared }), alwaysRun: body.selection.alwaysRun, fullSuiteOn: body.selection.fullSuiteOn },
@@ -91,5 +97,6 @@ async function planOf(
     ...(failures.length === 0 ? {} : { lastNightlyFailures: failures.slice(0, 500) }),
     ...(dependencies === undefined ? {} : { dependencies }),
     ...(flakyRerun ? { flakyRerun: true as const } : {}),
+    ...(candidates.length === 0 ? {} : { baselineCandidates: candidates.map((sha) => ({ sha })) }),
   };
 }
