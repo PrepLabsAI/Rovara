@@ -240,9 +240,17 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   ] as Array<[string, Parameters<typeof sources>[0]]>)("%s reads unknown, so every call counts as changed", async (_name, files) => {
     expect(await read(files)).toBeUndefined();
   });
-  it("still reads none_found for code that changes no quoted line", async () => {
-    expect(await read([["src/count.ts", "import a from './a.js';\nexport const count = 1;\n", "import a from './a.js';\nexport const count = 2;\n"]])).toMatchObject({ status: "none_found" });
-    expect(await read([["src/same.ts", "const s = 'same words';\nconst n = 1;\n", "const s = 'same words';\nconst n = 2;\n"]])).toMatchObject({ status: "none_found" });
+  it("still reads none_found for code with no quote or backtick anywhere, and for an unchanged file", async () => {
+    expect(await read([["src/count.ts", "export const count = 1;\nexport const other = 2;\n", "export const other = 2;\nexport const count = 3;\n"]])).toMatchObject({ status: "none_found" });
+    expect(await read([["src/py.py", "def f(x):\n    return x + 1\n", "def f(x):\n    return x + 2\n"]])).toMatchObject({ status: "none_found" });
+  });
+  it.each([
+    ["an unrelated change in a file that has a string elsewhere", "const s = 'same words';\nconst n = 1;\n", "const s = 'same words';\nconst n = 2;\n"],
+    ["a changed import specifier", "import a from './a.js';\n", "import a from './b.js';\n"],
+    ["a selector edit on a line with no quote", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = A;\n", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = B;\n"],
+    ["a Python f-string replacement field", "t = f\"{\n  foo\n}\"\n", "t = f\"{\n  bar\n}\"\n"],
+  ])("%s is conservatively unknown", async (_name, before, after) => {
+    expect(await read([["src/x.ts", before, after]])).toBeUndefined();
   });
   it("a file F4 found and diffed is accounted for", async () => {
     expect(await read([["prompts/system.txt", "old", "new prompt"]])).toMatchObject({ status: "changes" });
@@ -278,10 +286,6 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   });
   it("JSX text in a .tsx file reads unknown", async () => {
     expect(await read([["src/view.tsx", "export const V = () => <p>Be terse</p>;\n", "export const V = () => <p>Be verbose</p>;\n"]])).toBeUndefined();
-  });
-  it("a moved unquoted line still reads none_found, but a changed import specifier is conservatively unknown", async () => {
-    expect(await read([["src/x.ts", "import a from './a.js';\nconst n = 1;\nconst s = 'x y';\n", "import a from './a.js';\nconst s = 'x y';\nconst n = 1;\n"]])).toMatchObject({ status: "none_found" });
-    expect(await read([["src/x.ts", "import a from './a.js';\n", "import a from './b.js';\n"]])).toBeUndefined();
   });
 
   it("the production classifier counts every readable call as changed when coverage is unknown", async () => {

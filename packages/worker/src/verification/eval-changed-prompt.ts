@@ -36,22 +36,15 @@ export function evalChangedPrompt(frame: ModelEgressFrame): boolean {
 
 /** A prompt can be loaded at run time from a file F4 cannot classify (assets/persona.txt) or sit in a plain string constant of a module with
  * no AI import. F4 reports nothing for those, which is "not found", never "unchanged". So a changed file that F4 gave no item for is
- * unknown (the whole classification becomes unknown) unless it is code that provably changed no string. Deliberately over-counting:
- * - no text is masked: a changed import specifier counts as unknown too, since any quoted text on a line might be prompt text;
- * - a file that can hold a multi-line string (a backtick, a triple quote, a line ending in a backslash, a closing JSX tag) is unchanged only when its text
- *   is identical apart from those specifiers;
- * - any other file is unchanged only when its quote-bearing lines are the same lines in the same order (single-line strings cannot hide
- *   on a line without a quote, and no tokenizer state is kept that a stray quote could desynchronise).
- * Every step is one linear pass: no backtracking over the file. */
+ * unknown (the whole classification becomes unknown) unless it is code that provably holds no string: no quote or backtick character and no
+ * closing JSX tag anywhere in either side. Deliberately over-counting, with no tokenizer state a stray quote could desynchronise: any changed
+ * file that has a quote, however placed, is unknown. Known limit (EVAL-WIRE-SELECTOR-EDITS): quote-free logic that only chooses between prompts
+ * defined in other, unchanged files still reads unchanged. One linear pass. */
 const codePath = /\.(?:[cm]?[jt]sx?|py|pyi)$/iu;
-const multiLineCapable = /\\[ \t]*\r?(?:\n|$)|`|"""|'''|<\//u;
-const quoteBearing = (text: string): string[] => text.split("\n").filter(line => /["']/u.test(line));
+const holdsText = /["'`]|<\//u;
 function sameCode(before: string | undefined, after: string | undefined): boolean {
   const left = before ?? ""; const right = after ?? "";
-  if (left === right) return true;
-  if (multiLineCapable.test(left) || multiLineCapable.test(right)) return false;
-  const lines = quoteBearing(left); const others = quoteBearing(right);
-  return lines.length === others.length && lines.every((line, i) => line === others[i]);
+  return left === right || (!holdsText.test(left) && !holdsText.test(right));
 }
 function everyChangeAccountedFor(files: readonly PromptChangedFile[], report: PromptChangeReport): boolean {
   const found = new Set<string>();
