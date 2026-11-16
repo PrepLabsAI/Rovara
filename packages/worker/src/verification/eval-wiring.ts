@@ -22,6 +22,7 @@ import type { EvalFinalCheckPorts } from "./eval-final-check.js";
 import type { EvalMeterOptions } from "./eval-model-access.js";
 import type { ModelEgressFrame } from "@agentx/contracts";
 import { modelAccessSource } from "../model-access.js";
+import { evalChangedPrompt } from "./eval-changed-prompt.js";
 
 /** The host's setting that turns the eval on: the model gateway's https origin. Unset (the default), or anything else: the eval stays off. */
 export const EVAL_GATEWAY_URL_VARIABLE = "ROVARA_EVAL_GATEWAY_URL";
@@ -47,7 +48,7 @@ export interface EvalHostSources {
   readonly sandbox: FreshEvalSandbox;
   /** The worker's own folder for the run's socket (absolute; short enough for a Unix socket path). */
   readonly runDir: string;
-  /** The worker's own "this frame carries a changed prompt". Absent: the eval reads "no changed prompt call". */
+  /** The worker's own "this frame carries a changed prompt". Defaults to F4/F8 over this check's pinned candidate; unknown counts as changed. */
   readonly changedPrompt?: (frame: ModelEgressFrame) => boolean;
   /** The worker's own pin of the model, from the trusted plan: true only for a frame that calls the plan's model (and judge). Required: the repository's eval code must not choose the model. */
   readonly modelAllowed: (frame: ModelEgressFrame) => boolean;
@@ -103,6 +104,7 @@ export function evalFinalCheckForTask(input: EvalTaskBindingInput): EvalFinalChe
     const origin = evalGatewayOriginFrom(input.environment);
     if (origin === undefined || !isWhole(input.sources)) return undefined;
     const sources = input.sources;
+    const changedPrompt = sources.changedPrompt ?? evalChangedPrompt;
     if (typeof input.controlPlaneUrl !== "string" || input.controlPlaneUrl === "" || typeof input.capability !== "string" || input.capability === "") return undefined;
     const modelAccess = createEvalGatewayAccess(origin, evalGatewayTokenSource({ origin, controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, ...(input.fetch === undefined ? {} : { fetch: input.fetch }), ...(input.now === undefined ? {} : { now: input.now }) }),
       input.fetch === undefined ? {} : { fetch: input.fetch });
@@ -113,7 +115,7 @@ export function evalFinalCheckForTask(input: EvalTaskBindingInput): EvalFinalChe
       roundKind: fresh ? "check_unsealed" : "working",
       plan: sources.plan, approval: sources.approval, cache: sources.cache, baselines: sources.baselines,
       modelAccess,
-      exec: createBridgedEvalExec({ sandbox: sources.sandbox, runDir: sources.runDir, modelAllowed: sources.modelAllowed, ...(sources.changedPrompt === undefined ? {} : { changedPrompt: sources.changedPrompt }), ...(input.now === undefined ? {} : { now: input.now }) }),
+      exec: createBridgedEvalExec({ sandbox: sources.sandbox, runDir: sources.runDir, modelAllowed: sources.modelAllowed, changedPrompt, ...(input.now === undefined ? {} : { now: input.now }) }),
       ...(sources.meter === undefined ? {} : { meter: sources.meter }),
     });
   } catch { return undefined; }
