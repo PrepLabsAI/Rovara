@@ -488,3 +488,6 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
     }),
   ];
 }
+
+/** Lane L2b (DEC 236): the model-keys point (the keys live in the model gateway), for the dispatcher's `extraModules` next to the step 5 points. */
+export { gatewayModelKeysModules } from "./gateway-model-access.js";
