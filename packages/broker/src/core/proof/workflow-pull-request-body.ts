@@ -99,7 +99,7 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
     // Between markers, so a pushed PR feedback fix can bring them up to date and leave the rest as the person left it.
     PULL_REQUEST_STATUS_START,
     // R1 (re-check round 1): the lessons used belong in the description a version 1 task OPENS with, not only in one a pushed fix rewrites.
-    ...workflowPullRequestStatusLines(workflow, { ...(context?.lessonsUsed === undefined ? {} : { lessonsUsed: context.lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) }, proofLines),
+    ...workflowPullRequestStatusLines(workflow, { ...(context?.lessonsUsed === undefined ? {} : { lessonsUsed: context.lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(context?.browserEvidenceLines === undefined ? {} : { browserEvidenceLines: context.browserEvidenceLines }) }, proofLines),
     PULL_REQUEST_STATUS_END,
     ...attributionBodyLines(context?.attribution),
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
@@ -129,6 +129,8 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, conte
     ...workflowReviewLines(workflow, WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED),
     ...(context?.secondReviewLines ?? []),
     ...proofLines,
+    // TE-H1: the browser evidence lines (text only), under the proof lines, as version 1 lists them.
+    ...(context?.browserEvidenceLines ?? []),
     // Approve by exception (DECISIONS 24): version 1 descriptions list the lessons used too (same visibility rule as version 2).
     ...lessonsUsedLines(context?.lessonsUsed, 10),
   ].map((line) => hideEmailAddresses(line));

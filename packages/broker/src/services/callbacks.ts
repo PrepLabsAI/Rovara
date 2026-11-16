@@ -15,6 +15,7 @@ import { currentDocumentType } from "../core/decisions/workflow-subject.js";
 import { operationKey, taskPointerKey } from "../core/task-flow/keys.js";
 import { handleCodingRunUpload, isCodingRunUpload } from "./candidate-export.js";
 import { handleE2EEvidenceUpload, readE2EAdmissionChunk, type RoundRecordReaders } from "../core/e2e/callbacks.js";
+import { handleBrowserEvidenceUpload } from "../core/proof/browser-evidence-upload.js";
 import type { UploadStores } from "../core/e2e/uploads-chunks.js";
 import { openPullRequest } from "../core/build-step/publish.js";
 import { updatePullRequest } from "../core/build-step/maintain.js";
@@ -95,7 +96,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "pull-request", "pull-request-update", "setup-agent"]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "pull-request", "pull-request-update", "setup-agent"]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -280,6 +281,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         return json(200, action === "e2e-admission" ? await readE2EAdmissionChunk(uploadStores(deps), deps.e2e.records, operation, bodyOf(request))
           : await handleE2EEvidenceUpload(uploadStores(deps), operation, bodyOf(request)));
       }
+      // TE-H1 browser evidence (DEC 241): one chunked upload of the run's before and after screenshots, judged by the handler (it needs no e2e admission).
+      if (action === "browser-evidence") return json(200, await handleBrowserEvidenceUpload(uploadStores(deps), operation, bodyOf(request)));
       if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "setup-agent") {

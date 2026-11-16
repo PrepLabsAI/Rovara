@@ -1,4 +1,4 @@
-import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js";
+import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; import { refuseBrowserEvidenceOnCloud } from "./browser-evidence-seam.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
@@ -1222,7 +1222,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|browser-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -6740,7 +6740,7 @@ async function handleCallback(
   action: string,
 ) {
   const token = request.headers["x-agentx-callback-capability"];
-  if (!token) throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
+  if (!token) throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required"); refuseBrowserEvidenceOnCloud(action); // TE-H1: browser evidence is not on Cloud yet (DEFERRED 1b-X5)
   // #201 Release A: accept the child format before any reconciler starts issuing it. The key
   // family is selected by the envelope, never by unverified claims or signature fallback.
   const cancelClaims = token.startsWith("cancel-v1.")

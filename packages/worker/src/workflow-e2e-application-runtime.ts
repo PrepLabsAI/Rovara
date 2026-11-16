@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { E2E_AGENT_STEPS_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
+import { BROWSER_EVIDENCE_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
 import { assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment } from "@agentx/model-runtime";
 import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
@@ -71,6 +71,21 @@ export async function workflowE2EApplicationChecksAvailability(environment: Node
   }
 }
 
+export type BrowserEvidenceAvailability = Readonly<{ status: "ready" } | { status: "unavailable"; reason: "executor-image-not-configured" | "executor-image-not-on-host" | "not-yet-checked" }>;
+
+/**
+ * Whether this worker can take browser evidence now (TE-H1): EXECUTOR_IMAGE names an image reference (as one docker argument: no space, no control character, no leading dash) and the host already holds it. Judged apart from application
+ * CHECKS, which also need a shared runtime directory a laptop worker has no use for. Never throws; a Docker that cannot answer is unavailable.
+ */
+export async function browserEvidenceAvailability(environment: NodeJS.ProcessEnv = process.env, options: { docker?: DockerCli } = {}): Promise<BrowserEvidenceAvailability> {
+  const image = environment.EXECUTOR_IMAGE?.trim() ?? "";
+  if (image === "" || image.length > 512 || /\s/u.test(image) || [...image].some((character) => character.charCodeAt(0) < 0x20) || image.startsWith("-")) return { status: "unavailable", reason: "executor-image-not-configured" };
+  try {
+    const inspected = await (options.docker ?? createProcessDockerCli()).run(["image", "inspect", image], { signal: AbortSignal.timeout(IMAGE_INSPECT_TIMEOUT_MS), timeoutMs: IMAGE_INSPECT_TIMEOUT_MS });
+    return inspected.code === 0 ? { status: "ready" } : { status: "unavailable", reason: "executor-image-not-on-host" };
+  } catch { return { status: "unavailable", reason: "executor-image-not-on-host" }; }
+}
+
 /** Why `task.workflowE2EAgentSteps.v1` is not on /ping now, in the order it is judged. Each reason is a fixed code; the detail, where there is one, names a variable or a file and never a value. */
 export type AgentStepsAvailability = Readonly<
   | { status: "available" }
@@ -116,6 +131,7 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
   /** Test seam for the agent step feature (Task 4.3a): the shared AWS files check. */
   sharedConfigCheck?: () => void }) {
   let latest: WorkflowE2EApplicationChecksAvailability = { status: "unavailable", reason: "not-yet-checked" };
+  let browserLatest: BrowserEvidenceAvailability = { status: "unavailable", reason: "not-yet-checked" };
   const judgeAgentSteps = (checks: WorkflowE2EApplicationChecksAvailability): AgentStepsAvailability => {
     // A judgement that fails is never "available".
     try {
@@ -140,6 +156,7 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
         new Promise<WorkflowE2EApplicationChecksAvailability>((resolve) => { limit = setTimeout(() => resolve({ status: "unavailable", reason: "executor-image-not-on-host" }), AVAILABILITY_CHECK_LIMIT_MS); }),
       ]).finally(() => clearTimeout(limit));
       latest = answer;
+      browserLatest = await browserEvidenceAvailability(input.environment ?? process.env, { ...(input.docker === undefined ? {} : { docker: input.docker }) });
       sessionSyncImage = answer.status === "ready" && await executorImageSyncsSession(workflowE2EApplicationRuntimeConfig(input.environment ?? process.env, input.platform, input.arch).executorImage,
         input.docker ?? createProcessDockerCli()).catch(() => false);
     } catch {
@@ -162,12 +179,14 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     /** Why the agent step feature is on or off /ping now (Task 4.3a). */
     agentSteps: (): AgentStepsAvailability => agentSteps,
     executor: {
-      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE] as const,
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, BROWSER_EVIDENCE_FEATURE] as const,
       withheldInvocationFeatures: () => ({
         // Running a replay needs exactly what an application round needs (the executor image on the host), so it is listed, and withheld, with the others (Task 4.6b).
         ...(latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest, [E2E_REPLAY_CHECKS_FEATURE]: latest,
           // PLANDRYRUN tries the proposed checks in a throwaway container of the executor image, so it needs the same thing (T6).
           [PLAN_DRY_RUN_FEATURE]: latest }),
+        // TE-H1 browser evidence runs its capture in a container of the executor image too (DEC 241a), so it needs the image on the host; it needs no shared runtime directory, so it is judged on its own (a laptop worker lists it without listing application CHECKS).
+        ...(browserLatest.status === "ready" ? {} : { [BROWSER_EVIDENCE_FEATURE]: browserLatest }),
         ...(agentSteps.status === "available" ? {} : { [E2E_AGENT_STEPS_FEATURE]: agentSteps }),
         // The sync needs the image to carry the label, and an image that has not been checked yet is not known to have it.
         ...(latest.status === "ready" && sessionSyncImage ? {} : { [E2E_MODEL_SESSION_SYNC_FEATURE]: { status: "unavailable", reason: "executor-image-lacks-session-sync" } }),

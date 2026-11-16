@@ -10,13 +10,14 @@
 import type { TierReviewCall } from "../../core/build-step/tier-review-calls.js";
 import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type Metering, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type BrowserEvidenceRecipe, type Metering, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import { registryModelPrices } from "../model-prices.js";
 import { LOCAL_MODEL_PROVIDER_ORDER, chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
 import { createSecondReview, type SecondReview } from "../../core/second-review/index.js";
 import { createLocalSecondReviewSeams } from "./second-review.js";
 import { SecondReviewerSchema } from "@agentx/contracts";
+import type { TaskRecord } from "../../core/task-flow/records.js";
 import type { ProxyRoute } from "../model-proxy/types.js";
 import { OneShotOperations, capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, withOneShotOperations, type LocalModelProxy, type LoopbackProxy, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
@@ -165,6 +166,8 @@ export interface LocalAppOptions {
   sandboxModelHostsAllowed?: (project: string) => boolean;
   /** FIX-0518: the state a task's worker machine was created with (`denied` or `allowed`; undefined when it cannot say). The evidence reads this first, so it says what really applied, not what the config says now. */
   sandboxModelHostsOf?: (machineId: string) => Promise<"denied" | "allowed" | undefined>;
+  /** TE-H1 (DEC 241c): the project's browser evidence recipe from the owner's own config (`projectSettings.<project>.browserEvidence`), read fail-closed (undefined is off). Absent: browser evidence is never asked for. */
+  browserEvidenceRecipe?: (project: string) => BrowserEvidenceRecipe | undefined | Promise<BrowserEvidenceRecipe | undefined>;
   /** FIX-0518: the names a project's test sandbox is denied (empty when the owner allowed model hosts for it): a setup run's website ask for one is refused, and an owner's approval of one is refused. */
   sandboxDenied?: (project: string) => readonly string[];
   /** For tests: the fetch under a connection's check, and the check that refuses an address that must not be called. */
@@ -445,6 +448,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
+    // TE-H1: the recipe is the owner's (config); the pull request's lines are text only and say "on the task page, behind sign-in" (the laptop's own address is http, so no link is written).
+    ...(options.browserEvidenceRecipe === undefined ? {} : { browserEvidence: { recipe: async (task: TaskRecord) => options.browserEvidenceRecipe!(task.project), linesOf: (task: TaskRecord, digest: string) => evidence.browserEvidenceLinesOf(task, digest, {}) } }),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),

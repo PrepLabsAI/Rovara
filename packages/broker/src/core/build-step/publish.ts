@@ -76,7 +76,9 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
   const lessonsUsed = await lessonsUsedOf(deps, task, repository.repositoryId);
   const linearIssueKey = await ticketIssueKeyOf(deps, task);
-  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
+  // TE-H1: what the browser evidence run showed for exactly this code, as fixed text lines (none on an install without it, or for a run that took none).
+  const browserLines: readonly string[] = await deps.browserEvidence?.linesOf(task, candidate.digest).catch((): readonly string[] => []) ?? [];
+  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }), ...(browserLines.length === 0 ? {} : { browserEvidenceLines: browserLines }) });
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
   const operationId = newId(deps);
   const headBranch = headBranchOf(operationId);
