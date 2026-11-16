@@ -1,6 +1,7 @@
 import type { WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
+import type { MoneyStop } from "./money-stop.js";
 import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
 import type { TaskTestEnvironment } from "../test-env/seam.js";
 import type {
@@ -208,6 +209,11 @@ export interface TaskFlowDeps {
   queues: QueueService;
   outbox: TransactionalOutbox;
   machines: WorkerMachines;
+  /**
+   * A deployed install's per-run dollar stop and usage flush (money-stop.ts): a Stop and a close let a running model run send its usage first, a run is stopped at its cap as its usage is
+   * booked, and each model run is admitted (`run.start`) before it is handed to a worker that reports usage while it runs. Absent (the laptop): today's Stop, close and dispatch.
+   */
+  moneyStop?: MoneyStop;
   admission: Admission;
   audit: AuditSink;
   projects: ProjectSource;

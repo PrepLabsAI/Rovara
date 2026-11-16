@@ -53,6 +53,8 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
 export const SECOND_REVIEWER_FEATURE = "task.workflowSecondReviewer.v1" as const;
 /** DR5: the design-review form of the PLAN_CRITIQUE operation (`designReview` binding). A worker without it is never sent the binding; the broker refuses delivery instead (ec2-delivery.ts). */
 export const DESIGN_REVIEW_WORKER_FEATURE = "task.designReview.v1" as const;
+/** Per-run dollar stop: the worker reports a run's usage while it runs (`usageCheckpoints` on a task invocation). A deployed install sends a model step only to a worker that lists it. */
+export const USAGE_CHECKPOINTS_FEATURE = "task.usageCheckpoints.v1" as const;
 /** Broker-owned eval trigger and prior usage; repository data cannot request spend. */
 export const EvalRequestSchema = z.object({
   aiChange: z.literal(true), reason: z.literal("eval_hint"), evalPass: z.union([z.literal(1), z.literal(2)]),
@@ -62,7 +64,7 @@ export const EvalRequestSchema = z.object({
 export type EvalRequest = z.infer<typeof EvalRequestSchema>;
 
 export const WORKER_INVOCATION_FEATURES = [TEST_ENV_PROVE_MEASURE_FEATURE, "task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.workflowApprovedPlan.v1", SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, EVAL_ROUND_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
-  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE] as const;
+  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE, USAGE_CHECKPOINTS_FEATURE] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** An agent step's payload (`agentStep`) goes only to a worker that lists this; the agent kind also needs AGENT_RUN_FEATURE. */
 export const AGENT_STEP_FEATURE = "task.agentStep" as const;
@@ -553,6 +555,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * only. Sent only while the proof switch is on, and only to a worker whose /ping lists "task.evidenceCapture.v1"; the dispatcher drops the field for an older worker (no evidence is captured and the omission is logged), because its strict parse would refuse it.
          */
         evidenceCapture: z.literal(true).optional(),
+        /**
+         * Per-run dollar stop (core money stop): the run reports its model usage while it runs (a `usage` event of what it spent since the last one, at most every few seconds, after a model call ends),
+         * not only at its end, so the broker books it as it happens and stops the run at the task's or the day's cap. Sent only to a worker whose /ping lists USAGE_CHECKPOINTS_FEATURE; never dropped (a
+         * deployed install refuses the step to an older worker at dispatch).
+         */
+        usageCheckpoints: z.literal(true).optional(),
         evalRequest: EvalRequestSchema.optional(),
         /**
          * Test environment (wire-testenv): this setup draft also runs the environment detectors over the default branch's files and reports the environment it would propose (a draft, never approved or run). Setup-draft

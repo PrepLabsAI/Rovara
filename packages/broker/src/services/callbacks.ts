@@ -23,6 +23,7 @@ import { recordWorkItemProgress } from "../core/work-breakdown/progress.js";
 import type { StepOutcome } from "../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../core/task-flow/results.js";
+import { isSpendStopCode, requestSpendStop } from "../core/task-flow/money-stop.js";
 import { iso } from "../core/task-flow/support.js";
 import { parseKnowledgeCommit } from "../core/meta-repo/prepare-meta.js";
 import { PLAN_RETENTION } from "../core/plan/store.js";
@@ -77,6 +78,12 @@ export interface CallbackDeps {
   setupAgent?: Omit<SetupAgentCallbackDeps, "store" | "companyId" | "now"> | undefined;
   /** The project's context sources (the monitoring connections and MCP servers the owner ticked). Absent: a stage is told there are none. */
   contextSources?: ContextSourcesRuntime;
+  /**
+   * Books the model usage a batch of the worker's events reports (a deployed install: core-host/usage-booking.ts), BEFORE the batch is acknowledged. A booking that fails fails the batch, so
+   * the worker sends it again (booking counts each usage once). Absent: nothing is booked here (the laptop books each call at its model proxy). An answer with `spendStop` (a cap the run reached,
+   * core/task-flow/money-stop.ts) asks the run to stop.
+   */
+  bookUsage?: ((operation: OperationRecord, events: ReadonlyArray<{ type: string; timestamp: string; payload: unknown }>) => Promise<unknown>) | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -149,14 +156,43 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   return { artifactId };
 }
 
-async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
+function parseEvents(body: Record<string, unknown>): Array<{ type: string; timestamp: string; payload: unknown }> {
   const events = body["events"];
   if (!Array.isArray(events) || events.length < 1 || events.length > EVENTS_MAX) throw agentXError("CONFIG_INVALID", `a batch holds 1 through ${EVENTS_MAX} events`);
-  const parsed = events.map((event) => {
+  return events.map((event) => {
     const record = event as Record<string, unknown>;
     if (record === null || typeof record !== "object" || typeof record["type"] !== "string" || typeof record["timestamp"] !== "string") throw agentXError("CONFIG_INVALID", "an event needs a type and a timestamp");
     return { type: record["type"], timestamp: record["timestamp"], payload: record["payload"] ?? null };
   });
+}
+
+/** The event type a worker reports a model session's spend with. */
+const USAGE_EVENT = "usage";
+
+/**
+ * A batch of an operation that has ended (stopped, closed, or ended by the broker): its usage is still booked, because the spend happened (lane L8). A batch of usage alone is then taken
+ * (nothing is stored); any other batch is refused as terminal output after its usage was booked, and booking it again when the worker resends it counts nothing more.
+ */
+async function bookTerminalUsage(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number } | undefined> {
+  if (deps.bookUsage === undefined) return undefined;
+  let parsed: Array<{ type: string; timestamp: string; payload: unknown }>;
+  // A batch that does not read is answered as any terminal output is.
+  try { parsed = parseEvents(body); } catch { return undefined; }
+  if (!parsed.some((event) => event.type === USAGE_EVENT)) return undefined;
+  await deps.bookUsage(operation, parsed);
+  return parsed.every((event) => event.type === USAGE_EVENT) ? { accepted: parsed.length } : undefined;
+}
+
+async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
+  const parsed = parseEvents(body);
+  // The usage the batch reports is booked first: an acknowledged batch is a booked one.
+  const booked = deps.bookUsage === undefined ? undefined : await deps.bookUsage(operation, parsed);
+  // The per-run stop (core/task-flow/money-stop.ts): the booking found the run's task or the company's day at its cap, so the run is asked to stop. Its worker then sends what it spent
+  // and ends. Never fails the batch (its usage is booked); a stop that could not be asked now is asked again at the run's next booking.
+  const spendStop = (booked as { spendStop?: unknown } | undefined)?.spendStop;
+  if (isSpendStopCode(spendStop)) {
+    try { await requestSpendStop(deps.flow, operation, spendStop); } catch (error) { deps.flow.log?.({ component: "callbacks", event: "spend_stop_not_asked", error: error instanceof Error ? error.name : "unknown" }); }
+  }
   // The work item checkpoints of an ordered run (spec 059) are judged against the approved run and written into the task's workflow BEFORE the batch is acknowledged: the worker goes on to the next item only
   // when this returns, so what a retry resumes from is what was durably recorded. A checkpoint that does not continue the approved run is refused (the worker then fails the operation).
   await recordWorkItemProgress(deps.flow, operation, parsed);
@@ -273,7 +309,11 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
-      if (action !== "result" && isTerminalStatus(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+      if (action !== "result" && isTerminalStatus(operation.status)) {
+        const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
+        if (booked !== undefined) return json(200, booked);
+        throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+      }
       if (isCodingRunUpload(action)) return json(200, await handleCodingRunUpload(action, uploadStores(deps), operation, bodyOf(request)));
       if (action === "e2e-admission" || action === "e2e-evidence") {
         if (deps.e2e === undefined) throw agentXError("NOT_FOUND", "this callback is not available on this install");

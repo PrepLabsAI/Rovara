@@ -19,8 +19,9 @@
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
 //
-// What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
-// the admission hold sweep) refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use.
+// What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices)
+// refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use. The admission's hold sweep is the root's own (lane L8),
+// and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
@@ -34,12 +35,16 @@ import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from
 import { deployedDevWiringParts, stepUpDecisionProofs } from "../core-host/deployed-decisions.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
-import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
+import {
+  HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, readHostedAdmissionSettings, runSpendState, runStopWiredFrom, type HostedAdmissionSettings, type HostedIdentityOptions,
+} from "../core-host/hosted-modules.js";
+import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
+import { taskPointerKey } from "../core/task-flow/keys.js";
 import { applyPolicyHook, type PolicyHookInstall } from "../core/policy-hook/index.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
@@ -51,7 +56,7 @@ import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
-import { createCallbackService } from "../services/index.js";
+import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
@@ -257,6 +262,31 @@ export function outboxCompaniesOf(event: unknown): string[] | undefined {
   return [...companies];
 }
 
+// ---- money (lane L8)
+
+/**
+ * One company's money wiring over the sealed registry: the callback layer's usage booking (the usage the company's workers report is booked into the task's cost ledger before the batch
+ * is acknowledged, core-host/usage-booking.ts) and the admission's own hold sweep. The company is the runtime's own, never the operation's word (the callback layer has checked they agree).
+ */
+export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date, settings?: HostedAdmissionSettings): { bookUsage: NonNullable<CallbackServiceOptions["bookUsage"]>; holdSweep: CoreService } {
+  const store = registry.require("storage");
+  const metering = registry.require("metering");
+  const booking = createUsageBooking({ store, metering, now });
+  const ledger = createHostedLedger({ store, metering, now });
+  return {
+    // The per-run stop (core-money-stop): after a batch's usage is booked, the run's task and the company's day are read against the caps; a run past one is answered with the stop's code,
+    // and the callback layer asks its worker to stop (core/task-flow/money-stop.ts `requestSpendStop`). Without the caps (`settings`) nothing is read.
+    bookUsage: async (operation, events) => {
+      const booked = await booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events);
+      if (settings === undefined || !events.some((event) => event.type === USAGE_EVENT_TYPE)) return booked;
+      const taskId = (await store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+      const state = typeof taskId === "string" && taskId !== "" ? await runSpendState({ store, ledger, settings, now }, companyId, taskId) : "spend_unknown";
+      return state === "within" ? booked : { ...booked, spendStop: state };
+    },
+    holdSweep: createHostedHoldSweep({ store, companyId, now }),
+  };
+}
+
 // ---- the root
 
 export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRoot {
@@ -275,13 +305,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   };
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   const lessonsSwitch = readCoreLessonsSwitch(env);
+  // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
+  const readSettings = readHostedAdmissionSettings(env);
+  const admissionSettings = "settings" in readSettings ? readSettings.settings : undefined;
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey }), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -291,6 +324,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
+      // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
+      flowOptions: { moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
@@ -319,7 +354,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
           }
         }
-        return { ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }) };
+        // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
+        return {
+          ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
+        };
       },
     }),
   });
@@ -387,12 +426,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const runtime = await app.runtimeFor(companyId);
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
+        const money = coreMoneyWiring(registry, companyId, now, admissionSettings);
         return createCallbackService({
           flow: runtime.flow.deps,
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
           grants: new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential),
           ...(lessons === undefined ? {} : { onEvents: (operation, events) => lessons.host.onEvents(operation, events) }),
+          bookUsage: money.bookUsage,
         });
       })();
       found.catch(() => callbackHandlers.delete(companyId));

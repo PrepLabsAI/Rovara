@@ -5,7 +5,7 @@
 // refuses in fixed words what it does not have.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { CORE_ENGINE_VARIABLE, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition, type QueueService } from "@agentx/contracts";
+import { CORE_ENGINE_VARIABLE, change, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition, type QueueService } from "@agentx/contracts";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
@@ -191,10 +191,35 @@ describe("the dispatcher as the host of the core's dispatch", () => {
     expect(w.machinesWorld.executions).toHaveLength(1);
   });
 
-  it("reads a core message strictly: exactly its four fields, version 1, a company id and two UUIDs", () => {
+  it("delivers a queued cancel (money stop) to the worker of an operation being stopped, through the host, and drops one for an operation that is not", async () => {
+    const w = await createWorld();
+    const task = await w.start(COMPANY_A);
+    const batch = await w.staged();
+    await w.handler({ Records: batch });
+    await w.machinesWorld.settle();
+    expect(failures(await w.handler({ Records: batch.map(w.again) }))).toEqual([]);
+    const operationId = coreDispatchMessage(batch[0]!.body)!.operationId;
+    const cancelRecord = (cancel: string): SqsRecord => ({ ...batch[0]!, messageId: randomUUID(), receiptHandle: `rh-${randomUUID()}`, body: JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId: task.workspaceId, operationId, cancel }) });
+    const before = w.machinesWorld.posts.length;
+    // Not being stopped: taken by the host, and dropped (acknowledged, never sent).
+    expect(failures(await w.handler({ Records: [cancelRecord(randomUUID())] }))).toEqual([]);
+    expect(w.machinesWorld.posts).toHaveLength(before);
+    // Being stopped: the cancel goes to its worker, once.
+    await w.store.update({ key: { pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${operationId}` }, ops: [change.set("status", "CANCEL_REQUESTED")] });
+    const cancel = randomUUID();
+    expect(failures(await w.handler({ Records: [cancelRecord(cancel)] }))).toEqual([]);
+    expect(w.machinesWorld.posts.slice(before)).toEqual([expect.objectContaining({ status: 200, workspaceId: task.workspaceId, operationId: cancel })]);
+    expect(w.today).not.toHaveBeenCalled();
+  });
+
+  it("reads a core message strictly: exactly its four fields (and a cancel's own id), version 1, a company id and two UUIDs", () => {
     const workspaceId = randomUUID();
     const operationId = randomUUID();
+    const cancel = randomUUID();
     expect(coreDispatchMessage(JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId, operationId }))).toEqual({ v: 1, companyId: COMPANY_A, workspaceId, operationId });
+    expect(coreDispatchMessage(JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId, operationId, cancel }))).toEqual({ v: 1, companyId: COMPANY_A, workspaceId, operationId, cancel });
+    for (const bad of ["x", 1, null, "not-a-uuid"]) expect(coreDispatchMessage(JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId, operationId, cancel: bad }))).toBeUndefined();
+    expect(coreDispatchMessage(JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId, operationId, cancel, extra: 1 }))).toBeUndefined();
     for (const body of [
       JSON.stringify({ v: 1, workspaceId, operationId }), JSON.stringify({ v: 2, companyId: COMPANY_A, workspaceId, operationId }),
       JSON.stringify({ v: 1, companyId: "acme", workspaceId, operationId }), JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId, operationId, invocation: {} }),

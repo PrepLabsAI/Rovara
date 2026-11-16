@@ -80,7 +80,7 @@ import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
-  usageForControlPlane, reviewUsageArtifactName, spentNothing, statsSince,
+  usageForControlPlane, reviewUsageArtifactName, statsSince, createUsageCheckpointer, type UsageCheckpointer,
   type TaskUsageOutcome, type UsageStats,
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies, type ExecuteSerialWorkflowDependenciesInput, type ExecuteSerialWorkflowDependenciesResult } from "./workflow-dependencies.js";
@@ -192,7 +192,7 @@ export interface TaskInvocationDependencies {
    * PLANINC-3b: the limits on a model call; tests supply short ones. Defaults: the planning deadline (25 minutes, or AGENTX_PLAN_DEADLINE_MS), the stall limit (240 s),
    * the abort confirmation (30 s), the heartbeat (60 s) and the clock's tick (5 s). Only a PLAN run has a deadline and a stall limit.
    */
-  modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number };
+  modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number; usageCheckpointMs?: number };
   /** Where the worker's structured model-call lines go. Default: stdout, as the worker's other log lines. */
   log?: WorkerLogSink;
   /** PLANDRYRUN: how a coding plan's proposed checks are tried on the unchanged code; tests supply a fake. Default: `runPlanDryRun` (a sandbox container per check). */
@@ -448,6 +448,7 @@ async function runTask(
       ...(standingInstructions === undefined ? {} : { standingInstructions }),
       eventSink: dependencies.eventSink, artifactSink: dependencies.artifactSink,
       ...(dependencies.cancellationController === undefined ? {} : { cancellationController: dependencies.cancellationController }),
+      ...(invocation.payload.usageCheckpoints === true ? { usageCheckpoints: { ...(dependencies.modelCallLimits?.usageCheckpointMs === undefined ? {} : { intervalMs: dependencies.modelCallLimits.usageCheckpointMs }) } } : {}),
       ...hooks,
     });
     return { conversationId: invocation.payload.conversationId, reopened: false, agentStepResult };
@@ -974,6 +975,18 @@ async function runTask(
   const limits = dependencies.modelCallLimits ?? {};
   const stallLimitMs = limits.stallMs ?? PLANNING_STALL_MS;
   const abortConfirmMs = limits.abortConfirmMs ?? PLANNING_ABORT_CONFIRM_MS;
+  // Per-run dollar stop (core money stop): a run asked for checkpoints reports what it spent since its last report after a model call ends (usage.ts `createUsageCheckpointer`); the broker
+  // books each one and stops the run at its cap. A run not asked (any other install) reports once, at its end, as before. A run whose baseline could not be read sends no checkpoint either.
+  const checkpointsAsked = invocation.payload.usageCheckpoints === true;
+  const withRetention = <M extends object>(model: M) => ({ ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) });
+  const sendCheckpoint = (payload: Record<string, unknown>): void => { void emit("usage", payload, { urgent: true }); };
+  const checkpointsFor = (open: { getSessionStats(): UsageStats; getModel(): { provider: string; modelId: string } }, baseline: UsageStats | undefined, enabled = checkpointsAsked): UsageCheckpointer => createUsageCheckpointer({
+    enabled, ...(limits.usageCheckpointMs === undefined ? {} : { intervalMs: limits.usageCheckpointMs }),
+    baseline, stats: () => open.getSessionStats(), model: () => withRetention(open.getModel()), requested: dependencies.model, send: sendCheckpoint,
+  });
+  const checkpoints = checkpointsFor(session, usageBaseline, checkpointsAsked && usageBaselineKnown);
+  /** The checkpoints of the parallel parts and reviewers of this run (a stop sends what each spent before it ends). */
+  const partCheckpoints = new Map<object, UsageCheckpointer>();
   // A planning run has one wall-clock deadline (the first prompt and the format retry share it) and a no-activity limit; the other modes only get the heartbeat-free attempt counter.
   const monitor = new ModelCallMonitor({
     ...(planning || understanding ? { deadlineMs: limits.deadlineMs ?? (understanding ? UNDERSTAND_DEADLINE_MS : planningDeadlineMs()), stallMs: stallLimitMs } : {}),
@@ -1039,6 +1052,9 @@ async function runTask(
       await Promise.all([...partSessions].map((partSession) => within(abortConfirmMs, async () => { await partSession.abort(); })));
       // Bounded: a session whose abort already hung (a deadline abort that was not confirmed) must not hang the cancel too.
       await within(abortConfirmMs, async () => { await session.abort(); });
+      // What the run spent leaves first (with checkpoints asked): the broker waits for it before it ends the run, and the ending's evidence takes time.
+      checkpoints.checkpointNow();
+      for (const part of partCheckpoints.values()) part.checkpointNow();
       // The cancel's own result ends the operation and refuses any later output, so what is buffered is sent first.
       await within(CANCEL_FLUSH_MAX_MS, async () => {
         await emit("progress", { message: "AgentX stopped this run because it was cancelled." }, { urgent: true });
@@ -1087,6 +1103,7 @@ async function runTask(
       lastModelNote = modelNote?.modelCall;
       finalText = assistantText((event as { message?: unknown }).message);
       activeFindings.concludeWith(finalText);
+      checkpoints.observe(event);
     }
     if (loopStop !== undefined) return;
     const action = loopGuard.observe(event);
@@ -1306,12 +1323,15 @@ async function runTask(
         const graph = input.common.graph;
         const reportPartUsage = async (partSession: PiSessionHandle, itemId: string, partOutcome: TaskUsageOutcome): Promise<void> => {
           try {
-            const usage = createTaskUsageTelemetry(partSession.getSessionStats(), {
-              ...partSession.getModel(),
-              ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }),
-            }, partOutcome);
+            const stats = partSession.getSessionStats();
+            const partModel = { ...partSession.getModel(), ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
+            const usage = createTaskUsageTelemetry(stats, partModel, partOutcome);
             const redactedUsage = redactCredentials(usage);
-            await emit("usage", usageForControlPlane(redactedUsage, dependencies.model));
+            // With checkpoints, the end tells only what is left (marked final); without, the whole part as before.
+            const checkpointed = partCheckpoints.get(partSession);
+            partCheckpoints.delete(partSession);
+            const endReport = checkpointed?.checkpointed === true ? checkpointed.endReport(stats, partModel, partOutcome, dependencies.model) : usageForControlPlane(redactedUsage, dependencies.model);
+            if (endReport !== undefined) await emit("usage", endReport);
             await artifactSink({ name: `usage-part-${itemId.slice(0, 8)}.json`, mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
           } catch (error) {
             onDiagnostic(`Rovara could not report the usage of one part: ${errorText(error)}`);
@@ -1343,6 +1363,9 @@ async function runTask(
             );
             const open = partSession;
             partSessions.add(open);
+            // A part reports its usage as it goes too (per-run dollar stop): a part's session is made new, so it starts from nothing.
+            const partUsage = checkpointsFor(open, undefined);
+            partCheckpoints.set(open, partUsage);
             const onAbort = (): void => { void open.abort().catch(() => undefined); };
             if (context.signal.aborted) onAbort();
             else context.signal.addEventListener("abort", onAbort, { once: true });
@@ -1368,6 +1391,7 @@ async function runTask(
                 lastNote = note?.modelCall;
                 lastText = assistantText((event as { message?: unknown }).message);
                 partFindings.concludeWith(lastText);
+                partUsage.observe(event);
               }
               if (stoppedBy !== undefined) return;
               const action = guard.observe(event);
@@ -1736,11 +1760,19 @@ async function runTask(
           ...(fileTools === undefined ? {} : { fileTools }),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
           onLoadedKnowledge: (manifest) => { void emit("progress", loadedKnowledgePayload(manifest)); },
-          onUsage: async ({ role, stats, model, outcome, secondReviewTry }) => {
-            const usage = createTaskUsageTelemetry(stats, { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, outcome);
+          // Per-run dollar stop: each reviewer reports its usage as it goes too (its session is made new, so it starts from nothing).
+          // Kept with the parts' so a stop sends what each reviewer spent at once too.
+          ...(checkpointsAsked ? { usageCheckpoints: (reviewer: PiSessionHandle) => { const made = checkpointsFor(reviewer, undefined); partCheckpoints.set(reviewer, made); return made; } } : {}),
+          onUsage: async ({ role, stats, model, outcome, secondReviewTry, checkpoints: reviewerCheckpoints }) => {
+            // The reviewer has ended: a later stop has nothing more of it to send.
+            for (const [session, made] of partCheckpoints) if (made === reviewerCheckpoints) partCheckpoints.delete(session);
+            const reviewerModel = { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
+            const usage = createTaskUsageTelemetry(stats, reviewerModel, outcome);
             const redactedUsage = redactCredentials(usage);
             // SR-1: the usage event stays exactly the telemetry shape the activity index reads (an extra field would make it unreadable and it would be dropped); the second reviewer's calls are told apart by their own artifact names.
-            await events.append("usage", usageForControlPlane(redactedUsage, dependencies.model));
+            // With checkpoints (a deployed install's broker, which reads only the figures), the end tells what is left, marked final.
+            const endReport = reviewerCheckpoints?.checkpointed === true ? reviewerCheckpoints.endReport(stats, reviewerModel, outcome, dependencies.model) : usageForControlPlane(redactedUsage, dependencies.model);
+            if (endReport !== undefined) await events.append("usage", endReport);
             await artifactSink({ name: reviewUsageArtifactName(role, secondReviewTry), mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
           },
         });
@@ -1933,17 +1965,19 @@ async function runTask(
     try {
       const running = session.getSessionStats();
       const spent = statsSince(running, usageBaseline);
-      const usage = createTaskUsageTelemetry(spent, {
+      const runModel = {
         ...session.getModel(),
         ...(dependencies.model.cacheRetention === undefined
           ? {}
           : { cacheRetention: dependencies.model.cacheRetention }),
-      }, outcome);
+      };
+      const usage = createTaskUsageTelemetry(spent, runModel, outcome);
       const redactedUsage = redactCredentials(usage);
-      // A run that made no model call (a review run's own session is not used: its reviewers have sessions of their own) has nothing to report, on a fresh session and on a reopened one alike.
-      // Without this a reopened run would send the whole conversation's running total again.
-      if (usageBaselineKnown && !spentNothing(spent)) {
-        await emit("usage", usageForControlPlane(redactedUsage, dependencies.model));
+      // What the checkpoints have not reported yet (all of the run's spend when there were none). A run that made no model call (a review run's own session is not used: its reviewers have
+      // sessions of their own) has nothing to report, on a fresh session and on a reopened one alike. Without this a reopened run would send the whole conversation's running total again.
+      const endReport = usageBaselineKnown ? checkpoints.endReport(running, runModel, outcome, dependencies.model) : undefined;
+      if (endReport !== undefined) {
+        await emit("usage", endReport);
         // Kept once the control plane has the event (after the final flush below).
         usageToKeep = running;
       } else if (!usageBaselineKnown) {
