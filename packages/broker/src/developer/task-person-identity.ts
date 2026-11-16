@@ -1,3 +1,4 @@
+import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
   SLACK_OIDC_ISSUER,
@@ -30,6 +31,7 @@ export interface TaskPersonIdentity {
 export type ProjectAccessSubject = Pick<DeveloperCaller, "developerId" | "slackUserId">;
 
 export interface TaskPersonIdentityDependencies {
+  workspace?: SlackWorkspaceScope;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   slackTeamId: string;
@@ -180,7 +182,7 @@ async function qualifyCurrent(
   }
   const channelIds = [...new Set([...channels, ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
   if (channelIds.length > MAX_CHANNELS || channelIds.some((channelId) => !SlackChannelIdSchema.safeParse(channelId).success)) return unavailable();
-  const request = TaskPersonProofRequestSchema.safeParse({ kind: "task-person-proof", slackUserId: subject.slackUserId, channelIds });
+  const request = TaskPersonProofRequestSchema.safeParse({ kind: "task-person-proof", slackUserId: subject.slackUserId, channelIds, ...(deps.workspace === undefined ? {} : { workspace: deps.workspace }) });
   if (!request.success) return unavailable();
   let raw: TaskPersonProofResponse;
   try {

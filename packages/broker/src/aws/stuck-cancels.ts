@@ -1,3 +1,5 @@
+import { slackRecordScope } from "./slack-workspace-tokens.js";
+import { SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 // Issue 195: a cancel that never reaches the worker never holds a workspace for good. Stopping a
 // task moves it to CANCEL_REQUESTED and queues a cancel operation; if that cancel is lost (its
 // dispatch failed, or its worker is gone), the task stays CANCEL_REQUESTED and its workspace stays
@@ -64,6 +66,7 @@ export type StuckCancelRetry =
   | { outcome: "SKIPPED"; reason: string };
 
 export interface StuckCancelDependencies {
+  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">;
   client: Client;
   tableName: string;
   /** Queues the cancel again (createCancelRetrier). Absent where the reconciler has no signing key (legacy). */
@@ -309,7 +312,9 @@ async function noteRelease(
       log({ event: "stuck_cancel.note_skipped", ...ids, reason: "thread-record-unreadable" });
       return;
     }
-    await dependencies.postNote!({ channelId: parts[1]!, threadTs: parts[2]! }, FAILED_CANCEL_RELEASED_MESSAGE);
+    const scope = dependencies.workspaces === undefined ? undefined : slackRecordScope(workspace, parts[0]);
+    if (scope !== undefined && await dependencies.workspaces!.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
+    await dependencies.postNote!({ channelId: parts[1]!, threadTs: parts[2]!, ...(scope === undefined ? {} : { workspace: scope }) }, FAILED_CANCEL_RELEASED_MESSAGE);
   } catch (error) {
     // Logged, not counted: the release stands, and the task's status carries the same message.
     log({ event: "stuck_cancel.note_failed", ...ids, errorName: error instanceof Error ? error.name : "unknown" });

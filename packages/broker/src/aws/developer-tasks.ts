@@ -1,3 +1,4 @@
+import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
@@ -274,12 +275,14 @@ export interface DeveloperTaskRouteDependencies {
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
   taskReaderPerson?(developerId: string, project: string): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
-  boundChannels?(channelIds: readonly string[]): Promise<BoundChannel[]>;
+  workspaceForTask?(task: DeveloperTaskRecord): Promise<SlackWorkspaceScope | undefined>;
+  workspaceForProject?(project: string): Promise<SlackWorkspaceScope | undefined>;
+  boundChannels?(channelIds: readonly string[], workspace?: SlackWorkspaceScope): Promise<BoundChannel[]>;
   /**
    * Q10: whether this Slack user is a member of this channel, through the access check's own Slack
    * lookup; SLACK_UNAVAILABLE when the lookup fails. Without it no private-channel share is allowed.
    */
-  channelMember?(slackUserId: string, channelId: string): Promise<boolean>;
+  channelMember?(slackUserId: string, channelId: string, workspace?: SlackWorkspaceScope): Promise<boolean>;
   /** C5: the project's bound channel IDs, sorted, for sharing a task that already exists (R11: no access check). */
   projectChannelIds(project: string): Promise<string[]>;
   /** The developer sign-in issuer; the task page the draft pull request links to is on its origin. */
@@ -1442,10 +1445,11 @@ async function shareFor(
   wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
 ): Promise<ShareDecision | undefined> {
   if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
+  const workspace = await deps.workspaceForProject?.(project);
   const linked = caller.slackUserId !== undefined;
   const looked: BoundChannel[] = deps.boundChannels === undefined
     ? access.channelIds.map((channelId) => ({ channelId }))
-    : await deps.boundChannels(access.channelIds);
+    : workspace === undefined ? await deps.boundChannels(access.channelIds) : await deps.boundChannels(access.channelIds, workspace);
   // R10: a caller with no Slack link keeps each channel's privacy, never its name.
   const bound: BoundChannel[] = linked ? looked : looked.map(({ channelId, isPrivate }) => (isPrivate === undefined ? { channelId } : { channelId, isPrivate }));
   let decision: ShareDecision | undefined;
@@ -1464,7 +1468,7 @@ async function shareFor(
     }
     throw error;
   }
-  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId });
+  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId }, workspace);
   return decision;
 }
 
@@ -1478,14 +1482,14 @@ const PRIVACY_NOT_SET_UP = CHANNEL_PRIVACY_NOT_SET_UP;
  * channel-info lookup is configured) is treated as private unless the caller is a member, and a
  * failed membership lookup refuses: nothing here lets a share through on doubt.
  */
-async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel): Promise<void> {
+async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel, workspace?: SlackWorkspaceScope): Promise<void> {
   if (channel.isPrivate === false) return;
   const refusal = () => channel.isPrivate === true
     ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER)
     : agentXError("SLACK_UNAVAILABLE", deps.boundChannels === undefined ? PRIVACY_NOT_SET_UP : PRIVACY_UNKNOWN);
   // A caller with no Slack link cannot be confirmed as a member.
   if (caller.slackUserId === undefined || deps.channelMember === undefined) throw refusal();
-  if (!(await deps.channelMember(caller.slackUserId, channel.channelId))) throw refusal();
+  if (!(workspace === undefined ? await deps.channelMember(caller.slackUserId, channel.channelId) : await deps.channelMember(caller.slackUserId, channel.channelId, workspace))) throw refusal();
 }
 
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
@@ -1537,11 +1541,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   }
   let share: TaskShare | undefined;
   if (decision !== undefined) {
+    const teamId = (await deps.workspaceForProject?.(request.project))?.teamId ?? deps.slackTeamId;
     // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
-    if (deps.slackTeamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
+    if (teamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
     share = {
-      ...taskShare(decision, deps.slackTeamId, receivedAt),
-      ...(deps.initialSlackThread !== undefined && deps.initialSlackThread.teamId === deps.slackTeamId
+      ...taskShare(decision, teamId, receivedAt),
+      ...(deps.initialSlackThread !== undefined && deps.initialSlackThread.teamId === teamId
         && deps.initialSlackThread.channelId === decision.channelId ? { threadTs: deps.initialSlackThread.threadTs } : {}),
     };
   }
@@ -6127,8 +6132,9 @@ async function nextShare(
   if (task.share === undefined) {
     // R11: sharing an existing task does not recheck project access; it uses the latest policy.
     const decision = await shareFor(deps, caller, task.project, { revision: project.definition.revision, policy, access: "granted", channelIds: await deps.projectChannelIds(task.project) }, { shareToChannel: true, shareMode: request.shareMode, channel: request.channel });
-    if (decision === undefined || deps.slackTeamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
-    return taskShare(decision, deps.slackTeamId, now);
+    const teamId = (await deps.workspaceForProject?.(task.project))?.teamId ?? deps.slackTeamId;
+    if (decision === undefined || teamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
+    return taskShare(decision, teamId, now);
   }
   const current = task.share;
   if (request.channel !== undefined) {

@@ -91,6 +91,7 @@ export interface DeveloperIdentityDependencies {
   extraPublicKeys?: ReadonlyArray<{ purpose?: Exclude<SigningKeyPurpose, "developer">; publicJwk(): Promise<PublicSigningJwk> }>;
   providers: Partial<Record<DeveloperSignInMethod, SignInProvider>>;
   directory: SlackDirectory;
+  directoryForWorkspace?: (workspace: unknown) => Promise<SlackDirectory>;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
   /** Lane ID part 2: the factors Code owns for a step-up. Absent: a step-up is refused for everyone (no code is issued), and every other sign-in is as before. */
@@ -894,48 +895,56 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           throw error;
         }
       }
+      if (deps.company !== undefined && deps.directoryForWorkspace === undefined) return { ok: false, error: "slack_unavailable" };
+      let directory = deps.directory;
+      if (deps.directoryForWorkspace !== undefined) {
+        try {
+          const scoped = event.kind === "task-people-display-read" ? event.request : event;
+          directory = await deps.directoryForWorkspace((scoped as { workspace?: unknown }).workspace);
+        } catch { return { ok: false, error: "slack_unavailable" }; }
+      }
       if (event.kind === "channel-by-name") {
         const parsed = ChannelByNameRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.channelByName(parsed.data.name);
+        return directory.channelByName(parsed.data.name);
       }
       if (event.kind === "slack-user-by-email") {
         const parsed = SlackUserByEmailRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        const found = await deps.directory.lookupByEmail(parsed.data.email);
+        const found = await directory.lookupByEmail(parsed.data.email);
         if (found === "unavailable") return { ok: false, error: "slack_unavailable" };
         return found === "none" ? { ok: true } : { ok: true, userId: found.userId };
       }
       if (event.kind === "slack-auth-check") {
         if (!SlackAuthCheckRequestSchema.safeParse(event).success) return { ok: false, error: "invalid_request" };
-        return deps.directory.authTest();
+        return directory.authTest();
       }
       if (event.kind === "channel-info") {
         const parsed = ChannelInfoRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.channelInfo(parsed.data.channelIds);
+        return directory.channelInfo(parsed.data.channelIds);
       }
       if (event.kind === "task-person-proof") {
         const parsed = TaskPersonProofRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.taskPersonProof(parsed.data.slackUserId, parsed.data.channelIds);
+        return directory.taskPersonProof(parsed.data.slackUserId, parsed.data.channelIds);
       }
       if (event.kind === "task-channel-people") {
         const parsed = TaskChannelPeopleRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.taskChannelPeople(parsed.data.channelIds);
+        return directory.taskChannelPeople(parsed.data.channelIds);
       }
       if (event.kind === "task-people-display-read") {
         const parsed = TaskPeopleDisplayReadRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        return deps.directory.taskPeopleDisplayRead({
+        return directory.taskPeopleDisplayRead({
           ...parsed.data,
           admission: { ...parsed.data.admission, deadlineAt: Math.min(parsed.data.admission.deadlineAt, deps.now() + 20_000) },
         });
       }
       const parsed = ChannelMembersRequestSchema.safeParse(event);
       if (!parsed.success) return { ok: false, error: "invalid_request" };
-      return deps.directory.channelMembers(parsed.data.slackUserId, parsed.data.channelIds);
+      return directory.channelMembers(parsed.data.slackUserId, parsed.data.channelIds);
     }
     const request = adaptHttpApiEvent(event);
     const url = new URL(request.path, "https://agentx.invalid");
