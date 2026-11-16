@@ -23,6 +23,7 @@ import {
 } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.js";
+import { createCoreHostApp, DispatchOnlyMergeTrackingError, DISPATCH_ONLY_MERGE_TRACKING_REFUSED } from "../../packages/broker/src/core-host/app.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
@@ -293,6 +294,16 @@ describe("the core on the dispatcher", () => {
       } as Parameters<typeof createDispatcherCoreHost>[0],
     };
   };
+
+  it("refuses merge tracking on a dispatch-only runtime with a fixed typed error", async () => {
+    const world = createFakeWorld();
+    const app = createCoreHostApp({
+      env: env(), modules: world.modules, context: () => world.context(), dispatchOnly: true, servedCompanies: async () => [],
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: refusingTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(), log: () => undefined, services: () => ({ "merge-tracking": { pass: async () => ({}) } }) }),
+    });
+    await expect(app.runtimeFor(COMPANY_A)).rejects.toMatchObject({ name: "DispatchOnlyMergeTrackingError", message: DISPATCH_ONLY_MERGE_TRACKING_REFUSED });
+    await expect(app.runtimeFor(COMPANY_A)).rejects.toBeInstanceOf(DispatchOnlyMergeTrackingError);
+  });
 
   it("refuses to build without the core queue's URLs, the State table, the callback signing key, the artifacts bucket or the workers' placement, in fixed words", () => {
     for (const missing of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "STATE_TABLE_NAME", "CALLBACK_SIGNING_KEY", "ARTIFACT_BUCKET_NAME", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {

@@ -70,6 +70,16 @@ export class CoreEngineOffError extends Error {
   }
 }
 
+/** Fixed refusal: a dispatch-only root cannot run merge tracking without the merge switch blockers. */
+export const DISPATCH_ONLY_MERGE_TRACKING_REFUSED = "the dispatch-only core runtime cannot include merge tracking";
+
+export class DispatchOnlyMergeTrackingError extends Error {
+  constructor() {
+    super(DISPATCH_ONLY_MERGE_TRACKING_REFUSED);
+    this.name = "DispatchOnlyMergeTrackingError";
+  }
+}
+
 export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
   const flags = readCoreEngineFlags(options.env ?? process.env);
   const active = anyCoreAreaOn(flags);
@@ -106,12 +116,13 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
         if (!coreAreaOn(flags, "flow", companyId) && !(await servedCompanies()).includes(companyId)) throw new CoreEngineOffError("the flow is not on for this company and it holds no core task");
         const built = await registry();
         const runtime = createCoreRuntime({ ...options.runtime(built, companyId, flags), registry: built, companyId, flags });
+        if (options.dispatchOnly === true && runtime.services["merge-tracking"] !== undefined) throw new DispatchOnlyMergeTrackingError();
         // Only an area the switch has ON for this company must have its services: a gap in an area that is off costs that area its jobs (`service_not_wired`), never the company's whole runtime.
         const areas = CORE_AREAS.filter((area) => coreAreaOn(flags, area, companyId));
         const gaps = options.dispatchOnly === true ? [] : serviceGaps(runtime.services, areas);
         if (gaps.length > 0) throw new Error(`the core runtime lacks services for the areas switched on: ${gaps.join(", ")}`);
-        // The switch blockers (switch-blockers.ts): required checks, by id. Honest CI is asked where the merge area is on or merge tracking runs at all. A dispatch-only root (the dispatcher) runs no
-        // merge tracking and no job of any area (the same reason it has no service gaps), so it is never asked: it would otherwise refuse every company's runtime, and every core record would come back.
+        // The switch blockers (switch-blockers.ts): required checks, by id. Honest CI is asked where the merge area is on or merge tracking runs at all. A dispatch-only root runs no merge job;
+        // the guard above makes that assumption explicit so future merge-tracking wiring cannot turn this skipped check into a bypass.
         const blockers = options.dispatchOnly === true ? [] : switchBlockers(runtime, areas);
         if (blockers.length > 0) throw new CoreSwitchBlockedError(blockers);
         return runtime;
