@@ -28,7 +28,7 @@ import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "..
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
-import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
+import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, readHostedAdmissionSettings, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
@@ -49,6 +49,7 @@ import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
+import { CORE_ENGINE_VARIABLE, parseCoreSwitch } from "../core-host/flags.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
@@ -220,6 +221,12 @@ export function outboxCompaniesOf(event: unknown): string[] | undefined {
 
 export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRoot {
   const { env, log } = inputs;
+  if (parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value.mode !== "off") {
+    const admission = readHostedAdmissionSettings(env);
+    if ("problem" in admission) throw new Error("core engine settings are not readable");
+    if (readCoreLessonsSwitch(env).problem !== undefined) throw new Error("core engine settings are not readable");
+    policyHookSettingsFromEnvironment(env);
+  }
   const now = inputs.now ?? (() => new Date());
   const membershipOf = inputs.signInTableName === undefined || inputs.signInTableName === ""
     ? async () => undefined

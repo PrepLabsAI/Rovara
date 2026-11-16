@@ -103,19 +103,21 @@ class BrokerEnvironment {
   readonly names: PackedList<BrokerNameKey>;
   readonly settings: PackedList<BrokerSettingKey>;
 
-  private constructor(broker: lambda.Function) {
+  private constructor(broker: lambda.Function, includeNames: boolean) {
     const stack = Stack.of(broker);
     this.names = new PackedList<BrokerNameKey>(stack, "the broker's name", (key) => BROKER_NAMES[key].code, LITERAL_NAME);
     this.settings = new PackedList<BrokerSettingKey>(stack, "the broker's setting", (key) => BROKER_SETTINGS[key].code, BROKER_SETTING_VALUE);
-    broker.addEnvironment(BROKER_ACCOUNT_VARIABLE, stack.account);
-    broker.addEnvironment(BROKER_NAMES_VARIABLE, Lazy.string({ produce: () => this.names.joined() }));
+    if (includeNames) {
+      broker.addEnvironment(BROKER_ACCOUNT_VARIABLE, stack.account);
+      broker.addEnvironment(BROKER_NAMES_VARIABLE, Lazy.string({ produce: () => this.names.joined() }));
+    }
     broker.addEnvironment(BROKER_SETTINGS_VARIABLE, Lazy.string({ produce: () => this.settings.joined() }));
   }
 
-  static of(broker: lambda.Function): BrokerEnvironment {
+  static of(broker: lambda.Function, includeNames = true): BrokerEnvironment {
     const existing = BrokerEnvironment.byBroker.get(broker);
     if (existing !== undefined) return existing;
-    const created = new BrokerEnvironment(broker);
+    const created = new BrokerEnvironment(broker, includeNames);
     BrokerEnvironment.byBroker.set(broker, created);
     return created;
   }
@@ -141,6 +143,11 @@ export function addBrokerDeadLetterQueues(broker: lambda.Function, naming: Agent
 export function addBrokerSetting(broker: lambda.Function, naming: AgentXNaming, key: BrokerSettingKey, value: string): void {
   if (naming.env === undefined) broker.addEnvironment(BROKER_SETTINGS[key].variable, value);
   else BrokerEnvironment.of(broker).settings.add(key, value);
+}
+
+/** Add a setting to the packed list on any named Lambda without adding the broker-only name/account variables. */
+export function addPackedSetting(fn: lambda.Function, key: BrokerSettingKey, value: string): void {
+  BrokerEnvironment.of(fn, false).settings.add(key, value);
 }
 
 /**

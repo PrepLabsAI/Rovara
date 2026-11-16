@@ -135,6 +135,10 @@ export const BROKER_SETTINGS = {
   signInSlackSince: { code: "sn", variable: "DEVELOPER_SIGNIN_SLACK_SINCE" },
   oidcSince: { code: "os", variable: "DEVELOPER_OIDC_SINCE" },
   mcpConfirmElicitation: { code: "mc", variable: "MCP_CONFIRM_ELICITATION" },
+  coreAllowedCompanies: { code: "ac", variable: "ROVARA_CORE_ALLOWED_COMPANIES" },
+  coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },
+  coreCompanyDayCap: { code: "cd", variable: "ROVARA_CORE_COMPANY_DAY_CAP_USD" },
+  coreLessons: { code: "cl", variable: "ROVARA_CORE_LESSONS" },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;

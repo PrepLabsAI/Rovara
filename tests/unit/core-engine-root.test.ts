@@ -60,6 +60,22 @@ describe("the broker's core root, switch off (the default)", () => {
 });
 
 describe("the broker's core root, switch on", () => {
+  it("refuses malformed core settings in fixed words without repeating their values", () => {
+    const cases = [
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, "core engine settings are not readable", "none"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_TASK_CAP_USD: "1001" }, "core engine settings are not readable", "1001"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on:secret-value" }, "core engine settings are not readable", "secret-value"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "secret-value" }, "the policy hook settings are not JSON", "secret-value"],
+    ] as const;
+    for (const [env, word, privateValue] of cases) {
+      try { createBrokerCoreRoot(rootInputs(env, fakeTables().client)); throw new Error("expected settings refusal"); }
+      catch (error) {
+        expect((error as Error).message).toContain(word);
+        expect((error as Error).message).not.toContain(privateValue);
+      }
+    }
+  });
+
   it("gives the routes a core entry; the registry refuses by name while the broker's adapter inputs are owed, and a start falls back to nothing", async () => {
     const tables = fakeTables([member("dev-a", ORG, "owner")]);
     const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client));

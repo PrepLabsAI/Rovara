@@ -44,6 +44,12 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   GitHubAppCredentialRef: "github-app-example-company-engineering",
   // The core switch's longest value (CORE_ENGINE_PARAMETER_PATTERN: two companies).
   CoreEngine: `on:org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
+  CoreAllowedCompanies: `org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
+  CoreAllowedCompaniesLong: Array.from({ length: 5 }, (_, index) => `org_${String(index).padStart(20, "a")}`).join(":"),
+  CoreTaskCapUsd: "1000",
+  CoreCompanyDayCapUsd: "1000",
+  CorePolicyHook: "x".repeat(900),
+  CoreLessons: `on:org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
 };
 const RANDOM = "A1B2C3D4E5F6G";
 const UUID = "12345678-1234-1234-1234-123456789012";

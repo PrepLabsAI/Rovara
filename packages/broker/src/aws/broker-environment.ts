@@ -135,11 +135,15 @@ export function brokerSettingsFromEnvironment(env: MutableEnvironment): Array<{ 
  * broker): the names under their variables (the dead-letter queues as one JSON object of URLs by label), then what the environment's name decides. A variable that is already
  * set is not replaced (an empty setting, an install that leaves the Slack team out, is set as empty, as the parameter's own value was).
  */
-export function hydrateBrokerEnvironment(env: MutableEnvironment): void {
+export function hydrateBrokerSettings(env: MutableEnvironment): void {
   // The settings first: they are plain values the rest does not need, and a bad list stops the broker before anything is built from it.
   for (const { spec, value } of brokerSettingsFromEnvironment(env)) {
     if (!isSet(env[spec.variable])) env[spec.variable] = value;
   }
+}
+
+export function hydrateBrokerEnvironment(env: MutableEnvironment): void {
+  hydrateBrokerSettings(env);
   // A named broker always has AGENTX_NAMES (with its account); an empty list still means a packed broker, so the derived variables are still built.
   if (env[BROKER_NAMES_VARIABLE] === undefined) return;
   const queues = new Map<BrokerNameSpec, string>();

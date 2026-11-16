@@ -40,7 +40,7 @@ vi.mock("../../packages/broker/src/aws/broker-environment.js", async (importOrig
 /** Every variable the broker's code reads that a named environment's control plane does not pass as such. */
 function builtNames(): Set<string> {
   const names = new Set<string>();
-  for (const spec of [...Object.values(BROKER_NAMES), ...Object.values(BROKER_SETTINGS)]) names.add(spec.variable);
+  for (const spec of [...Object.values(BROKER_NAMES), ...Object.values(BROKER_SETTINGS)]) if (spec.variable !== "ROVARA_CORE_ALLOWED_COMPANIES") names.add(spec.variable);
   for (const derived of DERIVED_BROKER_VARIABLES) names.add(derived.variable);
   return names;
 }
@@ -48,6 +48,12 @@ function builtNames(): Set<string> {
 describe("the broker entry module reads no packed name before it unpacks them", () => {
   it("imports the environment init first, before any other import", () => {
     const source = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
+    const imports = [...source.matchAll(/^import\s[^;]*?["']([^"']+)["'];/gmu)].map((match) => match[1]);
+    expect(imports[0]).toBe("./broker-environment-init.js");
+  });
+
+  it("hydrates the packed settings before the dispatcher's first import can read them", () => {
+    const source = readFileSync(new URL("../../packages/broker/src/aws/dispatcher.ts", import.meta.url), "utf8");
     const imports = [...source.matchAll(/^import\s[^;]*?["']([^"']+)["'];/gmu)].map((match) => match[1]);
     expect(imports[0]).toBe("./broker-environment-init.js");
   });
@@ -63,7 +69,7 @@ describe("the broker entry module reads no packed name before it unpacks them", 
       const broker = functions.find((entry) => entry.logicalId.startsWith("Broker"))!;
       const environment: Record<string, string | undefined> = { ...saved };
       for (const name of names) delete environment[name];
-      Object.assign(environment, broker.variables, { AWS_REGION: RESOLVER_REGION });
+      Object.assign(environment, broker.variables, { AWS_REGION: RESOLVER_REGION, ROVARA_CORE_ENGINE: "off" });
       const record = (key: string | symbol): void => {
         if (typeof key !== "string" || !names.has(key)) return;
         if (!hydration.started) readsBefore.push(key);

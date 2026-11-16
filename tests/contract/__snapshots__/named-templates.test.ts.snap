@@ -17724,11 +17724,7 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
 
 exports[`named environment templates > pins L1a's broker core dispatch queue references 1`] = `
 {
-  "CORE_DISPATCH_DEAD_LETTER_URL": {
-    "Ref": "CoreEngineJobsDeadLetterQueue4163BB61",
-  },
-  "CORE_DISPATCH_QUEUE_URL": {
-    "Ref": "CoreEngineJobsQueue9C998495",
-  },
+  "CORE_DISPATCH_DEAD_LETTER_URL": undefined,
+  "CORE_DISPATCH_QUEUE_URL": undefined,
 }
 `;

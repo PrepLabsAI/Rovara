@@ -9,7 +9,6 @@
 //      deleter start and the callback signing key only while the switch is not off; no EC2 terminate; the State table's outbox pending index. The legacy template has none of it.
 // Dropped from the monolith's test, with reason: the packed-settings and Slack-ingress cases (Code's broker does not pack settings; the ingress wiring comes with the Slack step), the catalog
 // repositories (another lane's), and the IAM simulation (Code has no simulator support; the services check stands in).
-import { createHash } from "node:crypto";
 import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -330,25 +329,48 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
   });
 });
 
-describe("L1a broker environment-only template change", () => {
+describe("L1a broker environment derivation", () => {
   const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value).replace(/[a-f0-9]{64}/gu, "<asset-hash>")).digest("hex");
-
-  it("adds only the two broker environment references: no resource, IAM or other property changes", () => {
+  it("derives both dispatch queue URLs at runtime without adding broker environment entries", () => {
     const before = structuredClone(inApp);
     const queues = Object.entries(before.Resources).filter(([, resource]) => resource.Type === "AWS::SQS::Queue");
     const queue = queues.find(([, resource]) => resource.Properties.QueueName === coreDispatchQueueName("staging"))!;
     const dead = queues.find(([, resource]) => resource.Properties.QueueName === coreDispatchDeadLetterName("staging"))!;
     const broker = Object.entries(before.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
     const variables = (broker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(variables.CORE_DISPATCH_QUEUE_URL).toEqual({ Ref: queue[0] });
-    expect(variables.CORE_DISPATCH_DEAD_LETTER_URL).toEqual({ Ref: dead[0] });
-    delete variables.CORE_DISPATCH_QUEUE_URL;
-    delete variables.CORE_DISPATCH_DEAD_LETTER_URL;
-    // Full pre-L1a named template, recorded before production edits. No git history required in CI.
-    expect(digest(before)).toBe("652a4941d01f4da3099d50c2b0382d2766df46a951a2e66c6ae846f2c4d21c2e");
+    expect(variables).not.toHaveProperty("CORE_DISPATCH_QUEUE_URL");
+    expect(variables).not.toHaveProperty("CORE_DISPATCH_DEAD_LETTER_URL");
+    expect(queue[1].Properties.QueueName).toBe(coreDispatchQueueName("staging"));
+    expect(dead[1].Properties.QueueName).toBe(coreDispatchDeadLetterName("staging"));
+    expect(broker[1].Properties.Environment).toBeDefined();
+  });
+
+  it("constrains all five kept core settings and passes them to both functions without IAM changes", () => {
+    const parameters = inApp.Parameters as Record<string, { Default?: string; AllowedPattern?: string; MaxLength?: number }>;
+    expect(parameters).toMatchObject({
+      CoreAllowedCompanies: { Default: "none", AllowedPattern: "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
+      CoreAllowedCompaniesLong: { Default: "", AllowedPattern: "^$|^(all|org_[0-9a-z]{20}(:org_[0-9a-z]{20}){0,4})$", MaxLength: 128 },
+      CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
+      CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
+      CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
+      CorePolicyHook: { Default: "", MaxLength: 900 },
+    });
+    for (const logicalPrefix of ["Broker", "Dispatcher"]) {
+      const fn = Object.entries(inApp.Resources).find(([id, resource]) => id.startsWith(logicalPrefix) && resource.Type === "AWS::Lambda::Function")![1];
+      const variables = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+      expect(variables.AGENTX_SETTINGS).toBeDefined();
+      expect(variables.ROVARA_POLICY_HOOK).toEqual({ Ref: "CorePolicyHook" });
+      expect(variables.ROVARA_CORE_ALLOWED_COMPANIES).toEqual({ Ref: "CoreAllowedCompaniesLong" });
+      expect(JSON.stringify(variables)).toContain("CoreAllowedCompanies");
+      expect(JSON.stringify(variables)).toContain("CoreTaskCapUsd");
+      expect(JSON.stringify(variables)).toContain("CoreCompanyDayCapUsd");
+      expect(JSON.stringify(variables)).toContain("CoreLessons");
+    }
+    expect(Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy")).toHaveLength(Object.values(json.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy").length);
   });
 
   it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
     expect(digest(legacy.toJSON())).toBe("9a7942afbd5561cef0077003fe43e470ef6b83993bef9ca72068f9e475247b06");
   });
 });
+import { createHash } from "node:crypto";

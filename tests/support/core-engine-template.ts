@@ -2,6 +2,7 @@
 // so a test that pins "everything else" does not have to know the core engine's resources.
 import { expect } from "vitest";
 import { CORE_JOB_SCHEDULES } from "@agentx/contracts";
+import { removePackedPieces } from "./broker-environment-template.js";
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
 
@@ -13,7 +14,7 @@ type Resource = { Type: string; Properties: Record<string, unknown> };
 export function withoutCoreEngine(template: unknown): unknown {
   const synthesized = template as { Parameters: Record<string, unknown>; Conditions: Record<string, unknown>; Resources: Record<string, Resource> };
   expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
-  delete synthesized.Parameters.CoreEngine;
+  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreAllowedCompaniesLong", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
   expect(conditions).toHaveLength(1);
   delete synthesized.Conditions[conditions[0]!];
@@ -33,6 +34,9 @@ export function withoutCoreEngine(template: unknown): unknown {
     expect(dispatcherVariables, name).toHaveProperty(name);
     delete dispatcherVariables[name];
   }
+  removePackedPieces(dispatcherVariables, "AGENTX_SETTINGS", ["ac", "cd", "cl", "ct"]);
+  delete dispatcherVariables.ROVARA_POLICY_HOOK;
+  delete dispatcherVariables.ROVARA_CORE_ALLOWED_COMPANIES;
   const dispatcherPolicy = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DispatcherServiceRoleDefaultPolicy") && resource.Type === "AWS::IAM::Policy")!;
   const statements = (dispatcherPolicy[1].Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> }).Statement;
   expect(statements.filter((statement) => statement.Sid === "ConsumeCoreDispatchQueue")).toHaveLength(1);
@@ -48,13 +52,9 @@ export function withoutCoreEngine(template: unknown): unknown {
   expect(brokers).toHaveLength(1);
   const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
   expect(variables.ROVARA_CORE_ENGINE).toStrictEqual({ Ref: "CoreEngine" });
-  // L1a adds only these broker references; core-engine-infrastructure pins the full pre-L1a template after removing them.
-  for (const [name, queueId] of [["CORE_DISPATCH_QUEUE_URL", "CoreEngineJobsQueue"], ["CORE_DISPATCH_DEAD_LETTER_URL", "CoreEngineJobsDeadLetterQueue"]] as const) {
-    const matches = added.filter(([id, resource]) => id.startsWith(queueId) && resource.Type === "AWS::SQS::Queue");
-    expect(matches).toHaveLength(1);
-    expect(variables[name]).toStrictEqual({ Ref: matches[0]![0] });
-    delete variables[name];
-  }
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "cd", "cl", "ct"]);
+  delete variables.ROVARA_POLICY_HOOK;
+  delete variables.ROVARA_CORE_ALLOWED_COMPANIES;
   delete variables.ROVARA_CORE_ENGINE;
   return template;
 }

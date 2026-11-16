@@ -26,6 +26,7 @@ import {
   coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
+import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
 
 /** The stack parameter that holds the switch. */
 export const CORE_ENGINE_PARAMETER = "CoreEngine";
@@ -48,11 +49,18 @@ export interface CoreEngineProps {
   readonly env: string;
   /** The broker function: the schedules' target, and the principal that uses the queues. */
   readonly broker: lambda.Function;
+  readonly dispatcher: lambda.Function;
   readonly notifyOperator: cloudwatchActions.SnsAction;
 }
 
 export class CoreEngine extends Construct {
   readonly parameter: CfnParameter;
+  private readonly allowedCompanies: CfnParameter;
+  private readonly allowedCompaniesLong: CfnParameter;
+  private readonly taskCap: CfnParameter;
+  private readonly companyDayCap: CfnParameter;
+  private readonly policyHook: CfnParameter;
+  private readonly lessons: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
@@ -64,7 +72,7 @@ export class CoreEngine extends Construct {
   constructor(scope: Construct, id: string, props: CoreEngineProps) {
     super(scope, id);
     const stack = Stack.of(this);
-    const { env, broker } = props;
+    const { env, broker, dispatcher } = props;
     this.brokerFunctionArn = broker.functionArn;
     if (new Set(CORE_JOB_SCHEDULES.map((entry) => entry.job)).size !== CORE_JOB_SCHEDULES.length) throw new Error("core engine: a job is scheduled once");
     if (CORE_DISPATCH_MAX_RECEIVES <= CORE_DISPATCH_ATTEMPTS_MAX) throw new Error("core engine: the dispatch queue's redrive limit must be above the core's retry budget");
@@ -77,6 +85,22 @@ export class CoreEngine extends Construct {
       maxLength: CORE_ENGINE_PARAMETER_MAX_LENGTH,
       description: "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do; drain: no new task starts on the core and its running tasks finish there",
     });
+    this.allowedCompanies = new CfnParameter(stack, "CoreAllowedCompanies", { type: "String", default: "none", maxLength: 64, allowedPattern: "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", description: "Core engine admission: none (safe default), all, or up to two company ids" });
+    this.allowedCompaniesLong = new CfnParameter(stack, "CoreAllowedCompaniesLong", { type: "String", default: "", maxLength: 128, allowedPattern: "^$|^(all|org_[0-9a-z]{20}(:org_[0-9a-z]{20}){0,4})$", description: "Optional longer core admission company list; when set, overrides CoreAllowedCompanies and is passed as its own environment variable" });
+    this.taskCap = new CfnParameter(stack, "CoreTaskCapUsd", { type: "String", default: "5", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-task cap in whole USD, from 1 to 1000" });
+    this.companyDayCap = new CfnParameter(stack, "CoreCompanyDayCapUsd", { type: "String", default: "25", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-company UTC-day cap in whole USD, from 1 to 1000" });
+    this.policyHook = new CfnParameter(stack, "CorePolicyHook", { type: "String", default: "", maxLength: 900, description: "Optional policy-hook settings JSON; empty disables the hook" });
+    this.lessons = new CfnParameter(stack, "CoreLessons", { type: "String", default: "off", maxLength: 64, allowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", description: "Core lessons switch, default off" });
+    for (const [key, value] of [["coreTaskCap", this.taskCap.valueAsString], ["coreCompanyDayCap", this.companyDayCap.valueAsString], ["coreLessons", this.lessons.valueAsString]] as const) {
+      addBrokerSetting(broker, props.naming, key, value);
+      addPackedSetting(dispatcher, key, value);
+    }
+    addBrokerSetting(broker, props.naming, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
+    addPackedSetting(dispatcher, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
+    broker.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
+    dispatcher.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
+    broker.addEnvironment("ROVARA_CORE_ALLOWED_COMPANIES", this.allowedCompaniesLong.valueAsString);
+    dispatcher.addEnvironment("ROVARA_CORE_ALLOWED_COMPANIES", this.allowedCompaniesLong.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).
@@ -95,8 +119,6 @@ export class CoreEngine extends Construct {
       enforceSSL: true,
     });
     broker.addEnvironment(CORE_ENGINE_VARIABLE, this.parameter.valueAsString);
-    broker.addEnvironment(CORE_DISPATCH_QUEUE_URL_VARIABLE, this.queue.queueUrl);
-    broker.addEnvironment(CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, this.deadLetters.queueUrl);
     // Exactly these two queues, granted on each queue's own resource policy, not on the broker's role: the broker role's inline policy is at IAM's size limit (one more statement there makes
     // CDK split it into a managed policy, which the deploy role may not create). Same account, so the queue policy alone grants it; the permissions boundary still bounds the role (it allows sqs).
     for (const queue of [this.queue, this.deadLetters]) {

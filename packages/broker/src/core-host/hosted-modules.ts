@@ -63,7 +63,7 @@ const wholeDollars = (raw: string | undefined, fallback: number): number | undef
 /** The admission's settings, or a fixed problem (never the value read). The implicit laptop company is never allowed: a deployed company has its own id. */
 export function readHostedAdmissionSettings(env: NodeJS.ProcessEnv): { settings: HostedAdmissionSettings } | { problem: string } {
   const raw = env[CORE_ALLOWED_COMPANIES_VARIABLE]?.trim() ?? "";
-  if (raw === "") return { problem: "no company is allowed on the core engine" };
+  if (raw === "" || raw === "none") return { problem: "no company is allowed on the core engine" };
   const task = wholeDollars(env[CORE_TASK_CAP_VARIABLE], DEFAULT_TASK_CAP_USD);
   const day = wholeDollars(env[CORE_COMPANY_DAY_CAP_VARIABLE], DEFAULT_COMPANY_DAY_CAP_USD);
   if (raw === ALL_COMPANIES) {
