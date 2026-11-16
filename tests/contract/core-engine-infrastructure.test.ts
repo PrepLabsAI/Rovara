@@ -13,7 +13,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES,
+  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   SERVICE_ROLE_SERVICES, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -352,7 +352,7 @@ describe("L1a broker environment derivation", () => {
       CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
-      CorePolicyHook: { Default: "", AllowedPattern: "^[ -~]*$", MaxLength: 600 },
+      CorePolicyHook: { Default: "", AllowedPattern: "^[ -~]*$", MaxLength: POLICY_HOOK_PARAMETER_MAX_LENGTH },
     });
     for (const logicalPrefix of ["Broker", "Dispatcher"]) {
       const fn = Object.entries(inApp.Resources).find(([id, resource]) => id.startsWith(logicalPrefix) && resource.Type === "AWS::Lambda::Function")![1];

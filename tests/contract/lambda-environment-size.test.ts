@@ -1,12 +1,13 @@
 // Lambda holds all of a function's environment variables, keys and values together, to 4,096 bytes, and only the deploy says so. A named environment's broker was over it once the
-// core switch-on lanes added their settings. After L5 ANSWER-2 removes the five-id raw override and limits admission to one company id, the honest worst case is 3,951 bytes in staging
-// and 4,209 with the longest environment name (113 bytes over Lambda's 4,096-byte limit). This resolves the broker's and the
-// dispatcher's environments with the longest names CloudFormation can generate and holds each under a ceiling with 128 bytes of margin, measured the stricter way (the compact
-// JSON of the map, which counts each variable's quotes and separators), so a later lane cannot drift past the limit unseen.
+// core switch-on lanes added their settings. With admission limited to one company id and the policy hook capped at POLICY_HOOK_PARAMETER_MAX_LENGTH (DEC 246), the worst case
+// fits with the longest environment name and the longest value every parameter accepts. This resolves the broker's and the dispatcher's environments with the longest names
+// CloudFormation can generate and holds each under a ceiling with 128 bytes of margin, measured the stricter way (the compact JSON of the map, which counts each variable's quotes,
+// separators and escapes), so a later lane cannot drift past the limit unseen.
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { describe, expect, it } from "vitest";
+import { POLICY_HOOK_PARAMETER_MAX_LENGTH, PolicyHookSettingsSchema } from "@agentx/contracts";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { DEPLOY_PARAMETER_VALUES, LAMBDA_ENVIRONMENT_LIMIT_BYTES, controlPlaneOf, environmentBytes, keyValueBytes, lambdaEnvironments, type Template as ResolvableTemplate } from "../support/lambda-environment-size.js";
 
@@ -52,11 +53,22 @@ describe("the broker's and the dispatcher's environments stay under Lambda's 4 K
 });
 
 describe("the measuring", () => {
-  it("uses a quote-heavy two-key policy-hook JSON at the stack parameter cap", () => {
+  it("gives the policy hook the parameter's longest value, all characters JSON must escape, and the parameter accepts nothing longer or wider", () => {
+    const parameter = (synthesized(LONGEST_ENVIRONMENT).template as { Parameters: Record<string, { MaxLength?: number; AllowedPattern?: string }> }).Parameters["CorePolicyHook"]!;
+    expect(parameter).toMatchObject({ MaxLength: POLICY_HOOK_PARAMETER_MAX_LENGTH, AllowedPattern: "^[ -~]*$" });
     const hook = DEPLOY_PARAMETER_VALUES.CorePolicyHook!;
-    expect(hook).toHaveLength(600);
-    expect(hook).toMatch(/^\{"address":"https:\/\/policy-hook\.example\/answer[a]+","keys":\[\{"kty":"RSA","n":"A{80}","e":"AQAB","kid":"rotation-a","alg":"RS256"\},\{"kty":"RSA","n":"A{80}","e":"AQAB","kid":"rotation-b","alg":"RS256"\}\]\}$/u);
-    expect((hook.match(/"/gu) ?? []).length).toBeGreaterThan(10);
+    expect(hook).toHaveLength(POLICY_HOOK_PARAMETER_MAX_LENGTH);
+    expect(environmentBytes({ H: hook })).toBe(environmentBytes({ H: "" }) + 2 * POLICY_HOOK_PARAMETER_MAX_LENGTH);
+  });
+
+  it("fits one real RSA-2048 hook key under the cap; a two-key rotation waits for the keys to leave the environment (BROKER-ENV-HEADROOM)", () => {
+    const key = (kid: string) => ({ kty: "RSA" as const, n: "A".repeat(342), e: "AQAB", kid, alg: "RS256" as const, use: "sig" as const });
+    const one = { address: `https://policy-hook.example-company.com/${"a".repeat(54)}`, keys: [key("policy-2026-11")] };
+    expect(PolicyHookSettingsSchema.safeParse(one).success).toBe(true);
+    expect(JSON.stringify(one).length).toBeLessThanOrEqual(POLICY_HOOK_PARAMETER_MAX_LENGTH);
+    const smallestTwo = { address: "https://h.io", keys: [{ kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "a", alg: "RS256" }, { kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "b", alg: "RS256" }] };
+    expect(PolicyHookSettingsSchema.safeParse(smallestTwo).success).toBe(true);
+    expect(JSON.stringify(smallestTwo).length).toBeGreaterThan(POLICY_HOOK_PARAMETER_MAX_LENGTH);
   });
 
   it("counts the compact JSON of the variable map and the keys plus values, in bytes", () => {

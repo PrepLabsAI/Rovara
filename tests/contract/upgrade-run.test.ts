@@ -110,7 +110,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
       CorePolicyHook: '{"address":"https://hook.example","keys":[]}',
       CoreLessons: "on:org_aaaaaaaaaaaaaaaaaaaa",
     };
-    const h = await harness({ controlPlane: { ...coreSettings } });
+    const h = await harness({ controlPlane: { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****", ...coreSettings }, loadRelease: async () => release("1.3.0", ["BudgetMonthlyUsd", ...Object.keys(coreSettings)]) });
     await runUpgrade(options, h.deps);
     const deployed = h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")?.parameters;
     for (const [name, value] of Object.entries(coreSettings)) expect(deployed?.[name], name).toBe(value);

@@ -68,7 +68,6 @@ describe("the broker's core root, switch on", () => {
       [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_COMPANY_DAY_CAP_USD: "1001" }, "1001"],
       [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on:secret-value" }, "secret-value"],
       [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "secret-value" }, "secret-value"],
-      [{ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, "none"],
       [{ ROVARA_CORE_ENGINE: "on" }, "ROVARA_CORE_ALLOWED_COMPANIES"],
     ] as const;
     for (const [env, privateValue] of cases) {
@@ -85,6 +84,11 @@ describe("the broker's core root, switch on", () => {
       expect(job.statusCode).toBe(503);
       expect(job.body).toContain("The core engine settings are not readable.");
     }
+  });
+
+  it("drains without reading the admission settings: allowed companies \"none\" is not a settings problem, and a new task goes the old way", async () => {
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, fakeTables().client));
+    expect(await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" })).toBeUndefined();
   });
 
   it("gives the routes a core entry; the registry refuses by name while the broker's adapter inputs are owed, and a start falls back to nothing", async () => {

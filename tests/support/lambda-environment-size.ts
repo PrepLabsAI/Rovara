@@ -10,6 +10,8 @@
  * An intrinsic this does not know throws: a measure that guessed would be no measure.
  */
 
+import { POLICY_HOOK_PARAMETER_MAX_LENGTH } from "@agentx/contracts";
+
 type Json = Record<string, unknown>;
 interface Resource { Type: string; Properties?: Json }
 export interface Template { Resources: Record<string, Resource>; Parameters?: Record<string, { Default?: unknown; Type?: string; AllowedValues?: string[] }> }
@@ -20,13 +22,12 @@ export const RESOLVER_REGION = "ap-southeast-4";
 export const RESOLVER_ACCOUNT = "123456789012";
 const PARAMETER_FALLBACK = "p".repeat(64);
 
+/**
+ * The policy hook at its worst: the parameter's longest value, every character one that compact JSON must escape (the parameter allows any printable ASCII, so `"` and `\` pass
+ * the deploy; the broker refuses bad settings later, at run time). Each costs two bytes in the stricter measure and one in keys plus values, so no real hook measures larger.
+ */
 function policyHookWorstCase(): string {
-  const key = (kid: string) => ({ kty: "RSA", n: "A".repeat(80), e: "AQAB", kid, alg: "RS256" });
-  const settings = { address: "https://policy-hook.example/answer", keys: [key("rotation-a"), key("rotation-b")] };
-  const json = JSON.stringify(settings);
-  if (json.length > 600) throw new Error("two-key policy hook fixture exceeds its 600-character stack parameter");
-  settings.address += "a".repeat(600 - json.length);
-  return JSON.stringify(settings);
+  return '"'.repeat(POLICY_HOOK_PARAMETER_MAX_LENGTH);
 }
 
 /** What a deploy gives the parameters, at a realistic worst length: a fully configured install (OIDC, Slack, two subnets, the core switch on for two companies). */

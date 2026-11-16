@@ -22,7 +22,7 @@
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
-  CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES,
+  CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -87,7 +87,7 @@ export class CoreEngine extends Construct {
     this.allowedCompanies = new CfnParameter(stack, "CoreAllowedCompanies", { type: "String", default: "none", maxLength: 64, allowedPattern: "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", description: "Core engine admission: none (safe default), all, or up to two company ids" });
     this.taskCap = new CfnParameter(stack, "CoreTaskCapUsd", { type: "String", default: "5", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-task cap in whole USD, from 1 to 1000" });
     this.companyDayCap = new CfnParameter(stack, "CoreCompanyDayCapUsd", { type: "String", default: "25", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-company UTC-day cap in whole USD, from 1 to 1000" });
-    this.policyHook = new CfnParameter(stack, "CorePolicyHook", { type: "String", default: "", maxLength: 600, allowedPattern: "^[ -~]*$", description: "Optional policy-hook settings JSON; empty disables the hook" });
+    this.policyHook = new CfnParameter(stack, "CorePolicyHook", { type: "String", default: "", maxLength: POLICY_HOOK_PARAMETER_MAX_LENGTH, allowedPattern: "^[ -~]*$", description: "Optional policy-hook settings JSON; empty disables the hook" });
     this.lessons = new CfnParameter(stack, "CoreLessons", { type: "String", default: "off", maxLength: 64, allowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", description: "Core lessons switch, default off" });
     for (const [key, value] of [["coreTaskCap", this.taskCap.valueAsString], ["coreCompanyDayCap", this.companyDayCap.valueAsString], ["coreLessons", this.lessons.valueAsString]] as const) {
       addBrokerSetting(broker, props.naming, key, value);
