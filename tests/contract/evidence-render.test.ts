@@ -395,7 +395,7 @@ describe("nothing turns the version 2 writer on yet", () => {
     expect(readFileSync(`${root}/packages/broker/src/local/app/evidence.ts`, "utf8")).not.toMatch(/\bwriter\b/u);
     // TE-H1 slice 2 (DEC 241, #756): the one place a writer is given. A pack needs the v2 form only to carry the browser evidence `visual` check and its pairs, so `keepEvidence` makes the v2 writer itself, and ONLY when this run's
     // `browserEvidence` was uploaded and stored (no browser evidence = no writer = the v1 pack, byte for byte: tests/unit/browser-evidence-keep.test.ts). Every v2 reader is already in place or ships in the same change: the v1 view
-    // (`loadEvidencePack`, which the proof page and the risk input read), the description's reader (`loadEvidenceRead`, off until `evidenceWriter: 2`), the panel, the PR lines and the picture route (local/app/evidence.ts), and the
+    // (`loadEvidencePack`, which the proof page reads; the risk input has no caller in Code yet and would read the same view), the description's reader (`loadEvidenceRead`, off until `evidenceWriter: 2`), the panel, the PR lines and the picture route (local/app/evidence.ts), and the
     // erase by task prefix; nothing else (Slack, MCP, the CLI, Cloud) reads a pack Code keeps. A failure to build the v2 form falls back to the plain v1 pack. Exactly this one line is approved, by its words.
     const approvedForcedWriter = (entry: string) => entry.startsWith("packages/broker/src/core/proof/evidence-keep.ts:") && entry.includes("{ version: 2, producer: { edition: \"code\", isolation: browser.isolation } }");
     const writers = grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2");
