@@ -120,18 +120,18 @@ describe("a model-written line cannot close or link a Linear issue", () => {
   });
 
   it("runs in time proportional to the text, however it is shaped", () => {
-    // Scaling checks: each shape is timed at a size and at four times it (the largest sizes are the old 200,000-character inputs); the cost must grow no faster than the text.
-    const shapes: Array<[string, number, (size: number) => string]> = [
-      ["repeated fix", 6_250, (size) => "fix ".repeat(size)],
-      ["fix then a long word", 25_000, (size) => `fix ${"a".repeat(size)}-1`],
-      ["repeated fixes and an ampersand", 3_750, (size) => "fixes &".repeat(size)],
-      ["a long run of letters and digits", 12_500, (size) => `${"a1".repeat(size)}-5`],
+    // Scaling checks: each shape is timed at a size and at eight times it (the largest 8N inputs are 200,000 characters, under 256 KiB so they stay in CPU cache); the cost must grow no faster than the text.
+    const shapes: Array<[string, number, number, (size: number) => string]> = [
+      ["repeated fix", 6_250, 4, (size) => "fix ".repeat(size)],
+      ["fix then a long word", 25_000, 1, (size) => `fix ${"a".repeat(size)}-1`],
+      ["repeated fixes and an ampersand", 3_750, 7, (size) => "fixes &".repeat(size)],
+      ["a long run of letters and digits", 12_500, 2, (size) => `${"a1".repeat(size)}-5`],
     ];
-    for (const [label, n, build] of shapes) {
+    for (const [label, n, unitBytes, build] of shapes) {
       expectLinearScaling((size) => {
         const text = build(size);
         return () => neutralizeLinearWords(text);
-      }, { n, label: `neutralizeLinearWords on ${label}` });
+      }, { n, unitBytes, label: `neutralizeLinearWords on ${label}` });
     }
   });
 

@@ -355,8 +355,8 @@ it("normalizes opaque credentials in encoded queries, cookies, headers, keys and
 });
 
 it("handles the full byte budget promptly and refuses aggregate item, token and depth overflow", () => {
-  // A scaling check, not a wall-clock bound: the cost of the full-budget string must stay linear (8 x 131,071 = 1,048,568 bytes, the budget's own size).
-  expectLinearScaling((n) => { const part = "x".repeat(n); return () => normalizeGolden(part); }, { n: 131_071, label: "normalizeGolden on a string at the byte budget" });
+  // A scaling check, not a wall-clock bound: the cost of the full-budget string must stay linear. N is small (8N = 262,144 bytes) so the 8N input stays in CPU cache; the full-budget string is checked once below.
+  expectLinearScaling((n) => { const part = "x".repeat(n); return () => normalizeGolden(part); }, { n: 32_768, label: "normalizeGolden on a string at the byte budget" });
   const text = "x".repeat(1_048_574);
   expect(normalizeGolden(text)).toEqual({ value: text, jwts: [] });
   let deep: unknown = "leaf";

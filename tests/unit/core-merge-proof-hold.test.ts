@@ -362,10 +362,8 @@ describe("the reason is untrusted text", () => {
   });
   it("a 1 MB reason costs about the same as a short one", () => {
     expect(plainReason("ab ".repeat(350_000))!.length).toBeLessThanOrEqual(OVERRIDE_REASON_MAX);
-    // The cost must not grow faster than the input (43,750 -> 350,000 repeats, the original size).
-    let last: string | undefined;
-    expectLinearScaling((repeats) => { const reason = "ab ".repeat(repeats); return () => { last = plainReason(reason); }; }, { n: 43_750, label: "plainReason on a long reason" });
-    expect(last!.length).toBeLessThanOrEqual(OVERRIDE_REASON_MAX);
+    // The cost must not grow faster than the input (10,000 -> 80,000 repeats; the 8N input stays at or under 256 KiB so it stays in CPU cache). The full 350,000 repeats are checked once above.
+    expectLinearScaling((repeats) => { const reason = "ab ".repeat(repeats); return () => { plainReason(reason); }; }, { n: 10_000, unitBytes: 3, label: "plainReason on a long reason" });
   });
 });
 

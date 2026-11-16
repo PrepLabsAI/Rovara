@@ -395,8 +395,8 @@ describe("fix round 1 (review of 334c7ced)", () => {
     const redactor = createCredentialRedactor([]);
     const registerMany = (target: ReturnType<typeof createCredentialRedactor>, count: number) => { for (let index = 0; index < count; index += 1) target.addSessionSecret(`opaque-session-value-${String(index).padStart(6, "0")}-abcdef`, { evidenceOnly: true }); };
     registerMany(redactor, 12_000);
-    // Close to linear as a scaling check: eight times the values (1,500 -> 12,000, the original count) costs about eight times, not sixty-four.
-    expectLinearScaling((count) => () => { registerMany(createCredentialRedactor([]), count); }, { n: 1_500, label: "registering session values" });
+    // Close to linear as a scaling check: eight times the values (500 -> 4,000; the 8N input, about 60 bytes a value, stays at or under 256 KiB so it stays in CPU cache; the full 12,000 are registered once above) costs about eight times, not sixty-four.
+    expectLinearScaling((count) => () => { registerMany(createCredentialRedactor([]), count); }, { n: 500, unitBytes: 60, label: "registering session values" });
     expect(redactor.contains(bytesOf("opaque-session-value-011999-abcdef"), "all")).toBe(true);
     expect(redactor.text("x opaque-session-value-000001-abcdef y")).toBe("x <session> y");
     const told: string[] = [];

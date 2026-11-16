@@ -64,7 +64,7 @@ it("refuses malformed stored metadata and storage failures without leaking cause
 });
 it("handles 100 installations in bounded time, and reports truncation without opening claims", async () => {
   // A scaling check, not a wall-clock bound: 12 and 96 installations (the store's cap is 100, which a larger input would cross). Each run backfills a fresh store, because a completed backfill answers at once.
-  await expectLinearScalingAsync((n) => { const items = listed(n); return async () => { await setup().store.backfill(async () => items); }; }, { n: 12, label: "backfill of installations" });
+  await expectLinearScalingAsync((n) => { const items = listed(n); return async () => { await setup().store.backfill(async () => items); }; }, { n: 12, unitBytes: 100, label: "backfill of installations" });
   const { store } = setup();
   expect(await store.backfill(async () => listed(100))).toEqual({ more: false });
   const other = setup();

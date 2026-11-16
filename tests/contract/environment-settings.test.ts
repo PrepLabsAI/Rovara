@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EnvironmentSettingsSchema, listEnvironments, readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings, type EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import { EnvironmentSettingsSchema, LEGACY_SETTINGS_KEYS, listEnvironments, readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings, type EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 
@@ -141,5 +141,67 @@ describe("environment settings", () => {
     await writeEnvironmentSettings(store, { ...stagingSettings, env: "production", stacks: { ...stagingSettings.stacks } });
     store.values.set("/agentx/orphan/lock", "{}");
     expect(await listEnvironments(store)).toEqual(["production", "staging"]);
+  });
+
+  describe("the old monolith's legacy keys (cloud, cloudSignIn)", () => {
+    const legacy = { ...stagingSettings, cloud: { enabled: true, gatewayUrl: "https://gw.example.com" }, cloudSignIn: { mode: "hosted" } };
+
+    it("are exactly cloud and cloudSignIn", () => {
+      expect(LEGACY_SETTINGS_KEYS).toEqual(["cloud", "cloudSignIn"]);
+    });
+
+    it("reading ignores them, whatever their value", async () => {
+      const store = new MemoryParameterStore();
+      store.values.set("/agentx/staging/settings", JSON.stringify(legacy));
+      expect(await readEnvironmentSettings(store, "staging")).toEqual(stagingSettings);
+      store.values.set("/agentx/staging/settings", JSON.stringify({ ...stagingSettings, cloud: null }));
+      expect(await readEnvironmentSettings(store, "staging")).toEqual(stagingSettings);
+      store.values.set("/agentx/staging/settings", JSON.stringify({ ...stagingSettings, cloudSignIn: "x" }));
+      expect(await readEnvironmentSettings(store, "staging")).toEqual(stagingSettings);
+    });
+
+    it("every other unknown key is still refused, naming it", async () => {
+      const store = new MemoryParameterStore();
+      for (const key of ["cloudGateway", "Cloud", "signIn", "cloud_sign_in"]) {
+        store.values.set("/agentx/staging/settings", JSON.stringify({ ...legacy, [key]: {} }));
+        await expect(readEnvironmentSettings(store, "staging")).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      }
+      // The schema itself never accepts them, so a write can never store them.
+      expect(EnvironmentSettingsSchema.safeParse(legacy).success).toBe(false);
+      await expect(writeEnvironmentSettings(store, legacy as EnvironmentSettings)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    });
+
+    it("the next write drops them and reports their names, never their values", async () => {
+      const store = new MemoryParameterStore();
+      store.values.set("/agentx/staging/settings", JSON.stringify(legacy));
+      const current = await readEnvironmentSettings(store, "staging");
+      const reported: string[][] = [];
+      await writeEnvironmentSettings(store, { ...current!, updatedAt: "2026-11-16T00:00:00.000Z" }, { onLegacyKeysDropped: (keys) => reported.push(keys) });
+      expect(reported).toEqual([["cloud", "cloudSignIn"]]);
+      const stored = JSON.parse(store.values.get("/agentx/staging/settings")!) as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("cloud");
+      expect(stored).not.toHaveProperty("cloudSignIn");
+      expect(JSON.stringify(reported)).not.toContain("gw.example.com");
+      // Once dropped, the next write has nothing to report.
+      await writeEnvironmentSettings(store, { ...current!, updatedAt: "2026-11-16T00:00:01.000Z" }, { onLegacyKeysDropped: (keys) => reported.push(keys) });
+      expect(reported).toHaveLength(1);
+    });
+
+    it("reports only the legacy keys actually stored", async () => {
+      const store = new MemoryParameterStore();
+      store.values.set("/agentx/staging/settings", JSON.stringify({ ...stagingSettings, cloudSignIn: {} }));
+      const reported: string[][] = [];
+      await writeEnvironmentSettings(store, stagingSettings, { onLegacyKeysDropped: (keys) => reported.push(keys) });
+      expect(reported).toEqual([["cloudSignIn"]]);
+    });
+
+    it("a write that fails reports nothing", async () => {
+      const store = new MemoryParameterStore();
+      store.values.set("/agentx/staging/settings", JSON.stringify(legacy));
+      const failing = { ...store, get: store.get.bind(store), put: async () => { throw new Error("ssm down"); }, delete: store.delete.bind(store), list: store.list.bind(store) };
+      const reported: string[][] = [];
+      await expect(writeEnvironmentSettings(failing, stagingSettings, { onLegacyKeysDropped: (keys) => reported.push(keys) })).rejects.toThrow("ssm down");
+      expect(reported).toEqual([]);
+    });
   });
 });

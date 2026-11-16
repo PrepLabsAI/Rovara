@@ -88,11 +88,11 @@ describe("the changed-files reader flags weakening", () => {
     expect(flagsOf("src/a.json", ['    "test": "x",']).testCommandChanged).toBeUndefined();
   });
   it("reads a 1 MB line and a diff of 20,000 lines in linear time", () => {
-    // Scaling checks, not a wall-clock bound: each input is timed at N and at 8N (8N is the original size).
+    // Scaling checks, not a wall-clock bound: each input is timed at N and at 8N. The 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1 MB line and 20,000 lines are checked once, un-timed, below.
     const longOf = (units: number) => `${"a ".repeat(units)}pragma: no cover`;
     const manyOf = (count: number) => Array.from({ length: count }, (_unused, n) => `value_${String(n)} = "pending (it.skip"`);
-    expectLinearScaling((n) => { const line = longOf(n); return () => flagsOf("src/a.py", [line]); }, { n: 62_500, label: "a 1 MB line" });
-    expectLinearScaling((n) => { const lines = manyOf(n); return () => flagsOf("tests/test_big.py", lines); }, { n: 2_500, label: "a diff of 20,000 lines" });
+    expectLinearScaling((n) => { const line = longOf(n); return () => flagsOf("src/a.py", [line]); }, { n: 16_000, unitBytes: 2, label: "a 1 MB line" });
+    expectLinearScaling((n) => { const lines = manyOf(n); return () => flagsOf("tests/test_big.py", lines); }, { n: 900, unitBytes: 35, label: "a diff of 20,000 lines" });
     expect(flagsOf("src/a.py", [longOf(500_000)]).testsExcluded).toBe(true);
     expect(flagsOf("tests/test_big.py", manyOf(20_000)).testsSkipped).toBe(true);
   });
@@ -107,16 +107,16 @@ describe("worst-case input to the new readers (8 MiB, linear time)", () => {
     ["one line of ignore-option prefixes", "--ignor --deselec omi ", "pytest.ini"],
     ["one line of script-key prefixes", '"test" ', "package.json"],
   ])("%s", (_name, unit, path) => {
-    // A scaling check, not a wall-clock bound: the line is timed at 1 MiB and at 8 MiB.
+    // A scaling check, not a wall-clock bound: the line is timed at 32 KiB and at 256 KiB (so the 8N input stays in CPU cache); the full 8 MiB line is read once, un-timed, below.
     const lineOf = (bytes: number) => unit.repeat(Math.ceil(bytes / unit.length));
-    expectLinearScaling((bytes) => { const line = lineOf(bytes); return () => read(hunk(path, [line])); }, { n: MIB8 / 8, label: _name });
+    expectLinearScaling((bytes) => { const line = lineOf(bytes); return () => read(hunk(path, [line])); }, { n: 32_768, label: _name });
     const files = read(hunk(path, [lineOf(MIB8)]));
     expect(files).toHaveLength(1);
   });
   it("many short lines and many files", () => {
     const diffOf = (count: number) => Array.from({ length: count }, (_unused, n) => hunk(`tests/__snapshots__/s${String(n)}.snap`)).flat();
-    // A scaling check, not a wall-clock bound: 2,500 and 20,000 changed files.
-    expectLinearScaling((count) => { const text = section(diffOf(count)); return () => parseChangedFiles(text); }, { n: 2_500, label: "many short lines and many files" });
+    // A scaling check, not a wall-clock bound: 190 and 1,520 changed files (the 8N input, about 170 bytes a file, stays at or under 256 KiB so it stays in CPU cache); the full 20,000 files are read once, un-timed, below.
+    expectLinearScaling((count) => { const text = section(diffOf(count)); return () => parseChangedFiles(text); }, { n: 190, unitBytes: 170, label: "many short lines and many files" });
     const files = parseChangedFiles(section(diffOf(20_000))).files;
     expect(files.length).toBe(200);
     expect(files.every((file) => file.snapshotChanged === true)).toBe(true);
@@ -221,8 +221,8 @@ describe("the flags block", () => {
   });
   it("reads a 1 MB name quickly and prints a bounded line", () => {
     const hugeOf = (length: number) => "AGENTS.md/" + "x".repeat(length);
-    // A scaling check, not a wall-clock bound: the name is timed at 125,000 and at 1,000,000 characters.
-    expectLinearScaling((length) => { const name = hugeOf(length); const changed = files({ path: name }); const pack = looseWith({ absentOnNew: [name], absentOnNewCount: 1 }); return () => weakeningBlock(changed, pack); }, { n: 125_000, label: "a 1 MB file name" });
+    // A scaling check, not a wall-clock bound: the name is timed at 32,768 and at 262,144 characters (the 8N input stays at or under 256 KiB so it stays in CPU cache); the full 1,000,000 characters are checked once, un-timed, below.
+    expectLinearScaling((length) => { const name = hugeOf(length); const changed = files({ path: name }); const pack = looseWith({ absentOnNew: [name], absentOnNewCount: 1 }); return () => weakeningBlock(changed, pack); }, { n: 32_768, label: "a 1 MB file name" });
     const huge = hugeOf(1_000_000);
     const block = weakeningBlock(files({ path: huge }), looseWith({ absentOnNew: [huge], absentOnNewCount: 1 }));
     expect(Math.max(...block.map((line) => line.length))).toBeLessThanOrEqual(310);
@@ -378,12 +378,12 @@ describe("N1: exclude options are read only where they mean a test or coverage r
 
 describe("N6: every path pattern is linear in the path", () => {
   it.each(["tests/", "a/", "tests/tests/", "test/a/", ".approved.", ".golden.", ".cassette.", "snapshots/", "fixtures/", "a.", "__snapshots__/"])("a hostile path of %s repeated stays fast", (unit) => {
-    // Scaling checks, not wall-clock bounds: the path is timed at 2,000 and at 16,000 repeats (the original largest size).
+    // Scaling checks, not wall-clock bounds: the path is timed at 2,000 and at 16,000 repeats (8N is at most 14 bytes a repeat, under 256 KiB).
     for (const tail of ["x", "snapshotz/x", "fixturez/x", ".snapz"]) {
       expectLinearScaling((times) => {
         const path = unit.repeat(times) + tail;
         return () => { isSnapshotPath(path); isFixturePath(path); isTestConfigPath(path); isInstructionFilePath(path); isCiExecutedPath(path); };
-      }, { n: 2_000, label: `${unit} repeated, then ${tail}` });
+      }, { n: 2_000, unitBytes: unit.length, label: `${unit} repeated, then ${tail}` });
     }
   });
   it("a test folder above is still what decides snapshots/, golden/ and fixtures/", () => {

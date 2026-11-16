@@ -53,7 +53,7 @@ describe("action policy contracts", () => {
       const name = `${"a".repeat(size - 1)}b`;
       const allA = "a".repeat(size);
       return () => { results = [toolPatternMatches(pattern, name), toolPatternMatches(hostile, allA)]; };
-    }, { n: 12_500, label: "toolPatternMatches many-star pattern" });
+    }, { n: 12_500, unitBytes: 2, label: "toolPatternMatches many-star pattern" });
     expect(results).toEqual([false, false]);
   });
 

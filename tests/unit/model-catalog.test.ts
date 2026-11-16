@@ -347,9 +347,9 @@ describe("company-gateway rows", () => {
   it("refuses a non-array without throwing, and a huge host fast", () => {
     expect(checkCompanyGatewayRows("nope", builtin())).toMatchObject({ ok: false, issues: [{ code: "invalid_row" }] });
     expect(checkModelHost("a".repeat(1_000_000))).toEqual({ ok: false, code: "too_long" });
-    // Refusing it must not cost more as the host grows (125,000 -> 1,000,000 characters, the original size).
+    // Refusing it must not cost more as the host grows (32,000 -> 256,000 characters: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1,000,000 characters is checked once above).
     let refusal: ReturnType<typeof checkModelHost> | undefined;
-    expectLinearScaling((size) => { const host = "a".repeat(size); return () => { refusal = checkModelHost(host); }; }, { n: 125_000, label: "refusing a huge model host" });
+    expectLinearScaling((size) => { const host = "a".repeat(size); return () => { refusal = checkModelHost(host); }; }, { n: 32_000, label: "refusing a huge model host" });
     expect(refusal).toEqual({ ok: false, code: "too_long" });
   });
 });

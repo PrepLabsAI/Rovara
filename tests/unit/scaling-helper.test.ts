@@ -22,12 +22,19 @@ describe("expectLinearScaling", () => {
     expect(() => expectLinearScaling(quadratic, { n: 600, label: "quadratic" })).toThrow(/faster than linear/u);
   });
   it("fails work that exceeds the hang limit", () => {
-    expect(() => expectLinearScaling(linear, { n: 200_000, hangMs: 0.0001, minSampleMs: 0, label: "hang" })).toThrow(/Hang limit|faster than linear/u);
+    expect(() => expectLinearScaling(linear, { n: 200_000, unitBytes: 0, hangMs: 0.0001, minSampleMs: 0, label: "hang" })).toThrow(/Hang limit|faster than linear/u);
+  });
+  it("refuses an 8N input over 256 KiB, so a linear scan cannot fall out of the CPU cache and read a steady ~25", () => {
+    expect(() => expectLinearScaling(linear, { n: 40_000, label: "too big" })).toThrow(/8N input is about 320000 bytes, over the 262144 byte limit/u);
+    expect(() => expectLinearScaling(linear, { n: 100, unitBytes: 4_000, label: "big unit" })).toThrow(/over the 262144 byte limit/u);
+    expect(() => expectLinearScaling(linear, { n: 32_768, label: "exactly at the limit", minSampleMs: 0 })).not.toThrow(/byte limit/u);
+    expect(() => expectLinearScaling(linear, { n: 200_000, unitBytes: 0, label: "builds no input", minSampleMs: 0 })).not.toThrow(/byte limit/u);
   });
   it("rejects bad options", () => {
     expect(() => expectLinearScaling(linear, { n: 0 })).toThrow(/bad scaling options/u);
     expect(() => expectLinearScaling(linear, { n: 10, k: 1 })).toThrow(/bad scaling options/u);
     expect(() => expectLinearScaling(linear, { n: 10, k: 4, maxRatio: 3 })).toThrow(/bad scaling options/u);
+    expect(() => expectLinearScaling(linear, { n: 10, unitBytes: -1 })).toThrow(/bad scaling options/u);
   });
 });
 

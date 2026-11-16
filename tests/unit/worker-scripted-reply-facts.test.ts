@@ -113,9 +113,9 @@ describe("candidate reply facts", () => {
     const tooMany = fixture([summary()]);
     await round(tooMany.wrapped, 201);
     expect(facts(tooMany.results)).toBe("unknown");
-    // A scaling check, not a wall-clock bound: refusing a summary with 12,500 escape hosts and one with 100,000 (the old input) may take about eight times as long, never sixty-four.
+    // A scaling check, not a wall-clock bound: refusing a summary with 900 escape hosts and one with 7,200 (about 34 bytes a host: the 8N input stays at or under 256 KiB so it stays in CPU cache) may take about eight times as long, never sixty-four. The old 100,000-host summary is refused once, un-timed.
     let refused: unknown;
-    await expectLinearScalingAsync((hostCount) => {
+    const refuseHosts = (hostCount: number) => {
       const hosts = Array.from({ length: hostCount }, () => "x".repeat(10));
       const oversized = { ...summary(), escapes: { count: 0, hosts, unreadable: 0 } };
       return async () => {
@@ -123,7 +123,11 @@ describe("candidate reply facts", () => {
         await round(huge.wrapped, 1);
         refused = facts(huge.results);
       };
-    }, { n: 12_500, label: "oversized escape-host summary" });
+    };
+    await expectLinearScalingAsync(refuseHosts, { n: 900, unitBytes: 34, label: "oversized escape-host summary" });
+    expect(refused).toBe("unknown");
+    refused = undefined;
+    await refuseHosts(100_000)();
     expect(refused).toBe("unknown");
   });
 });

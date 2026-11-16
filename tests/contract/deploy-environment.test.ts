@@ -936,3 +936,109 @@ describe("keptOperatorParameters", () => {
     expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain("CallbackSigningKey");
   });
 });
+
+describe("an upgrade whose answers leave github.appId out keeps the deployed GitHubAppId (switch-over gap 1)", () => {
+  const withoutAppId = (): DeployAnswers => {
+    const { account, installationId, privateKeySecretArn } = baseAnswers().github;
+    return { ...baseAnswers(), github: { ...(account === undefined ? {} : { account }), ...(installationId === undefined ? {} : { installationId }), privateKeySecretArn } };
+  };
+  async function installedEnvironment(engine: "cdk" | "templates" = "cdk"): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await deployEnvironment({ mode: "install", engine, answers: baseAnswers(), release: fakeRelease(), deployer: fakeDeployer(scriptedOutputs()).deployer, store, secrets, holder: HOLDER });
+    return { store, secrets };
+  }
+  const deployedControlPlane = (parameters: Record<string, string>) => async (name: string) => (name === stackName("control-plane") ? parameters : undefined);
+
+  for (const deployedAppId of ["", "5389609"]) {
+    it(`sends the deployed value ${JSON.stringify(deployedAppId)} and names it as kept`, async () => {
+      const { store, secrets } = await installedEnvironment();
+      const upgrade = fakeDeployer(scriptedOutputs());
+      const events: unknown[] = [];
+      await deployEnvironment({
+        mode: "upgrade", engine: "cdk", answers: withoutAppId(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+        deployedParameters: deployedControlPlane({ GitHubAppId: deployedAppId }), onEvent: (event) => events.push(event),
+      });
+      const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+      expect(controlPlane.parameters.GitHubAppId).toBe(deployedAppId);
+      expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["GitHubAppId"], dropped: [] });
+    });
+  }
+
+  it("names GitHubAppId among the kept operator parameters, on the templates engine too", async () => {
+    const { store, secrets } = await installedEnvironment("templates");
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const events: unknown[] = [];
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: withoutAppId(), release: fakeReleaseWithControlPlaneParameters(["BudgetMonthlyUsd", "BudgetScope", "GitHubAppId"]), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: deployedControlPlane({ GitHubAppId: "", BudgetMonthlyUsd: "260", BudgetScope: "account" }), onEvent: (event) => events.push(event),
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).toMatchObject({ GitHubAppId: "", BudgetMonthlyUsd: "260", BudgetScope: "account" });
+    expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["BudgetMonthlyUsd", "BudgetScope", "GitHubAppId"], dropped: [] });
+  });
+
+  it("an upgrade whose answers name an appId still sends the answers' one", async () => {
+    const { store, secrets } = await installedEnvironment();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: deployedControlPlane({ GitHubAppId: "" }),
+    });
+    expect(upgrade.requests.find((request) => request.part === "control-plane")!.parameters.GitHubAppId).toBe("123");
+  });
+
+  it("refuses before deploying anything when the deployed control plane has no GitHubAppId to keep, or a non-number one", async () => {
+    for (const deployed of [{}, { GitHubAppId: "12a" }, { GitHubAppId: "****" }]) {
+      const { store, secrets } = await installedEnvironment();
+      const upgrade = fakeDeployer(scriptedOutputs());
+      await expect(deployEnvironment({
+        mode: "upgrade", engine: "cdk", answers: withoutAppId(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+        deployedParameters: deployedControlPlane(deployed),
+      })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("github.appId") as unknown });
+      expect(upgrade.requests).toEqual([]);
+      // Refused before the lock is taken.
+      expect(store.calls.filter((call) => call.op === "put" && call.name === lockParameterName(ENV))).toHaveLength(1);
+    }
+  });
+
+  it("an upgrade that does not deploy the control plane needs no app id at all", async () => {
+    const { store, secrets } = await installedEnvironment();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const reads: string[] = [];
+    await deployEnvironment({
+      mode: "upgrade", engine: "cdk", answers: withoutAppId(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER, parts: ["foundation"],
+      deployedParameters: async (name) => { reads.push(name); return undefined; },
+    });
+    expect(upgrade.requests.map((request) => request.part)).toEqual(["foundation"]);
+    expect(reads).not.toContain(stackName("control-plane"));
+  });
+
+  it("an install stays strict: no app id is refused before the lock or anything deploys", async () => {
+    const store = new MemoryParameterStore();
+    const install = fakeDeployer(scriptedOutputs());
+    await expect(deployEnvironment({ mode: "install", engine: "cdk", answers: withoutAppId(), release: fakeRelease(), deployer: install.deployer, store, secrets: memorySecrets(), holder: HOLDER }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("an install needs the GitHub App id (github.appId in the answers)") as unknown });
+    expect(install.requests).toEqual([]);
+    expect(store.values.has(lockParameterName(ENV))).toBe(false);
+  });
+});
+
+describe("a settings write drops the old monolith's legacy keys and says so (switch-over gap 2)", () => {
+  it("an upgrade reads settings holding cloud and cloudSignIn, writes them without, and reports the names", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await deployEnvironment({ mode: "install", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: fakeDeployer(scriptedOutputs()).deployer, store, secrets, holder: HOLDER });
+    const stored = JSON.parse(store.values.get(settingsParameterName(ENV))!) as Record<string, unknown>;
+    store.values.set(settingsParameterName(ENV), JSON.stringify({ ...stored, cloud: { on: true }, cloudSignIn: { mode: "hosted" } }));
+    const events: unknown[] = [];
+    await deployEnvironment({
+      mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: fakeDeployer(scriptedOutputs()).deployer, store, secrets, holder: HOLDER,
+      deployedParameters: nothingDeployed, onEvent: (event) => events.push(event),
+    });
+    expect(events).toContainEqual({ kind: "settings-legacy-keys-dropped", env: ENV, keys: ["cloud", "cloudSignIn"] });
+    const rewritten = JSON.parse(store.values.get(settingsParameterName(ENV))!) as Record<string, unknown>;
+    expect(rewritten).not.toHaveProperty("cloud");
+    expect(rewritten).not.toHaveProperty("cloudSignIn");
+  });
+});

@@ -336,8 +336,8 @@ it("bounds malformed large claim reads and never calls the writer", async () => 
   const stored = (await store.get(address))!;
   let reads = 0; let writes = 0;
   let read: unknown; let started: unknown;
-  // A 125 KB, then 1 MB, corrupt claim: reading it must cost no more than its size (linear work grows about 8x).
-  await expectLinearScalingAsync((size) => {
+  // A 32 KB, then 256 KB, corrupt claim: reading it must cost no more than its size (linear work grows about 8x). The 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1 MB claim is read once, un-timed, below.
+  const claimWork = (size: number) => {
     const malformed = { ...stored, claimId: "x".repeat(size) };
     // Inject a corrupt read directly: the real DocumentStore rejects oversized writes.
     const mine = createDocumentBaseScoreCache({
@@ -345,7 +345,9 @@ it("bounds malformed large claim reads and never calls the writer", async () => 
       put: async () => { writes++; return { applied: true }; },
     }, { companyId: parts().company, now: () => 1_800_000_000_000 });
     return async () => { reads = 0; writes = 0; read = await mine.readMeasurement!(parts()); started = await mine.startMeasurement!(parts()); };
-  }, { n: 125_000, label: "reading a malformed large claim" });
+  };
+  await expectLinearScalingAsync(claimWork, { n: 32_768, label: "reading a malformed large claim" });
+  await claimWork(1_000_000)();
   expect(read).toBe("unavailable");
   expect(started).toEqual({ status: "unavailable" });
   expect(reads).toBe(2); expect(writes).toBe(0);
