@@ -12,6 +12,8 @@ import { resolveLearning, setLearnedLessonsGate } from "../../packages/broker/sr
 import { localLessonsEnabled } from "../../packages/broker/src/lessons/switch.js";
 import { newRepoFileState } from "../../packages/broker/src/lessons/repo-file-state.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
+import { NO_REASON_TEXT, buildTaskReflectSubject } from "../../packages/broker/src/lessons/task-subject.js";
 import type { CodeMilestoneHandler } from "../../packages/broker/src/core/milestones/milestones.js";
 import { COMPANY, createHarness, definition, type Harness } from "../support/task-flow-harness.js";
 import { draft, lessonRecord } from "./lessons/lesson-helpers.js";
@@ -569,6 +571,81 @@ describe("what a finished task tells lessons", () => {
     expect(base!.sendBackRequestIds).toHaveLength(1);
     expect(await rows.sendBack({ workspaceId: COMPANY, project: "payments", taskId: w.taskId, requestId: base!.sendBackRequestIds[0]! })).toMatchObject({ origin: "human", actorDeveloperId: "local-owner", actorTrust: "member", reasonText: "Use the helper" });
     expect(await rows.sendBack({ workspaceId: COMPANY, project: "payments", taskId: w.taskId, requestId: randomUUID() })).toBeUndefined();
+  });
+
+  describe("a findings answer's reason is code's summary, not the person's words", () => {
+    const FINDINGS_REASON = "1 accepted, 2 to fix";
+    const decisionOf = (requestId: string) => ({ requestId, workflowRevision: 1, decision: "REQUEST_CHANGES", actorId: "owner", actorRole: "TASK_OWNER", reason: FINDINGS_REASON, source: "FINDINGS" });
+    async function findingsTask(w: World, notes: string[] | undefined): Promise<string> {
+      const requestId = randomUUID();
+      await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "decisions"], [decisionOf(requestId)])] });
+      await w.h.store.transact([ownerNoteItem({ taskId: w.taskId, requestId, text: "Fix only the problems listed. The owner gave no further instructions for them.", now: new Date(w.h.clock.now), ...(notes === undefined ? {} : { findingNotes: notes }) })]);
+      return requestId;
+    }
+    const sources = (w: World) => createLocalLessonSources({ flow: w.h.deps, companyId: COMPANY, ownerId: "local-owner", repos: { ofProject: async () => [], ofTask: async () => undefined, scopes: () => ({ read: async () => new Set<string>() }), targets: async () => [] }, now: () => w.h.clock.now });
+    const back = (w: World, requestId: string, workspaceId: string = COMPANY) => sources(w).rows.sendBack({ workspaceId, project: "payments", taskId: w.taskId, requestId });
+
+    it("reads the person's per-finding notes as their words, with their standing, and never the summary", async () => {
+      const w = await world();
+      const requestId = await findingsTask(w, ["Return 404, not 500.", "Keep the footer line."]);
+      const fact = await back(w, requestId);
+      expect(fact).toMatchObject({ origin: "human", actorDeveloperId: "local-owner", actorTrust: "member", reasonText: "Return 404, not 500.\nKeep the footer line." });
+      expect(JSON.stringify(fact)).not.toContain(FINDINGS_REASON);
+      const subject = buildTaskReflectSubject({ workspaceId: COMPANY, project: "payments", taskId: w.taskId, repositories: [], task: { developerId: "local-owner" }, sendBacks: [fact as never], rest: {} });
+      expect(subject.spans).toEqual([expect.objectContaining({ kind: "send_back", trust: "member", authorId: "local-owner", text: "Return 404, not 500.\nKeep the footer line." })]);
+      expect(subject.spans[0]!.fixedText).toBeUndefined();
+    });
+
+    it("with no notes the send-back is counted but its text is fixed: never the summary, never a correction", async () => {
+      const w = await world();
+      for (const notes of [undefined, [], ["  "]]) {
+        const requestId = await findingsTask(w, notes as string[] | undefined);
+        const fact = await back(w, requestId);
+        expect(fact, JSON.stringify(notes)).toMatchObject({ origin: "human", actorTrust: "member", fixedText: true });
+        expect(fact).not.toHaveProperty("reasonText");
+        const subject = buildTaskReflectSubject({ workspaceId: COMPANY, project: "payments", taskId: w.taskId, repositories: [], task: { developerId: "local-owner" }, sendBacks: [fact as never], rest: {} });
+        expect(subject.spans).toEqual([expect.objectContaining({ kind: "send_back", text: NO_REASON_TEXT, fixedText: true })]);
+        expect(JSON.stringify(subject)).not.toContain(FINDINGS_REASON);
+      }
+    });
+
+    it("a fact marked as code's text never becomes the span's text, even when it still carries the sentence", () => {
+      const subject = buildTaskReflectSubject({
+        workspaceId: COMPANY, project: "payments", taskId: "t1", repositories: [], task: { developerId: "local-owner" }, rest: {},
+        sendBacks: [{ id: "task:t1:sendback:r1", origin: "human", actorDeveloperId: "local-owner", actorTrust: "member", reasonText: FINDINGS_REASON, fixedText: true }],
+      });
+      expect(subject.spans).toEqual([{ kind: "send_back", text: NO_REASON_TEXT, trust: "member", eventId: "task:t1:sendback:r1", authorId: "local-owner", fixedText: true }]);
+    });
+
+    it("a task with no owner note at all (a decision from before notes were kept) is fixed text too", async () => {
+      const w = await world();
+      const requestId = randomUUID();
+      await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "decisions"], [decisionOf(requestId)])] });
+      expect(await back(w, requestId)).toMatchObject({ origin: "human", fixedText: true });
+    });
+
+    it("a plain send-back still reads the person's reason as it did", async () => {
+      const w = await world();
+      const requestId = randomUUID();
+      await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "decisions"], [{ ...decisionOf(requestId), source: "SEND_BACK", reason: "Use the helper" }])] });
+      const fact = await back(w, requestId);
+      expect(fact).toMatchObject({ origin: "human", reasonText: "Use the helper" });
+      expect(fact).not.toHaveProperty("fixedText");
+    });
+
+    it("two companies: another company's workspace reads nothing of this task's notes (and does not even read the note row)", async () => {
+      const w = await world();
+      const requestId = await findingsTask(w, ["Return 404, not 500."]);
+      const reads: string[] = [];
+      const get = w.h.store.get.bind(w.h.store);
+      w.h.store.get = (async (key: Parameters<typeof get>[0]) => { reads.push(String((key as { sk?: unknown }).sk)); return get(key); }) as typeof w.h.store.get;
+      expect(await back(w, requestId, "org_zzzzzzzzzzzzzzzzzzzz")).toBeUndefined();
+      expect(reads.filter((sk) => sk.startsWith("OWNER_NOTE#"))).toEqual([]);
+      // A task whose own company is another's is not this company's, whatever workspace is named.
+      await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["companyId"], "org_zzzzzzzzzzzzzzzzzzzz")] });
+      expect(await back(w, requestId)).toBeUndefined();
+      expect(reads.filter((sk) => sk.startsWith("OWNER_NOTE#"))).toEqual([]);
+    });
   });
 
   it("gives nothing for a task of another company, an unknown task, or a task with no workflow", async () => {
