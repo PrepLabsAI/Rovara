@@ -9,12 +9,12 @@
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
   EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
-  addBrowserEvidenceToPack, type ArtifactRef, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
+  addBrowserEvidenceToPack, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { deleteEvidenceArtifacts, statEvidenceArtifacts, storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
-import { storeBrowserEvidence } from "./browser-evidence-store.js";
+import { browserEvidenceCapturedDigests, browserEvidenceStoredRefs, storeBrowserEvidence } from "./browser-evidence-store.js";
 import type { EvidenceBlobStore } from "./evidence-blob-store.js";
 import type { PinnedDependency } from "./dependency-evidence.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
@@ -188,13 +188,13 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     let heldBefore = new Map<string, unknown>();
     if (input.browserEvidence !== undefined) {
       try {
-        heldBefore = await statEvidenceArtifacts(deps.store, owner, input.browserEvidence.routes.flatMap((row) => (row.status === "shown" ? [row.before.sha256, row.after.sha256] : [])));
+        heldBefore = await statEvidenceArtifacts(deps.store, owner, browserEvidenceCapturedDigests(input.browserEvidence));
         browser = await storeBrowserEvidence(deps.store, owner, input.browserEvidence);
       } catch { deps.log?.("evidence.browser_not_stored", {}); }
     }
     const abandon = async (): Promise<void> => {
       if (browser === undefined) return;
-      const refs = browser.routes.flatMap((row): ArtifactRef[] => (row.status === "shown" ? [row.before, row.after] : [])).filter((ref) => !heldBefore.has(ref.sha256));
+      const refs = browserEvidenceStoredRefs(browser).filter((ref) => !heldBefore.has(ref.sha256));
       if (refs.length > 0) await deleteEvidenceArtifacts(deps.store, owner, refs);
     };
     abandonBrowser = abandon;

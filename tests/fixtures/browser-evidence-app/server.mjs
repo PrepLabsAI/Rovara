@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 
 const page = readFileSync("page.html", "utf8");
 const shell = (body) => `<!doctype html><html><head><meta charset="utf-8"><style>body{font:16px sans-serif;margin:24px;background:#fff;color:#111}.box{width:600px;height:120px;background:#3a7;color:#fff;padding:8px}</style></head><body>${body}</body></html>`;
+// Slice 4: pages that work on the base code and break on the candidate (BE_REGRESS=1 is set only for the candidate's app): one answers 500, one never yields after load.
+const regress = process.env.BE_REGRESS === "1";
 const routes = {
   "/": page,
   "/checkout": page,
@@ -56,6 +58,8 @@ const routes = {
   "/slot-label": shell(`<h1>Settings</h1><x-field>abcd1234</x-field><script>customElements.define("x-field", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = "<dl><dt>API key:</dt><dd><slot></slot></dd></dl>"; } });</script>`),
   // Sign-in forms laid out on one line: they must be shown.
   "/signin-inline": shell(`<h1>Sign in</h1><form><label>Password:</label> <input type="password" value="hunter2-y"><button>Sign in</button></form><p><label>Password: <input type="password"></label> <a href="/forgot">Forgot?</a></p>`),
+  "/regress-ok": shell(`<h1>Fine</h1><p>This page works.</p>`),
+  "/regress-busy": regress ? shell(`<h1>Busy</h1><script>setTimeout(() => { for (;;) {} }, 0);</script>`) : shell(`<h1>Fine</h1><p>This page works.</p>`),
   // A page whose own script never yields after load.
   "/busy": shell(`<h1>Busy</h1><script>setTimeout(() => { for (;;) {} }, 0);</script>`),
 };
@@ -104,6 +108,19 @@ createServer((request, response) => {
   if (url.pathname === "/slow") { setTimeout(() => { response.writeHead(200, { "content-type": "text/plain" }); response.end("ok"); }, Math.min(5_000, Number(url.searchParams.get("ms")) || 0)); return; }
   const late = /^\/late-fetch\/(\d{1,4})\/(a|b)$/.exec(url.pathname);
   if (late !== null) { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(lateFetch(Number(late[1]), late[2])); return; }
+  if (url.pathname === "/regress") {
+    if (regress) { response.writeHead(500, { "content-type": "text/plain" }); response.end("boom"); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  // Slice 4: a candidate that breaks AND prints someone's address on its error page (the recording would show it): the video of this page, and of the whole run, is withheld.
+  if (url.pathname === "/regress-leaky") {
+    if (regress) { response.writeHead(500, { "content-type": "text/html; charset=utf-8" }); response.end(shell(`<h1>Error</h1><p>Could not load the account of ada@example.com</p>`)); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
   const body = routes[url.pathname];
   if (body === undefined) { response.writeHead(404, { "content-type": "text/plain" }); response.end("not found"); return; }
   response.writeHead(200, { "content-type": body === "ok" ? "text/plain" : "text/html; charset=utf-8" });

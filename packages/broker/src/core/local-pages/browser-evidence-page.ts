@@ -17,7 +17,7 @@ export function renderBrowserEvidenceIndex(context: PageContext, projects: reado
 }
 
 /** The form's values: the recipe in force, or the suggestion the owner asked to start from. */
-type Shown = Pick<BrowserEvidenceRecipe, "startCommand" | "port" | "routes"> & Partial<Pick<BrowserEvidenceRecipe, "readyPath" | "framework" | "mask" | "signIn">>;
+type Shown = Pick<BrowserEvidenceRecipe, "startCommand" | "port" | "routes"> & Partial<Pick<BrowserEvidenceRecipe, "readyPath" | "framework" | "mask" | "signIn" | "video">>;
 
 export function renderBrowserEvidencePage(context: PageContext, view: BrowserEvidencePageView, options: { fresh: boolean; useSuggestion: boolean }): string {
   const action = `${esc(context.base)}/browser-evidence/${esc(view.project)}/act`;
@@ -57,6 +57,9 @@ export function renderBrowserEvidencePage(context: PageContext, view: BrowserEvi
       + `${field("signInPath", "The login page", signIn?.path)}<br>${field("signInUsername", "Selector of the user name field", signIn?.usernameSelector)}<br>${field("signInPassword", "Selector of the password field", signIn?.passwordSelector)}<br>${field("signInSubmit", "Selector of the sign-in button", signIn?.submitSelector)}<br>`
       + `${field("signInSuccessPath", "The page a signed-in person lands on", signIn?.successPath)}<br>${field("signInSuccessSelector", "Or an element only a signed-in page has", signIn?.successSelector)}`
       + `<p class="muted">The user name and password are saved below, in the secret store, and never here. Both fields are painted over in every picture.</p></fieldset>`
+      // Slice 4: the one choice that records the live page. Said plainly, beside the box, with what it costs.
+      + `<fieldset><legend>Video of a page that fails</legend><label><input type="checkbox" name="videoOn" value="yes"${shown?.video === undefined ? "" : " checked"}> This app shows test data only. Keep a video of a changed page that fails to load or shows errors.</label>`
+      + `<p class="warn">A video cannot be hidden the way the pictures are: it records the page as it loads, before anything is painted over. Tick this only if nothing real can appear in this app (no customer, payment or personal data, no real keys). It is not available when the app is behind a login. Rovara drops every video of a run if any page of it shows what looks like a secret or personal data, or has an element marked <code>data-private</code>. A video is kept for a short time (14 days by default) in this company's evidence store, and is shown only as a download on the task page, behind your sign-in. It is never put on GitHub.</p></fieldset>`
       + `${hidden("version", view.version ?? 0)}${token("save")}`;
     return `<form class="decide" method="post" action="${action}">${hidden("op", "save")}${inner}<div class="row">${button("Save the recipe", "primary")}</div></form>`;
   };

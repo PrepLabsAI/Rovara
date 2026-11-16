@@ -9,15 +9,17 @@
 // runs AGAIN after the picture: raw text that reached the paint is still in the page then (nothing rewrites it back to masked), so any match means the picture is dropped ("withheld").
 // Not reachable by any text scrub, and so left to mask selectors: canvas (masked by default), images' own pixels, CSS generated content, closed shadow roots, and out-of-process frames
 // (another origin's frames are aborted). Every step is bounded by the page's time; the context is closed after each page, which also ends a renderer that is still busy.
+// VIDEO (slice 4) cannot be masked this way: a recording is of the live page from its first frame, before any scrub. So it is asked for only by a run whose recipe says the app shows fixture data only, never for an app behind
+// a login (the sign-in runs in its own context, which is never recorded), and the recording of a page is kept only when that page failed or showed errors: every other recording is deleted unread.
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { request } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Page, type Video } from "playwright-core";
 import {
-  BROWSER_EVIDENCE_TEXT_MASK, BROWSER_EVIDENCE_TEXT_MASKS, BROWSER_EVIDENCE_TEXT_SCAN_MAX, browserEvidenceSecretMasks, isBrowserEvidenceRoute,
+  BROWSER_EVIDENCE_TEXT_MASK, BROWSER_EVIDENCE_TEXT_MASKS, BROWSER_EVIDENCE_TEXT_SCAN_MAX, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_SIZE, browserEvidenceSecretMasks, browserEvidenceVideoEligible, isBrowserEvidenceRoute, isWebm,
   type BrowserEvidenceExecutorSignIn, type BrowserEvidenceSignInValues,
 } from "@agentx/contracts";
 import type { BrowserEvidenceCaptureAnswer, BrowserEvidenceDriver, BrowserEvidenceSide } from "./browser-evidence.js";
@@ -38,6 +40,8 @@ const SIGN_IN_WAIT_MS = 6_000;
 /** The page's nodes and form fields read at most, and its characters in all; a page with more is not photographed. */
 const PAGE_NODES_MAX = 50_000;
 const PAGE_CHARS_MAX = 2_000_000;
+/** Elements the app itself marks as private: a page with one is not a fixture-only page, so no recording of it is kept (the pictures paint these over; a recording cannot). */
+const PRIVATE_MARKERS = "[data-rovara-mask], [data-private]";
 
 const pause = (milliseconds: number) => new Promise<void>((resolve) => { setTimeout(resolve, milliseconds); });
 
@@ -113,8 +117,9 @@ export async function startProjectApp(input: { command: string; cwd: string; por
 
 // ---- the page
 
-type PageArg = { masks: ReadonlyArray<{ source: string; flags: string; label?: boolean }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
-type PageVerdict = "clean" | "dirty" | "too_large";
+type PageArg = { masks: ReadonlyArray<{ source: string; flags: string; label?: boolean }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string; markers: string };
+/** `changed` (scrub mode only): the page had text a mask rewrote. That is the proof that what the page showed before the scrub was not fixture data only: a recording of it would hold the raw text. */
+type PageVerdict = "clean" | "dirty" | "too_large" | "changed";
 
 /**
  * Runs IN THE PAGE (each frame). `verify: false` replaces every text mask in the text nodes (light DOM and open shadow roots), form values, placeholders and the title. `verify: true`
@@ -152,6 +157,7 @@ function maskPage(arg: PageArg): PageVerdict {
   const unseen = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
   let nodes = 0;
   let chars = 0;
+  let changed = false;
   const pending: unknown[] = [doc.documentElement];
   const roots: Array<{ root: Root; joined: string[] }> = [{ root: doc, joined: [] }];
   while (pending.length > 0) {
@@ -171,7 +177,7 @@ function maskPage(arg: PageArg): PageVerdict {
       if (chars > arg.maxChars) return "too_large";
       if (arg.verify) { if (hits(text)) return "dirty"; continue; }
       const out = scrub(text);
-      if (out !== text) node.nodeValue = out;
+      if (out !== text) { node.nodeValue = out; changed = true; }
     }
   }
   for (const { root } of roots) {
@@ -184,7 +190,12 @@ function maskPage(arg: PageArg): PageVerdict {
         if (typeof text !== "string" || text === "") continue;
         chars += text.length;
         if (chars > arg.maxChars) return "too_large";
-        if (arg.verify) { if (!masked(field) && hits(text)) return "dirty"; } else field[key] = scrub(text);
+        if (arg.verify) { if (!masked(field) && hits(text)) return "dirty"; } else {
+          // (Text inside an element the picture paints over still counts: a recording is not painted over.)
+          const out = scrub(text);
+          if (out !== text) changed = true;
+          field[key] = out;
+        }
       }
     }
   }
@@ -199,10 +210,19 @@ function maskPage(arg: PageArg): PageVerdict {
       if (alt === "") continue;
       if (arg.verify) { if (!masked(image) && hits(alt)) return "dirty"; continue; }
       const broken = image.complete === true && image.naturalWidth === 0;
-      image.setAttribute?.("alt", broken ? "" : scrub(alt));
+      const out = scrub(alt);
+      if (out !== alt) changed = true;
+      image.setAttribute?.("alt", broken ? "" : out);
     }
   }
-  if (!arg.verify) { doc.title = scrub(doc.title); return "clean"; }
+  if (!arg.verify) {
+    const title = scrub(doc.title);
+    if (title !== doc.title) changed = true;
+    doc.title = title;
+    // An element the app itself marks as private (`data-private`, `data-rovara-mask`) is the app saying it shows private data: not a fixture-only page, whatever its text matches.
+    for (const { root } of roots) if (arg.markers !== "" && root.querySelectorAll(arg.markers).length > 0) changed = true;
+    return changed ? "changed" : "clean";
+  }
   if (hits(doc.title)) return "dirty";
   // The page's text as it is composed on screen (shadow roots in place of their hosts' children, slotted nodes where their slot is, hidden elements left out, whitespace
   // collapsed, a line break at every block edge and <br>), read whole so a secret split over several elements is seen. Two views from one walk: `shown`, everything as rendered, for
@@ -343,77 +363,129 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
         if (context !== undefined) await bounded(context.close(), CLOSE_MS).catch(() => undefined);
       }
     },
-    async capture(_side: BrowserEvidenceSide, route: string, options: { maskSelectors: readonly string[]; timeoutMs: number }): Promise<BrowserEvidenceCaptureAnswer> {
-      if (!isBrowserEvidenceRoute(route)) return { ok: false, reason: "page_did_not_load" };
-      const url = new URL(route, origin);
-      if (url.origin !== origin) return { ok: false, reason: "page_did_not_load" };
-      const deadline = Date.now() + Math.max(1, options.timeoutMs);
-      const left = () => Math.max(1, deadline - Date.now());
-      let context: BrowserContext | undefined;
+    async capture(_side: BrowserEvidenceSide, route: string, options: { maskSelectors: readonly string[]; timeoutMs: number; video?: true }): Promise<BrowserEvidenceCaptureAnswer> {
+      // Nothing is recorded unless the run asks (and a run with a sign-in never asks: the recipe refuses the two together).
+      if (options.video !== true || input.signIn !== undefined) return captureOnce(route, options, undefined);
+      let dir: string | undefined;
+      try { dir = await mkdtemp(join(tmpdir(), "rovara-be-video-")); } catch { dir = undefined; }
+      let recorded: Video | undefined;
+      const started = Date.now();
+      const flags = { raw: false };
       try {
-        // A run with a sign-in that did not work (or was never made) takes no page: a signed-out page photographed as the signed-in one would be a false picture.
-        if (input.signIn !== undefined && session === undefined) return { ok: false, reason: "capture_failed" };
-        context = await bounded(input.browser.newContext({ viewport: VIEWPORT, serviceWorkers: "block", acceptDownloads: false, ...(session === undefined ? {} : { storageState: session }) }), left());
-        await onlyOwnOrigin(context, left);
-        const page: Page = await bounded(context.newPage(), left());
-        // The page's own errors only: a console error about a request Rovara blocked (another origin) is not the change's.
-        let consoleErrors = 0;
-        page.on("console", (message) => { if (message.type() === "error" && originOf(message.location().url) === origin) consoleErrors += 1; });
-        page.on("pageerror", () => { consoleErrors += 1; });
-        try {
-          const response = await bounded(page.goto(url.href, { waitUntil: "load", timeout: left() }), left());
-          if (response === null || response.status() >= 400 || originOf(page.url()) !== origin) return { ok: false, reason: "page_did_not_load" };
-          // Sent back to the login page: the session did not hold, and the login form is not the picture of this page.
-          if (input.signIn !== undefined && url.pathname !== input.signIn.form.path && new URL(page.url()).pathname === input.signIn.form.path) return { ok: false, reason: "capture_failed" };
-        } catch (error) {
-          return { ok: false, reason: timedOut(error) ? "time_limit" : "page_did_not_load" };
+        let answer = await captureOnce(route, options, dir === undefined ? undefined : { dir, onPage: (page) => { recorded = page.video() ?? undefined; } }, flags);
+        // Recording must never cost the pictures: a context that cannot record (no encoder in this image, a refused write) fails the capture, so the page is taken once more without recording, with the time that is left,
+        // and its video is "not recorded". A page that failed for any other reason fails the same way the second time and says so.
+        let noRecorder = false;
+        if (dir !== undefined && !answer.ok && answer.reason === "capture_failed") {
+          const left = options.timeoutMs - (Date.now() - started);
+          if (left >= 2_000) { answer = await captureOnce(route, { ...options, timeoutMs: left }, undefined, flags); noRecorder = true; }
         }
-        const arg = (verify: boolean): PageArg => ({ masks: [...BROWSER_EVIDENCE_TEXT_MASKS.map((item) => ({ ...item })), ...secretMasks], mask: BROWSER_EVIDENCE_TEXT_MASK, maxText: BROWSER_EVIDENCE_TEXT_SCAN_MAX,
-          maxNodes: PAGE_NODES_MAX, maxChars: PAGE_CHARS_MAX, verify, maskedSelector: options.maskSelectors.join(", ") });
-        // Every frame the page has: the app's own (and about:/srcdoc ones) are read; a frame of another origin was aborted, so it shows only the browser's error page.
-        const everyFrame = async (verify: boolean): Promise<PageVerdict> => {
-          for (const frame of page.frames()) {
-            // Every frame is read, whatever its address (an aborted frame shows the browser's error page, which reads fine); a frame that cannot be read means no picture.
-            let verdict: PageVerdict;
-            try { verdict = await bounded(frame.evaluate(maskPage, arg(verify)), left()); } catch (error) {
-              if (timedOut(error)) throw error;
-              return "too_large";
-            }
-            if (verdict !== "clean") return verdict;
-          }
-          return "clean";
-        };
-        try {
-          if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
-          // Freeze, then cut the network: the page's own scripts stop, so no re-render can bring the raw text back, and no late answer brings new data; then scrub what changed since, and verify.
-          const session = await bounded(context.newCDPSession(page), left());
-          await bounded(session.send("Emulation.setScriptExecutionDisabled", { value: true }), left());
-          // Offline only once frozen: the app's own "offline" handlers cannot run and paint a banner into the picture.
-          await bounded(context.setOffline(true), left());
-          if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
-          const verdict = await everyFrame(true);
-          if (verdict === "dirty") return { ok: false, reason: "masked_content" };
-          if (verdict !== "clean") return { ok: false, reason: "capture_failed" };
-          const bytes = await bounded(page.screenshot({
-            type: "jpeg", quality: SCREENSHOT_QUALITY, timeout: Math.min(SCREENSHOT_TIMEOUT_MS, left()), animations: "disabled", caret: "hide",
-            mask: options.maskSelectors.map((selector) => page.locator(selector)), maskColor: "#5c5c5c",
-          }), left());
-          // Again after the picture: a continuation that ran between the verify pass and the paint left its raw text in the page.
-          const after = await everyFrame(true);
-          if (after === "dirty") return { ok: false, reason: "masked_content" };
-          if (after !== "clean") return { ok: false, reason: "capture_failed" };
-          return { ok: true, bytes: Uint8Array.from(bytes), consoleErrors };
-        } catch (error) {
-          return { ok: false, reason: timedOut(error) ? "time_limit" : "capture_failed" };
-        }
-      } catch (error) {
-        return { ok: false, reason: timedOut(error) ? "time_limit" : "capture_failed" };
+        // A page whose text a mask had to rewrite (or that could not be read) was not showing fixture data only. Its recording is never kept, and the answer says so for EVERY page, healthy or not: the run drops every video on it.
+        if (flags.raw) return { ...answer, videoNotKept: "withheld" as const };
+        // Only a page that failed to load or showed errors keeps its recording; every other one is deleted without being read.
+        const eligible = answer.ok ? browserEvidenceVideoEligible({ status: "shown", consoleErrors: { after: answer.consoleErrors } }) : browserEvidenceVideoEligible({ status: "not_run", reason: answer.reason });
+        if (!eligible) return answer;
+        return { ...answer, ...(dir === undefined || noRecorder ? { videoNotKept: "not_recorded" as const } : await collectVideo(recorded, dir)) };
       } finally {
-        // Closing the context also ends a renderer that is still busy (a page whose script never yields).
-        if (context !== undefined) await bounded(context.close(), CLOSE_MS).catch(() => undefined);
+        if (dir !== undefined) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
       }
     },
   });
+
+  async function captureOnce(route: string, options: { maskSelectors: readonly string[]; timeoutMs: number }, recording: { dir: string; onPage(page: Page): void } | undefined, flags: { raw: boolean } = { raw: false }): Promise<BrowserEvidenceCaptureAnswer> {
+    if (!isBrowserEvidenceRoute(route)) return { ok: false, reason: "page_did_not_load" };
+    const url = new URL(route, origin);
+    if (url.origin !== origin) return { ok: false, reason: "page_did_not_load" };
+    const deadline = Date.now() + Math.max(1, options.timeoutMs);
+    const left = () => Math.max(1, deadline - Date.now());
+    let context: BrowserContext | undefined;
+    try {
+      // A run with a sign-in that did not work (or was never made) takes no page: a signed-out page photographed as the signed-in one would be a false picture.
+      if (input.signIn !== undefined && session === undefined) return { ok: false, reason: "capture_failed" };
+      context = await bounded(input.browser.newContext({ viewport: VIEWPORT, serviceWorkers: "block", acceptDownloads: false, ...(session === undefined ? {} : { storageState: session }),
+        ...(recording === undefined ? {} : { recordVideo: { dir: recording.dir, size: { ...BROWSER_EVIDENCE_VIDEO_SIZE } } }) }), left());
+      await onlyOwnOrigin(context, left);
+      const page: Page = await bounded(context.newPage(), left());
+      recording?.onPage(page);
+      // The page's own errors only: a console error about a request Rovara blocked (another origin) is not the change's.
+      let consoleErrors = 0;
+      page.on("console", (message) => { if (message.type() === "error" && originOf(message.location().url) === origin) consoleErrors += 1; });
+      page.on("pageerror", () => { consoleErrors += 1; });
+      const arg = (verify: boolean): PageArg => ({ masks: [...BROWSER_EVIDENCE_TEXT_MASKS.map((item) => ({ ...item })), ...secretMasks], mask: BROWSER_EVIDENCE_TEXT_MASK, maxText: BROWSER_EVIDENCE_TEXT_SCAN_MAX,
+        maxNodes: PAGE_NODES_MAX, maxChars: PAGE_CHARS_MAX, verify, maskedSelector: options.maskSelectors.join(", "), markers: PRIVATE_MARKERS });
+      // Every frame the page has: the app's own (and about:/srcdoc ones) are read; a frame of another origin was aborted, so it shows only the browser's error page.
+      // A scrub that rewrote something says so (`flags.raw`): what the page showed before the scrub held text a mask hides, and a recording of it would show that text.
+      const everyFrame = async (verify: boolean): Promise<PageVerdict> => {
+        for (const frame of page.frames()) {
+          // Every frame is read, whatever its address (an aborted frame shows the browser's error page, which reads fine); a frame that cannot be read means no picture.
+          let verdict: PageVerdict;
+          try { verdict = await bounded(frame.evaluate(maskPage, arg(verify)), left()); } catch (error) {
+            if (timedOut(error)) throw error;
+            return "too_large";
+          }
+          if (verdict === "changed") { flags.raw = true; continue; }
+          if (verdict !== "clean") return verdict;
+        }
+        return "clean";
+      };
+      try {
+        const response = await bounded(page.goto(url.href, { waitUntil: "load", timeout: left() }), left());
+        if (response !== null && response.status() >= 400 && originOf(page.url()) === origin && recording !== undefined) {
+          // An error page of the app itself (a 404, a 500 with a trace) was loaded and is in the recording, and no scrub or verify ran on it: it is read once, and a page that holds text a mask hides, or that cannot be read, takes the recording with it.
+          try { if ((await everyFrame(false)) !== "clean") flags.raw = true; } catch { flags.raw = true; }
+        }
+        if (response === null || response.status() >= 400 || originOf(page.url()) !== origin) return { ok: false, reason: "page_did_not_load" };
+        // Sent back to the login page: the session did not hold, and the login form is not the picture of this page.
+        if (input.signIn !== undefined && url.pathname !== input.signIn.form.path && new URL(page.url()).pathname === input.signIn.form.path) return { ok: false, reason: "capture_failed" };
+      } catch (error) {
+        return { ok: false, reason: timedOut(error) ? "time_limit" : "page_did_not_load" };
+      }
+      try {
+        if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
+        // Freeze, then cut the network: the page's own scripts stop, so no re-render can bring the raw text back, and no late answer brings new data; then scrub what changed since, and verify.
+        const session = await bounded(context.newCDPSession(page), left());
+        await bounded(session.send("Emulation.setScriptExecutionDisabled", { value: true }), left());
+        // Offline only once frozen: the app's own "offline" handlers cannot run and paint a banner into the picture.
+        await bounded(context.setOffline(true), left());
+        if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
+        const verdict = await everyFrame(true);
+        if (verdict === "dirty") return { ok: false, reason: "masked_content" };
+        if (verdict !== "clean") return { ok: false, reason: "capture_failed" };
+        const bytes = await bounded(page.screenshot({
+          type: "jpeg", quality: SCREENSHOT_QUALITY, timeout: Math.min(SCREENSHOT_TIMEOUT_MS, left()), animations: "disabled", caret: "hide",
+          mask: options.maskSelectors.map((selector) => page.locator(selector)), maskColor: "#5c5c5c",
+        }), left());
+        // Again after the picture: a continuation that ran between the verify pass and the paint left its raw text in the page.
+        const after = await everyFrame(true);
+        if (after === "dirty") return { ok: false, reason: "masked_content" };
+        if (after !== "clean") return { ok: false, reason: "capture_failed" };
+        return { ok: true, bytes: Uint8Array.from(bytes), consoleErrors };
+      } catch (error) {
+        return { ok: false, reason: timedOut(error) ? "time_limit" : "capture_failed" };
+      }
+    } catch (error) {
+      return { ok: false, reason: timedOut(error) ? "time_limit" : "capture_failed" };
+    } finally {
+      // Closing the context also ends a renderer that is still busy (a page whose script never yields).
+      if (context !== undefined) await bounded(context.close(), CLOSE_MS).catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * The recording of a page whose load failed or showed errors, once its context is closed: saved to the scratch folder, held to the per-video cap before it is read, and to being a WebM. A recording that cannot be had is
+ * "not recorded" (never an error's own text), and one over the cap is "over the size cap": the pictures are never affected either way.
+ */
+async function collectVideo(video: Video | undefined, dir: string): Promise<{ video: Uint8Array } | { videoNotKept: "over_size_cap" | "not_recorded" }> {
+  if (video === undefined) return { videoNotKept: "not_recorded" };
+  try {
+    const file = join(dir, "page.webm");
+    await bounded(video.saveAs(file), CLOSE_MS);
+    const size = (await stat(file)).size;
+    if (size > BROWSER_EVIDENCE_VIDEO_MAX_BYTES) return { videoNotKept: "over_size_cap" };
+    const bytes = Uint8Array.from(await readFile(file));
+    return bytes.byteLength > 0 && isWebm(bytes) ? { video: bytes } : { videoNotKept: "not_recorded" };
+  } catch { return { videoNotKept: "not_recorded" }; }
 }
 
 
