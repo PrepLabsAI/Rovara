@@ -32,7 +32,7 @@ const maestroRuns = (runs: RecordedRun[]) => runs.filter((row) => row.file === M
 describe("androidEmulatorArgs", () => {
   it("starts the image's own AVD headless and read-only, with no snapshot, sound, camera or metrics, and KVM or nothing", () => {
     expect(androidEmulatorArgs({ avd: "rovara", port: 5554 })).toEqual(["-avd", "rovara", "-port", "5554", "-read-only", "-no-snapshot", "-no-window", "-no-audio", "-no-boot-anim", "-no-metrics", "-gpu", "swiftshader_indirect",
-      "-accel", "on", "-camera-back", "none", "-camera-front", "none", "-netdelay", "none", "-netspeed", "full", "-memory", "2048", "-cores", "2"]);
+      "-accel", "on", "-camera-back", "none", "-camera-front", "none", "-netdelay", "none", "-netspeed", "full", "-memory", "2048", "-cores", "2", "-partition-size", "768"]);
   });
   it("adds the emulator's own verbose start-up log only when asked (the CI diagnostics)", () => {
     const base = androidEmulatorArgs({ avd: "rovara", port: 5554 });
