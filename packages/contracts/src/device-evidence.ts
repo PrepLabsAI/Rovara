@@ -67,19 +67,43 @@ function relativeProjectPath(value: unknown): value is string {
 }
 const GlobSchema = z.string().refine((value) => validPolicyPath(value, POLICY_PATTERN_MAX), "a repository glob");
 export const DEVICE_EVIDENCE_RECIPE_FLOWS_MAX = 50;
+/** What one step may do before its picture (slice 2: written into a Maestro flow by the executor, never taken from the repository). */
+export const DEVICE_EVIDENCE_ACTIONS_MAX = 10;
+export const DEVICE_EVIDENCE_ACTION_TEXT_MAX = 200;
+const ActionTextSchema = line(DEVICE_EVIDENCE_ACTION_TEXT_MAX);
+/**
+ * One thing a step does, from a short fixed list (the driver turns each into one Maestro command; nothing here is Maestro's own syntax, so a recipe cannot run a script, open a link or reach
+ * another app). `text` and `id` are matched exactly as written. `input` types fixture text, so it never holds a real secret: what it types is masked on the picture like any other text.
+ */
+export const DeviceEvidenceActionSchema = z.discriminatedUnion("do", [
+  z.object({ do: z.literal("tap_text"), text: ActionTextSchema }).strict(),
+  z.object({ do: z.literal("tap_id"), id: ActionTextSchema }).strict(),
+  z.object({ do: z.literal("input"), text: ActionTextSchema }).strict(),
+  z.object({ do: z.literal("wait_text"), text: ActionTextSchema }).strict(),
+  z.object({ do: z.literal("wait_id"), id: ActionTextSchema }).strict(),
+  z.object({ do: z.literal("scroll") }).strict(),
+  z.object({ do: z.literal("back") }).strict(),
+  z.object({ do: z.literal("hide_keyboard") }).strict(),
+]);
+export type DeviceEvidenceAction = z.infer<typeof DeviceEvidenceActionSchema>;
+/** An Android application id (package name): dotted words, at least two. */
+export const DEVICE_EVIDENCE_APP_ID = /^[A-Za-z][A-Za-z0-9_]{0,63}(?:\.[A-Za-z][A-Za-z0-9_]{0,63}){1,8}$/u;
 export const DEVICE_EVIDENCE_MASK_IDS_MAX = 20;
 export const DEVICE_EVIDENCE_PLATFORMS = ["android", "ios"] as const;
 
 /**
  * How Rovara shows a project's mobile flows: the platform, the project's own build command and the app file it makes, and the flows (a named list of steps, with the repository files that
  * make each one). `maskIds` name extra elements (an Android resource id, an iOS accessibility identifier) to paint over. `fixtureDataOnly` is an admin's choice to show a screen Rovara cannot
- * read a tree for, unmasked, because the app runs on fixture data only. Kept in Rovara's settings, never in the repository. What a step does is the driver's (slice 2).
+ * read a tree for, unmasked, because the app runs on fixture data only. Kept in Rovara's settings, never in the repository. What a step does before its picture is its `actions` (slice 2: the emulator driver writes them as a Maestro flow).
  */
 export const DeviceEvidenceRecipeSchema = z.object({
   platform: z.enum(DEVICE_EVIDENCE_PLATFORMS),
   buildCommand: line(500),
   appFile: z.string().refine(relativeProjectPath, "a path inside the project"),
-  flows: z.array(z.object({ id: NameSchema, files: z.array(GlobSchema).min(1).max(20), steps: z.array(z.object({ id: NameSchema, label: line(80) }).strict()).min(1).max(DEVICE_EVIDENCE_STEPS_MAX) }).strict())
+  /** The app's Android application id; the emulator driver needs it to start the app (slice 2). */
+  appId: z.string().max(200).regex(DEVICE_EVIDENCE_APP_ID, "an application id").optional(),
+  flows: z.array(z.object({ id: NameSchema, files: z.array(GlobSchema).min(1).max(20),
+    steps: z.array(z.object({ id: NameSchema, label: line(80), actions: z.array(DeviceEvidenceActionSchema).max(DEVICE_EVIDENCE_ACTIONS_MAX).optional() }).strict()).min(1).max(DEVICE_EVIDENCE_STEPS_MAX) }).strict())
     .min(1).max(DEVICE_EVIDENCE_RECIPE_FLOWS_MAX),
   maskIds: z.array(line(200)).max(DEVICE_EVIDENCE_MASK_IDS_MAX).optional(),
   fixtureDataOnly: z.boolean().optional(),
@@ -142,7 +166,7 @@ const deviceAllowed = (device: DeviceEvidenceDevice, isolation: DeviceEvidenceIs
 
 // ---- which changed flows are picked
 
-export type DeviceEvidenceFlow = { id: string; steps: Array<{ id: string; label: string }> };
+export type DeviceEvidenceFlow = { id: string; steps: Array<{ id: string; label: string; actions?: DeviceEvidenceAction[] }> };
 export type DeviceEvidenceNotShown = { flow: string; reason: DeviceEvidenceNotShownReason };
 export type DeviceEvidencePick =
   | { status: "picked"; flows: DeviceEvidenceFlow[]; notShown: DeviceEvidenceNotShown[]; moreNotShown: number }
@@ -171,7 +195,7 @@ export function pickChangedFlows(input: { changedFiles: unknown; recipe: unknown
       }
       if (hit) break;
     }
-    if (hit) hits.push({ id: row.id, steps: row.steps.map((step) => ({ id: step.id, label: step.label })) });
+    if (hit) hits.push({ id: row.id, steps: row.steps.map((step) => ({ id: step.id, label: step.label, ...(step.actions === undefined ? {} : { actions: step.actions }) })) });
   }
   if (hits.length === 0) return { status: "not_run", reason: "no_changed_flow" };
   const over = hits.slice(DEVICE_EVIDENCE_FLOWS_MAX).map((row) => ({ flow: row.id, reason: "over_flow_cap" as const }));
