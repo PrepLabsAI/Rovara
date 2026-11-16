@@ -115,7 +115,12 @@ export function createAndroidEmulatorDriver(options: AndroidDriverOptions): Devi
       for (;;) {
         if (mine.stopped) return "time_limit";
         if (now() >= bootEnds) { note("boot", "no boot in time"); return left() <= 0 ? "time_limit" : "device_did_not_start"; }
-        if (!mine.emulator.running()) { note("boot", "emulator exited", mine.emulator.tail?.()); return "device_did_not_start"; }
+        if (!mine.emulator.running()) {
+          // The program's last words may still be in the pipe when it is reported gone: give them a moment (only when output was asked for).
+          if (mine.emulator.tail !== undefined) await sleep(300);
+          note("boot", "emulator exited", mine.emulator.tail?.());
+          return "device_did_not_start";
+        }
         // adb's server could not take its port (something in the shared network namespace held it first): nothing it would say is believed.
         if (!mine.adbServer.running()) { note("boot", "adb server exited"); return "device_did_not_start"; }
         const booted = await adb(["shell", "getprop", "sys.boot_completed"], Math.min(ADB_MS, bootEnds - now()));
