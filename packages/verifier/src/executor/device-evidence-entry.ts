@@ -2,7 +2,7 @@
 // `--network container:<sandbox>`, `/dev/kvm`, the built apps read-only at /apps). It takes ONE argument, the plan, runs the device-evidence runner (slice 1) over the Android emulator driver and the
 // real JPEG encoder, and prints ONE line: the runner's result, with the pictures as base64. It starts no listener, reads no file but the two apps, writes only under /tmp, has no secret and holds no
 // credential, so there is nothing for the credential scan to look for. Anything wrong is one fixed sentence on standard error and exit code 2 (a plan) or 1 (a failed run); never a stack or a screen's words.
-import { accessSync, constants, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, cpSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { DeviceEvidenceCaptured } from "@agentx/contracts";
 import { decodeDeviceExecutorPlan, DEVICE_EXECUTOR_APPS_DIR, encodeDeviceExecutorOutput, type DeviceExecutorPlan } from "../host/device-executor.js";
@@ -19,9 +19,19 @@ export const DEVICE_TOOLS = Object.freeze({
 /** The programs' environment: their own paths and a home directory in memory, nothing of the worker's (there is none) and nothing from outside. */
 export const DEVICE_ENV = Object.freeze({
   PATH: "/opt/java/bin:/opt/android-sdk/platform-tools:/opt/maestro/bin:/usr/local/bin:/usr/bin:/bin", HOME: "/home/android", TMPDIR: "/tmp", LANG: "C.UTF-8", JAVA_HOME: "/opt/java",
-  ANDROID_SDK_ROOT: "/opt/android-sdk", ANDROID_HOME: "/opt/android-sdk", ANDROID_AVD_HOME: "/opt/android-avd", ANDROID_USER_HOME: "/home/android/.android",
+  ANDROID_SDK_ROOT: "/opt/android-sdk", ANDROID_HOME: "/opt/android-sdk", ANDROID_AVD_HOME: "/tmp/rovara-avd", ANDROID_USER_HOME: "/home/android/.android",
 });
 export const DEVICE_SCRATCH_DIR = "/tmp/rovara-device";
+/** The image's AVD (read-only, with the rest of the image) and the private copy the emulator is started from: the first real CI run showed the emulator refuses to start ("a snapshot operation ... is pending") when its AVD directory cannot be written. */
+export const DEVICE_IMAGE_AVD_DIR = "/opt/android-avd";
+export const DEVICE_AVD_HOME = "/tmp/rovara-avd";
+
+/** Copies the image's AVD into memory (the container's own /tmp, gone with it) and points its .ini at the copy. Nothing in the image is ever written. */
+export function prepareWritableAvd(name: string, from: string = DEVICE_IMAGE_AVD_DIR, to: string = DEVICE_AVD_HOME): void {
+  mkdirSync(to, { recursive: true, mode: 0o700 });
+  cpSync(`${from}/${name}.avd`, `${to}/${name}.avd`, { recursive: true });
+  writeFileSync(`${to}/${name}.ini`, `avd.ini.encoding=UTF-8\npath=${to}/${name}.avd\ntarget=android-34\n`, { mode: 0o600 });
+}
 
 export type DevicePlanDeps = Readonly<{
   command: DeviceCommandPort;
@@ -50,7 +60,7 @@ export function deviceEnvironmentReport(): string[] {
   const groups = (() => { try { return readFileSync("/proc/self/status", "utf8").split("\n").find((row) => row.startsWith("Groups:")) ?? "Groups: ?"; } catch { return "Groups: unreadable"; } })();
   lines.push(`uid ${String(process.getuid?.())} gid ${String(process.getgid?.())} ${groups.replace(/\s+/gu, " ")}`);
   try { const row = statSync("/dev/kvm"); lines.push(`/dev/kvm mode ${(row.mode & 0o7777).toString(8)} uid ${String(row.uid)} gid ${String(row.gid)} char-device ${String(row.isCharacterDevice())}`); } catch { lines.push("/dev/kvm cannot be seen"); }
-  for (const [path, mode] of [["/dev/kvm", constants.R_OK | constants.W_OK], ["/opt/android-avd", constants.W_OK], ["/opt/android-avd/rovara.avd", constants.W_OK], ["/opt/android-avd/rovara.avd/config.ini", constants.R_OK],
+  for (const [path, mode] of [["/dev/kvm", constants.R_OK | constants.W_OK], ["/opt/android-avd/rovara.avd/config.ini", constants.R_OK], [DEVICE_AVD_HOME, constants.W_OK], [`${DEVICE_AVD_HOME}/rovara.avd`, constants.W_OK],
     ["/opt/android-sdk/emulator/emulator", constants.X_OK], ["/home/android", constants.W_OK], ["/home/android/.android", constants.W_OK], ["/tmp", constants.W_OK], [DEVICE_SCRATCH_DIR, constants.W_OK]] as const) {
     try { accessSync(path, mode); lines.push(`${path}: ${mode === constants.W_OK ? "writable" : mode === constants.X_OK ? "executable" : "accessible"}`); } catch (error) { lines.push(`${path}: NOT accessible (${String((error as NodeJS.ErrnoException).code)})`); }
   }
@@ -66,6 +76,7 @@ async function main(): Promise<void> {
   let code = 0;
   try {
     mkdirSync(DEVICE_SCRATCH_DIR, { recursive: true, mode: 0o700 });
+    prepareWritableAvd(DEVICE_TOOLS.avd);
     if (talk) {
       for (const line of deviceEnvironmentReport()) process.stderr.write(`device env: ${line}\n`);
       const check = await createNodeCommandPort().run(DEVICE_TOOLS.emulator, ["-accel-check"], { timeoutMs: 20_000, maxStdoutBytes: 4_096, env: DEVICE_ENV, mergeStderr: true });

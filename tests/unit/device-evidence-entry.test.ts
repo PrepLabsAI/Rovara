@@ -1,10 +1,13 @@
 // Device testing slice 2: the whole device-executor program over scripted tools. The runner (slice 1), the Android driver, the real JPEG encoder and the answer's checks work together: a screen
 // with a secret in it comes out painted, a run that cannot boot says why, a screen that cannot be read is withheld even under the admin's fixture-data choice, and what is printed is believed
 // by the worker only through its own checks.
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEVICE_EVIDENCE_RUN_MS, DEVICE_EVIDENCE_STEP_MS, deviceEvidenceCheck, deviceEvidenceLines, type DeviceEvidenceOutcome } from "../../packages/contracts/src/device-evidence.js";
 import { checkKindInfo } from "../../packages/contracts/src/check-kinds.js";
-import { runDevicePlan } from "../../packages/verifier/src/executor/device-evidence-entry.js";
+import { DEVICE_ENV, prepareWritableAvd, runDevicePlan } from "../../packages/verifier/src/executor/device-evidence-entry.js";
 import { decodeDeviceExecutorPlan, encodeDeviceExecutorOutput, encodeDeviceExecutorPlan, parseDeviceExecutorOutput, type DeviceExecutorPlanInput } from "../../packages/verifier/src/host/device-executor.js";
 import { decodeJpeg } from "../support/device-jpeg-decode.js";
 import { answer, fakeAndroid, rawScreencap, type FakeAndroidScript } from "../support/device-command-fake.js";
@@ -121,5 +124,24 @@ describe("runDevicePlan", () => {
     // Each tool call takes 400 ms of the plan's 1,000 ms: the run ends before the device is ready.
     const { captured } = await run({}, { ...baseInput, runMs: 1_000 }, 400);
     expect(captured).toMatchObject({ notRun: "time_limit", steps: [] });
+  });
+});
+
+describe("the AVD the emulator starts from", () => {
+  it("is a private, writable copy of the image's AVD with its .ini pointing at the copy, and the image's own directory is never written", () => {
+    const root = mkdtempSync(join(tmpdir(), "rovara-avd-test-"));
+    const from = join(root, "image");
+    const to = join(root, "copy");
+    mkdirSync(join(from, "rovara.avd", "sub"), { recursive: true });
+    writeFileSync(join(from, "rovara.avd", "config.ini"), "hw.ramSize=2048\n");
+    writeFileSync(join(from, "rovara.avd", "sub", "x.img"), "x");
+    writeFileSync(join(from, "rovara.ini"), "path=/opt/android-avd/rovara.avd\n");
+    prepareWritableAvd("rovara", from, to);
+    expect(readFileSync(join(to, "rovara.avd", "config.ini"), "utf8")).toBe("hw.ramSize=2048\n");
+    expect(readFileSync(join(to, "rovara.avd", "sub", "x.img"), "utf8")).toBe("x");
+    expect(readFileSync(join(to, "rovara.ini"), "utf8")).toBe(`avd.ini.encoding=UTF-8\npath=${to}/rovara.avd\ntarget=android-34\n`);
+    expect(() => { accessSync(join(to, "rovara.avd"), constants.W_OK); }).not.toThrow();
+    expect(readFileSync(join(from, "rovara.ini"), "utf8")).toBe("path=/opt/android-avd/rovara.avd\n");
+    expect(DEVICE_ENV.ANDROID_AVD_HOME).toBe("/tmp/rovara-avd");
   });
 });

@@ -58,9 +58,10 @@ RUN mkdir -p /opt/android-avd \
     && if [ ! -f "$cfg" ]; then echo "avdmanager did not create $cfg; found:"; find / -xdev \( -name 'rovara.avd' -o -name 'rovara.ini' \) 2>/dev/null; ls -la /opt/android-avd "$HOME/.android" 2>&1; exit 1; fi \
     && if [ ! -f /opt/android-avd/rovara.ini ]; then printf 'avd.ini.encoding=UTF-8\npath=/opt/android-avd/rovara.avd\ntarget=android-34\n' > /opt/android-avd/rovara.ini; fi \
     && for kv in hw.lcd.width=720 hw.lcd.height=1280 hw.lcd.density=320 hw.ramSize=2048 disk.dataPartition.size=2G hw.gpu.enabled=yes hw.gpu.mode=swiftshader_indirect hw.keyboard=yes \
-                 hw.audioInput=no hw.audioOutput=no hw.camera.back=none hw.camera.front=none showDeviceFrame=no; do \
+                 hw.sdCard=no hw.audioInput=no hw.audioOutput=no hw.camera.back=none hw.camera.front=none showDeviceFrame=no; do \
          key="${kv%%=*}"; sed -i "/^${key}=/d" "$cfg"; echo "$kv" >> "$cfg"; \
        done \
+    && rm -f /opt/android-avd/rovara.avd/sdcard.img \
     && cat "$cfg" /opt/android-avd/rovara.ini
 # No command-line tools in the final image: nothing can install anything at run time.
 RUN rm -rf /opt/android-sdk/cmdline-tools
