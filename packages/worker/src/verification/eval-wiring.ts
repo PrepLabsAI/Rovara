@@ -12,11 +12,21 @@
 // or a proxy key) is never sent anywhere. The token never enters the sandbox (the bridge's egress is the stage's call), a log line, an error or an artifact.
 //
 // THE TRUSTED SOURCES (DEC 253j(1)): the confirmed plan with its question inventory, the persisted approval and the company-scoped baseline cache are delivered from the
-// control plane through the signed `eval-plan` callback (`evalPlanSourcesFor`). WHAT THIS BASE DOES NOT HAVE (it reads "not run", never a guess, until it is built): the
-// FRESH check sandbox (TE-B1), which `evalHostSourcesFor`'s `check` takes.
+// control plane through the signed `eval-plan` callback (`evalPlanSourcesFor`).
+//
+// THE FRESH CHECK SANDBOX (DEC 253n(2), TE-B1). `plannedFreshEvalSandbox` builds `createFreshEvalSandbox` per run, from the SAME delivered plan: its confirmed command and report path (held
+// to the plan's stored command hash), its model row, and, from this check's own pin (`withEvalPinnedCandidate`), the base and candidate commits, the working sandbox and the round's budget and
+// scratch folder. The worker's own pinned image (AGENTX_WORKER_IMAGE) runs it, and only when its digest is the plan's image digest. The candidate commit's own tree must be the pinned candidate
+// tree the plan's head hashes were read from. Anything missing or different: the run fails before anything starts, and the eval reads Not run.
 import type { EvalGatewayTokenSource } from "./eval-gateway-access.js";
 import { createEvalGatewayAccess } from "./eval-gateway-access.js";
-import { createBridgedEvalExec, type FreshEvalSandbox } from "./eval-bridged-exec.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { evalImageDigestOf } from "@agentx/contracts";
+import { createBridgedEvalExec, createFreshEvalSandbox, freshEvalSandboxOffered, FRESH_EVAL_RUN_MAX_MS, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
+import { createProcessCandidateGit } from "../e2e-candidate-source.js";
+import type { DockerCli } from "../swebench/containers.js";
 import { createEvalFinalCheckPorts, type EvalHostCapabilities } from "./eval-host.js";
 import type { EvalFinalCheckPorts } from "./eval-final-check.js";
 import type { EvalMeterOptions } from "./eval-model-access.js";
@@ -25,7 +35,7 @@ import { modelAccessSource } from "../model-access.js";
 import { evalChangedPrompt } from "./eval-changed-prompt.js";
 import { createEvalBaselines } from "./eval-baseline-refresh.js";
 import { evalSourcesFromDelivery, fetchEvalPlanDelivery, type DeliveredEvalSources } from "./eval-plan-delivery.js";
-import { pinnedEvalPlan } from "./eval-plan-source.js";
+import { pinnedEvalFreshCheck, pinnedEvalPlan } from "./eval-plan-source.js";
 
 /** The host's setting that turns the eval on: the model gateway's https origin. Unset (the default), or anything else: the eval stays off. */
 export const EVAL_GATEWAY_URL_VARIABLE = "ROVARA_EVAL_GATEWAY_URL";
@@ -78,7 +88,7 @@ export interface EvalCheckHost {
  * capability). The plan is the broker's stored plan completed with this check's own per-task hashes from the pinned candidate (`pinnedEvalPlan`, inside `withEvalPinnedCandidate`);
  * the approval and the cache are read-only views of the delivered answer. A refused or failed ask gives no plan, no grant and a cache that misses: "not connected", zero calls.
  */
-export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch }): Pick<EvalHostSources, "plan" | "approval" | "cache" | "baselines"> {
+export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch }): Pick<EvalHostSources, "plan" | "approval" | "cache" | "baselines"> & { readonly deliveredPlan: () => Promise<unknown> } {
   let delivery: Promise<DeliveredEvalSources | undefined> | undefined;
   const delivered = (): Promise<DeliveredEvalSources | undefined> => delivery ??= fetchEvalPlanDelivery({
     controlPlaneUrl: options.controlPlaneUrl, workspaceId: invocation.workspaceId, operationId: invocation.operationId, capability: invocation.callbackCapability,
@@ -96,18 +106,82 @@ export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { 
       write: async () => "refused",
     },
     baselines: createEvalBaselines(),
+    // The same one ask's plan, for the fresh check sandbox (its command, row and image).
+    deliveredPlan: async () => { try { const found = await delivered(); return found === undefined ? undefined : await found.plan(); } catch { return undefined; } },
+  };
+}
+
+/** The worker's own image variable: the model helper and the fresh check sandbox run it (pinned by digest). */
+export const EVAL_WORKER_IMAGE_VARIABLE = "AGENTX_WORKER_IMAGE";
+
+/** What the worker host gives the fresh check sandbox: its environment (the image and the helper's walls), its Docker and its workspace key. */
+export interface EvalFreshHost {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly docker: DockerCli;
+  /** `setupWorkspaceKey(rootPath)`: the round network's labels and sweep. */
+  readonly workspaceKey: () => Promise<string>;
+  /** Test seam; default `createFreshEvalSandbox`. */
+  readonly make?: (config: FreshEvalSandboxConfig) => FreshEvalSandbox;
+  /** Test seam: the tree of a commit in a repository. Default: the safe git path (`createProcessCandidateGit(...).treeOf`). */
+  readonly treeOf?: (directory: string, commit: string, signal: AbortSignal) => Promise<string>;
+}
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/**
+ * DEC 253n(2): the check round's fresh sandbox and model pin, built per run from the delivered plan (`deliveredPlan`) and this check's pin. `available()` answers only what the host can know before
+ * the plan is read (a pinned worker image and the model helper's walls); everything else is checked at `run`, which throws (Not run) before anything starts when it does not hold.
+ */
+export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<EvalSourceInvocation, "operationId">, deliveredPlan: () => Promise<unknown>): Pick<EvalCheckHost, "sandbox" | "runDir" | "modelAllowed"> {
+  const image = host.environment[EVAL_WORKER_IMAGE_VARIABLE]?.trim();
+  // The model the running plan pins (set when a run has read its plan): a frame for another row or model is refused before the stage.
+  let pinned: { row: string; path: RegExp } | undefined;
+  const sandbox: FreshEvalSandbox = {
+    available(): boolean {
+      try { return evalImageDigestOf(image) !== undefined && typeof host.docker?.run === "function" && freshEvalSandboxOffered(host.environment); } catch { return false; }
+    },
+    async run(input) {
+      const check = pinnedEvalFreshCheck(await deliveredPlan());
+      if (check === undefined || image === undefined) throw new Error("no fresh sandbox");
+      // The image the plan was measured with is the image that runs: the worker's own, by digest.
+      const digest = evalImageDigestOf(image);
+      if (digest === undefined || digest !== evalImageDigestOf(check.imageDigest)) throw new Error("no fresh sandbox");
+      // The new side runs the candidate COMMIT: its tree must be the pinned candidate tree the plan's head hashes came from (no uncommitted change is left out).
+      const scratch = await mkdtemp(join(check.round.scratchDir, "tree-"));
+      try {
+        const tree = await (host.treeOf ?? ((directory, commit, signal) => createProcessCandidateGit(scratch).treeOf(directory, commit, signal)))(check.repository.directory, check.repository.candidateCommit, input.signal);
+        if (tree !== check.repository.candidateTree) throw new Error("no fresh sandbox");
+      } finally { await rm(scratch, { recursive: true, force: true }).catch(() => undefined); }
+      const config: FreshEvalSandboxConfig = {
+        docker: host.docker, image, workspace: await host.workspaceKey(), taskId: invocation.operationId,
+        roundBudgetMs: Math.min(Math.max(1, Math.floor(check.round.roundBudgetMs)), FRESH_EVAL_RUN_MAX_MS),
+        repository: { directory: check.repository.directory, baseCommit: check.repository.baseCommit, candidateCommit: check.repository.candidateCommit },
+        command: check.command, report: check.report, rowId: check.rowId, scratchDir: check.round.scratchDir, workingSandbox: check.round.workingSandbox, environment: host.environment,
+      };
+      pinned = { row: check.rowId, path: new RegExp(`^/v1(?:beta)?/models/${escapeRegExp(check.model)}:(?:generateContent|streamGenerateContent)$`, "u") };
+      return await (host.make ?? createFreshEvalSandbox)(config).run(input);
+    },
+  };
+  return {
+    sandbox,
+    // Short and the worker's own: each run makes a private (0700) folder in it for the bridge socket and removes it.
+    runDir: tmpdir(),
+    modelAllowed: (frame) => pinned !== undefined && frame.row === pinned.row && pinned.path.test(frame.path),
   };
 }
 
 /**
  * The sources for this invocation, or undefined (the eval stays "not connected"). The plan, the approval and the baseline cache come from the broker (`evalPlanSourcesFor`); the check
- * round's sandbox, socket folder and model pin come from `check` (TE-B1). Without a check host there are no sources.
+ * round's sandbox, socket folder and model pin come from `check`, or (production) from `fresh`: the fresh sandbox built per run from the delivered plan. Without either there are no sources.
  */
-export function evalHostSourcesFor(invocation: EvalSourceInvocation, host: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch; readonly check?: EvalCheckHost | undefined }): EvalHostSources | undefined {
+export function evalHostSourcesFor(invocation: EvalSourceInvocation, host: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch; readonly check?: EvalCheckHost | undefined; readonly fresh?: EvalFreshHost | undefined }): EvalHostSources | undefined {
   try {
-    const check = host.check;
-    if (check === undefined || typeof host.controlPlaneUrl !== "string" || host.controlPlaneUrl === "") return undefined;
-    return { ...evalPlanSourcesFor(invocation, { controlPlaneUrl: host.controlPlaneUrl, ...(host.fetch === undefined ? {} : { fetch: host.fetch }) }),
+    if (typeof host.controlPlaneUrl !== "string" || host.controlPlaneUrl === "") return undefined;
+    const { deliveredPlan, ...sources } = evalPlanSourcesFor(invocation, { controlPlaneUrl: host.controlPlaneUrl, ...(host.fetch === undefined ? {} : { fetch: host.fetch }) });
+    // DEC 253n(2): without a given check host, the fresh sandbox is built per run from the same delivered plan (production).
+    const check: EvalCheckHost | undefined = host.check ?? (host.fresh === undefined ? undefined : plannedFreshEvalSandbox(host.fresh, invocation, deliveredPlan));
+    if (check === undefined) return undefined;
+    return { ...sources,
       sandbox: check.sandbox, runDir: check.runDir, modelAllowed: check.modelAllowed,
       ...(check.changedPrompt === undefined ? {} : { changedPrompt: check.changedPrompt }), ...(check.meter === undefined ? {} : { meter: check.meter }) };
   } catch { return undefined; }

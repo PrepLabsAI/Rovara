@@ -362,7 +362,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "setup-agent") {
         const run = deps.setupAgent!;
-        return json(200, await handleSetupAgentCallback({ ...run, store: deps.flow.store, companyId: deps.flow.companyId, now: () => (deps.flow.now?.() ?? new Date()).getTime() }, operation, bodyOf(request)));
+        return json(200, await handleSetupAgentCallback({ ...run, store: deps.flow.store, companyId: deps.flow.companyId, now: () => (deps.flow.now?.() ?? new Date()).getTime(),
+          log: (entry) => deps.flow.log?.({ component: "setup-agent", ...entry }) }, operation, bodyOf(request)));
       }
       const body = bodyOf(request);
       if (action === "events") {

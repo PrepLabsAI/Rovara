@@ -434,6 +434,11 @@ export function freshEvalEnvironment(input: { rowId: string; token: string; side
   return `${lines.map(([name, value]) => `${name}=${value}`).join("\n")}\n`;
 }
 
+/** Whether this worker offers the model helper's walls a fresh eval sandbox needs (`modelHelperOffer`), for a host that builds the sandbox later (DEC 253n(2)). Never throws. */
+export function freshEvalSandboxOffered(environment: NodeJS.ProcessEnv): boolean {
+  try { return modelHelperOffer(environment).offered === true; } catch { return false; }
+}
+
 /** The fresh eval check sandbox. See the section header above. */
 export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEvalSandbox {
   let rounds = 0;

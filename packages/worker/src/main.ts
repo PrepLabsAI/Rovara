@@ -185,7 +185,9 @@ const state = createWorkerServerState(
         const missingKeyAuthority=taskMissingKeyAuthorizer(invocation.payload,authorizeModelFallback,proxy,process.env);
         // Plan v3.2 row 20.2: the final-check eval's ports, for a task that asks for it, only when the host switched it on (ROVARA_EVAL_GATEWAY_URL) and the trusted sources are delivered. Otherwise none: the request reads "not connected" with zero calls.
         const evalRequested = invocation.payload.evalRequest !== undefined;
-        const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: process.env, controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation, { controlPlaneUrl }) : undefined });
+        const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: process.env, controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation, { controlPlaneUrl,
+          // DEC 253n(2): the fresh check sandbox (TE-B1), built per check from the delivered plan's confirmed command and the check's pinned candidate.
+          fresh: { environment: process.env, docker: createDockerCli(), workspaceKey: () => setupWorkspaceKey(rootPath) } }) : undefined });
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,

@@ -8,8 +8,13 @@
 // WHO READS IT: the broker's eval-plan source, and only for a record that is (1) this company's and this project's, (2) unedited (its digest recomputed from its body), (3) the one the
 // spend item names, and (4) bound to an APPROVED spend item. Anything else is no plan. The per-task parts (the base commit, the code hash, each question's base and head hash) are not
 // stored: the worker computes them from the pinned candidate and checks each question's base hash against this list (a mismatch is not runnable).
+//
+// DEC 253n(2): the plan also stores the confirmed eval COMMAND (an argv, no shell, and its working folder in the checkout) and the REPORT path the eval writes its measures to. Both are
+// covered by the stored command hash: `key.commandFingerprint` must equal `evalCommandFingerprintOf(command, report)`, checked on every read here and again by the worker before the fresh
+// check sandbox is built from them. A plan written before 253n has neither: it still reads, and its eval reads Not run (no command to run).
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
+import { evalCommandFingerprint } from "./eval-base-cache.js";
 import { isSafeE2ESourcePath } from "./e2e-source.js";
 import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalSpendInputsSchema } from "./eval-spend.js";
@@ -33,6 +38,31 @@ export const EvalPlanQuestionSchema = z.object({
   hash,
 }).strict();
 
+/** A plain relative folder of the checkout: `.` or up to 32 plain segments, never `..`. The fresh sandbox's own rule (`eval-bridged-exec.ts`). */
+const relativeFolder = z.string().min(1).max(512).regex(/^(?:\.|[A-Za-z0-9._@+-]+(?:\/[A-Za-z0-9._@+-]+){0,31})$/u).refine(path => !path.split("/").includes(".."), "no parent segment");
+/** The most characters every argument of the eval command may hold together. */
+export const EVAL_COMMAND_ARGS_MAX_CHARS = 16_384;
+/** The confirmed eval command: an argv run with no shell, in `cwd` (relative to the checkout). The fresh sandbox's own allow-list, so a plan never holds a command it would refuse. */
+export const EvalCommandSchema = z.object({
+  executable: z.string().regex(/^[A-Za-z0-9._/+-]{1,256}$/u),
+  args: z.array(z.string().regex(/^[^\0\r\n]{0,8192}$/u)).max(256).refine(args => args.reduce((n, arg) => n + arg.length, 0) <= EVAL_COMMAND_ARGS_MAX_CHARS, "the arguments are too long"),
+  cwd: relativeFolder,
+}).strict();
+export type EvalCommand = z.infer<typeof EvalCommandSchema>;
+/** Where the eval writes its measures file: a folder of the checkout and the file there (both plain relative paths). */
+export const EvalReportPathSchema = z.object({ cwd: relativeFolder, argument: relativeFolder.refine(path => path !== ".", "a file") }).strict();
+export type EvalReportPath = z.infer<typeof EvalReportPathSchema>;
+
+/** DEC 253n(2): the stored command hash of an eval command and its report path (`evalCommandFingerprint` of their canonical JSON under a fixed version). Throws (zod) for a command or path the schemas refuse. */
+export function evalCommandFingerprintOf(command: EvalCommand, report: EvalReportPath): string {
+  return evalCommandFingerprint(canonicalJson({ v: "rovara-eval-command/v1", command: EvalCommandSchema.parse(command), report: EvalReportPathSchema.parse(report) }));
+}
+
+/** The measurement settings fingerprint (setup measurement, refresh and task comparison share it; the worker's `evalSettingsFingerprint` is this one). */
+export function evalSettingsFingerprintOf(settings: { readonly imageDigest: string; readonly route: string }, judgePin: string): string {
+  return evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: settings.imageDigest, route: settings.route, judgePin }));
+}
+
 /** The stored plan's fields (the worker extends them with the per-task key it receives). */
 export const EvalPlanBodyShape = z.object({
   selection: z.string().min(1).max(512).regex(/^[^\p{Cc}\p{Cf}]+$/u),
@@ -50,9 +80,20 @@ export const EvalPlanBodyShape = z.object({
   questions: z.array(EvalPlanQuestionSchema).max(EVAL_QUESTION_LIMIT),
   maxCallsPerQuestion: whole,
   maxCostMicrosPerQuestion: whole,
+  /** DEC 253n(2): the confirmed eval command and report path, covered by `key.commandFingerprint`. Absent (a plan from before 253n): the eval has no command and reads Not run. */
+  command: EvalCommandSchema.optional(),
+  report: EvalReportPathSchema.optional(),
 }).strict();
+
+/** Whether a plan's command and report path are both present and hash to its stored command hash, or both absent. */
+export function evalPlanCommandHolds(plan: { readonly command?: unknown; readonly report?: unknown; readonly key: { readonly commandFingerprint: string } }): boolean {
+  if (plan.command === undefined && plan.report === undefined) return true;
+  try { return evalCommandFingerprintOf(plan.command as EvalCommand, plan.report as EvalReportPath) === plan.key.commandFingerprint; } catch { return false; }
+}
 /** The stored plan. Nothing in it is per task. */
-export const EvalPlanBodySchema = EvalPlanBodyShape.refine(plan => new Set(plan.questions.map(q => q.id)).size === plan.questions.length, "question ids are unique");
+export const EvalPlanBodySchema = EvalPlanBodyShape
+  .refine(plan => new Set(plan.questions.map(q => q.id)).size === plan.questions.length, "question ids are unique")
+  .refine(evalPlanCommandHolds, "the eval command does not match its stored hash");
 export type EvalPlanBody = z.infer<typeof EvalPlanBodySchema>;
 
 export const EvalPlanRecordSchema = z.object({

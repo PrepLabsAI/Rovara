@@ -16,6 +16,7 @@ import { startTask } from "../../core/task-flow/start.js";
 import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readState, startSetupAgent, stopSetupAgent, verifiedView, getSetupAgent, type SetupAgentView } from "../../core/setup-agent/agent.js";
 import { createEvalSpendSubject, EVAL_SPEND_KIND, readEvalSpendItem } from "../../core/setup-agent/eval-spend.js";
+import { confirmEvalDiscovery } from "../../core/setup-agent/eval-discovery.js";
 import { SETUP_APPLY_KIND, confirmSetupAgent, createSetupProposalSubject, discardSetupApply, readSetupApply, type SetupApplyDeps } from "../../core/setup-agent/apply.js";
 import { setupStateOf, startProjectSetupCheck } from "../../core/setup-agent/check.js";
 import { SETUP_COMMAND_WORDS, checkPersonCommand, queueSetupCommand } from "../../core/setup-agent/command.js";
@@ -32,7 +33,7 @@ import { createSessionControlHost } from "./host.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
-const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/(setup-agent|setup-check)(?:\/(stop|command|journal|confirm|discard))?$/u;
+const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/(setup-agent|setup-check)(?:\/(stop|command|journal|confirm|discard|eval-confirm))?$/u;
 const bodyOf = (request: BrokerRequest): unknown => {
   if (request.body === undefined || request.body === "") return {};
   try { return JSON.parse(request.body) as unknown; } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
@@ -59,6 +60,8 @@ export interface LocalSetupAgentOptions {
   sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** `ROVARA_SETUP_AGENT=0`: the feature is off and every route and the worker's callback answer as an unknown path. */
   enabled: boolean;
+  /** DEC 253n: the monthly cap an eval spend item must fit (the trusted host's). Absent (a laptop has no eval budget): an eval confirmation is refused, nothing is proposed. */
+  evalMonthlyCapMicros?: number | undefined;
 }
 
 export interface LocalSetupAgent {
@@ -124,6 +127,12 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     stopperName: async (developerId) => (developerId === ownerDeveloperId ? options.owner.displayName : undefined),
   });
 
+  // The install's people as the eval seams read them: the local owner, matched by the developer id of a stored identity (a Code install has no other member).
+  const localMembers = {
+    companyRole: (person: Parameters<ReturnType<typeof localOwnerMembers>["companyRole"]>[0]) => localOwnerMembers().companyRole({ ...person, ...(person.developerId === ownerDeveloperId ? { principal: options.owner } : {}) }),
+    projectGrant: (person: Parameters<ReturnType<typeof localOwnerMembers>["projectGrant"]>[0], project: string) => localOwnerMembers().projectGrant({ ...person, ...(person.developerId === ownerDeveloperId ? { principal: options.owner } : {}) }, project),
+  };
+
   const offerOfHost = (ask: SetupHostAsk): ApprovalOffer => ({ requestId: hostRequestId(ask), revision: HOST_ASK_REVISION, artifactDigest: hostAskDigest(ask), kind: "setup", risk: "high" });
 
   const view = async (project: string): Promise<SetupPageView | undefined> => {
@@ -149,10 +158,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       };
     });
     const apply = await readSetupApply({ flow, store, companyId, now: options.now }, project);
-    const evalSpend = await readEvalSpendItem({ store, companyId, members: {
-      companyRole: person => localOwnerMembers().companyRole({ ...person, ...(person.developerId === ownerDeveloperId ? { principal: options.owner } : {}) }),
-      projectGrant: () => undefined,
-    } }, project);
+    const evalSpend = await readEvalSpendItem({ store, companyId, members: localMembers }, project);
     const waiting = apply !== undefined && apply.state === "checking";
     void pointerTask;
     const cannotStart = !options.enabled ? "Setting a project up with Rovara is off on this install." : (await options.modelAccessConfigured()) ? undefined : "Rovara has no model key on this install, so it cannot run a setup. Set a model key, then restart `rovara up`.";
@@ -257,6 +263,15 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       }
       if (tail === "confirm" && request.method === "POST") return json(200, await confirmSetupAgent(deps, project, bodyOf(request), developerIdOf(caller.principal)));
       if (tail === "discard" && request.method === "POST") return json(200, { discarded: await discardSetupApply(deps, project, developerIdOf(caller.principal)) });
+      // DEC 253n(1): confirm a selection from the latest setup run's eval report; the broker builds the eval plan from its own reads of the code host.
+      if (tail === "eval-confirm" && request.method === "POST") {
+        return json(200, await confirmEvalDiscovery({
+          store, companyId, now: options.now, members: localMembers, ...(options.evalMonthlyCapMicros === undefined ? {} : { monthlyCapMicros: options.evalMonthlyCapMicros }), latest: deps.latest,
+          readFile: (repository, path, commit, readOptions) => codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+            .fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
+          log: (entry) => flow.log?.({ component: "setup-agent", ...entry }),
+        }, project, bodyOf(request), caller.principal));
+      }
       return undefined;
     } catch (error) {
       if (error instanceof AgentXError) return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
