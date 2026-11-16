@@ -1,5 +1,5 @@
-// DEC 243c / DEC 236j: a company's agents run on a model it chose from what the gateway offers it. The list is the gateway's (read per company, checked against the contract); a model not on it is never chosen,
-// never routed and never run; every route is the gateway's agent route under the model's own name; the default is the install's model while nothing is chosen. Two companies never see each other's list or choice.
+// DEC 243c / DEC 236j: a company's agents run on a model it chose from what the gateway offers it. The list is the gateway's (read per company, checked against the contract); a model not on it is never chosen
+// (a step already holding its choice keeps it); every route is the gateway's agent route under the model's own name; the default is the install's model while nothing is chosen. Two companies never see each other's list or choice.
 import { describe, expect, it } from "vitest";
 import {
   AgentModelPageSchema, OFFERED_AGENT_MODELS_MAX, OfferedAgentModelsSchema, agentModelIdentity, agentModelName,
