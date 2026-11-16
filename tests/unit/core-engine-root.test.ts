@@ -8,6 +8,7 @@ import {
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
 const OTHER = "org_staging0000000000002" as OrgId;
@@ -60,19 +61,29 @@ describe("the broker's core root, switch off (the default)", () => {
 });
 
 describe("the broker's core root, switch on", () => {
-  it("refuses malformed core settings in fixed words without repeating their values", () => {
+  it("loads with malformed core settings and refuses core routes and jobs in fixed words", async () => {
     const cases = [
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, "core engine settings are not readable", "none"],
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_TASK_CAP_USD: "1001" }, "core engine settings are not readable", "1001"],
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on:secret-value" }, "core engine settings are not readable", "secret-value"],
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "secret-value" }, "the policy hook settings are not JSON", "secret-value"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, "none"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_TASK_CAP_USD: "1001" }, "1001"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_COMPANY_DAY_CAP_USD: "1001" }, "1001"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on:secret-value" }, "secret-value"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "secret-value" }, "secret-value"],
+      [{ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, "none"],
+      [{ ROVARA_CORE_ENGINE: "on" }, "ROVARA_CORE_ALLOWED_COMPANIES"],
     ] as const;
-    for (const [env, word, privateValue] of cases) {
-      try { createBrokerCoreRoot(rootInputs(env, fakeTables().client)); throw new Error("expected settings refusal"); }
-      catch (error) {
-        expect((error as Error).message).toContain(word);
-        expect((error as Error).message).not.toContain(privateValue);
-      }
+    for (const [env, privateValue] of cases) {
+      const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client));
+      const answer = await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" });
+      expect(answer?.statusCode).toBe(503);
+      expect(answer?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
+      expect(answer?.body).not.toContain(privateValue);
+      await expect(root.handleEvent({ source: "agentx.core-job", job: "dispatch-sweep" })).rejects.toThrow("The core engine settings are not readable.");
+      const broker = await createAdminBroker({ core: root });
+      const nonCore = await adminCall(broker.handler, { method: "GET", path: "/v1/admin/projects" });
+      expect(nonCore.status).toBe(200);
+      const job = await broker.handler({ source: "agentx.core-job", job: "dispatch-sweep" });
+      expect(job.statusCode).toBe(503);
+      expect(job.body).toContain("The core engine settings are not readable.");
     }
   });
 

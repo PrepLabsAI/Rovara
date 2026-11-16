@@ -7,7 +7,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { describe, expect, it } from "vitest";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
-import { LAMBDA_ENVIRONMENT_LIMIT_BYTES, controlPlaneOf, environmentBytes, keyValueBytes, lambdaEnvironments, type Template as ResolvableTemplate } from "../support/lambda-environment-size.js";
+import { DEPLOY_PARAMETER_VALUES, LAMBDA_ENVIRONMENT_LIMIT_BYTES, controlPlaneOf, environmentBytes, keyValueBytes, lambdaEnvironments, type Template as ResolvableTemplate } from "../support/lambda-environment-size.js";
 
 skipLambdaBundling();
 
@@ -51,6 +51,13 @@ describe("the broker's and the dispatcher's environments stay under Lambda's 4 K
 });
 
 describe("the measuring", () => {
+  it("uses a quote-heavy two-key policy-hook JSON at the stack parameter cap", () => {
+    const hook = DEPLOY_PARAMETER_VALUES.CorePolicyHook!;
+    expect(hook).toHaveLength(600);
+    expect(hook).toMatch(/^\{"address":"https:\/\/policy-hook\.example\/answer[a]+","keys":\[\{"kty":"RSA","n":"A{80}","e":"AQAB","kid":"rotation-a","alg":"RS256"\},\{"kty":"RSA","n":"A{80}","e":"AQAB","kid":"rotation-b","alg":"RS256"\}\]\}$/u);
+    expect((hook.match(/"/gu) ?? []).length).toBeGreaterThan(10);
+  });
+
   it("counts the compact JSON of the variable map and the keys plus values, in bytes", () => {
     expect(environmentBytes({ A: "1" })).toBe('{"A":"1"}'.length);
     expect(environmentBytes({ NAME: "é" })).toBe(Buffer.byteLength('{"NAME":"é"}'));

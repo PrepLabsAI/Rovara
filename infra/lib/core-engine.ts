@@ -89,7 +89,7 @@ export class CoreEngine extends Construct {
     this.allowedCompaniesLong = new CfnParameter(stack, "CoreAllowedCompaniesLong", { type: "String", default: "", maxLength: 128, allowedPattern: "^$|^(all|org_[0-9a-z]{20}(:org_[0-9a-z]{20}){0,4})$", description: "Optional longer core admission company list; when set, overrides CoreAllowedCompanies and is passed as its own environment variable" });
     this.taskCap = new CfnParameter(stack, "CoreTaskCapUsd", { type: "String", default: "5", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-task cap in whole USD, from 1 to 1000" });
     this.companyDayCap = new CfnParameter(stack, "CoreCompanyDayCapUsd", { type: "String", default: "25", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-company UTC-day cap in whole USD, from 1 to 1000" });
-    this.policyHook = new CfnParameter(stack, "CorePolicyHook", { type: "String", default: "", maxLength: 900, description: "Optional policy-hook settings JSON; empty disables the hook" });
+    this.policyHook = new CfnParameter(stack, "CorePolicyHook", { type: "String", default: "", maxLength: 600, allowedPattern: "^[ -~]*$", description: "Optional policy-hook settings JSON; empty disables the hook" });
     this.lessons = new CfnParameter(stack, "CoreLessons", { type: "String", default: "off", maxLength: 64, allowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", description: "Core lessons switch, default off" });
     for (const [key, value] of [["coreTaskCap", this.taskCap.valueAsString], ["coreCompanyDayCap", this.companyDayCap.valueAsString], ["coreLessons", this.lessons.valueAsString]] as const) {
       addBrokerSetting(broker, props.naming, key, value);

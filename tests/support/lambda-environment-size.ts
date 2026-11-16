@@ -20,6 +20,15 @@ export const RESOLVER_REGION = "ap-southeast-4";
 export const RESOLVER_ACCOUNT = "123456789012";
 const PARAMETER_FALLBACK = "p".repeat(64);
 
+function policyHookWorstCase(): string {
+  const key = (kid: string) => ({ kty: "RSA", n: "A".repeat(80), e: "AQAB", kid, alg: "RS256" });
+  const settings = { address: "https://policy-hook.example/answer", keys: [key("rotation-a"), key("rotation-b")] };
+  const json = JSON.stringify(settings);
+  if (json.length > 600) throw new Error("two-key policy hook fixture exceeds its 600-character stack parameter");
+  settings.address += "a".repeat(600 - json.length);
+  return JSON.stringify(settings);
+}
+
 /** What a deploy gives the parameters, at a realistic worst length: a fully configured install (OIDC, Slack, two subnets, the core switch on for two companies). */
 export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   OidcIssuer: `https://cognito-idp.${RESOLVER_REGION}.amazonaws.com/${RESOLVER_REGION}_AbCdEfGhI`,
@@ -48,7 +57,7 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   CoreAllowedCompaniesLong: Array.from({ length: 5 }, (_, index) => `org_${String(index).padStart(20, "a")}`).join(":"),
   CoreTaskCapUsd: "1000",
   CoreCompanyDayCapUsd: "1000",
-  CorePolicyHook: "x".repeat(900),
+  CorePolicyHook: policyHookWorstCase(),
   CoreLessons: `on:org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
 };
 const RANDOM = "A1B2C3D4E5F6G";

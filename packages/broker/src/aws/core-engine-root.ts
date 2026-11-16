@@ -118,6 +118,7 @@ export interface BrokerCoreRoot {
 
 const CORE_CALLBACK = /^\/v1\/internal\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/operations\/[0-9a-f-]{36}\/[a-z-]+$/u;
 const callbackAnswer = (statusCode: number, code: string, message: string): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code, message } }) });
+const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable.";
 
 /**
  * The install's policy hook settings (ROVARA_POLICY_HOOK, JSON `{ address, keys }`), read the same way for the core engine (here) and for the developer API's company bounds on project
@@ -221,12 +222,17 @@ export function outboxCompaniesOf(event: unknown): string[] | undefined {
 
 export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRoot {
   const { env, log } = inputs;
+  let settingsBlocked = false;
   if (parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value.mode !== "off") {
-    const admission = readHostedAdmissionSettings(env);
-    if ("problem" in admission) throw new Error("core engine settings are not readable");
-    if (readCoreLessonsSwitch(env).problem !== undefined) throw new Error("core engine settings are not readable");
-    policyHookSettingsFromEnvironment(env);
+    try {
+      const admission = readHostedAdmissionSettings(env);
+      if ("problem" in admission || readCoreLessonsSwitch(env).problem !== undefined) settingsBlocked = true;
+      policyHookSettingsFromEnvironment(env);
+    } catch {
+      settingsBlocked = true;
+    }
   }
+  if (settingsBlocked) log({ event: "core_engine.settings_blocked" });
   const now = inputs.now ?? (() => new Date());
   const membershipOf = inputs.signInTableName === undefined || inputs.signInTableName === ""
     ? async () => undefined
@@ -291,10 +297,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   });
   if (lessonsSwitch.problem !== undefined) log({ event: "core_engine.lessons_switch_unreadable", problem: lessonsSwitch.problem });
 
-  // Off: nothing below is built, and the developer routes never get a core entry.
+  // Off: nothing below is built. Invalid active settings leave only the fixed core refusal entry.
   let coreTasks: CoreTaskEntry | undefined;
   let lessons: LessonsApi | undefined;
-  if (app.serving) {
+  if (settingsBlocked) {
+    coreTasks = { route: async () => callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS) };
+  } else if (app.serving) {
     // The library's install-wide learning gate follows the lessons switch.
     setCoreLessonsGate(env);
     const companyOf = async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => membershipOf(caller.principal.personId);
@@ -386,6 +394,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     lessons,
     async personErase(request, caller) {
       if (!app.serving || !(request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return undefined;
+      if (settingsBlocked) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       const registry = await app.registry();
       return await createPersonEraseRoute({
         app, log, standing: standingOf,
@@ -394,6 +403,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       }).route(request, caller);
     },
     async resumePersonErases(companyId, budgetMs) {
+      if (settingsBlocked) throw new Error(CORE_SETTINGS_REFUSAL_WORDS);
       const registry = await app.registry();
       return await resumePersonErases(eraseDepsOver(registry, companyId), companyId, budgetMs);
     },
@@ -401,6 +411,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       if (coreTasks === undefined) return undefined;
       const match = CORE_CALLBACK.exec(request.path.split("?")[0] ?? "");
       if (match === null || await ownerOfWorkspace(table, match[1]!) !== "core") return undefined;
+      if (settingsBlocked) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       // A core workspace is never the old routes' (engine-boundary.ts): any refusal here is the core's, in fixed words.
       const companyId = await companyOfWorkspace(match[1]!);
       if (companyId === undefined) return callbackAnswer(404, "NOT_FOUND", "workspace not found");
@@ -414,6 +425,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       return await handler(request);
     },
     async handleEvent(event, options) {
+      if (settingsBlocked && (isCoreJobEvent(event) || outboxCompaniesOf(event) !== undefined)) throw new Error(CORE_SETTINGS_REFUSAL_WORDS);
       if (isCoreJobEvent(event)) return await app.handleScheduledJob(event, options);
       const companies = outboxCompaniesOf(event);
       if (companies !== undefined) return { relayed: await app.relayOutbox(companies) };

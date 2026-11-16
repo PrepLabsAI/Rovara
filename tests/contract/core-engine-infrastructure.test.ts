@@ -353,7 +353,7 @@ describe("L1a broker environment derivation", () => {
       CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
-      CorePolicyHook: { Default: "", MaxLength: 900 },
+      CorePolicyHook: { Default: "", AllowedPattern: "^[ -~]*$", MaxLength: 600 },
     });
     for (const logicalPrefix of ["Broker", "Dispatcher"]) {
       const fn = Object.entries(inApp.Resources).find(([id, resource]) => id.startsWith(logicalPrefix) && resource.Type === "AWS::Lambda::Function")![1];
