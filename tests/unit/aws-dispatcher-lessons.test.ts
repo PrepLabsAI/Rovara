@@ -42,6 +42,31 @@ async function world(companyId = A) {
 }
 
 describe("read-only dispatcher lessons", () => {
+  it("composes the hosted reader only for a covered company and passes its lessons through readVisible", async () => {
+    const w = await world();
+    const original = (await w.store.get(lessonKey(A, "payments", "les_aaaa1111")))!;
+    await w.store.put({ item: { ...original, ...lessonKey(A, "payments", "les_hidden11"), id: "les_hidden11",
+      provenance: { ...(original["provenance"] as Record<string, JsonValue>), audience: { kind: "restricted", acl: { source: "slack", scope: "slack:channel/private", principals: ["someone-else"], groups: [], capturedAt: "2026-11-01T00:00:00.000Z", liveCheck: "on_read" } } } } });
+    await w.store.put({ item: { ...lessonSetKey(A, "payments"), setVersion: 1, members: { les_aaaa1111: 1, les_hidden11: 1 } } });
+    for (const write of w.writes) write.mockClear();
+    const env = { ROVARA_CORE_LESSONS: `on:${A}` };
+    const covered = hostedDispatcherFlow(env, w.options);
+    expect(typeof covered?.learned).toBe("function");
+    const answer = await covered!.learned!({ ...request, companyId: B } as typeof request);
+    expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+    expect(JSON.stringify(answer)).not.toContain("les_hidden11");
+    expect(JSON.stringify(answer)).not.toContain("B private advice");
+    w.send.mockClear();
+    // Even though the supplied options say on, only the deployment's switch decides.
+    const uncovered = hostedDispatcherFlow(env, { ...w.options, companyId: B });
+    expect(uncovered).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    for (const raw of [undefined, "off"]) {
+      expect(hostedDispatcherFlow(raw === undefined ? {} : { ROVARA_CORE_LESSONS: raw }, w.options)).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    }
+    expect(w.send).not.toHaveBeenCalled();
+    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+  });
+
   it("uses the workspace company with identical raw ids, never a payload company, and writes nothing", async () => {
     for (const company of [A, B]) {
       const w = await world(company);

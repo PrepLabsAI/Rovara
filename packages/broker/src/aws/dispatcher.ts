@@ -21,7 +21,7 @@ import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
-import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
+import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, NO_PEOPLE_HERE, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
@@ -744,16 +744,23 @@ export const handler = withCoreDispatch(workflowHandler, {
     coreDispatch ??= Promise.resolve().then(() => {
       const sqs = new SQSClient(awsClientConfiguration);
       const queueUrl = process.env[CORE_DISPATCH_QUEUE_URL_VARIABLE] ?? "";
-      const flow = hostedDispatcherFlow(process.env);
       return createDispatcherCoreHost({
         env: process.env,
         documentClient,
         clients: { dynamo: new DynamoDBClient(awsClientConfiguration), sqs, s3: new S3Client(awsClientConfiguration) },
         machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker },
         changeVisibility: async (receiptHandle, seconds) => { await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds })); },
-        // Lane E2 step 6: the declared flow inputs (none while lessons are switched on anywhere: then nothing is declared and every core record comes back) and the step 5 points.
+        // Resolve lessons separately for each runtime. The reader rechecks ownership from the workspace record, never the dispatch payload.
+        flow: (registry, companyId) => {
+          // This dispatcher has no live company-membership reader. Audience comparisons that need it must refuse;
+          // the existing hosted audience rules can still prove same-project, same-owner sources from State alone.
+          const unavailable = async (): Promise<never> => { throw agentXError("RUNTIME_UNAVAILABLE", NO_PEOPLE_HERE); };
+          return hostedDispatcherFlow(process.env, {
+            companyId, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), store: registry.require("storage"),
+            people: { approvers: unavailable, onProjectRoster: unavailable, linkedAccounts: unavailable, displayName: unavailable, isErased: unavailable },
+          });
+        },
         // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.
-        ...(flow === undefined ? {} : { flow }),
         extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env) }), ...gatewayModelKeysModules(process.env)],
         // The per-run stop's dispatch side (core-money-stop): each model run is admitted and goes only to a worker that reports its usage while it runs; a queued cancel is delivered.
         moneyStop: (registry, companyId) => {
