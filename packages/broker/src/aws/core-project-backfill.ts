@@ -6,6 +6,7 @@ import { canonicalJson, OrgIdSchema, OrgRoleSchema, StoredProjectDefinitionSchem
 import { Membership, membershipKey } from "./company-check.js";
 import { GithubInstallationBindings } from "./github-credentials.js";
 import { projectKey } from "./project-records.js";
+import { projectMemberKey } from "./admin-actions.js";
 
 type Row = Record<string, unknown>;
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
@@ -194,16 +195,26 @@ async function processGrant(deps: CoreBackfillDependencies, mapping: Mapping, in
   // Preview may use the explicitly planned membership only; real writes require the durable row.
   if (member === undefined ? !dryRun : !memberMatches(member, mapping.companyId, g.personId, expectedRole)) throw conflict();
   const key = grantKey(g.personId, g.projectName), existing = await get(deps, key);
+  const reverseKey = projectMemberKey(g.projectName, g.personId), reverse = await get(deps, reverseKey);
+  if (reverse !== undefined && (reverse["entityType"] !== "PROJECT_MEMBER" || reverse["role"] !== g.role)) throw conflict();
   if (existing !== undefined) {
     if (existing["entityType"] !== "MEMBERSHIP" || existing["ownerKey"] !== g.personId || existing["projectName"] !== g.projectName || existing["role"] !== g.role || !owned(existing, mapping.companyId)) throw conflict();
-    return false;
+    if (reverse !== undefined) return false;
   }
+  const grantedAt = typeof existing?.["grantedAt"] === "string" ? existing["grantedAt"] : new Date((deps.now ?? Date.now)()).toISOString();
+  const reverseRow = { ...reverseKey, entityType: "PROJECT_MEMBER", role: g.role, grantedAt };
+  const reversePut: Write = { Put: { TableName: deps.tableName, Item: reverseRow,
+    ...(reverse === undefined
+      ? { ConditionExpression: "attribute_not_exists(pk)" }
+      : { ConditionExpression: "#role = :role", ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":role": g.role } }),
+  } };
   await transact(deps, [
     { ConditionCheck: { TableName: deps.signInTableName, Key: personKey(g.personId), ...fence(source) } },
     { ConditionCheck: { TableName: deps.signInTableName, Key: memberKey, ...fence(member) } },
-    { Put: { TableName: deps.tableName, Item: { ...key, entityType: "MEMBERSHIP", ownerKey: g.personId, projectName: g.projectName, role: g.role, grantId: randomUUID() }, ...fence(undefined) } },
+    ...(existing === undefined ? [{ Put: { TableName: deps.tableName, Item: { ...key, entityType: "MEMBERSHIP", ownerKey: g.personId, projectName: g.projectName, role: g.role, grantId: randomUUID(), grantedAt }, ...fence(undefined) } } as Write] : []),
+    reversePut,
   ], dryRun);
-  if (!dryRun && (await get(deps, key))?.["role"] !== g.role) throw unavailable();
+  if (!dryRun && ((await get(deps, key))?.["role"] !== g.role || (await get(deps, reverseKey))?.["role"] !== g.role)) throw unavailable();
   return true;
 }
 export async function backfillCorePage(dependencies: CoreBackfillDependencies, value: unknown): Promise<CoreBackfillReport> {

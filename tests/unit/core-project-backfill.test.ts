@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { listProjectMembers, projectMemberKey } from "../../packages/broker/src/aws/admin-actions.js";
 import { backfillCorePage, checkCorePeople, planCoreProjectWrites } from "../../packages/broker/src/aws/core-project-backfill.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -90,7 +91,20 @@ it("reports people gaps read-only, then writes only explicit valid people and gr
   expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 4, failed: 0 });
   expect(await checkCorePeople(deps, operatorInput())).toMatchObject({ gaps: [] });
   expect(db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toMatchObject({ companyId: A, role: "member" });
+  expect(await listProjectMembers({ tableName: "state", documentClient: deps.documentClient } as never, "web")).toEqual([{ developerId: personId, role: "developer", grantedAt: at }]);
+  expect(db.get(projectMemberKey("web", personId).pk, projectMemberKey("web", personId).sk)).toEqual({ ...projectMemberKey("web", personId), entityType: "PROJECT_MEMBER", role: "developer", grantedAt: at });
   expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 0, skippedExisting: 4 });
+});
+it("refuses a reverse member row with a different role without changing either row", async () => {
+  const { db, deps } = setup(); seedPerson(db);
+  db.set({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", companyId: A, personId, role: "member", joinedAt: at });
+  const key = projectMemberKey("web", personId);
+  const foreignRole = { ...key, entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: at };
+  db.set(foreignRole);
+  const before = db.get(key.pk, key.sk);
+  expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ skippedConflict: 1, written: 2 });
+  expect(db.get(key.pk, key.sk)).toEqual(before);
+  expect(db.get(`MEMBER#${personId}`, "PROJECT#web")).toBeUndefined();
 });
 it("never invents membership for an unknown/revoked person or overwrites foreign membership", async () => {
   for (const kind of ["unknown", "revoked", "foreign"]) {
