@@ -21,12 +21,13 @@ interface StopWorld {
   cancels: WorkerInvocation[];
 }
 
-function world(options: { moneyStop?: boolean; features?: string[]; admission?: Admission } = {}): StopWorld {
+function world(options: { moneyStop?: boolean; features?: string[]; admission?: Admission; understandFirst?: boolean } = {}): StopWorld {
   const kept: StopWorld["kept"] = [];
   const onWait: StopWorld["onWait"] = {};
   const dispatcher: { run?: () => Promise<unknown> } = {};
   const harness: HarnessOptions = {
     machines: { features: options.features ?? FEATURES },
+    ...(options.understandFirst === undefined ? {} : { understandFirst: options.understandFirst }),
     ...(options.admission === undefined ? {} : { admission: options.admission }),
     ...(options.moneyStop === false ? {} : {
       extra: (clock) => ({
@@ -98,6 +99,27 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     await cancelTask(h.deps, run.taskId);
     expect(await operationOf(h, run)).toMatchObject({ status: "FAILED" });
     expect((await h.flow.get(h.owner, run.taskId)).workflow?.blockReason).not.toBe("You stopped this step. Retry to run it again.");
+    expect(kept).toEqual([]);
+  });
+
+  it("does not block the next step a run that succeeded during the wait already started", async () => {
+    const w = world({ understandFirst: true }); const { h, kept, onWait } = w;
+    await h.registerProject();
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a health endpoint", workflow: true });
+    const drain = async (): Promise<void> => { for (let round = 0; round < 12; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) return; h.clock.advance(70); } };
+    await drain();
+    const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const prepare = h.machines.delivered(workspace.machine!.machineId).at(-1)!;
+    h.machines.finish(workspace.machine!.machineId, prepare.operationId);
+    await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED", outcome: { kind: "prepared" } });
+    await drain();
+    const understand = h.machines.delivered(workspace.machine!.machineId).at(-1)!;
+    expect(understand).toMatchObject({ kind: "task", payload: { workflowMode: "UNDERSTAND" } });
+    onWait.run = async () => {
+      await h.flow.recordResult({ workspaceId: workspace.id, operationId: understand.operationId, fence: understand.fence, status: "SUCCEEDED", outcome: { kind: "understood", assessment: { kind: "ready", path: "QUICK", restatement: "Add a health endpoint", assumptions: ["It returns 200"] } } });
+    };
+    await cancelTask(h.deps, started.task.taskId);
+    expect((await h.flow.get(h.owner, started.task.taskId)).workflow).toMatchObject({ stage: "PLAN", state: "RUNNING" });
     expect(kept).toEqual([]);
   });
 

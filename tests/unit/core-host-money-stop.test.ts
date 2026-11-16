@@ -87,6 +87,33 @@ describe("where a run stands against the caps (runSpendState)", () => {
     expect(await w.state(A, other)).toBe("within");
   });
 
+  it("at a full day, stops a run whose own hold is used up even under the task cap; a hold of an earlier day gives no room today", async () => {
+    // With a $20 task cap a start holds the full $6 planning allowance.
+    const w = setup({ ...SETTINGS, taskCapMicros: 20_000_000, companyDayCapMicros: 12_000_000 });
+    const mine = randomUUID();
+    await w.start(A, mine);
+    await w.start(A, randomUUID());
+    await w.book(A, mine, 6_000_000);
+    // Its $6 hold is used up, the day is at $12 of $12: no room left anywhere, though the task is under its cap.
+    expect(await w.state(A, mine)).toBe("company_day_cap");
+    // A hold taken yesterday, with room: today's full day stops the run all the same.
+    const store = new MemoryDocumentStore();
+    const yesterday = new Date(`2026-11-14T10:00:00.000Z`);
+    const old = createHostedLedger({ store, metering: exactMeter, now: () => yesterday });
+    const staged = await createHostedAdmission({ settings: SETTINGS, store, ledger: old, now: () => yesterday, runStopWired: true }).stage({ companyId: A, idempotencyKey: "s", action: "task.start", subject: { type: "task", id: mine }, taskStart: { workflow: true, path: "FULL", pathFrom: "request" } });
+    expect((await store.transact([...staged.items])).applied).toBe(true);
+    const today = createHostedLedger({ store, metering: exactMeter, now: () => NOW });
+    await today.recordUsage({ companyId: A, entryId: "big", at: NOW.toISOString(), taskId: randomUUID(), usage: { provider: "p", modelId: "m", tokens: { input: 25_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } } });
+    expect(await runSpendState({ store, ledger: today, settings: SETTINGS, now: () => NOW }, A, mine)).toBe("company_day_cap");
+  });
+
+  it("reads a task with unpriced usage as unknown even when the day reads", async () => {
+    const w = setup();
+    const task = randomUUID();
+    await w.store.put({ item: { pk: costPartition(A, task), sk: "TOTAL", entityType: "COST_TOTAL", taskId: task, companyId: A, micros: 0, entries: 1, unpricedEntries: 1 } });
+    expect(await w.state(A, task)).toBe("spend_unknown");
+  });
+
   it("reads spend that is not dollars as unknown (fails closed), and so a read that throws", async () => {
     const w = setup();
     const task = randomUUID();
