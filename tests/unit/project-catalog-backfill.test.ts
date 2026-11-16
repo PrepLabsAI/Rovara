@@ -57,6 +57,25 @@ it("verify/mark writes only after exact comparison, explicit mark and apply", as
   expect(w.db.get(key.pk, key.sk)).toBeUndefined();
   expect(await w.run("undo-run", { dryRun: false })).toMatchObject({ ok: false });
 });
+it("undo preview counts deletes and enforces the same 99-delete boundary as apply", async () => {
+  for (const count of [99, 100]) {
+    const w = world();
+    for (let i = 0; i < Math.floor(count / 2); i++) {
+      const name = `p${String(i).padStart(3, "0")}`; w.seed(name, A); await w.apply(A, [name]);
+    }
+    if (count % 2 === 1) {
+      const name = "tail";
+      w.db.set({ ...orgProjectCatalogKey(A, name), entityType: "PROJECT_CATALOG", companyId: A, name, latestRevision: 1, backfillRunId: "run-a" });
+    }
+    // Two tagged deletes per full project; the optional catalog-only row reaches an odd boundary.
+    w.send.mockClear();
+    const preview = await w.run("undo-run");
+    expect(preview).toMatchObject({ ok: count <= 99, ...(count <= 99 ? { deleteCount: count } : { error: "unavailable" }), written: 0 });
+    expect(w.send.mock.calls.every(([c]) => c.constructor.name !== "TransactWriteCommand")).toBe(true);
+    const applied = await w.run("undo-run", { dryRun: false });
+    expect(applied).toMatchObject({ ok: count <= 99, ...(count <= 99 ? { deleteCount: count } : { error: "unavailable" }) });
+  }
+});
 it("verify refuses extra, foreign and missing core history; undo deletes only the run's rows", async () => {
   const w = world(); w.seed("web", A); w.seed("foreign", B); await w.apply();
   await w.apply(B, ["foreign"], { runId: "run-b" });
@@ -104,6 +123,9 @@ it("mark supports its full atomic maximum and refuses the next row without write
   for (const count of [99, 100]) {
     const w = world();
     for (let i = 0; i < count; i++) { const name = `p${String(i).padStart(3, "0")}`; w.seed(name, A); await w.apply(A, [name]); }
+    w.send.mockClear();
+    expect(await w.run("verify", { mark: true })).toMatchObject({ ok: count === 99, ...(count === 100 ? { error: "unavailable" } : {}) });
+    expect(w.send.mock.calls.every(([c]) => c.constructor.name !== "TransactWriteCommand")).toBe(true);
     w.send.mockClear();
     expect(await w.run("verify", { mark: true, dryRun: false })).toMatchObject({ ok: count === 99, written: count === 99 ? 1 : 0 });
     if (count === 100) expect(w.send.mock.calls.every(([c]) => c.constructor.name !== "TransactWriteCommand")).toBe(true);

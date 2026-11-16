@@ -24,6 +24,7 @@ export interface CatalogBackfillReport {
   ok: boolean; written: number; error?: "invalid_input" | "unavailable" | "conflict";
   companies?: CompanyDiscovery[]; mappings?: Array<{ companyId: string; projectNames: string[] }>;
   continuation?: string; missing?: string[]; extra?: string[]; conflicts?: string[];
+  deleteCount?: number;
 }
 // ONE total I/O budget, including history, core copies and all transaction writes.
 function bounded(deps: CoreBackfillDependencies) {
@@ -143,9 +144,8 @@ async function verify(deps: Deps, companyId: string, runId: string, mark: boolea
   }
   const missing = [...expected.keys()].filter(n => !actual.has(n)), extra = [...actual].filter(n => !expected.has(n));
   if (missing.length || extra.length || conflicts.length) return { ok: false, written: 0, missing, extra, conflicts: [...new Set(conflicts)] };
+  if (mark && own.length > 99) throw fail();
   if (!mark || dryRun) return { ok: true, written: 0, missing, extra, conflicts };
-  // DynamoDB's 100-item transaction ceiling: fail closed rather than publishing an unfenced verification.
-  if (own.length > 99) throw fail();
   const writes: Write[] = own.map((row, index) => index === 0
     ? { Put: { TableName: deps.tableName, Item: { ...row, backfillMarked: true }, ...fence(row) } }
     : { ConditionCheck: { TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, nameOf(row)), ...fence(row) } });
@@ -177,7 +177,7 @@ async function undo(deps: Deps, companyId: string, runId: string, dryRun: boolea
   if (!dryRun && writes.length > 0) await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { ConditionCheck: { TableName: deps.tableName, Key: flagKey, ...fence(undefined) } }, ...writes,
   ] }));
-  return { ok: true, written: dryRun ? 0 : writes.length };
+  return { ok: true, written: dryRun ? 0 : writes.length, deleteCount: writes.length };
 }
 /** Input is runtime-checked; customer identifiers appear only in operator reports, never public route errors. */
 export async function catalogBackfill(dependencies: CoreBackfillDependencies, value: unknown): Promise<CatalogBackfillReport> {

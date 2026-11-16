@@ -2170,7 +2170,7 @@ async function registerProject(
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
-    if (project.companyId === undefined && !duplicate) brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+
     return {
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
@@ -2270,6 +2270,7 @@ async function registerProject(
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+
     // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
     if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
     try {
@@ -2375,7 +2376,6 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
       corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
-    if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
     const repairLegacy = snapshot.catalog?.latestRevision !== targetRevision;
     if (!repairLegacy && corePlan.status !== "ready") return;
     const key = projectCatalogKey(projectName);

@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { canonicalJson, OrgIdSchema, OrgRoleSchema, StoredProjectDefinitionSchema, orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
+import { canonicalJson, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, StoredProjectDefinitionSchema, orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { GithubInstallationBindings } from "./github-credentials.js";
 import { projectKey } from "./project-records.js";
@@ -69,12 +69,12 @@ function matchingRevision(row: Row, source: Row, company: string) {
   return row["entityType"] === "PROJECT" && owned(row, company) && equal(content(row), content(source));
 }
 /** The broker appends these writes to its legacy transaction. Backfill supplies the explicit operator company.
- * A missing company in forward mode is a reported skip, with zero core reads. */
-export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string, backfillRunId?: string): Promise<{ status: "ready" | "existing" | "unknown_company"; writes: Write[] }> {
+ * Forward writes follow D1 when the legacy source has no explicit company. */
+export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string, backfillRunId?: string): Promise<{ status: "ready" | "existing"; writes: Write[] }> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw conflict();
   const source = value as Row;
-  const companyValue = mappedCompany === undefined ? source["companyId"] : mappedCompany;
-  if (companyValue === undefined) return { status: "unknown_company", writes: [] };
+  // D1: legacy projects without an explicit company belong to the implicit company.
+  const companyValue = mappedCompany === undefined ? source["companyId"] ?? IMPLICIT_COMPANY_ID : mappedCompany;
   const parsedCompany = OrgIdSchema.safeParse(companyValue);
   if (!parsedCompany.success || !owned(source, parsedCompany.data)) throw conflict();
   const company = parsedCompany.data, definition = sourceDefinition(source);
