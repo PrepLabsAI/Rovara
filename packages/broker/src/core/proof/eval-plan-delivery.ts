@@ -9,7 +9,7 @@
 // the company's own (`cache(companyId)`) and read at the plan's own key. Any fault, a missing source, or an answer over `EVAL_PLAN_DELIVERY_MAX_BYTES` is "not_available": the worker then reads
 // "not connected" and spends nothing. A refusal is one fixed sentence that names no company, project or source.
 import {
-  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, agentXError, evalBaseCacheKey,
+  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey,
   type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalPlanDelivery, type EvalSpendApproval,
 } from "@agentx/contracts";
 import { isLiveOperation } from "../e2e/uploads-chunks.js";
@@ -20,10 +20,13 @@ const NOT_AVAILABLE: EvalPlanDelivery = Object.freeze({ status: "not_available" 
 /** The project's scope, always the run's own: the company that runs the operation and the project of the operation's own task. */
 export interface EvalPlanScope { readonly companyId: string; readonly project: string }
 
+/** The run's own pinned base: each repository's base commit, from the operation's own stored dispatch payload (`workflowBase`, the broker's pin), never the request. Undefined when it has none. */
+export interface EvalPlanRun { readonly bases: ReadonlyArray<{ readonly repositoryId: string; readonly baseCommitSha: string }> | undefined }
+
 /** The broker's trusted sources. Each one is asked only for the run's own scope, and each answer is checked against it again here. */
 export interface EvalPlanSources {
-  /** The confirmed final-check plan of this company's project (Rovara's own selection, inventory and pins), or undefined when there is none. */
-  plan(scope: EvalPlanScope): Promise<unknown>;
+  /** The confirmed final-check plan of this company's project (Rovara's own selection, inventory and pins), or undefined when there is none. `run` names the run's pinned base (DEC 253j(1)). */
+  plan(scope: EvalPlanScope, run: EvalPlanRun): Promise<unknown>;
   /** The persisted spend approval of this company's project (F3e `createEvalSpendCapabilities(...).approval`), or undefined when it is not wired here. */
   approval(scope: EvalPlanScope): EvalSpendApproval | undefined;
   /** The company's own base-score cache (`createDocumentBaseScoreCache` for this company), or undefined when it is not wired here. */
@@ -77,7 +80,8 @@ export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operati
   const scope: EvalPlanScope = Object.freeze({ companyId: deps.companyId, project });
   const log = (event: Parameters<NonNullable<EvalPlanDeliveryDeps["log"]>>[0]): void => { try { deps.log?.(event); } catch { /* logging never changes the answer */ } };
   try {
-    const plan = record(await deps.sources.plan(scope));
+    const base = WorkflowReviewBaseSchema.safeParse(payload["workflowBase"]);
+    const plan = record(await deps.sources.plan(scope, Object.freeze({ bases: base.success ? base.data : undefined })));
     if (plan === undefined) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
     const key = record(plan["key"]);
     // The plan must be this company's and this project's, in its own fields and in its cache key.

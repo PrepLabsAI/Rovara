@@ -1,5 +1,6 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
 import { withEvalChangedPromptClassifier } from "./verification/eval-changed-prompt.js";
+import { withEvalPinnedCandidate } from "./verification/eval-plan-source.js";
 import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact, type BrowserEvidenceSignInAnswer } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
@@ -709,7 +710,8 @@ async function runTask(
             status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
           });
           const running = (dependencies.evalFinalCheck === undefined || status !== "verified" ? evaluate()
-            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, evaluate))
+            // DEC 253j(1): the trusted plan's per-task hashes come from this same pinned candidate.
+            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, () => withEvalPinnedCandidate(repositories, candidateBefore, stop.signal, evaluate)))
             .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
         } catch (error) {
