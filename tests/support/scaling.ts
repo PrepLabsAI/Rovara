@@ -32,6 +32,8 @@ export type ScalingOptions = {
   minSampleMs?: number;
   /** Approximate bytes one unit of n adds to the input. Default 1. Use 0 when the work builds no input that grows with n. */
   unitBytes?: number;
+  /** Bytes the work holds in memory whatever n is (registered values, a fixed table): they are in the cache's working set too, so they count toward `maxInputBytes` together with the k*N input. Default 0. */
+  fixedBytes?: number;
   /** The largest allowed k*N input in bytes, default 262144 (256 KiB): larger inputs leave the CPU cache and read a steady ~25 on CI for linear code. Shrink N rather than raise this. */
   maxInputBytes?: number;
   /** Generous hang limit for ONE timed sample, in ms. Default 30000. */
@@ -60,8 +62,9 @@ function settings(options: ScalingOptions) {
   const label = options.label ?? "scaling";
   const unitBytes = options.unitBytes ?? 1;
   const maxInputBytes = options.maxInputBytes ?? 262_144;
-  if (!(options.n >= 1) || !(k > 1) || runs < 1 || !(maxRatio > k) || !(unitBytes >= 0)) throw new Error(`${label}: bad scaling options`);
-  const inputBytes = options.n * k * unitBytes;
+  const fixedBytes = options.fixedBytes ?? 0;
+  if (!(options.n >= 1) || !(k > 1) || runs < 1 || !(maxRatio > k) || !(unitBytes >= 0) || !(fixedBytes >= 0)) throw new Error(`${label}: bad scaling options`);
+  const inputBytes = options.n * k * unitBytes + fixedBytes;
   if (inputBytes > maxInputBytes) throw new Error(`${label}: the ${k}N input is about ${Math.round(inputBytes)} bytes, over the ${maxInputBytes} byte limit. Larger inputs leave the CPU cache and CI shows a steady ratio of about 25 for linear code. Shrink N (the repeat count keeps a small N stable).`);
   return { n: options.n, k, runs, maxRatio, floorMs, minSampleMs, hangMs, label };
 }

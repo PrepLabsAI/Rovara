@@ -283,6 +283,25 @@ describe("inert text", () => {
     }
   });
 
+  // SCALING-CAP-BLIND: the scaling checks above stop at 256 KiB, so they cannot see a regression that reads past the cap. These pin the cap itself: the last character inside it counts, the first one past it never does,
+  // and a hostile text far past it gives exactly what the text cut at the cap gives (the cap refuses; it does not slow down).
+  it("the 256 KiB read cap is exact: a word that ends inside it is kept, one that starts at the cap is never read", () => {
+    const CAP = 262_144;
+    const at = (gap: number) => `${"x".repeat(10)}${" ".repeat(gap)}tail`;
+    expect(at(CAP - 10 - 4)).toHaveLength(CAP);
+    expect(inertEvidenceText(at(CAP - 10 - 4), 300)).toBe("xxxxxxxxxx tail");
+    expect(inertEvidenceText(at(CAP - 10 - 3), 300)).toBe("xxxxxxxxxx");
+    expect(inertEvidenceText(at(CAP - 10 + 1), 300)).toBe("xxxxxxxxxx");
+  });
+  it("a hostile text past the cap reads as the text cut at the cap, for every hostile shape, and the far end never changes the answer", () => {
+    const CAP = 262_144;
+    for (const unit of ["![", "[](", "<", "&", "a", " ", "\n"] as const) {
+      const base = unit.repeat(Math.ceil(CAP / unit.length)).slice(0, CAP);
+      const expected = inertEvidenceText(base, 300);
+      for (const tail of ["x", "Z".repeat(1_000), "![a](b)".repeat(100_000), " ".repeat(2_000_000)]) expect(inertEvidenceText(`${base}${tail}`, 300), `${JSON.stringify(unit)} + ${String(tail.length)} chars`).toBe(expected);
+    }
+  });
+
   it("reads at most 256 KiB of raw input", () => {
     expect(inertEvidenceText(`${"x".repeat(10)}${" ".repeat(300_000)}tail`, 300)).toBe("xxxxxxxxxx");
     expect(inertEvidenceText(`${"x".repeat(10)} tail`, 300)).toBe("xxxxxxxxxx tail");

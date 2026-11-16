@@ -2,7 +2,7 @@
 // Every claim has a control: a label that is on every answer, a caller that is the only one served, a set that must be exactly the pinned one.
 import { request } from "node:http";
 import { connect } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GENERAL_FAKES_SET_PATH, GENERAL_FAKES_SUMMARY_MAX_COUNT, GENERAL_FAKE_ANSWER_HEADER, GENERAL_FAKE_ANSWER_LABEL, GENERAL_FAKE_CANNOT_ANSWER_BODY, buildGeneralFakesSetBytes, buildOpenApiFake, parseGeneralFakesSummaryText,
   type GeneralFakeServiceFake,
@@ -23,7 +23,7 @@ const DOCUMENT = {
 };
 const FAKES: GeneralFakeServiceFake[] = [{ status: "built", fake: buildOpenApiFake(DOCUMENT, "openapi.json") }, { status: "not_built", reason: "spec_ambiguous" }];
 const SET = buildGeneralFakesSetBytes({ workspaceId: WORKSPACE, operationId: OPERATION, fakes: FAKES })!;
-const ARGS = { listen: "127.0.0.1", caller: "127.0.0.1", digest: SET.digest, workspaceId: WORKSPACE, operationId: OPERATION } as const;
+const ARGS = { listen: "127.0.0.1", caller: "127.0.0.1", digest: SET.digest, workspaceId: WORKSPACE, operationId: OPERATION, lifetimeMs: 600_000 } as const;
 
 function memoryFiles(): SummaryFiles & { files: Map<string, string>; failWrites: boolean } {
   const files = new Map<string, string>();
@@ -57,9 +57,9 @@ function call(port: number, method: string, path: string, body?: string): Promis
 const label = (answer: Answer) => answer.headers[GENERAL_FAKE_ANSWER_HEADER];
 
 describe("the program's arguments", () => {
-  const good = ["--listen", "172.30.5.16", "--caller", "172.30.5.3", "--digest", "a".repeat(64), "--workspace", WORKSPACE, "--operation", OPERATION];
+  const good = ["--listen", "172.30.5.16", "--caller", "172.30.5.3", "--digest", "a".repeat(64), "--workspace", WORKSPACE, "--operation", OPERATION, "--lifetime-ms", "600000"];
   it("are parsed strictly", () => {
-    expect(parseGeneralFakesServeArguments(good)).toEqual({ listen: "172.30.5.16", caller: "172.30.5.3", digest: "a".repeat(64), workspaceId: WORKSPACE, operationId: OPERATION });
+    expect(parseGeneralFakesServeArguments(good)).toEqual({ listen: "172.30.5.16", caller: "172.30.5.3", digest: "a".repeat(64), workspaceId: WORKSPACE, operationId: OPERATION, lifetimeMs: 600_000 });
     const refused = (argv: string[]) => expect(() => parseGeneralFakesServeArguments(argv)).toThrow(GeneralFakesHelperRefused);
     refused([...good, "--port", "80"]);
     refused([...good, "--caller", "172.30.5.4"]);
@@ -70,7 +70,13 @@ describe("the program's arguments", () => {
     refused(good.map((token) => (token === "172.30.5.3" ? "::1" : token)));
     refused(good.map((token) => (token === "a".repeat(64) ? "abc" : token)));
     refused(good.map((token) => (token === WORKSPACE ? "x" : token)));
-    refused(good.slice(0, 8));
+    refused(good.slice(0, 10));
+    refused(good.map((token) => (token === "600000" ? "999" : token)));
+    refused(good.map((token) => (token === "600000" ? "86400001" : token)));
+    refused(good.map((token) => (token === "600000" ? "1.5e5" : token)));
+    refused(good.map((token) => (token === "600000" ? "-600000" : token)));
+    refused(good.map((token) => (token === "600000" ? "0600000" : token)));
+    refused([...good, "--lifetime-ms", "600000"]);
     refused(good.map((token) => (token === "--digest" ? "--digets" : token)));
     refused([]);
   });
@@ -78,6 +84,39 @@ describe("the program's arguments", () => {
     expect(isGeneralFakesSummarizeRequest(["--summarize"])).toBe(true);
     expect(isGeneralFakesSummarizeRequest(["--summarize", "--listen", "1.2.3.4"])).toBe(false);
     expect(isGeneralFakesSummarizeRequest([])).toBe(false);
+  });
+});
+
+describe("the helper's own deadline", () => {
+  it("closes every connection and exits when the lifetime is over, with no help from the worker", async () => {
+    const exits: number[] = [];
+    const files = memoryFiles();
+    const helper = await serveGeneralFakes({ ...ARGS, lifetimeMs: 2_000 }, { readFile: read(), files, port: 0, summaryPath: SUMMARY_PATH, exit: (code) => { exits.push(code); } });
+    running.push(helper);
+    expect((await call(helper.port, "GET", "/s/0/pets/4")).status).toBe(200);
+    expect(exits).toEqual([]);
+    await vi.waitFor(() => { expect(exits).toEqual([0]); }, { timeout: 10_000 });
+    expect(helper.server.listening).toBe(false);
+    await expect(call(helper.port, "GET", "/s/0/pets/4")).rejects.toThrow();
+  });
+  it("is cancelled by a normal close (no exit is called for a helper that was already closed)", async () => {
+    const exits: number[] = [];
+    const helper = await serveGeneralFakes({ ...ARGS, lifetimeMs: 500 }, { readFile: read(), files: memoryFiles(), port: 0, summaryPath: SUMMARY_PATH, exit: (code) => { exits.push(code); } });
+    await helper.close();
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(exits).toEqual([]);
+  });
+  it("still exits at the deadline with a connection held open (the held connection is cut)", async () => {
+    const exits: number[] = [];
+    const helper = await serveGeneralFakes({ ...ARGS, lifetimeMs: 500 }, { readFile: read(), files: memoryFiles(), port: 0, summaryPath: SUMMARY_PATH, exit: (code) => { exits.push(code); } });
+    running.push(helper);
+    const socket = connect(helper.port, "127.0.0.1");
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    socket.on("error", () => undefined);
+    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    await vi.waitFor(() => { expect(exits).toEqual([0]); }, { timeout: 5000 });
+    await closed;
+    socket.destroy();
   });
 });
 

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { codeEnvReferences } from "../../packages/worker/src/env-detect/env-config.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 type Files = Record<string, string>;
 async function detect(files: Files) {
@@ -77,6 +78,32 @@ describe("a dependency found from code", () => {
   it("skips a test folder and a dependency folder, and reads no more than the source budget", async () => {
     const detection = await detect({ "tests/db.test.ts": "process.env.REDIS_URL;", "node_modules/x/index.js": "process.env.MYSQL_HOST;" });
     expect(detection.dependencies).toBeUndefined();
+  });
+});
+
+// ENV-DETECT-MILD-QUADRATIC: blanking the comment and docstring blocks rebuilt the whole text once per block (n^1.7: 4x the size cost 10 to 12x). It is one pass now, and these pin both the answers and the growth.
+describe("blanking comments in one pass", () => {
+  it("blanks every block kind and keeps every other character, line break and line number (golden)", () => {
+    const js = ["const a = 1; /* process.env.DATABASE_URL */ const b = process.env.REDIS_URL;", "/* one", "two */ const c = process.env.MYSQL_HOST;", "/* x */ /* y */ process.env.KAFKA_BROKERS"].join("\n");
+    expect(codeEnvReferences("src/a.ts", js)).toEqual([{ name: "REDIS_URL", line: 1 }, { name: "MYSQL_HOST", line: 3 }, { name: "KAFKA_BROKERS", line: 4 }]);
+    const py = ['"""', 'os.environ["DATABASE_URL"]', '"""', "x = os.environ[\"REDIS_URL\"]", "'''", 'os.environ["MYSQL_HOST"]', "'''", 'y = os.getenv("MONGO_URI")'].join("\n");
+    expect(codeEnvReferences("app/db.py", py)).toEqual([{ name: "REDIS_URL", line: 4 }, { name: "MONGO_URI", line: 8 }]);
+  });
+  it("treats docstrings of the two kinds that overlap as one blanked span, and keeps what follows (golden)", () => {
+    // A `'''` block opens inside a `"""` block and closes after it: the whole stretch is blanked, the line after it is read.
+    const py = ['"""', "'''", 'os.environ["DATABASE_URL"]', '"""', 'os.environ["REDIS_URL"]', "'''", 'os.environ["MYSQL_HOST"]'].join("\n");
+    expect(codeEnvReferences("app/db.py", py)).toEqual([{ name: "MYSQL_HOST", line: 7 }]);
+  });
+  it("an unterminated block opener is not a block, and a block comment is not closed by a later one's opener", () => {
+    expect(codeEnvReferences("src/a.ts", "/* never closed\nprocess.env.DATABASE_URL")).toEqual([{ name: "DATABASE_URL", line: 2 }]);
+    expect(codeEnvReferences("app/db.py", '"""never closed\nos.environ["DATABASE_URL"]')).toEqual([{ name: "DATABASE_URL", line: 2 }]);
+  });
+  // The hostile shape: thousands of tiny blocks (an opener repeated with its closer right behind it), up to the 5000 block cap and past it. 8N stays under the helper's 256 KiB input limit.
+  it.each([["src/a.ts", "/**/"], ["src/a.ts", "/*/"], ["app/db.py", '""" '], ["app/db.py", "''' "], ["app/db.py", "'"], ["app/db.py", '"'], ["src/a.ts", "/*"]])("grows linearly with a file of %s made of %j", (path, unit) => {
+    expectLinearScaling((n) => {
+      const text = `process.env.DATABASE_URL\nos.environ["REDIS_URL"]\n${unit.repeat(Math.ceil(n / unit.length))}`.slice(0, n);
+      return () => codeEnvReferences(path, text);
+    }, { n: 2_048, runs: 3, label: `codeEnvReferences ${path} ${unit}` });
   });
 });
 
