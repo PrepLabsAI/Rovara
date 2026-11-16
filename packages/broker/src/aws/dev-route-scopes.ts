@@ -109,6 +109,11 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // The Home number "Corrections you had to repeat" (core-host/lessons-repeats-api.ts): one project (its roster), or the company (owners and admins). Full access only, live membership.
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/repeats", requires: "full" },
   { method: "GET", path: "/v1/dev/lessons/repeats", requires: "full" },
+  // Lane W part 4: the company administrator's routes; full access only (DEC ANSWER-4), then a live admin or owner membership, and a fresh step-up to change anyone.
+  { method: "GET", path: "/v1/dev/company/members", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/members/{personId}/removal-preview", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/members/{personId}/removal", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/members/{personId}/role", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },

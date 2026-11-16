@@ -112,7 +112,7 @@ function expandRegex(source: string): string[] {
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
   // The company reads' paths are constants of their contract (#649), which the router imports.
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts"]) {
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/broker/src/aws/company-member-routes.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
@@ -196,6 +196,8 @@ async function setUp(mode: "linking" | "developer") {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   const config: DeveloperApiConfiguration = {
     companies: { companyOf: async () => IMPLICIT_COMPANY_ID },
+    // Lane W part 4: the company admin routes need the member helper to exist; this one finds nobody, so only the route table's answer is tested here.
+    companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
