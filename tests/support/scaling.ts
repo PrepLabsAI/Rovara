@@ -7,8 +7,10 @@
  * Linear work gives a ratio near k (8), quadratic work near k*k (64). The ratio bound (24) sits between them with a wide margin,
  * and a generous per-run hang limit still catches work that never finishes.
  *
- * Pick N so that one run at N takes a few milliseconds on a fast machine; the batch calibration below also
- * repeats the work until one sample is long enough to time. Prove each use with a mutant: make the code under test
+ * The work is repeated inside one timed sample until the fastest N sample takes at least `minSampleMs` (20 ms), so a
+ * single timer tick, GC pause or scheduler hiccup cannot dominate the N time. The repeat count is calibrated on N
+ * from warm, fastest-of-several samples (a single cold sample under-counts the real cost) and then reused for k*N.
+ * Prove each use with a mutant: make the code under test
  * quadratic and the test must fail.
  */
 export type ScalingOptions = {
@@ -22,13 +24,21 @@ export type ScalingOptions = {
   maxRatio?: number;
   /** Times below this many ms count as this many ms, so timer noise on a tiny N cannot fail a linear run. Default 2. */
   floorMs?: number;
-  /** One sample must be at least this long, so the work is repeated (the same count at N and k*N). Default 8. */
+  /** The N sample (fastest of the timed runs) must be at least this long, so the work is repeated inside one sample (the same count at N and k*N). Default 20. */
   minSampleMs?: number;
   /** Generous hang limit for ONE timed sample, in ms. Default 30000. */
   hangMs?: number;
   /** Shown in failure messages. */
   label?: string;
 };
+
+const MAX_BATCHES = 1 << 16;
+
+/** The next repeat count: enough that a sample of `tookMs` at `batches` reaches 1.5x the target, at least doubled. */
+function grow(batches: number, tookMs: number, minSampleMs: number) {
+  const wanted = Math.ceil((batches * minSampleMs * 1.5) / Math.max(tookMs, 0.01));
+  return Math.min(MAX_BATCHES, Math.max(batches * 2, wanted));
+}
 
 export type ScalingResult = { ms: number; msK: number; ratio: number; batches: number; n: number; k: number };
 
@@ -37,7 +47,7 @@ function settings(options: ScalingOptions) {
   const runs = options.runs ?? 5;
   const maxRatio = options.maxRatio ?? 3 * k;
   const floorMs = options.floorMs ?? 2;
-  const minSampleMs = options.minSampleMs ?? 8;
+  const minSampleMs = options.minSampleMs ?? 20;
   const hangMs = options.hangMs ?? 30_000;
   const label = options.label ?? "scaling";
   if (!(options.n >= 1) || !(k > 1) || runs < 1 || !(maxRatio > k)) throw new Error(`${label}: bad scaling options`);
@@ -63,12 +73,6 @@ export function expectLinearScaling(make: (n: number) => () => unknown, options:
     return performance.now() - start;
   };
   let batches = 1;
-  while (batches < 4096) {
-    const took = sample(small, batches);
-    if (took >= s.minSampleMs) break;
-    if (took > s.hangMs) break;
-    batches *= 2;
-  }
   const fastest = (work: () => unknown) => {
     sample(work, batches); // warm-up
     let best = Infinity;
@@ -79,7 +83,12 @@ export function expectLinearScaling(make: (n: number) => () => unknown, options:
     }
     return best;
   };
-  const ms = fastest(small);
+  // Calibrate on N: measure the fastest of the warm runs, and repeat the work more until that is long enough.
+  let ms = fastest(small);
+  while (ms < s.minSampleMs && batches < MAX_BATCHES) {
+    batches = grow(batches, ms, s.minSampleMs);
+    ms = fastest(small);
+  }
   if (ms > s.hangMs) return verdict(s.label, s, ms, ms, batches);
   const msK = fastest(large);
   return verdict(s.label, s, ms, msK, batches);
@@ -96,12 +105,6 @@ export async function expectLinearScalingAsync(make: (n: number) => () => unknow
     return performance.now() - start;
   };
   let batches = 1;
-  while (batches < 4096) {
-    const took = await sample(small, batches);
-    if (took >= s.minSampleMs) break;
-    if (took > s.hangMs) break;
-    batches *= 2;
-  }
   const fastest = async (work: () => unknown) => {
     await sample(work, batches); // warm-up
     let best = Infinity;
@@ -112,7 +115,11 @@ export async function expectLinearScalingAsync(make: (n: number) => () => unknow
     }
     return best;
   };
-  const ms = await fastest(small);
+  let ms = await fastest(small);
+  while (ms < s.minSampleMs && batches < MAX_BATCHES) {
+    batches = grow(batches, ms, s.minSampleMs);
+    ms = await fastest(small);
+  }
   if (ms > s.hangMs) return verdict(s.label, s, ms, ms, batches);
   const msK = await fastest(large);
   return verdict(s.label, s, ms, msK, batches);
