@@ -42,11 +42,6 @@ export function applyPolicyHook(registry: AdapterRegistry, settings: PolicyHookS
     ...(options.audit === undefined ? {} : { audit: options.audit }),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
-  return applyPolicyHookClient(registry, client, options);
-}
-
-/** Binds the same admission and approval guards for inline and hosted pinned-key clients. */
-export function applyPolicyHookClient(registry: AdapterRegistry, client: PolicyHookClient, options: ApplyPolicyHookOptions = {}): PolicyHookClient {
   const admissionName = registry.names("admission")[0];
   const admission = registry.require("admission");
   const approversName = registry.names("approvers")[0];

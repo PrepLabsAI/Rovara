@@ -4,8 +4,6 @@ import { describe, expect, it } from "vitest";
 import { createAdapterRegistry, parsePluginConfig } from "../../packages/broker/src/ports/adapter-registry.js";
 import { registerCodeDefaults } from "../../packages/broker/src/ports/policy-defaults.js";
 import { POLICY_HOOK_ADAPTER_NAME, PolicyHookSetupError, applyPolicyHook } from "../../packages/broker/src/core/policy-hook/index.js";
-import { applyHostedPolicyHook } from "../../packages/broker/src/core/policy-hook/hosted.js";
-import { policyHookKeyThumbprint } from "../../packages/contracts/src/policy-hook.js";
 import { COMPANY, ISSUER, fakeService, makeKey, settingsFor, signerOf } from "./policy-hook-fixture.js";
 
 const install = makeKey("install-key-1");
@@ -45,16 +43,6 @@ describe("policy hook wiring", () => {
 
   it("an address without the install's signing key does not start", () => {
     expect(() => applyPolicyHook(registry(), settingsFor(hookKey), undefined)).toThrow(PolicyHookSetupError);
-  });
-
-  it("binds hosted settings to the same guards and requires the install signer", async () => {
-    const settings = { address: "https://rules.example/hook", jwks: "https://rules.example/keys", thumbprints: [policyHookKeyThumbprint(hookKey.jwk)] };
-    expect(() => applyHostedPolicyHook(registry(), settings, undefined)).toThrow(PolicyHookSetupError);
-    const r = registry();
-    applyHostedPolicyHook(r, settings, { issuer: ISSUER, signer: signerOf(install) }, { fetch: async () => new Response('{"keys":[]}'), admission: { holdMs: 0 } });
-    expect(r.names("admission")).toEqual([POLICY_HOOK_ADAPTER_NAME]);
-    expect(r.names("approvers")).toEqual([POLICY_HOOK_ADAPTER_NAME]);
-    expect(await r.require("admission").admit({ companyId: COMPANY, idempotencyKey: "k", action: "task.start", projectName: "web", subject: { type: "task", id: "task_1" } })).toMatchObject({ allowed: false, code: "company_rules_no_answer" });
   });
 
   it("an address: the hook wraps the install's admission and approvers and asks", async () => {
