@@ -1,4 +1,5 @@
 import { DOCKER_SOCKET_GUARD_SERVICES_SOURCE } from "./docker-socket-guard-services-source.js";
+import { DOCKER_SOCKET_GUARD_BROWSER_SOURCE } from "./docker-socket-guard-browser-source.js";
 
 // Port lane L4b: the Docker socket guard of one local worker.
 // This is the program that runs inside the helper container (`node -e`), kept as text so the broker needs no build step for it and
@@ -69,6 +70,8 @@ async function ownedFound(reference) {
   if (labels[OWNER] !== policy.owner || typeof parsed.Id !== "string") return undefined;
   const name = String(parsed.Name || "").replace(/^\//, "");
   if (labels[SANDBOX] === "1") return { id: parsed.Id, class: labels[DEVCONTAINER_LABEL] === "1" ? "dev" : "sandbox", execUser: undefined, profile: "", name: name };
+  // A capture container of browser evidence (policy.browserEvidence): told apart ALWAYS from a sandbox, so no rule that fits a sandbox (a command, the sandbox user) is ever applied to it.
+  if (BE !== null && labels[SANDBOX] === BE_CLASS) return { id: parsed.Id, class: BE_CLASS, execUser: undefined, profile: "", name: name };
   if (SVC === null || labels[SANDBOX] !== SERVICE_CLASS) return undefined;
   const user = parsed.Config && typeof parsed.Config.User === "string" ? parsed.Config.User : "";
   return { id: parsed.Id, class: "service", execUser: user, profile: String(labels[PROFILE_LABEL] || ""), name: name };
@@ -574,6 +577,8 @@ async function route(request, response) {
   }
 
   if (SVC !== null && method === "POST" && path === "/containers/create" && SERVICE_CONTAINER_NAME.test(query.get("name") || "")) return serviceCreate(request, response, query);
+  // TE-H1: a capture container (the executor image sharing one of this worker's sandboxes' network), only with the owner's policy for it.
+  if (BE !== null && method === "POST" && path === "/containers/create" && BE_NAME.test(query.get("name") || "")) return browserEvidenceCreate(request, response, query);
 
   if (method === "POST" && path === "/containers/create") {
     const text = await readBody(request);
@@ -669,7 +674,7 @@ async function route(request, response) {
     onlyQuery(query, []);
     let name;
     try { name = decodeURIComponent(match[1]); } catch (error) { deny("image name is not valid"); }
-    if (name !== policy.image && !(SVC !== null && serviceImageMayBeInspected(name)) && imageRefusal(name) !== undefined) deny("only the worker's image, a test service's catalog image, or a dev container's image from a listed registry, may be inspected");
+    if (name !== policy.image && !(SVC !== null && serviceImageMayBeInspected(name)) && !browserEvidenceImageMayBeInspected(name) && imageRefusal(name) !== undefined) deny("only the worker's image, a test service's catalog image, or a dev container's image from a listed registry, may be inspected");
     return forward(request, response, "/images/" + encodeURIComponent(name) + "/json");
   }
 
@@ -749,6 +754,8 @@ function attachUpgrade(request, socket, head, target, reference, refuse) {
   ownedFound(decoded).then(function (found) {
     if (found === undefined) return refuse("404 Not Found", "no such container of this worker");
     if (found.class === "service" && SVC !== null) return serviceAttach(request, socket, head, target, found, refuse);
+    // A capture container's output is read by an attach that takes no input: the same rule as a service container's (a request the guard builds, bytes passed on only after the daemon answered 101).
+    if (found.class === BE_CLASS && BE !== null) return serviceAttach(request, socket, head, target, found, refuse);
     if ((found.class === "sandbox" || found.class === "dev") && DEV !== undefined) return devAttach(request, socket, head, target, found, refuse);
     log("refused", { method: request.method, route: "attach", rule: "no attach for this kind of container" });
     return refuse("403 Forbidden", "this attach is not allowed");
@@ -806,7 +813,7 @@ function onUpgrade(request, socket, head) {
   const target = new URL(request.url || "/", "http://docker");
   const path = target.pathname.replace(/^\/v[0-9]+(\.[0-9]+)?(?=\/)/, "");
   const attach = /^\/containers\/([^/]+)\/attach$/.exec(path);
-  if (attach !== null && (SVC !== null || DEV !== undefined)) return attachUpgrade(request, socket, head, target, attach[1], refuse);
+  if (attach !== null && (SVC !== null || DEV !== undefined || BE !== null)) return attachUpgrade(request, socket, head, target, attach[1], refuse);
   const match = /^\/exec\/([^/]+)\/start$/.exec(path);
   let id = "";
   try { id = match === null ? "" : decodeURIComponent(match[1]); } catch (error) { id = ""; }
@@ -869,6 +876,7 @@ function onUpgrade(request, socket, head) {
 }
 
 ${DOCKER_SOCKET_GUARD_SERVICES_SOURCE}
+${DOCKER_SOCKET_GUARD_BROWSER_SOURCE}
 function createServer() {
   const server = http.createServer({ maxHeaderSize: 16384 }, onRequest);
   server.on("upgrade", onUpgrade);
