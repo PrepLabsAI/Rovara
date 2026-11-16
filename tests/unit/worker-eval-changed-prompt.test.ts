@@ -7,6 +7,7 @@ import { evalFinalCheckForTask } from "../../packages/worker/src/verification/ev
 import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
 import { createEvalFinalCheckWorld } from "../support/eval-final-check.js";
 import { frame } from "../support/eval-model-access.js";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 
 const git = vi.hoisted(() => ({ bytes: vi.fn(), text: vi.fn(), read: vi.fn() }));
 const bridge = vi.hoisted(() => ({ send: undefined as ((f: ModelEgressFrame) => Promise<void>) | undefined }));
@@ -286,11 +287,23 @@ describe("a change F4 cannot see is unknown when AI-related code uses it (EVAL-P
     expect(await read(files, loader)).toBeUndefined();
     expect(await read(files, manifest)).toMatchObject({ status: "none_found" });
   });
-  it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'", "from '", "import  \"a'", "\\ ", "\\ \n", "export from ", "const x = require ", "export "])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
-    const hostile = unit.repeat(Math.floor((1024 * 1024 - 2) / unit.length)); // plus the one added char, still under the 1 MiB side cap
-    const started = Date.now();
-    await read([["src/hostile.ts", hostile, `${hostile}x`]], loader);
-    expect(Date.now() - started).toBeLessThan(1500);
+  // Each hostile unit with the answer the full-size file must give: quote runs that cannot be told from prompt text read unknown (incomplete), the rest are plain code.
+  const HOSTILE: Array<[unit: string, status: string]> = [["'\"", "incomplete"], ["\\\"", "incomplete"], ["\\`", "incomplete"], ["\"\"\"x\\\"", "incomplete"], ["`'", "incomplete"], ["from '", "none_found"], ["import  \"a'", "incomplete"], ["\\ ", "none_found"], ["\\ \n", "none_found"], ["export from ", "none_found"], ["const x = require ", "none_found"], ["export ", "none_found"]];
+  const HOSTILE_UNITS = HOSTILE.map(([unit]) => unit);
+  // The hostile file as one pair of sides: `size` bytes of the repeated unit before, plus one added char after.
+  const hostileFile = (unit: string, size: number): Parameters<typeof sources>[0] => {
+    const hostile = unit.repeat(Math.max(1, Math.floor(size / unit.length)));
+    return [["src/hostile.ts", hostile, `${hostile}x`]];
+  };
+  it.each(HOSTILE)("scans a 1 MiB file of hostile quote runs %j and answers %s", async (unit, status) => {
+    // One full-size, un-timed run (the per-side cap is 1 MiB): the scan must finish with its fixed answer.
+    const answer = await read(hostileFile(unit, 1024 * 1024 - 2), loader);
+    expect(answer?.status).toBe(status);
+  });
+  // No wall-clock bound: a fixed limit fails on the 2 vCPU CI runner. Time the same scan at N and 8N and bound the ratio (linear ~8, quadratic ~64).
+  // Each side of the file holds N bytes (before and after), so one unit of n is 2 bytes of input; 8N stays under the helper's 256 KiB limit.
+  it.each(HOSTILE_UNITS)("scans hostile quote runs %j in linear time", async unit => {
+    await expectLinearScalingAsync(n => { const files = hostileFile(unit, n); return async () => { await read(files, loader); }; }, { n: 16_384, unitBytes: 2, label: `hostile quote runs ${JSON.stringify(unit)}` });
   });
   it("the production classifier counts every readable call as changed when an AI file reads the changed asset, and none when nothing does", async () => {
     sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]], loader);
