@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { attestRovaraOnlyBaseCheckout, detectPromptChanges, evalResultFromArtifact, type ModelEgress, type ModelEgressFrame, type ModelEgressScope } from "@agentx/contracts";
+import { attestRovaraOnlyBaseCheckout, detectPromptChanges, evalResultFromArtifact, type ModelEgress, type ModelEgressFrame, type ModelEgressScope, type PromptChangeReport } from "@agentx/contracts";
 import { candidatePromptChanges, changedPromptClassifier, evalChangedPrompt, withEvalChangedPromptClassifier } from "../../packages/worker/src/verification/eval-changed-prompt.js";
 import { evalFinalCheckForTask } from "../../packages/worker/src/verification/eval-wiring.js";
 import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
@@ -12,7 +12,7 @@ const git = vi.hoisted(() => ({ bytes: vi.fn(), text: vi.fn(), read: vi.fn() }))
 const bridge = vi.hoisted(() => ({ send: undefined as ((f: ModelEgressFrame) => Promise<void>) | undefined }));
 // Exercise the real exec counter, runner, meter and task binding without opening a forbidden Unix socket.
 vi.mock("../../packages/worker/src/model-bridge.js", () => ({ createModelBridge: (options: { egress: ModelEgress; egressScope: ModelEgressScope }) => {
-  bridge.send = async f => { for await (const _event of options.egress.forward(options.egressScope, f)) { /* drain to settle */ } };
+  bridge.send = async f => { let drained = 0; for await (const event of options.egress.forward(options.egressScope, f)) drained += event.kind.length; void drained; };
   return { listen: async () => undefined, issueToken: () => "test-only-bridge-token", dropToken: () => undefined, close: async () => undefined };
 } }));
 vi.mock("../../packages/worker/src/isolated-git.js", () => ({
@@ -51,7 +51,7 @@ describe("worker F4/F8 classifier", () => {
     ["unreadable diff", () => undefined],
     ["dynamic source", () => report("system = f'old {name}'", "system = f'new {name}'", "ai/app.py")],
     ["removed prompt", () => detectPromptChanges({ files: [{ path: "system.prompt", before: "old", status: "removed", wholeFile: true }] }).report],
-  ] as const)("counts %s as changed", (_name, get) => {
+  ] as Array<[string, () => PromptChangeReport | undefined]>)("counts %s as changed", (_name, get) => {
     expect(changedPromptClassifier(get())(call())).toBe(true);
   });
   it("a non-match cannot prove a call came from unchanged source", () => {
@@ -76,7 +76,7 @@ describe("pinned source producer", () => {
     expect(change).toMatchObject({ status: "changes", coverage: "complete", counts: { prompt_file: 1 } });
     expect(git.read.mock.calls).toEqual([["/worker/repo", "read"]]);
     expect(git.bytes.mock.calls[0]![0]).toEqual(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", baseCommitSha, treeSha, "--"]);
-    expect(git.bytes.mock.calls.slice(1).map(c => c[0])).toEqual([["cat-file", "blob", oldOid], ["cat-file", "blob", newOid]]);
+    expect(git.bytes.mock.calls.slice(1).map((c): unknown => c[0])).toEqual([["cat-file", "blob", oldOid], ["cat-file", "blob", newOid]]);
   });
   it("makes the production classifier false for a known unrelated change and removes the context afterward", async () => {
     source("export const count = 1;", "export const count = 2;", "src/count.ts");
@@ -126,11 +126,11 @@ describe("pinned source producer", () => {
 
 describe("source to final-check artifact (in-memory bridge transport)", () => {
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input);
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
     if (url.endsWith("/v1/internal/model-access")) return json({ baseUrl: "https://gateway.example.test", apiKey: "test-only-token", expiresAt: Date.now() + 3_600_000 });
     if (url.endsWith("/v1/product/eval/hold")) {
-      const asked = JSON.parse(String(init?.body)); return json({ scope: "0f8fad5b-d9cb-469f-a165-70867728950e", calls: asked.calls, costMicros: asked.costMicros });
+      const asked = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { calls: number; costMicros: number }; return json({ scope: "0f8fad5b-d9cb-469f-a165-70867728950e", calls: asked.calls, costMicros: asked.costMicros });
     }
     if (url.endsWith("/v1/product/eval/release")) return json({ released: 0 });
     if (!url.includes("/v1/product/gemini/")) throw new Error("unexpected route");
@@ -154,9 +154,9 @@ describe("source to final-check artifact (in-memory bridge transport)", () => {
     try {
       const ports = evalFinalCheckForTask({ requested: true, environment: { ROVARA_EVAL_GATEWAY_URL: "https://gateway.example.test" },
         controlPlaneUrl: "https://control.example.test", capability: "test-only-operation-capability", fetch: fetchImpl,
-        sources: { plan: w.ports.plan, approval: w.ports.approval, cache: w.ports.cache, baselines: w.ports.baselines, runDir: w.root, modelAllowed: () => true,
+        sources: { plan: (...args: Parameters<typeof w.ports.plan>) => w.ports.plan(...args), approval: w.ports.approval, cache: w.ports.cache, baselines: w.ports.baselines, runDir: w.root, modelAllowed: () => true,
           sandbox: { available: () => true, run: async input => {
-            for (const _id of input.ids) for (let i = 0; i < input.runs; i++) { calls++; await bridge.send!(modelFrame); }
+            for (let n = 0; n < input.ids.length * input.runs; n++) { calls++; await bridge.send!(modelFrame); }
             const file = `report-${++reports}.json`;
             await writeFile(join(w.root, file), JSON.stringify({ schemaVersion: 1, eval_set_hash: w.plan.evalSetHash,
               measures: [{ name: "accuracy", unit: "fraction", direction: "up_good", value: 1 }],
