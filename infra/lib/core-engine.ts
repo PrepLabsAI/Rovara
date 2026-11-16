@@ -56,7 +56,6 @@ export interface CoreEngineProps {
 export class CoreEngine extends Construct {
   readonly parameter: CfnParameter;
   private readonly allowedCompanies: CfnParameter;
-  private readonly allowedCompaniesLong: CfnParameter;
   private readonly taskCap: CfnParameter;
   private readonly companyDayCap: CfnParameter;
   private readonly policyHook: CfnParameter;
@@ -86,7 +85,6 @@ export class CoreEngine extends Construct {
       description: "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do; drain: no new task starts on the core and its running tasks finish there",
     });
     this.allowedCompanies = new CfnParameter(stack, "CoreAllowedCompanies", { type: "String", default: "none", maxLength: 64, allowedPattern: "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", description: "Core engine admission: none (safe default), all, or up to two company ids" });
-    this.allowedCompaniesLong = new CfnParameter(stack, "CoreAllowedCompaniesLong", { type: "String", default: "", maxLength: 128, allowedPattern: "^$|^(all|org_[0-9a-z]{20}(:org_[0-9a-z]{20}){0,4})$", description: "Optional longer core admission company list; when set, overrides CoreAllowedCompanies and is passed as its own environment variable" });
     this.taskCap = new CfnParameter(stack, "CoreTaskCapUsd", { type: "String", default: "5", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-task cap in whole USD, from 1 to 1000" });
     this.companyDayCap = new CfnParameter(stack, "CoreCompanyDayCapUsd", { type: "String", default: "25", maxLength: 4, allowedPattern: "^([1-9][0-9]{0,2}|1000)$", description: "Core engine per-company UTC-day cap in whole USD, from 1 to 1000" });
     this.policyHook = new CfnParameter(stack, "CorePolicyHook", { type: "String", default: "", maxLength: 600, allowedPattern: "^[ -~]*$", description: "Optional policy-hook settings JSON; empty disables the hook" });
@@ -99,8 +97,6 @@ export class CoreEngine extends Construct {
     addPackedSetting(dispatcher, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     broker.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
     dispatcher.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
-    broker.addEnvironment("ROVARA_CORE_ALLOWED_COMPANIES", this.allowedCompaniesLong.valueAsString);
-    dispatcher.addEnvironment("ROVARA_CORE_ALLOWED_COMPANIES", this.allowedCompaniesLong.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).

@@ -105,7 +105,6 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     const coreSettings = {
       CoreEngine: "on:org_aaaaaaaaaaaaaaaaaaaa",
       CoreAllowedCompanies: "org_aaaaaaaaaaaaaaaaaaaa",
-      CoreAllowedCompaniesLong: "org_aaaaaaaaaaaaaaaaaaaa",
       CoreTaskCapUsd: "500",
       CoreCompanyDayCapUsd: "800",
       CorePolicyHook: '{"address":"https://hook.example","keys":[]}',

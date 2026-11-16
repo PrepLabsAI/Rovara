@@ -14,7 +14,7 @@ type Resource = { Type: string; Properties: Record<string, unknown> };
 export function withoutCoreEngine(template: unknown): unknown {
   const synthesized = template as { Parameters: Record<string, unknown>; Conditions: Record<string, unknown>; Resources: Record<string, Resource> };
   expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
-  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreAllowedCompaniesLong", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons"]) delete synthesized.Parameters[name];
+  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
   expect(conditions).toHaveLength(1);
   delete synthesized.Conditions[conditions[0]!];

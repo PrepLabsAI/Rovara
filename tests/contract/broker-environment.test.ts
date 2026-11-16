@@ -83,7 +83,7 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
     it("is given the account, the packed variables, and none of the variables it builds", () => {
       expect(given[BROKER_ACCOUNT_VARIABLE]).toBe(RESOLVER_ACCOUNT);
       const built = new Set([...Object.values(BROKER_NAMES).map((spec) => spec.variable), ...Object.values(BROKER_SETTINGS).map((spec) => spec.variable), ...DERIVED_BROKER_VARIABLES.map((entry) => entry.variable)]);
-      expect(Object.keys(raw).filter((key) => built.has(key) && key !== "ROVARA_CORE_ALLOWED_COMPANIES")).toEqual([]);
+      expect(Object.keys(raw).filter((key) => built.has(key))).toEqual([]);
     });
 
     it("packs every name in the table, and every setting", () => {
@@ -123,11 +123,8 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();
-        const expected = spec.variable === "ROVARA_CORE_ALLOWED_COMPANIES"
-          ? DEPLOY_PARAMETER_VALUES.CoreAllowedCompaniesLong
-          : DEPLOY_PARAMETER_VALUES[parameter!] ?? resolver.ref(parameter!);
+        const expected = DEPLOY_PARAMETER_VALUES[parameter!] ?? resolver.ref(parameter!);
         expect(hydrated[spec.variable]).toBe(expected);
-        if (spec.variable === "ROVARA_CORE_ALLOWED_COMPANIES") expect(parameter).toBe("CoreAllowedCompanies");
       });
     }
 

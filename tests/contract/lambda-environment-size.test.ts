@@ -1,5 +1,6 @@
 // Lambda holds all of a function's environment variables, keys and values together, to 4,096 bytes, and only the deploy says so. A named environment's broker was over it once the
-// core switch-on lanes added their settings (2026-11-15: 4,135 bytes in the staging fixture, 4,393 with the longest environment name). This resolves the broker's and the
+// core switch-on lanes added their settings. After L5 ANSWER-2 removes the five-id raw override and limits admission to one company id, the honest worst case is 3,951 bytes in staging
+// and 4,209 with the longest environment name (113 bytes over Lambda's 4,096-byte limit). This resolves the broker's and the
 // dispatcher's environments with the longest names CloudFormation can generate and holds each under a ceiling with 128 bytes of margin, measured the stricter way (the compact
 // JSON of the map, which counts each variable's quotes and separators), so a later lane cannot drift past the limit unseen.
 import { Stack } from "aws-cdk-lib";

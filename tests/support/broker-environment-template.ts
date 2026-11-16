@@ -38,7 +38,7 @@ export function unpackedBrokerVariables(variables: Record<string, unknown>): Rec
   for (const [code, value] of pieces(settings)) {
     const spec = settingSpecs.get(code);
     if (spec === undefined) throw new Error(`unknown setting code ${code}`);
-    if (spec.variable !== "ROVARA_CORE_ALLOWED_COMPANIES" || !(spec.variable in out)) out[spec.variable] = value;
+    out[spec.variable] = value;
   }
   const env = rest.AGENTX_ENV;
   if (typeof env === "string") for (const entry of DERIVED_BROKER_VARIABLES) out[entry.variable] = entry.kind === "text" ? entry.value(env) : entry.queueName(env);

@@ -349,7 +349,6 @@ describe("L1a broker environment derivation", () => {
     const parameters = inApp.Parameters as Record<string, { Default?: string; AllowedPattern?: string; MaxLength?: number }>;
     expect(parameters).toMatchObject({
       CoreAllowedCompanies: { Default: "none", AllowedPattern: "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
-      CoreAllowedCompaniesLong: { Default: "", AllowedPattern: "^$|^(all|org_[0-9a-z]{20}(:org_[0-9a-z]{20}){0,4})$", MaxLength: 128 },
       CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
@@ -360,12 +359,13 @@ describe("L1a broker environment derivation", () => {
       const variables = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
       expect(variables.AGENTX_SETTINGS).toBeDefined();
       expect(variables.ROVARA_POLICY_HOOK).toEqual({ Ref: "CorePolicyHook" });
-      expect(variables.ROVARA_CORE_ALLOWED_COMPANIES).toEqual({ Ref: "CoreAllowedCompaniesLong" });
+      expect(variables).not.toHaveProperty("ROVARA_CORE_ALLOWED_COMPANIES");
       expect(JSON.stringify(variables)).toContain("CoreAllowedCompanies");
       expect(JSON.stringify(variables)).toContain("CoreTaskCapUsd");
       expect(JSON.stringify(variables)).toContain("CoreCompanyDayCapUsd");
       expect(JSON.stringify(variables)).toContain("CoreLessons");
     }
+    expect(parameters).not.toHaveProperty("CoreAllowedCompaniesLong");
     expect(Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy")).toHaveLength(Object.values(json.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy").length);
   });
 
