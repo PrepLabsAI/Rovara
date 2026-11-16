@@ -217,6 +217,20 @@ it("a client's stolen code or refresh cannot mint for a foreign company's member
   expect((await h.http(httpEvent("POST", "/v1/auth/token", { grant_type: "refresh_token", client_id: "web-app", refresh_token: (JSON.parse(minted.body) as { refresh_token: string }).refresh_token }))).statusCode).toBe(400);
 });
 
+it("the web app marker is the operator's, on an install-level client: a company administrator's write is refused whatever it names (DEC 236h)", async () => {
+  const h = signinCompanyWorld();
+  const webApp = { ...client(), fullAccess: true, secretHash: "f".repeat(64), webApp: true };
+  // A company's own write, by the sign-in server's put event: refused, nothing stored.
+  expect(await call(h, { kind: "put-sign-in-client", companyId: A, client: { ...webApp, companyId: A } })).toEqual({ ok: false, error: "invalid_request" });
+  expect(h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")).toBeUndefined();
+  // The operator's write of a client that is not install-level (the implicit company's own) is refused too: the marker belongs only on an install-level client.
+  expect(await call(h, { kind: "company-signin-client-set", client: { ...webApp } })).toEqual({ ok: false, error: "unavailable" });
+  expect(h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")).toBeUndefined();
+  // The operator's install-level client carries it.
+  expect(await call(h, { kind: "company-signin-client-set", client: { ...webApp, installLevel: true } })).toEqual({ ok: true });
+  expect(h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")).toMatchObject({ webApp: true, installLevel: true });
+});
+
 it.each(["keep-secret", "owner-mismatch", "full-access", "install-level"])("rejects unsafe %s updates before modifying a row", async (damage) => {
   const h = signinCompanyWorld(); expect(await put(h, A)).toEqual({ ok: true });
   const before = h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app");

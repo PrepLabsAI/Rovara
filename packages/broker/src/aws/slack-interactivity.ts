@@ -344,6 +344,9 @@ const FINDING_FORM_FILE_MAX = 100;
 const FINDING_REASON_MAX = 500;
 const FINDING_INSTRUCTION_MAX = 1_000;
 
+/** DEC 236h: a security finding is accepted on the Rovara web page only; the form says so and offers Fix alone for it. */
+export const SECURITY_ACCEPT_IN_SLACK = "Open the Rovara web page to accept this.";
+
 const findingBlockIds = (findingId: string) => ({ action: `finding_action_${findingId}`, note: `finding_note_${findingId}` });
 
 /**
@@ -362,9 +365,9 @@ export function workflowFindingsModal(findings: readonly WorkflowOpenFinding[], 
     // Reviewer text and paths are untrusted: redacted, on one line, cut, escaped and never a link (as on the card).
     const where = finding.file === undefined ? "" : ` (${cleanLine(finding.file, FINDING_FORM_FILE_MAX)}${finding.line === undefined ? "" : `:${finding.line}`})`;
     blocks.push(
-      { type: "section", text: { type: "mrkdwn", text: `*${index + 1}. ${finding.role === "SECURITY" ? "Security review" : "Code review"}*${where}\n${cleanLine(finding.text, FINDING_FORM_TEXT_MAX)}` } },
+      { type: "section", text: { type: "mrkdwn", text: `*${index + 1}. ${finding.role === "SECURITY" ? "Security review" : "Code review"}*${where}\n${cleanLine(finding.text, FINDING_FORM_TEXT_MAX)}${finding.role === "SECURITY" ? `\n_${SECURITY_ACCEPT_IN_SLACK}_` : ""}` } },
       { type: "input", block_id: ids.action, label: { type: "plain_text", text: `What should happen to finding ${index + 1}?` },
-        element: { type: "radio_buttons", action_id: "action", options: [fix, accept], initial_option: fix } },
+        element: { type: "radio_buttons", action_id: "action", options: finding.role === "SECURITY" ? [fix] : [fix, accept], initial_option: fix } },
       { type: "input", block_id: ids.note, optional: true, label: { type: "plain_text", text: "Fix instructions, or your reason to accept" },
         hint: { type: "plain_text", text: "A reason is needed to accept this finding." },
         element: { type: "plain_text_input", action_id: "note", multiline: true, max_length: FINDING_INSTRUCTION_MAX } },
@@ -1921,7 +1924,8 @@ export function workflowSlackHandlers(deps: {
           const action: "ACCEPT" | "FIX" = chosen === "ACCEPT" ? "ACCEPT" : "FIX";
           const raw = asRecord(asRecord(values[ids.note]).note).value;
           const note = typeof raw === "string" ? raw.trim() : "";
-          if (action === "ACCEPT" && note === "") errors[ids.note] = "Give a reason to accept this finding.";
+          if (action === "ACCEPT" && finding.role === "SECURITY") errors[ids.action] = SECURITY_ACCEPT_IN_SLACK;
+          else if (action === "ACCEPT" && note === "") errors[ids.note] = "Give a reason to accept this finding.";
           else if (action === "ACCEPT" && note.length > FINDING_REASON_MAX) errors[ids.note] = `A reason is at most ${FINDING_REASON_MAX} characters.`;
           else if (action === "FIX" && note.length > FINDING_INSTRUCTION_MAX) errors[ids.note] = "Instructions are at most 1,000 characters.";
           return { findingId: finding.findingId, action, note };

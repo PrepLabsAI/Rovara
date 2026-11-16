@@ -75,12 +75,17 @@ const ClientRecord = z.object({
   secretHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   scopes: ClientScopesSchema.optional(),
   fullAccess: z.literal(true).optional(),
+  /**
+   * DEC 236h: this client is the Rovara web app, the one surface where a security review finding may be accepted (with a fresh step-up). Written only by the operator or the install that seeds Cloud's web
+   * app client: the registration schema above has no such field, so an administrator's registration, a company's included, can never carry it, and an update by registration drops it. Only with full access.
+   */
+  webApp: z.literal(true).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1).max(512),
 }).strict();
 const oneOwner = (record: { companyId?: string | undefined; installLevel?: true | undefined }) => record.companyId === undefined || record.installLevel === undefined;
-export const SignInClientRecordSchema = ClientRecord.refine(oneOwner, "a client has one owner");
+export const SignInClientRecordSchema = ClientRecord.refine(oneOwner, "a client has one owner").refine((record) => record.webApp === undefined || record.fullAccess === true, "the web app client has full access");
 export type SignInClientRecord = z.infer<typeof SignInClientRecordSchema>;
 
 /** A client as anyone but the sign-in server sees it: never its secret's hash. */

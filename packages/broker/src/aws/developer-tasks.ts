@@ -209,6 +209,7 @@ import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/p
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
+import { requireWebPageForSecurityAccept } from "./security-accept.js";
 import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader, type TaskReaderPerson } from "./task-readers.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
@@ -2948,6 +2949,8 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
     if (prior.source !== "FINDINGS") throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
     return { task: await taskView(deps, task, { events: 0, details: false }) };
   }
+  // DEC 236h: accepting a security finding is the web page's, the Rovara web app's own sign-in client with a fresh step-up; a token of the CLI, an AI tool, a scoped client or another full-access client may accept only the code review's findings.
+  await requireWebPageForSecurityAccept(caller, workflow, request, deps.now());
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) {
     throw agentXError("IDEMPOTENCY_CONFLICT", "these findings are out of date; refresh the task and try again");
   }

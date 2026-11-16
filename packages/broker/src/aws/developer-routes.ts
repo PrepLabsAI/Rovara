@@ -204,11 +204,13 @@ export interface DeveloperRouteDependencies {
   companyReads?: CompanyReadsConfiguration;
 }
 /** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
-/**
- * `stepUp` (lane ID part 2, hosted wiring (g)): the person's last step-up as the VERIFIED access token states it (`stepUpOf`); set only by the token sign-in (`authenticateDeveloper`, and
- * `authenticateClientToken` for a sign-in client's token), never from a header, a query or a body. Only the core's routes read it, and they check its age themselves.
- */
-export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string; stepUp?: { at: string; method: string } }
+export interface DeveloperCaller {
+  developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string;
+  /** DEC 236h: set only for the Rovara web app's own sign-in client (registered with full access AND marked `webApp` by the operator), from its registration; never for the Rovara CLI's token, a scoped client's, or another full-access client's. */
+  webApp?: true;
+  /** DEC 236h: the person's last step-up as the VERIFIED access token states it (`stepUpOf`), for the acts that need a fresh sign-in; its age is checked where it is used. Never from a header, a query or a body. */
+  stepUp?: { at: string; method: string };
+}
 
 /** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
 export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
@@ -1053,6 +1055,7 @@ export async function authenticateCaller(deps: DeveloperRouteDependencies, autho
     ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }),
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
+    ...(person.client.fullAccess === true && person.client.webApp === true ? { webApp: true as const, ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }) } : {}),
   };
 }
 

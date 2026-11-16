@@ -833,6 +833,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
+        // DEC 236h: the web app marker is never set by an applied admin change; the operator or the install seeds it.
+        if (parsed.data.client.webApp === true) return { ok: false, error: "invalid_request" };
         if (deps.company !== undefined) {
           try {
             await store.putClient(parsed.data.client, parsed.data.companyId ?? IMPLICIT_COMPANY_ID, { ...(parsed.data.keepSecret === true ? { keepSecret: true } : {}) });
