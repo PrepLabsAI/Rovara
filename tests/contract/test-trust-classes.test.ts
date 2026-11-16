@@ -296,10 +296,11 @@ describe("what counts toward the proof that a change works", () => {
     expect(trustClassCountsTowardProof(undefined)).toBe(false);
     expect(trustClassCountsTowardProof("newer")).toBe(false);
   });
-  it("counts scripted replies by the Proof table's one rule (DECISIONS 192a): before the task and independent count, replies written in this task only when the real model agreed", () => {
+  it("counts scripted replies by the Proof table's one rule (DECISIONS 192a): before the task counts, replies written in this task only when the real model agreed, and independent replies (parked by 192a) never", () => {
     expect([...REPLY_PROVENANCES]).toEqual(["before_task", "independent", "task_made"]);
     expect(scriptedRepliesCountTowardProof("before_task")).toBe(true);
-    expect(scriptedRepliesCountTowardProof("independent")).toBe(true);
+    expect(scriptedRepliesCountTowardProof("independent")).toBe(false);
+    for (const realModel of [undefined, "confirmed", "unconfirmed", "disagreed"]) expect(scriptedRepliesCountTowardProof("independent", realModel), String(realModel)).toBe(false);
     expect(scriptedRepliesCountTowardProof("task_made")).toBe(false);
     expect(scriptedRepliesCountTowardProof("task_made", "confirmed")).toBe(true);
     expect(scriptedRepliesCountTowardProof("task_made", "unconfirmed")).toBe(false);
@@ -318,7 +319,7 @@ describe("what counts toward the proof that a change works", () => {
     expect(checkCountsTowardProof({ kind: "test", trust: "real" })).toBe(true);
     expect(checkCountsTowardProof({ kind: "lint", trust: "real" })).toBe(false);
     expect(checkCountsTowardProof({ kind: "test", trust: "made_by_rovara" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "independent" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "independent" })).toBe(false);
     expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "before_task" })).toBe(true);
     expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "task_made" })).toBe(false);
     expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "task_made", realModel: "confirmed" })).toBe(true);
@@ -331,8 +332,10 @@ describe("what counts toward the proof that a change works", () => {
     expect(checkCountsTowardProof({ kind: "test", replies: "task_made", realModel: "disagreed" })).toBe(false);
     expect(checkCountsTowardProof({ kind: "test", replies: "task_made", realModel: "confirmed" })).toBe(true);
     expect(checkCountsTowardProof({ kind: "test", replies: "somebody_else", realModel: "confirmed" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "test", replies: "independent" })).toBe(true);
-    expect(checkCountsTowardProof({ kind: "test", proofBasis: "something_newer", replies: "independent" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", replies: "independent" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", replies: "independent", realModel: "confirmed" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", replies: "before_task", realModel: "disagreed" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", proofBasis: "something_newer", replies: "before_task" })).toBe(false);
   });
   it("never counts an eval as 'Proven': it has its own labels (DECISIONS 170)", () => {
     expect(checkKindInfo("eval")?.countsTowardProof).toBe(false);
@@ -403,7 +406,8 @@ describe("per-test answers from every source", () => {
     expect(testAnswerCountsTowardProof(recorded)).toBe(true);
     expect(testAnswerCountsTowardProof(emulated)).toBe(true);
     expect(testAnswerCountsTowardProof(rovara)).toBe(false);
-    expect(testAnswerCountsTowardProof(scripted("independent"))).toBe(true);
+    expect(testAnswerCountsTowardProof(scripted("independent"))).toBe(false);
+    expect(testAnswerCountsTowardProof(scripted("independent"), "confirmed")).toBe(false);
     expect(testAnswerCountsTowardProof(scripted("before_task"))).toBe(true);
     expect(testAnswerCountsTowardProof(scripted("task_made"))).toBe(false);
     expect(testAnswerCountsTowardProof(scripted("task_made"), "confirmed")).toBe(true);
@@ -412,8 +416,10 @@ describe("per-test answers from every source", () => {
     expect(testCountsTowardProof(passed("a", []))).toBe(true);
     expect(testCountsTowardProof(passed("a", [recorded, emulated]))).toBe(true);
     expect(testCountsTowardProof(passed("a", [recorded, rovara]))).toBe(false);
-    expect(testCountsTowardProof(passed("a", [scripted("independent"), scripted("task_made")]))).toBe(false);
-    expect(testCountsTowardProof(passed("a", [scripted("independent"), scripted("task_made")]), "confirmed")).toBe(true);
+    expect(testCountsTowardProof(passed("a", [scripted("before_task"), scripted("task_made")]))).toBe(false);
+    expect(testCountsTowardProof(passed("a", [scripted("before_task"), scripted("task_made")]), "confirmed")).toBe(true);
+    // one independent reply keeps a test out of the proof, even with the real model's agreement
+    expect(testCountsTowardProof(passed("a", [scripted("independent"), scripted("task_made")]), "confirmed")).toBe(false);
     expect(testCountsTowardProof({ testId: "a", status: "failed", uses: [] })).toBe(false);
     expect(testCountsTowardProof({ testId: "a", status: "not_run", uses: [], notRun: { dependency: "x", reason: "no_recording" } })).toBe(false);
   });
@@ -426,8 +432,8 @@ describe("per-test answers from every source", () => {
       // and for every source but scripted replies (whose counting also needs the real-model result), the two are equal
       if (use.source !== "scripted") expect(classCounts, JSON.stringify(use)).toBe(testAnswerCountsTowardProof(use));
     }
-    // and every scripted provenance a class can stand for counts once the real model agreed
-    for (const provenance of REPLY_PROVENANCES) expect(testAnswerCountsTowardProof(scripted(provenance), "confirmed"), provenance).toBe(trustClassCountsTowardProof(testAnswerTrustClass(scripted(provenance))));
+    // and every scripted provenance a class can stand for counts once the real model agreed, except `independent`, which is parked (192a) and never counts whatever the real model says (its class stays Simulated)
+    for (const provenance of REPLY_PROVENANCES) expect(testAnswerCountsTowardProof(scripted(provenance), "confirmed"), provenance).toBe(provenance !== "independent" && trustClassCountsTowardProof(testAnswerTrustClass(scripted(provenance))));
   });
   it("never counts a faked answer: the record cannot tell a hand-written answer from one the fake made up (DECISIONS 169, rework b)", () => {
     expect(testAnswerCountsTowardProof(faked)).toBe(false);

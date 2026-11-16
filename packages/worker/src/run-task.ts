@@ -658,7 +658,7 @@ async function runTask(
         if (createCandidateManifest(afterEval).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterEval;
         if (evalArtifact !== undefined) {
           const result = evalResultFromArtifact(evalArtifact);
-          await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No drop found." });
+          await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No regression measured (eval)." });
           try { await dependencies.artifactSink({ name: EVAL_ROUND_ARTIFACT, mediaType: "application/json", content: JSON.stringify(evalArtifact) }); }
           catch { await events.append("progress", { message: "Eval result could not be saved." }); }
         }

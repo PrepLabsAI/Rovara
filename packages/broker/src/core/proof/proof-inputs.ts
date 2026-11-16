@@ -59,13 +59,14 @@ export async function loadProofContext(
   };
   const [loadedProof, scenarioRows, evidence, design, realModelRun] = await Promise.all([checked ? loadTestProof(deps.actions, task, digest, operations) : Promise.resolve(undefined), scenarios(), evidenceOf(), designOf(), realRunOf()]);
   let testProof = loadedProof;
-  const checkDependencies = new Map<string, readonly { dependencyId: string; trust: "simulated"; replies: "task_made" }[]>();
+  const checkDependencies = new Map<string, readonly { dependencyId: string; trust: "simulated"; replies: "task_made" | "independent" }[]>();
   if (testProof?.scriptedReplies !== undefined) {
     const recorded = recordedCheckIdsOf(workflow);
     for (const facts of testProof.scriptedReplies) {
       const checkId = checkIdOfProofItem(facts.checkId, recorded);
       if (checkId === undefined) { testProof = undefined; checkDependencies.clear(); break; }
-      if (facts.taskMade > 0) checkDependencies.set(checkId, [{ dependencyId: "scripted_replies", trust: "simulated", replies: "task_made" }]);
+      const used = [...(facts.taskMade > 0 ? ["task_made" as const] : []), ...((facts.independent ?? 0) > 0 ? ["independent" as const] : [])];
+      if (used.length > 0) checkDependencies.set(checkId, used.map((replies) => ({ dependencyId: "scripted_replies", trust: "simulated" as const, replies })));
     }
   }
   return { plan, ...(checkDependencies.size === 0 ? {} : { checkDependencies }), ...(realModelRun === undefined ? {} : { realModelRun }), ...(scenarioRows === undefined ? {} : { scenarioRows }), ...(testProof === undefined ? {} : { testProof }), ...(evidence === undefined ? {} : { evidence }), ...(design === undefined ? {} : { design }) };

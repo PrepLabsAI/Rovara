@@ -105,12 +105,12 @@ export const CI_USES_FAKES_WORDS = "real check: your CI (uses fakes)";
 
 /**
  * Whether scripted AI replies of this provenance can prove a change: the one rule the Proof table uses (DECISIONS 192a, `proof-table.ts` with `agent-replies.ts`), in the reply set's own words (`REPLY_PROVENANCES`).
- * `before_task` and `independent` count (`replyCountsTowardProof`). `task_made` counts only when the same test also passed on the real model in the final check (`realModel` is "confirmed"); unconfirmed, or the real
- * model did not agree, it does not (the Proof table then shows `AGENT_REPLIES_UNCONFIRMED_WORDS` or `AGENT_REPLIES_DISAGREED_WORDS`). Any other value, or a status spelled otherwise, never counts (fail closed).
+ * It is `replyCountsTowardProof` (model-reply-provenance.ts), the one rule: `before_task` counts. `task_made` counts only when the same test also passed on the real model in the final check (`realModel` is "confirmed");
+ * unconfirmed, or the real model did not agree, it does not (the Proof table then shows `AGENT_REPLIES_UNCONFIRMED_WORDS` or `AGENT_REPLIES_DISAGREED_WORDS`). `independent` never counts (DEC 192a parks that agent).
+ * Any other value, or a status spelled otherwise, never counts (fail closed).
  */
 export function scriptedRepliesCountTowardProof(provenance: unknown, realModel?: unknown): boolean {
-  if (replyCountsTowardProof(provenance)) return true;
-  return provenance === "task_made" && realModel === "confirmed";
+  return replyCountsTowardProof(provenance, realModel);
 }
 
 /** Whether an answer of this trust class can stand behind a proof. A mock Rovara made, or an answer Rovara made up, never does (O31, DECISIONS 169). A class this build does not know, or none, does not count. */
