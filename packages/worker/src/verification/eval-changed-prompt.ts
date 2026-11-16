@@ -34,14 +34,41 @@ export function evalChangedPrompt(frame: ModelEgressFrame): boolean {
   try { return classifiers.getStore()?.(frame) ?? true; } catch { return true; }
 }
 
+/** A prompt can be loaded at run time from a file F4 cannot classify (assets/persona.txt) or sit in a plain string constant of a module with
+ * no AI import. F4 reports nothing for those, which is "not found", never "unchanged". So a changed file that F4 gave no item for is
+ * unknown (the whole classification becomes unknown) unless it is code that provably holds no string: no quote or backtick character and no
+ * closing JSX tag anywhere in either side. Deliberately over-counting, with no tokenizer state a stray quote could desynchronise: any changed
+ * file that has a quote, however placed, is unknown. Known limit (EVAL-WIRE-SELECTOR-EDITS): quote-free logic that only chooses between prompts
+ * defined in other, unchanged files still reads unchanged. One linear pass. */
+const codePath = /\.(?:[cm]?[jt]sx?|py|pyi)$/iu;
+const holdsText = /["'`]|<\//u;
+function sameCode(before: string | undefined, after: string | undefined): boolean {
+  const left = before ?? ""; const right = after ?? "";
+  return left === right || (!holdsText.test(left) && !holdsText.test(right));
+}
+function everyChangeAccountedFor(files: readonly PromptChangedFile[], report: PromptChangeReport): boolean {
+  const found = new Set<string>();
+  for (const item of report.items) { found.add(item.path); if (item.oldPath !== undefined) found.add(item.oldPath); }
+  for (const file of files) {
+    if (found.has(file.path) || file.before === file.after) continue;
+    if (!codePath.test(file.path)) return false;
+    if (!sameCode(file.before, file.after)) return false;
+  }
+  return true;
+}
+
 /** Read complete changed-file sides from the exact check candidate, never mutable worktree paths or diff drivers.
+ * The diff base is the plan's baseCommit, the commit the eval's old side runs: without one, or when a repository's own base
+ * differs, the answer is unknown. Never an arbitrary local base.
  * No rename inference is needed: a rename is a removal plus addition, both scanned by F4. Any missing coverage
  * makes the WHOLE classification unknown. Bounds match F4 and apply before allocating source text.
  */
 export async function candidatePromptChanges(
   repositories: readonly CandidateRepositoryInput[], candidates: readonly CandidateRepositoryIdentity[], signal: AbortSignal,
+  planBaseCommit: string | undefined,
 ): Promise<PromptChangeReport | undefined> {
   try {
+    if (typeof planBaseCommit !== "string" || !objectId.test(planBaseCommit)) return undefined;
     if (repositories.length === 0 || repositories.length > 32 || repositories.length !== candidates.length
       || new Set(repositories.map(r => r.repositoryId)).size !== repositories.length
       || new Set(candidates.map(r => r.repositoryId)).size !== candidates.length) return undefined;
@@ -51,11 +78,11 @@ export async function candidatePromptChanges(
       const candidate = candidates.find(c => c.repositoryId === repository.repositoryId);
       const base = repository.baseCommitSha;
       if (!candidate || !base || !objectId.test(base) || !objectId.test(candidate.treeSha)
-        || candidate.baseCommitSha !== base || signal.aborted) return undefined;
+        || candidate.baseCommitSha !== base || base !== planBaseCommit || signal.aborted) return undefined;
       await withIsolatedGit(repository.directory, "read", async (git) => {
         const options = { index: "none" as const, signal, timeout: 30_000 };
         const raw = await git.bytes(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv",
-          "--ignore-submodules=none", base, candidate.treeSha, "--"], { ...options, maxBuffer: 4 * 1024 * 1024 });
+          "--ignore-submodules=none", planBaseCommit, candidate.treeSha, "--"], { ...options, maxBuffer: 4 * 1024 * 1024 });
         const fields = new TextDecoder("utf-8", { fatal: true }).decode(raw).split("\0");
         if (fields.pop() !== "" || fields.length % 2 !== 0) throw new Error("unreadable change");
         for (let i = 0; i < fields.length; i += 2) {
@@ -83,14 +110,20 @@ export async function candidatePromptChanges(
       });
     }
     // Duplicate repository-relative paths make F4 incomplete, which is conservative too.
-    return signal.aborted ? undefined : detectPromptChanges({ files }).report;
+    if (signal.aborted) return undefined;
+    const { report } = detectPromptChanges({ files });
+    return everyChangeAccountedFor(files, report) ? report : undefined;
   } catch { return undefined; }
 }
 
 /** Keeps concurrent checks/companies isolated. The check's existing deadline also bounds source reads. */
 export async function withEvalChangedPromptClassifier<T>(
-  repositories: readonly CandidateRepositoryInput[], candidates: readonly CandidateRepositoryIdentity[], signal: AbortSignal, run: () => Promise<T>,
+  repositories: readonly CandidateRepositoryInput[], candidates: readonly CandidateRepositoryIdentity[], signal: AbortSignal,
+  /** The eval's own plan. Absent, or unreadable: every call counts as changed. */
+  plan: (() => Promise<{ readonly key: { readonly baseCommit: string } } | undefined>) | undefined, run: () => Promise<T>,
 ): Promise<T> {
-  const classifier = changedPromptClassifier(await candidatePromptChanges(repositories, candidates, signal));
+  let planBase: string | undefined;
+  try { planBase = plan === undefined ? undefined : (await plan())?.key.baseCommit; } catch { planBase = undefined; }
+  const classifier = changedPromptClassifier(await candidatePromptChanges(repositories, candidates, signal, planBase));
   return classifiers.run(classifier, run);
 }
