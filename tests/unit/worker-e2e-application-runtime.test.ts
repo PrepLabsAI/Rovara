@@ -190,7 +190,8 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     const DRY_RUN = "task.workflowPlanDryRun.v1";
     // TE-H1 browser evidence photographs the changed pages in a container of the executor image too (DEC 241a), so it is listed, and withheld, with them.
     const BROWSER = "task.browserEvidence.v1";
-    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, V2, BASELINE, "task.workflowE2EAgentSteps.v1", REPLAY, DRY_RUN, "task.workflowE2EMidStepSync.v1", BROWSER]);
+    const BROWSER_VIDEO = "task.browserEvidenceVideo.v1";
+    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, V2, BASELINE, "task.workflowE2EAgentSteps.v1", REPLAY, DRY_RUN, "task.workflowE2EMidStepSync.v1", BROWSER, BROWSER_VIDEO]);
     const before = await pingOf(monitor);
     expect(before.body.invocationFeatures).not.toContain(BASELINE);
     // Task 3.4: the string for version 2 admissions (web and API groups in one plan) is listed and withheld with the application CHECKS feature, so a worker that cannot run application rounds never claims it.
@@ -201,12 +202,15 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     expect(before.body.invocationFeatures).not.toContain(REPLAY);
     expect(before.body.invocationFeatures).not.toContain(DRY_RUN);
     expect(before.body.invocationFeatures).not.toContain(BROWSER);
+    // Slice 4: video on failure records inside that same capture container, so it is withheld, and listed, with browser evidence.
+    expect(before.body.invocationFeatures).not.toContain(BROWSER_VIDEO);
+    expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [BROWSER_VIDEO]: { status: "unavailable", reason: "not-yet-checked" } });
     expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [BROWSER]: { status: "unavailable", reason: "not-yet-checked" } });
     expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [REPLAY]: { status: "unavailable", reason: "not-yet-checked" } });
     monitor.start();
     await vi.waitFor(() => expect(monitor.current()).toEqual({ status: "ready" }));
     const ready = await pingOf(monitor);
-    expect(ready.body.invocationFeatures).toEqual(expect.arrayContaining([FEATURE, V2, BASELINE, REPLAY, DRY_RUN, BROWSER]));
+    expect(ready.body.invocationFeatures).toEqual(expect.arrayContaining([FEATURE, V2, BASELINE, REPLAY, DRY_RUN, BROWSER, BROWSER_VIDEO]));
     monitor.stop();
     const missing = { run: vi.fn(async () => ({ code: 1, stdout: "", stderr: "" })) };
     const without = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker: missing, intervalMs: 60_000 });

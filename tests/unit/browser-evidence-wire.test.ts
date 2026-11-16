@@ -7,7 +7,7 @@ import {
   BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_NOT_ON_CLOUD, BROWSER_EVIDENCE_UPLOAD_HEADER_MAX_BYTES, BROWSER_EVIDENCE_UPLOAD_MAX_BYTES, BrowserEvidenceExecutorLineSchema, browserEvidenceOutcomeOfPack,
   browserEvidencePanelOf, browserEvidenceServableImages, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceUpload, encodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceUpload, servableBrowserEvidenceImage,
 } from "../../packages/contracts/src/browser-evidence-wire.js";
-import { BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, BROWSER_EVIDENCE_TOTAL_MAX_BYTES, addBrowserEvidenceToPack, browserEvidenceLines, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome } from "../../packages/contracts/src/browser-evidence.js";
+import { BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, BROWSER_EVIDENCE_TOTAL_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES, addBrowserEvidenceToPack, browserEvidenceLines, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome } from "../../packages/contracts/src/browser-evidence.js";
 import { EvidencePackV2Schema, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -23,8 +23,8 @@ describe("the browser-evidence upload", () => {
     const bytes = encodeBrowserEvidenceUpload(captured());
     const back = decodeBrowserEvidenceUpload(bytes);
     expect(back).toEqual(captured());
-    // Every bound is the run's own: 4 MiB of pictures and a small header.
-    expect(BROWSER_EVIDENCE_UPLOAD_MAX_BYTES).toBe(BROWSER_EVIDENCE_TOTAL_MAX_BYTES + BROWSER_EVIDENCE_UPLOAD_HEADER_MAX_BYTES);
+    // Every bound is the run's own: 4 MiB of pictures, 4 MiB of video (slice 4) and a small header.
+    expect(BROWSER_EVIDENCE_UPLOAD_MAX_BYTES).toBe(BROWSER_EVIDENCE_TOTAL_MAX_BYTES + BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES + BROWSER_EVIDENCE_UPLOAD_HEADER_MAX_BYTES);
     expect(bytes.byteLength).toBeLessThan(BROWSER_EVIDENCE_UPLOAD_MAX_BYTES);
   });
 
