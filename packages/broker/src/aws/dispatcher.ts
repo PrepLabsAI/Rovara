@@ -757,7 +757,7 @@ export const handler = withCoreDispatch(workflowHandler, {
         // Lane E2 step 6: the declared flow inputs (none while lessons are switched on anywhere: then nothing is declared and every core record comes back) and the step 5 points.
         // A dispatch decides nothing for a person, so the identity point names nobody here.
         ...(flow === undefined ? {} : { flow }),
-        // DEC 243c: the company's chosen model, from the gateway's offered list: the same reader as the broker's, wired only where the model gateway is configured AND this function can sign with the task key (the key policy lets only the broker; until infra grants it, none).
+        // DEC 243c: the company's chosen model, from the gateway's offered list: the same reader as the broker's, wired only where ROVARA_CORE_AGENT_MODEL_CHOICE=on, the model gateway is configured AND this function can sign with the task key (the key policy lets only the broker; until infra grants it, none).
         ...(offeredReader === undefined ? {} : { offeredModels: offeredReader }),
         extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } }), ...gatewayModelKeysModules(process.env)],
         log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); }, // one JSON line on stderr, as logDispatchFailure's fallback (fixed fields only)

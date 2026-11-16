@@ -97,7 +97,7 @@ export interface BrokerCoreRootInputs {
    */
   taskTokens?: () => { signer: TokenSigner; issuer: string } | undefined;
   /**
-   * DEC 243c: what the model gateway offers one company's agents (the contract is `OfferedAgentModels`; no gateway API publishes it yet, docs/architecture/agent-model-choice.md). With it (and the model
+   * DEC 243c: what the model gateway offers one company's agents (the contract is `OfferedAgentModels`; the gateway serves it, docs/architecture/agent-model-choice.md). With it (or, from the environment, ROVARA_CORE_AGENT_MODEL_CHOICE=on and the model
    * gateway configured) each company chooses its agents' models on the web page from that list; without it every core step runs on ROVARA_CORE_AGENT_MODEL, exactly as before.
    */
   offeredModels?: OfferedModelsReader;

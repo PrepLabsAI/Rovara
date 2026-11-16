@@ -22,7 +22,6 @@ export const SERVICE_TOKEN_NOT_BEFORE_SKEW_SECONDS = 30;
 export const OFFERED_MODELS_BODY_MAX_BYTES = 65_536;
 /** The longest a read may take. */
 export const OFFERED_MODELS_HTTP_TIMEOUT_MS = 4_000;
-/** The only thing a failed read says. */
 /** Cloud rejects a longer issuer in a service token. */
 export const SERVICE_TOKEN_ISSUER_MAX_CHARS = 2_048;
 /**
@@ -30,6 +29,7 @@ export const SERVICE_TOKEN_ISSUER_MAX_CHARS = 2_048;
  * too before this is turned on: until infrastructure lets it sign with the task key, leave it unset, or a saved choice would not be the model the steps run on.
  */
 export const CORE_AGENT_MODEL_CHOICE_VARIABLE = "ROVARA_CORE_AGENT_MODEL_CHOICE";
+/** The only thing a failed read says. */
 export const OFFERED_MODELS_READ_FAILED = "the gateway's offered models could not be read";
 
 const failed = (): Error => new Error(OFFERED_MODELS_READ_FAILED);
