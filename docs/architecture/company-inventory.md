@@ -1,4 +1,4 @@
-416 record kinds: 56 company-scoped, 15 install-wide, 345 needs-company. 198 routes: 34 company-scoped, 2 install-wide, 162 needs-company.
+416 record kinds: 56 company-scoped, 15 install-wide, 345 needs-company. 199 routes: 35 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -633,6 +633,7 @@ The task-flow `keyOf` forwarding sites moved from line 207 to line 210 when task
 |---|---|---|---|---|---|---|
 | record | entity:PROJECT_SETTINGS | company-scoped | State table | no | - | Code is the sole owner. projectSettingsKey uses companyScoped(companyId, PROJECT_SETTINGS plus validated project name); the rows reader validates the stored company and project. Revision-conditional transaction includes one COMPANY_LOG audit under that same company. |
 | route | /v1/dev/projects/{id}/settings | company-scoped | State table | yes | GET, PUT | Full-access routes resolve live membership and check the project row before any settings read. PUT also checks the project administrator grant in that company. tests/contract/project-settings.test.ts covers both companies, foreign grants, stale revision and atomic audit. |
+| route | /v1/dev/company/settings-compliance | company-scoped | State table | yes | GET | M4a S3 (TE-D8): full-access route, read-only. Live membership, then the live membership row's role must be admin or owner (the sign-in table row of this company, not revoked). Names come from the install-wide project catalog but are kept only when the project's latest revision row names this company (the project page's own check); settings are read through company-scoped keys. tests/contract/project-settings-compliance.test.ts covers both companies, a foreign settings row, role refusals, paging over 250 projects and a read-only call. |
 
 New key construction sites: aws/project-settings.ts projectSettingsKey and the COMPANY_LOG audit partition both use the existing companyScoped builder. The audit entity reuses COMPANY_LOG. No generic forwarding site was added. The raw-name PROJECT and MEMBER families retain their existing needs-company classifications: this adapter checks their company before using them; it does not migrate their writers. The developer-routes forwarding expressions are unchanged and relocated by four lines.
 ## T3b member writes and company list (stacked on T3)
