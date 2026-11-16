@@ -48,8 +48,9 @@ import { createCallbackService } from "../services/index.js";
 import { createTaskTokenDescriber } from "../core/model-gateway/describer.js";
 import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
-import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
-import { coreModelGatewayWiring, gatewayModelKeysModules, taskKeySigner } from "../core-host/gateway-model-access.js";
+import type { TokenSigner } from "../developer/tokens.js";
+import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -254,7 +255,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
-  const modelChoices = createCompanyModelChoices({ reader: inputs.offeredModels, now: () => now().getTime() });
+  // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
+  const modelChoices = createCompanyModelChoices({ reader: inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens), now: () => now().getTime() });
   const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => modelChoices.flowOptionsFor(registry, companyId, modelGateway()!.flowOptions);
   const lessonsSwitch = readCoreLessonsSwitch(env);
   const lessonsByCompany = new Map<string, CoreLessons>();
@@ -462,16 +464,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
 /** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */
 export const CORE_MODEL_ACCESS_PATH = MODEL_ACCESS_PATH;
 
-/**
- * L2b (DEC 236): the task-token signer and issuer from the broker's environment: the install's KMS task key (TASK_TOKEN_KEY_ARN; only the broker may sign with it, by its key policy)
- * and the sign-in issuer (DEVELOPER_TOKEN_ISSUER, whose JWKS publishes that key with purpose `task`). Either absent: undefined.
- */
-export function taskTokensFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameters<typeof kmsTokenSigner>[0]["kms"]): { signer: TokenSigner; issuer: string } | undefined {
-  const keyId = env.TASK_TOKEN_KEY_ARN ?? "";
-  const issuer = env.DEVELOPER_TOKEN_ISSUER ?? "";
-  // Published with purpose `task` by the JWKS (developer-identity.ts); stamped here, where the key is known to be the task key.
-  return keyId === "" || issuer === "" ? undefined : { signer: taskKeySigner(kmsTokenSigner({ kms, keyId })), issuer };
-}
+export { taskTokensFromEnvironment };
 
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */
 export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engine's adapters yet: it needs the core dispatch queue's URLs in its environment, a code host provider for the core (the GitHub App behind the scoped provider interface) and its side of the workers' operations";

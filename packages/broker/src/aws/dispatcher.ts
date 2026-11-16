@@ -23,6 +23,8 @@ import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
 import { gatewayModelKeysModules, hostedSecurityModules } from "../core-host/hosted-modules.js";
+import { taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
@@ -745,6 +747,7 @@ export const handler = withCoreDispatch(workflowHandler, {
       const sqs = new SQSClient(awsClientConfiguration);
       const queueUrl = process.env[CORE_DISPATCH_QUEUE_URL_VARIABLE] ?? "";
       const flow = hostedDispatcherFlow(process.env);
+      const offeredReader = offeredModelsReaderFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
       return createDispatcherCoreHost({
         env: process.env,
         documentClient,
@@ -754,6 +757,8 @@ export const handler = withCoreDispatch(workflowHandler, {
         // Lane E2 step 6: the declared flow inputs (none while lessons are switched on anywhere: then nothing is declared and every core record comes back) and the step 5 points.
         // A dispatch decides nothing for a person, so the identity point names nobody here.
         ...(flow === undefined ? {} : { flow }),
+        // DEC 243c: the company's chosen model, from the gateway's offered list: the same reader as the broker's, wired only where the model gateway is configured AND this function can sign with the task key (the key policy lets only the broker; until infra grants it, none).
+        ...(offeredReader === undefined ? {} : { offeredModels: offeredReader }),
         extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } }), ...gatewayModelKeysModules(process.env)],
         log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); }, // one JSON line on stderr, as logDispatchFailure's fallback (fixed fields only)
       }).host;
