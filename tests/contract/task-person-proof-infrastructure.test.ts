@@ -215,18 +215,19 @@ describe("the named TEST proof-only installation gate", () => {
     // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.
     // #722: named/foreign re-pinned for the combined stacked baseline (#689 + R2 step 4; no template change of #722's own), the same values as L1a (#731) measured before its edits.
     // ENV-ROOM (pr/broker-env-diet): named/foreign re-pinned for the packed broker environment (AGENTX_NAMES, AGENTX_SETTINGS, AGENTX_ACCOUNT_ID; the snapshot diff is the broker's Variables only); legacy unchanged.
+    // Switch-over incident 2026-11-16: named and foreign re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA); only ordering moves.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "247547c3e6e1808ffdd553bcc9dc88b9a4da453675e23ce4bfc9704255c0e3c4",
-        withoutRoute: "a008009d43061070d530d5863c29af3e9ca10a17be0a0c25952cd5383c5dbf7d",
+        withRoute: "806128f89453deb2e870ab307d12bb4be811568cffb1c105214dd2c1652e2819",
+        withoutRoute: "a2795d80e5a542717ff4271ffa31f385dec9c8c783002ea50b6ee083cf965e68",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "95bdece8683dbde3bbd98c6a59f9e312073a30a2fc52bdf76cf062dc7d60ff26",
-        withoutRoute: "d432d6d13e81fb7ef768947ff355c7f5b703783ed7e3fed2a0c06b20530a28da",
+        withRoute: "96f6c8459030d34737d9802a7aeff82940e28a3037e6f2ddd0d6798f9e621644",
+        withoutRoute: "cfde335b057285fcc45d906e5705ba439909653bdc6bf28c6947944a2a383050",
       },
       {
         label: "legacy",

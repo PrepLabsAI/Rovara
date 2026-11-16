@@ -1,0 +1,231 @@
+{
+ "agentx-staging-control-plane": {
+  "Resources": {
+   "AgentSkillsReadRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /v1/internal/agent-skills"
+    }
+   },
+   "AgentToolsListRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /v1/internal/agent-tools"
+    }
+   },
+   "ContextToolsListRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /v1/internal/context-tools"
+    }
+   },
+   "DesignReviewPacketRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /v1/internal/design-review/packet"
+    }
+   },
+   "DeveloperSignInAppRouteBAD38FAA": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /v1/app/{proxy+}"
+    }
+   },
+   "DeveloperSignInAuthRoute98555360": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /v1/auth/{proxy+}"
+    }
+   },
+   "DeveloperSignInDevRoute4BB932E2": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /v1/dev/{proxy+}"
+    }
+   },
+   "DeveloperSignInFeedbackReviewRoute881C7CFE": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /review/{proxy+}"
+    }
+   },
+   "DeveloperSignInSessionLinkRoute06DE5874": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /s/{proxy+}"
+    }
+   },
+   "DeveloperSignInWebRoute253F2267": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /v1/web/{proxy+}"
+    }
+   },
+   "EventHookRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "POST /v1/hooks/{source}/{hookId}"
+    }
+   },
+   "GithubInstallCallbackRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /v1/github/install/callback"
+    }
+   },
+   "GithubInstallConfirmRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "POST /v1/github/install/confirm"
+    }
+   },
+   "GithubWebhookRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "POST /v1/github/webhooks"
+    }
+   },
+   "ModelAccessRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /v1/internal/model-access"
+    }
+   },
+   "ProjectSetupExecutionReadRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /v1/internal/project-setups/{setupExecutionId}/execution"
+    }
+   },
+   "ProxyRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /{proxy+}"
+    }
+   },
+   "SlackEventsRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "POST /v1/slack/events"
+    }
+   },
+   "SlackInteractivityRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "POST /v1/slack/interactions"
+    }
+   },
+   "SlackServiceRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "ANY /v1/service/{proxy+}"
+    }
+   },
+   "WebAppAppPathRouteC44AC6EE": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /app/{proxy+}"
+    }
+   },
+   "WebAppAppRoute46037100": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /app"
+    }
+   },
+   "WebAppJoinRoute2245635D": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /join"
+    }
+   },
+   "WebAppSessionRouteA44E7FCE": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "GET /s/{sessionId}"
+    }
+   },
+   "WorkerCallbackRoute": {
+    "Type": "AWS::ApiGatewayV2::Route",
+    "Properties": {
+     "ApiId": {
+      "Ref": "HttpApi"
+     },
+     "RouteKey": "POST /v1/internal/{proxy+}"
+    }
+   }
+  }
+ }
+}

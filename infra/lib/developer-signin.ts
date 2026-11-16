@@ -304,7 +304,11 @@ export class DeveloperSignIn extends Construct {
     });
     // Lane L12, named environments with developer tasks only (the legacy template stays as deployed): the core's /v1/app/* routes. No authorizer, as DevRoute (D17): the broker
     // verifies the developer token itself, refuses a method and path with no row in its route table, and answers nothing here while the core switch is off.
-    const coreAppRoute = named && tasks !== undefined ? new apigwv2.CfnRoute(this, "CoreAppRoute", {
+    // Construct id "AppRoute" (logical ID DeveloperSignInAppRouteBAD38FAA) on purpose (switch-over incident 2026-11-16): the
+    // 0.5.18 staging stack already holds ANY /v1/app/{proxy+} under that ID. A new ID made CloudFormation create a second route
+    // with the same key before its cleanup deleted the old one, and the update failed with 409 AlreadyExists.
+    // Pinned by tests/unit/collision-check.test.ts; check new previews with scripts/collision-check.ts.
+    const coreAppRoute = named && tasks !== undefined ? new apigwv2.CfnRoute(this, "AppRoute", {
       apiId: props.api.ref, routeKey: CORE_APP_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
     }) : undefined;
     // Public routes are stage-capped: bursts of 50, 20 requests a second on average,
