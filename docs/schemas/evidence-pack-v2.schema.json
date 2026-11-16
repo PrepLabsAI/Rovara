@@ -289,6 +289,21 @@
                 "minimum": 0,
                 "maximum": 100000000
               },
+              "flakyOnRerun": {
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
+                }
+              },
+              "flakyOnRerunCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000000
+              },
               "names": {
                 "maxItems": 500,
                 "type": "array",

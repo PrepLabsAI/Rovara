@@ -4,7 +4,7 @@
 //   - `prepareTestServices`: the dependencies a preparation (a candidate check) starts.
 // Nothing here is a second rule: the pin, the usable check and the plan are `usable.ts` and `task-plan.ts`. The seam only exists so `core/task-flow` and `core/build-step` do not import the environment's modules.
 import {
-  TEST_ENV_COVERAGE_PATH_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, awsPlanNeedsAllServices, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE,
+  TASK_FLAKY_RERUN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, awsPlanNeedsAllServices, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE,
   type OrgId, type ProjectCommand, type TaskDependencyPlan, type TestEnvTaskPlan, type TestEnvironmentBody, type TransactItem,
 } from "@agentx/contracts";
 import type { TestEnvDeps } from "./deps.js";
@@ -17,6 +17,7 @@ export function featuresForTestPlan(dependencies: readonly TaskDependencyPlan[] 
   const features = new Set<string>();
   if (plan !== undefined) features.add(TEST_ENV_PLAN_FEATURE);
   if (plan?.checks.some((check) => check.coveragePath !== undefined) === true) features.add(TEST_ENV_COVERAGE_PATH_FEATURE);
+  if (plan?.flakyRerun === true) features.add(TASK_FLAKY_RERUN_FEATURE);
   const planned = dependencies ?? plan?.dependencies ?? [];
   if (planned.length > 0) features.add(TEST_SERVICES_PLAN_FEATURE);
   if (planned.some((dependency) => dependency.backing === "emulated")) features.add(TEST_SERVICES_AWS_PLAN_FEATURE);
@@ -53,7 +54,7 @@ export function createTaskTestEnvironment(deps: TestEnvDeps, options: { orgId: O
       const scope = { orgId: options.orgId, project: input.project, taskId: input.taskId };
       const plan = input.mode === "CHECKS"
         ? input.readiness === undefined ? undefined : await testEnvPlanFor(deps, { ...scope, readiness: input.readiness }, env)
-        : await testEnvImplementPlanFor(deps, scope, env);
+        : await testEnvImplementPlanFor(deps, { ...scope, ...(input.readiness === undefined ? {} : { readiness: input.readiness }) }, env);
       return plan === undefined ? undefined : { plan, fixtureDigests: fixtureDigestsOfPlan(plan), requires: featuresForTestPlan(undefined, plan) };
     },
   };

@@ -14,6 +14,7 @@ import {
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
   submitWorkflowReview, workflowIsReviewOnly, workflowPullRequestTrees, workflowReviewRoles, workflowSelectedChecks,
   blockingFindings, change, secondReviewBlockFinding, type CandidateRepository, type TransactItem, type UpdateOp, type WorkflowSnapshot,
+  flakyHoldFactOf,
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { recordCatch, recordCodeChanged } from "../decisions/change-tier.js";
@@ -242,13 +243,31 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     }
     // The worker reports the readiness commands it was sent as `readiness:<index>`, in the order of the selected checks; agent-claimed entries never stand in for them, and a missing one is unknown.
     const selected = workflowSelectedChecks(workflow.checkPolicy);
-    const results = verificationResultsOf(selected, checks.data.checks);
+    const measured = verificationResultsOf(selected, checks.data.checks);
+    // TE-C6 (switch ROVARA_FLAKY_RERUN, 9d's decision): a check that failed ONLY on tests that passed on the worker's one rerun is recorded as passed for VERIFY, and the workflow carries the fact that B5's hold reads (the draft
+    // stays a draft). Any other failure, a timeout, a check that did not run or one whose command could not run stays FAILED, exactly as before; without the seam nothing changes.
+    let flakyFact: ReturnType<typeof flakyHoldFactOf>;
+    let results = measured;
+    if (deps.flakyChecks !== undefined && measured.some((result) => result.status === "FAILED" && result.broken !== true && result.programNotFound !== true && result.neverStarted !== true)) {
+      const flaky = await deps.flakyChecks({ task, operation, candidateDigest: candidate.digest, checks: checks.data.checks }).catch(() => undefined);
+      if (flaky !== undefined && flaky.byCheck.size > 0) {
+        const excused: Array<readonly string[]> = [];
+        results = measured.map((result, index) => {
+          const ids = flaky.byCheck.get(`readiness:${String(index)}`);
+          if (ids === undefined || result.status !== "FAILED" || result.broken === true || result.programNotFound === true || result.neverStarted === true) return result;
+          excused.push(ids);
+          return { checkId: result.checkId, status: "PASS" as const };
+        });
+        flakyFact = flakyHoldFactOf(excused, flaky.baseFlaky);
+      }
+    }
     if (results.length === 0 && !reviewOnly) { failure = WORKFLOW_BLOCK_REASONS.noCheckResults; throw new Error("there are no selected check results"); }
     next = recordWorkflowVerification(verifying, {
       candidate,
       checks: { candidateDigest: candidate.digest, producer: "agentx-worker-checks", environmentId: task.workspaceId, recordedAt: now, results, ...(reviewOnly ? { reviewOnly: true } : {}) },
       now,
       ...(e2eQualification === undefined ? {} : { e2eQualification }),
+      ...(flakyFact === undefined ? {} : { flakyOnChange: flakyFact }),
     });
     // Other code than the task held before: every review that already ran has seen code change after it (the catch counters' third number).
     if (workflow.candidate !== undefined && workflow.candidate.digest !== candidate.digest) {

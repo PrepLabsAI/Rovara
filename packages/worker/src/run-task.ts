@@ -78,6 +78,7 @@ import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCod
 import { runTestProof, serializeTestProof, withGeneralFakeFacts, withScriptedReplyFacts } from "./verification/test-proof.js";
 import { generalFakesFactsCollector, generalFakesPlanFor, mergeGeneralFakeFacts, withGeneralFakesRound, type GeneralFakeFacts } from "./general-fakes-round.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
+import { flakyRerunFileFor, flakyRerunFileOf, rerunFlaky, type ReportedFlaky } from "./verification/flaky-rerun.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -584,6 +585,11 @@ async function runTask(
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
+      // TE-C6: with the plan's `flakyRerun` and the evidence asked for, the failing tests of a test check that passed before are rerun once (inside what is left of the round's budget) so the evidence can name the ones that passed. The
+      // checks' entries are not changed. The rerun puts the checks' report files back, so the evidence below reads the round's own reports.
+      const flaky = invocation.payload.testEnvironment?.flakyRerun === true && !round.stopped && !stop.signal.aborted
+        ? await rerunFlaky({ rootPath: canonicalRoot, commands: readiness, checks: invocation.payload.testEnvironment.checks, entries: round.entries, runners, roundStartedAtMs: roundStarted, budgetMs: Math.max(0, roundBudgetMs - (Date.now() - roundStarted)), signal: stop.signal })
+        : undefined;
       const candidateReplyFacts = replyCollector.take();
       const candidateFakeFacts = fakesCollector.take();
       candidateFakeFactsTaken = true;
@@ -610,6 +616,9 @@ async function runTask(
       }
       let candidateAfter = await readCandidateRepositories(repositories);
       await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
+      // TE-C6: what the broker may excuse as flaky (only checks whose every failing test passed on the rerun). Informational for the worker: a failed save leaves the failure standing.
+      const flakyFile = flakyRerunFileOf(flaky);
+      if (flakyFile !== undefined) await dependencies.artifactSink({ name: flakyFile.name, mediaType: "application/json", content: flakyFile.content }).catch(() => undefined);
       const compact = compactCheckReport(checks);
       let workflowE2EEvidence: Awaited<ReturnType<typeof executeWorkflowE2EChecks>> | undefined;
       if (invocation.payload.workflowE2EAdmission !== undefined) {
@@ -635,7 +644,7 @@ async function runTask(
         const edgesStarted = Date.now();
         const repositoryEdges = await repositoryChecks.evidence({ kind: runners.kind, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs });
         const edgesSpentMs = Date.now() - edgesStarted;
-        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
+        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath), ...(flaky === undefined || flaky.size === 0 ? {} : { flaky }),
           baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs - edgesSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
       }
       const evidenceSpentMs = Date.now() - evidenceStarted;
@@ -841,6 +850,8 @@ async function runTask(
   let candidateCheckDrift = false;
   // The first round's report when the extra try was given (Ruling N).
   let firstRoundChecks: CheckReport | undefined;
+  // TE-C6: the rerun result that came with a report, and that report (see `flakyRerunFileFor`: the file is saved only next to that very report).
+  let flakyOfReport: ReportedFlaky | undefined;
   const verification = verificationExtension({
     // Review Focus 5: a broker that sends no readiness leaves the agent's own commands.
     plan: () => (checkPlan = planChecks(readiness, recorder, checkHistory)),
@@ -849,9 +860,10 @@ async function runTask(
     signal: verificationStop.signal,
     recorder,
     ...(workflowDependencies === undefined ? {} : { shouldRun: () => graphFinalItemReady }),
-    onReport: async (report) => {
+    onReport: async (report, flakyRerun) => {
       for (const message of repositoryChecks.notes()) await events.append("progress", { message });
       reportedChecks = report;
+      flakyOfReport = flakyRerun === undefined ? undefined : { report, result: flakyRerun };
       reportedChecksCandidate = undefined;
       if (candidateCheckDrift) return;
       // A report of no checks, or of checks that were stopped or errored, binds the code too: the broker accepts it only
@@ -874,6 +886,8 @@ async function runTask(
     onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
     ...(dependencies.originalCode === undefined ? defaultOriginalCode(manifest, canonicalRoot, checkRunners.originalCode) : { originalCode: dependencies.originalCode }),
+    // TE-C6: only when the plan says so (the broker sends the flag only to a worker that lists TASK_FLAKY_RERUN_FEATURE): a failing test of a test check that passed before is rerun once before the extra turn is decided.
+    ...(invocation.payload.testEnvironment?.flakyRerun === true ? { flakyRerun: { rootPath: canonicalRoot, checks: invocation.payload.testEnvironment.checks } } : {}),
   });
 
   // The agent's shell: the devcontainer's or the sandbox's, or the local one when it was chosen.
@@ -1181,6 +1195,9 @@ async function runTask(
         mediaType: "application/json",
         content: checksArtifactContent(finalChecks()),
       });
+      // TE-C6: what the broker may excuse as flaky, only when the report that stands came from the round that reran (an extra turn clears it: `firstRoundChecks` is then the report).
+      const flakyFile = flakyRerunFileFor(reportedChecks, flakyOfReport);
+      if (flakyFile !== undefined) await artifactSink({ name: flakyFile.name, mediaType: "application/json", content: flakyFile.content });
     };
     const runCompletedPrefixProjectChecks = async (
       repositories: readonly CandidateRepositoryInput[],
