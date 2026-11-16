@@ -91,21 +91,22 @@ function mapAge(map: CoverageMap, now: Date): number | undefined {
 
 /** Tests that could depend on a changed file through imports: every inventory test whose file reaches a changed file, transitively. */
 function reachingTests(graph: ImportGraph, changed: ReadonlySet<string>, inventory: readonly string[]): Set<string> {
-  const cache = new Map<string, boolean>();
-  const reaches = (start: string): boolean => {
-    const known = cache.get(start);
-    if (known !== undefined) return known;
-    const seen = new Set<string>([start]);
-    const queue = [start];
-    for (let head = 0; head < queue.length; head += 1) {
-      const file = queue[head] as string;
-      if (changed.has(file)) { cache.set(start, true); return true; }
-      for (const next of graph.get(file) ?? []) if (!seen.has(next)) { seen.add(next); queue.push(next); }
+  const dependents = new Map<string, string[]>();
+  for (const [file, imports] of graph) {
+    for (const imported of imports) {
+      const files = dependents.get(imported);
+      if (files === undefined) dependents.set(imported, [file]);
+      else files.push(file);
     }
-    cache.set(start, false);
-    return false;
-  };
-  return new Set(inventory.filter((id) => reaches(testFileOf(id))));
+  }
+  const reaching = new Set(changed);
+  const queue = [...changed];
+  for (let head = 0; head < queue.length; head += 1) {
+    for (const dependent of dependents.get(queue[head] as string) ?? []) {
+      if (!reaching.has(dependent)) { reaching.add(dependent); queue.push(dependent); }
+    }
+  }
+  return new Set(inventory.filter((id) => reaching.has(testFileOf(id))));
 }
 
 export function selectTests(input: SelectionInput): SelectionResult {
@@ -206,12 +207,38 @@ const JS_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".c
  */
 export function buildImportGraph(files: ReadonlyArray<{ path: string; text: string }>): ImportGraph {
   const known = new Set(files.map((file) => file.path));
+  const rootsByModule = new Map<string, { ordered: string[]; seen: Set<string> }>();
+  const addRoot = (module: string, root: string) => {
+    let roots = rootsByModule.get(module);
+    if (roots === undefined) {
+      const ordered = [module, posix.join("src", module)];
+      roots = { ordered, seen: new Set(ordered) };
+      rootsByModule.set(module, roots);
+    }
+    if (!roots.seen.has(root)) { roots.seen.add(root); roots.ordered.push(root); }
+  };
+  for (const path of known) {
+    for (let slash = path.indexOf("/"); slash > 0; slash = path.indexOf("/", slash + 1)) {
+      const suffix = path.slice(slash + 1);
+      if (suffix.endsWith(".py")) {
+        const module = suffix.slice(0, -3);
+        addRoot(module, path.slice(0, slash + 1 + module.length));
+      }
+    }
+    for (let slash = path.indexOf("/"); slash > 0; slash = path.indexOf("/", slash + 1)) {
+      const suffix = path.slice(slash + 1);
+      if (suffix.endsWith("/__init__.py")) {
+        const module = suffix.slice(0, -"/__init__.py".length);
+        addRoot(module, path.slice(0, slash + 1 + module.length));
+      }
+    }
+  }
   const graph = new Map<string, Set<string>>();
   const resolvePython = (from: string, dots: string, module: string): string | undefined => {
     let base = dots.length === 0 ? "" : posix.dirname(from);
     for (let level = 1; level < dots.length; level += 1) base = posix.dirname(base);
     const relative = module.replace(/\./gu, "/");
-    const candidates = dots.length === 0 ? sourceRoots(known, relative) : [posix.join(base, relative)];
+    const candidates = dots.length === 0 ? (rootsByModule.get(relative)?.ordered ?? [relative, posix.join("src", relative)]) : [posix.join(base, relative)];
     for (const candidate of candidates) {
       for (const option of [`${candidate}.py`, posix.join(candidate, "__init__.py")]) if (known.has(option)) return option;
     }
@@ -254,18 +281,6 @@ export function buildImportGraph(files: ReadonlyArray<{ path: string; text: stri
     graph.set(file.path, edges);
   }
   return graph;
-}
-
-/** Where an absolute Python module can live: the repository root, or a `src` directory, or any directory a file of that module path is found under. */
-function sourceRoots(known: ReadonlySet<string>, relative: string): string[] {
-  const roots = new Set<string>([relative, posix.join("src", relative)]);
-  for (const path of known) {
-    const at = path.indexOf(`/${relative}.py`);
-    const pkg = path.indexOf(`/${relative}/__init__.py`);
-    if (at > 0) roots.add(path.slice(0, at + 1 + relative.length));
-    if (pkg > 0) roots.add(path.slice(0, pkg + 1 + relative.length));
-  }
-  return [...roots];
 }
 
 // ---- the round budget and the per-check time limit
