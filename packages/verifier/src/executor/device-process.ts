@@ -11,6 +11,8 @@ export type DeviceBackground = Readonly<{
   running(): boolean;
   /** The end of what the program printed (output and errors), only when it was started with `capture`: for the CI test's diagnostic lines, never kept anywhere else. */
   tail?(): string;
+  /** How the program ended (a spawn error's code, or its exit code and signal), only when it was started with `capture`: for the same diagnostic lines. */
+  how?(): string;
   /** Asks the program's group to end, then forces it after `graceMs`; resolves when it is gone (or after the force, at most `graceMs` + 2 s). */
   stop(graceMs: number): Promise<void>;
 }>;
@@ -62,16 +64,20 @@ export function createNodeCommandPort(): DeviceCommandPort {
     start(file, args, options) {
       let exited = false;
       let last = "";
+      let how = "still running";
       const child = spawn(file, [...args], { detached: true, stdio: options.capture === true ? ["ignore", "pipe", "pipe"] : "ignore", env: { ...(options.env ?? {}) } });
       if (options.capture === true) {
         const keep = (chunk: Buffer) => { last = (last + chunk.toString("utf8")).slice(-2_000); };
         child.stdout?.on("data", keep);
         child.stderr?.on("data", keep);
       }
-      const gone = new Promise<void>((resolve) => { child.once("exit", () => { exited = true; resolve(); }); child.once("error", () => { exited = true; resolve(); }); });
+      const gone = new Promise<void>((resolve) => {
+        child.once("exit", (code, signal) => { exited = true; how = `exit code ${String(code)} signal ${String(signal)}`; resolve(); });
+        child.once("error", (error: NodeJS.ErrnoException) => { exited = true; how = `spawn error ${String(error.code ?? "unknown")} (the program never ran)`; resolve(); });
+      });
       return {
         running: () => !exited,
-        ...(options.capture === true ? { tail: () => last } : {}),
+        ...(options.capture === true ? { tail: () => last, how: () => how } : {}),
         async stop(graceMs) {
           if (exited) return;
           endGroup(child.pid, "SIGTERM");

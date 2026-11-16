@@ -2,7 +2,7 @@
 // `--network container:<sandbox>`, `/dev/kvm`, the built apps read-only at /apps). It takes ONE argument, the plan, runs the device-evidence runner (slice 1) over the Android emulator driver and the
 // real JPEG encoder, and prints ONE line: the runner's result, with the pictures as base64. It starts no listener, reads no file but the two apps, writes only under /tmp, has no secret and holds no
 // credential, so there is nothing for the credential scan to look for. Anything wrong is one fixed sentence on standard error and exit code 2 (a plan) or 1 (a failed run); never a stack or a screen's words.
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { DeviceEvidenceCaptured } from "@agentx/contracts";
 import { decodeDeviceExecutorPlan, DEVICE_EXECUTOR_APPS_DIR, encodeDeviceExecutorOutput, type DeviceExecutorPlan } from "../host/device-executor.js";
@@ -44,6 +44,19 @@ export async function runDevicePlan(plan: DeviceExecutorPlan, deps: DevicePlanDe
   });
 }
 
+/** What the container looks like from inside, for the CI test's log only (printed on request, never part of the evidence): who this is, which groups, /dev/kvm's owner and mode, and which paths can be written. */
+export function deviceEnvironmentReport(): string[] {
+  const lines: string[] = [];
+  const groups = (() => { try { return readFileSync("/proc/self/status", "utf8").split("\n").find((row) => row.startsWith("Groups:")) ?? "Groups: ?"; } catch { return "Groups: unreadable"; } })();
+  lines.push(`uid ${String(process.getuid?.())} gid ${String(process.getgid?.())} ${groups.replace(/\s+/gu, " ")}`);
+  try { const row = statSync("/dev/kvm"); lines.push(`/dev/kvm mode ${(row.mode & 0o7777).toString(8)} uid ${String(row.uid)} gid ${String(row.gid)} char-device ${String(row.isCharacterDevice())}`); } catch { lines.push("/dev/kvm cannot be seen"); }
+  for (const [path, mode] of [["/dev/kvm", constants.R_OK | constants.W_OK], ["/opt/android-avd", constants.W_OK], ["/opt/android-avd/rovara.avd", constants.W_OK], ["/opt/android-avd/rovara.avd/config.ini", constants.R_OK],
+    ["/opt/android-sdk/emulator/emulator", constants.X_OK], ["/home/android", constants.W_OK], ["/home/android/.android", constants.W_OK], ["/tmp", constants.W_OK], [DEVICE_SCRATCH_DIR, constants.W_OK]] as const) {
+    try { accessSync(path, mode); lines.push(`${path}: ${mode === constants.W_OK ? "writable" : mode === constants.X_OK ? "executable" : "accessible"}`); } catch (error) { lines.push(`${path}: NOT accessible (${String((error as NodeJS.ErrnoException).code)})`); }
+  }
+  return lines;
+}
+
 async function main(): Promise<void> {
   const plan = decodeDeviceExecutorPlan(process.argv[2]);
   if (plan === undefined || process.argv.length !== 3) { process.stderr.write("device evidence plan is not valid\n"); process.exit(2); }
@@ -53,6 +66,11 @@ async function main(): Promise<void> {
   let code = 0;
   try {
     mkdirSync(DEVICE_SCRATCH_DIR, { recursive: true, mode: 0o700 });
+    if (talk) {
+      for (const line of deviceEnvironmentReport()) process.stderr.write(`device env: ${line}\n`);
+      const check = await createNodeCommandPort().run(DEVICE_TOOLS.emulator, ["-accel-check"], { timeoutMs: 20_000, maxStdoutBytes: 4_096, env: DEVICE_ENV, mergeStderr: true });
+      process.stderr.write(`device env: emulator -accel-check exit ${String(check.exitCode)} | ${Buffer.from(check.stdout).toString("utf8").replace(/\s+/gu, " ").slice(0, 600)}\n`);
+    }
     const captured = await runDevicePlan(plan, {
       command: createNodeCommandPort(), writeFile: (path, text) => { writeFileSync(path, text, { mode: 0o600 }); return Promise.resolve(); },
       ...(talk ? { diag: (stage: string, note: string, detail?: string) => { process.stderr.write(`device ${stage}: ${note}${detail === undefined ? "" : ` | ${detail.replace(/\s+/gu, " ")}`}\n`); } } : {}),

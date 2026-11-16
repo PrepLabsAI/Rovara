@@ -64,6 +64,8 @@ RUN mkdir -p /opt/android-avd \
     && cat "$cfg" /opt/android-avd/rovara.ini
 # No command-line tools in the final image: nothing can install anything at run time.
 RUN rm -rf /opt/android-sdk/cmdline-tools
+# The container runs as uid 10001, not root: whatever sdkmanager and avdmanager created must be readable and runnable by it (never writable: the AVD is started `-read-only`).
+RUN chmod -R go-w,a+rX /opt/android-sdk /opt/android-avd
 
 # Maestro 2.12.1 (Apache-2.0), by SHA-256.
 RUN curl -fsSL -o /tmp/maestro.zip https://github.com/mobile-dev-inc/maestro/releases/download/cli-2.12.1/maestro.zip \
