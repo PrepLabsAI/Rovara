@@ -247,11 +247,21 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   it("a file F4 found and diffed is accounted for", async () => {
     expect(await read([["prompts/system.txt", "old", "new prompt"]])).toMatchObject({ status: "changes" });
   });
-  it("scans a very large file of unterminated quotes in bounded time", async () => {
-    const hostile = "'\"".repeat(450_000);
+  it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'"])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
+    const hostile = unit.repeat(Math.ceil(1024 * 1024 / unit.length));
     const started = Date.now();
-    await read([["src/hostile.ts", hostile, `${hostile}'`]]);
-    expect(Date.now() - started).toBeLessThan(5000);
+    await read([["src/hostile.ts", hostile, `${hostile}x`]]);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+  it.each([
+    ["a stray quote earlier on the line", "const re = /\"/.test(s) ? \"You are A\" : \"You are B\";\n", "const re = /\"/.test(s) ? \"You are A\" : \"You are C\";\n"],
+    ["a single-word literal", "const s = \"Summarize.\";\n", "const s = \"Explain.\";\n"],
+    ["an escaped multi-word literal", "const s = \"Line one.\\nLine two\";\n", "const s = \"Line one.\\nLine 2\";\n"],
+    ["a selector for an unchanged table", "const persona = \"terse\";\n", "const persona = \"verbose\";\n"],
+    ["a changed load path", "const t = readFile(\"assets/a.txt\");\n", "const t = readFile(\"assets/b.txt\");\n"],
+    ["an indented line inside a template literal", "const t = `\n  be terse\n`;\n", "const t = `\n  be verbose\n`;\n"],
+  ])("code with %s reads unknown", async (_name, before, after) => {
+    expect(await read([["src/x.ts", before, after]])).toBeUndefined();
   });
   it("the production classifier counts every readable call as changed when coverage is unknown", async () => {
     sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]]);

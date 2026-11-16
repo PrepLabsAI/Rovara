@@ -36,29 +36,35 @@ export function evalChangedPrompt(frame: ModelEgressFrame): boolean {
 
 /** A prompt can be loaded at run time from a file F4 cannot classify (assets/persona.txt) or sit in a plain string constant of a module with
  * no AI import. F4 reports nothing for those, which is "not found", never "unchanged". So a changed file that F4 gave no item for is
- * unknown (the whole classification becomes unknown) unless it is code whose prose-like string literals did not change. Import paths,
- * identifiers and keys have no whitespace-separated words and are not prose. */
+ * unknown (the whole classification becomes unknown) unless it is code whose quote-bearing text did not change. Best effort and deliberately
+ * over-counting: a changed line that holds a quote or backtick (outside an import/require specifier), or that sits inside a multi-line
+ * template literal or triple-quoted string, is a possible prompt change. Lines are compared as a multiset, so no tokenizer can be
+ * desynchronised by a stray quote, and every step is one linear pass (no backtracking over the file). */
 const codePath = /\.(?:[cm]?[jt]sx?|py|pyi)$/iu;
-const stringLiteral = /"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\[\s\S])*`/gu;
-const proseLiterals = (text: string | undefined): Map<string, number> => {
+const moduleSpecifier = /(?:\bfrom|\bimport|\brequire\s*\()\s*(['"])[^'"\n]*\1/gu;
+function quoteBearingLines(text: string | undefined): Map<string, number> {
   const found = new Map<string, number>();
   if (text === undefined) return found;
-  for (const match of text.matchAll(stringLiteral)) {
-    const literal = match[0]; const quote = literal.startsWith('"""') || literal.startsWith("'''") ? 3 : 1;
-    const body = literal.slice(quote, literal.length - quote);
-    if (/\S\s+\S/u.test(body)) found.set(body, (found.get(body) ?? 0) + 1);
+  let inside = false;
+  for (const line of text.split("\n")) {
+    let ticks = 0;
+    for (let i = line.indexOf("`"); i !== -1; i = line.indexOf("`", i + 1)) if (line[i - 1] !== "\\") ticks++;
+    const triples = line.split('"""').length + line.split("'''").length - 2;
+    const quoted = /["'`]/u.test(line.replace(moduleSpecifier, ""));
+    if (inside || quoted || ticks > 0 || triples > 0) found.set(line, (found.get(line) ?? 0) + 1);
+    if ((ticks + triples) % 2 === 1) inside = !inside;
   }
   return found;
-};
+}
 function everyChangeAccountedFor(files: readonly PromptChangedFile[], report: PromptChangeReport): boolean {
   const found = new Set<string>();
   for (const item of report.items) { found.add(item.path); if (item.oldPath !== undefined) found.add(item.oldPath); }
   for (const file of files) {
     if (found.has(file.path) || file.before === file.after) continue;
     if (!codePath.test(file.path)) return false;
-    const before = proseLiterals(file.before); const after = proseLiterals(file.after);
+    const before = quoteBearingLines(file.before); const after = quoteBearingLines(file.after);
     if (before.size !== after.size) return false;
-    for (const [text, count] of before) if (after.get(text) !== count) return false;
+    for (const [line, count] of before) if (after.get(line) !== count) return false;
   }
   return true;
 }

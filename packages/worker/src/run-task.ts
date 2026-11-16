@@ -709,10 +709,12 @@ async function runTask(
           const ports = dependencies.evalFinalCheck;
           let planning: ReturnType<EvalFinalCheckPorts["plan"]> | undefined;
           const plan = ports === undefined ? undefined : () => (planning ??= ports.plan());
-          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : { ...ports, plan }, {
+          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : Object.assign(Object.create(ports) as EvalFinalCheckPorts, { plan }), {
             status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
           });
-          const running = (ports === undefined || status !== "verified" ? evaluate()
+          // Only a fresh check round reads the plan; a working round refuses first, so the classifier has nothing to classify.
+          const fresh = ports?.roundKind === "check_sealed" || ports?.roundKind === "check_unsealed";
+          const running = (ports === undefined || status !== "verified" || !fresh || stop.signal.aborted ? evaluate()
             : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate))
             .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
