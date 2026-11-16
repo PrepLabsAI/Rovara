@@ -108,7 +108,8 @@ it("legacy unscoped workspace rows belong to the implicit company only", async (
   expect((await locateWorkspace({ store, companyId: A }, "shared-workspace"))?.scope).toBe("legacy");
   const get = vi.spyOn(store, "get");
   expect(await locateWorkspace({ store, companyId: B }, "shared-workspace")).toBeUndefined();
-  expect(get.mock.calls.every(([key]) => key.pk.startsWith(`ORG#${B}#`))).toBe(true);
+  // Its own scoped key, then the id-only discovery key (only to log a dangling pointer of its OWN company); a legacy row is never admitted for B.
+  expect(get.mock.calls.map(([key]) => key.pk)).toEqual([`ORG#${B}#WORKSPACE#shared-workspace`, "WORKSPACE#shared-workspace"]);
 });
 
 it("a foreign visibility failure never logs the adapter's cause or foreign company", async () => {
