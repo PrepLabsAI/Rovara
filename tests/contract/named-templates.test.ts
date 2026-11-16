@@ -231,6 +231,13 @@ function withoutTaskPeopleControls(template: unknown): unknown {
 // out above.
 describe("named environment templates", () => {
   const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child));
+  it("pins L1a's broker core dispatch queue references", () => {
+    const stack = stacks.find((candidate) => candidate.stackName === "agentx-staging-control-plane")!;
+    const template = normalizedTemplate(stack) as { Resources: Record<string, Resource> };
+    const broker = Object.entries(template.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")![1];
+    const variables = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect({ CORE_DISPATCH_QUEUE_URL: variables.CORE_DISPATCH_QUEUE_URL, CORE_DISPATCH_DEAD_LETTER_URL: variables.CORE_DISPATCH_DEAD_LETTER_URL }).toMatchSnapshot();
+  });
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);

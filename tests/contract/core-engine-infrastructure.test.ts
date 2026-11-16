@@ -13,7 +13,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES,
+  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   SERVICE_ROLE_SERVICES, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -368,3 +368,49 @@ it("excludes company rows from the existing publisher reader in named environmen
   const mapping = resources(named, "AWS::Lambda::EventSourceMapping").find(([id]) => id.startsWith("OutboxStreamMapping"))![1];
   expect(mapping.Properties.FilterCriteria).toEqual({ Filters: [{ Pattern: JSON.stringify({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } }) }] });
 });
+
+describe("L1a broker environment derivation", () => {
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value).replace(/[a-f0-9]{64}/gu, "<asset-hash>")).digest("hex");
+  it("derives both dispatch queue URLs at runtime without adding broker environment entries", () => {
+    const before = structuredClone(inApp);
+    const queues = Object.entries(before.Resources).filter(([, resource]) => resource.Type === "AWS::SQS::Queue");
+    const queue = queues.find(([, resource]) => resource.Properties.QueueName === coreDispatchQueueName("staging"))!;
+    const dead = queues.find(([, resource]) => resource.Properties.QueueName === coreDispatchDeadLetterName("staging"))!;
+    const broker = Object.entries(before.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
+    const variables = (broker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables).not.toHaveProperty("CORE_DISPATCH_QUEUE_URL");
+    expect(variables).not.toHaveProperty("CORE_DISPATCH_DEAD_LETTER_URL");
+    expect(queue[1].Properties.QueueName).toBe(coreDispatchQueueName("staging"));
+    expect(dead[1].Properties.QueueName).toBe(coreDispatchDeadLetterName("staging"));
+    expect(broker[1].Properties.Environment).toBeDefined();
+  });
+
+  it("constrains all five kept core settings and passes them to both functions without IAM changes", () => {
+    const parameters = inApp.Parameters as Record<string, { Default?: string; AllowedPattern?: string; MaxLength?: number }>;
+    expect(parameters).toMatchObject({
+      CoreAllowedCompanies: { Default: "none", AllowedPattern: "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
+      CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
+      CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
+      CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
+      CorePolicyHook: { Default: "", AllowedPattern: "^[ -~]*$", MaxLength: POLICY_HOOK_PARAMETER_MAX_LENGTH },
+    });
+    for (const logicalPrefix of ["Broker", "Dispatcher"]) {
+      const fn = Object.entries(inApp.Resources).find(([id, resource]) => id.startsWith(logicalPrefix) && resource.Type === "AWS::Lambda::Function")![1];
+      const variables = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+      expect(variables.AGENTX_SETTINGS).toBeDefined();
+      expect(variables.ROVARA_POLICY_HOOK).toEqual({ Ref: "CorePolicyHook" });
+      expect(variables).not.toHaveProperty("ROVARA_CORE_ALLOWED_COMPANIES");
+      expect(JSON.stringify(variables)).toContain("CoreAllowedCompanies");
+      expect(JSON.stringify(variables)).toContain("CoreTaskCapUsd");
+      expect(JSON.stringify(variables)).toContain("CoreCompanyDayCapUsd");
+      expect(JSON.stringify(variables)).toContain("CoreLessons");
+    }
+    expect(parameters).not.toHaveProperty("CoreAllowedCompaniesLong");
+    expect(Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy")).toHaveLength(Object.values(json.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy").length);
+  });
+
+  it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
+    expect(digest(legacy.toJSON())).toBe("9a7942afbd5561cef0077003fe43e470ef6b83993bef9ca72068f9e475247b06");
+  });
+});
+import { createHash } from "node:crypto";

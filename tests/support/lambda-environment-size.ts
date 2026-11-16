@@ -10,6 +10,8 @@
  * An intrinsic this does not know throws: a measure that guessed would be no measure.
  */
 
+import { POLICY_HOOK_PARAMETER_MAX_LENGTH } from "@agentx/contracts";
+
 type Json = Record<string, unknown>;
 interface Resource { Type: string; Properties?: Json }
 export interface Template { Resources: Record<string, Resource>; Parameters?: Record<string, { Default?: unknown; Type?: string; AllowedValues?: string[] }> }
@@ -19,6 +21,14 @@ export const LAMBDA_ENVIRONMENT_LIMIT_BYTES = 4096;
 export const RESOLVER_REGION = "ap-southeast-4";
 export const RESOLVER_ACCOUNT = "123456789012";
 const PARAMETER_FALLBACK = "p".repeat(64);
+
+/**
+ * The policy hook at its worst: the parameter's longest value, every character one that compact JSON must escape (the parameter allows any printable ASCII, so `"` and `\` pass
+ * the deploy; the broker refuses bad settings later, at run time). Each costs two bytes in the stricter measure and one in keys plus values, so no real hook measures larger.
+ */
+function policyHookWorstCase(): string {
+  return '"'.repeat(POLICY_HOOK_PARAMETER_MAX_LENGTH);
+}
 
 /** What a deploy gives the parameters, at a realistic worst length: a fully configured install (OIDC, Slack, two subnets, the core switch on for two companies). */
 export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
@@ -44,6 +54,12 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   GitHubAppCredentialRef: "github-app-example-company-engineering",
   // The core switch's longest value (CORE_ENGINE_PARAMETER_PATTERN: two companies).
   CoreEngine: `on:org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
+  // The parameter's longest value (two company ids), though DEC 229a uses one until #737/#743 are proven.
+  CoreAllowedCompanies: `org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
+  CoreTaskCapUsd: "1000",
+  CoreCompanyDayCapUsd: "1000",
+  CorePolicyHook: policyHookWorstCase(),
+  CoreLessons: `on:org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
 };
 const RANDOM = "A1B2C3D4E5F6G";
 const UUID = "12345678-1234-1234-1234-123456789012";

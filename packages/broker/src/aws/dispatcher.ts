@@ -1,4 +1,4 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import "./broker-environment-init.js"; import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { S3Client } from "@aws-sdk/client-s3";

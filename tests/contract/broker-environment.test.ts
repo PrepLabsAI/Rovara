@@ -123,7 +123,8 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();
-        expect(hydrated[spec.variable]).toBe(DEPLOY_PARAMETER_VALUES[parameter!] ?? resolver.ref(parameter!));
+        const expected = DEPLOY_PARAMETER_VALUES[parameter!] ?? resolver.ref(parameter!);
+        expect(hydrated[spec.variable]).toBe(expected);
       });
     }
 

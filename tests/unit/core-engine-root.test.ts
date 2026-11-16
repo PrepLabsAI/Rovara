@@ -4,11 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { CORE_APP_UNAVAILABLE } from "../../packages/broker/src/aws/core-app-routes.js";
+import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
 const OTHER = "org_staging0000000000002" as OrgId;
@@ -62,6 +63,36 @@ describe("the broker's core root, switch off (the default)", () => {
 });
 
 describe("the broker's core root, switch on", () => {
+  it("loads with malformed core settings and refuses core routes and jobs in fixed words", async () => {
+    const cases = [
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, "none"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_TASK_CAP_USD: "1001" }, "1001"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_COMPANY_DAY_CAP_USD: "1001" }, "1001"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on:secret-value" }, "secret-value"],
+      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "secret-value" }, "secret-value"],
+      [{ ROVARA_CORE_ENGINE: "on" }, "ROVARA_CORE_ALLOWED_COMPANIES"],
+    ] as const;
+    for (const [env, privateValue] of cases) {
+      const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client));
+      const answer = await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" });
+      expect(answer?.statusCode).toBe(503);
+      expect(answer?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
+      expect(answer?.body).not.toContain(privateValue);
+      await expect(root.handleEvent({ source: "agentx.core-job", job: "dispatch-sweep" })).rejects.toThrow("The core engine settings are not readable.");
+      const broker = await createAdminBroker({ core: root });
+      const nonCore = await adminCall(broker.handler, { method: "GET", path: "/v1/admin/projects" });
+      expect(nonCore.status).toBe(200);
+      const job = await broker.handler({ source: "agentx.core-job", job: "dispatch-sweep" });
+      expect(job.statusCode).toBe(503);
+      expect(job.body).toContain("The core engine settings are not readable.");
+    }
+  });
+
+  it("drains without the root reading the admission settings: a new task goes the old way (draining tasks are refused later, by the admission module)", async () => {
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, fakeTables().client));
+    expect(await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" })).toBeUndefined();
+  });
+
   it("gives the routes a core entry; the registry refuses by name while the broker's adapter inputs are owed, and a start falls back to nothing", async () => {
     const tables = fakeTables([member("dev-a", ORG, "owner")]);
     const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client));
@@ -278,4 +309,45 @@ it("keeps the off root's serialized answers byte identical with policy and servi
   expect(resolve).not.toHaveBeenCalled();
   expect(services).not.toHaveBeenCalled();
   expect(tables.reads).toEqual([]);
+});
+
+describe("the broker core dispatch queue piece (L1a)", () => {
+  const url = "https://sqs.us-east-1.amazonaws.com/123456789012/core-dispatch";
+  const deadLetterUrl = `${url}-dead`;
+  const words = "the broker needs valid core dispatch queue URLs";
+
+  it("builds the same queue settings as the dispatcher, with an optional region", () => {
+    for (const region of [undefined, "us-east-1"]) {
+      const env = { ROVARA_CORE_ENGINE: "on", CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl, ...(region === undefined ? {} : { AWS_REGION: region }) };
+      expect(brokerCoreDispatchQueue(env)).toEqual({ settings: { ...(region === undefined ? {} : { region }), queues: { "task-dispatch": { url, deadLetterUrl } } } });
+    }
+  });
+
+  it("refuses missing or invalid URLs in fixed words without echoing either value", () => {
+    for (const variable of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL"]) {
+      for (const value of [undefined, "", "  ", "zzq-private-input", "https://zzq-private-input/", "ftp://zzq-private-input/queue", "https://example/queue?zzq-private-input", "https://example/queue\n", 42, null]) {
+        const env = { ROVARA_CORE_ENGINE: "on", CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl, [variable]: value } as NodeJS.ProcessEnv;
+        expect(() => brokerCoreDispatchQueue(env)).toThrow(/^the broker needs valid core dispatch queue URLs$/u);
+        try { brokerCoreDispatchQueue(env); } catch (error) {
+          expect(error).toMatchObject({ name: "BrokerCoreQueueNotConfigured", message: words });
+          expect(String(error)).not.toContain("zzq-private-input");
+        }
+      }
+    }
+    expect(() => brokerCoreDispatchQueue({ CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: `${deadLetterUrl}.fifo` })).toThrow(words);
+  });
+
+  it("never invokes the queue piece with the switch off, even with unreadable queue settings", async () => {
+    const env = { ROVARA_CORE_ENGINE: "off" };
+    Object.defineProperty(env, "CORE_DISPATCH_QUEUE_URL", { get() { throw new Error("queue env read while off"); } });
+    const codeModules = vi.fn(() => { brokerCoreDispatchQueue(env); throw new Error("composition still owed"); });
+    const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client, { codeModules }));
+    expect(root.coreTasks).toBeUndefined();
+    await expect(root.app.registry()).rejects.toThrow("no registry is built");
+    expect(codeModules).not.toHaveBeenCalled();
+  });
+
+  it("keeps the complete broker dependency builder refusing until L6 composes the pieces", () => {
+    expect(() => brokerCoreModuleDeps({ CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl })).toThrow(BROKER_CORE_NOT_CONFIGURED);
+  });
 });

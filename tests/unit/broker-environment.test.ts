@@ -38,6 +38,7 @@ const NAMES = {
 const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", mcpConfirmElicitation: "enabled",
+  coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off",
 } as const satisfies Record<BrokerSettingKey, string>;
 
 const names = (entries: Partial<Record<BrokerNameKey, string>> = NAMES): string => Object.entries(entries).map(([key, value]) => `${BROKER_NAMES[key as BrokerNameKey].code}=${value}`).join(",");

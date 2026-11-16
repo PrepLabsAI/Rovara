@@ -978,6 +978,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json((await core.handleEvent(event, { remainingMs })) ?? { skipped: "not_core" }, "core-engine");
       } catch (error) {
         process.stderr.write(`${JSON.stringify({ component: "broker", event: "core_engine.event_failed", error: error instanceof Error ? error.name : "unknown" })}\n`);
+        if (error instanceof Error && error.message === "The core engine settings are not readable.") {
+          return json({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }, "core-engine", 503);
+        }
         return json({ error: "core_event_failed" }, "core-engine", 500);
       }
     }

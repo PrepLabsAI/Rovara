@@ -944,7 +944,7 @@ export class ControlPlaneStack extends Stack {
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
-      if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, notifyOperator });
+      if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
       // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets. Named environments only; nothing assumes it yet.
       if (naming.env !== undefined) {
         const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role;
