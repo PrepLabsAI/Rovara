@@ -6,6 +6,7 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
@@ -64,8 +65,11 @@ function parentRemainderDigest(template: TemplateJson): string {
   const remainder = structuredClone(template);
   // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
   // the legacy template must carry none of it, so legacy stays byte-identical.
-  if (remainder.Parameters?.CoreEngine !== undefined) withoutCoreEngine(remainder);
-  else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
+  if (remainder.Parameters?.CoreEngine !== undefined) {
+    withoutCoreEngine(remainder);
+    // The switch-over parity additions of a named control plane (switchover-parity-infrastructure.test.ts); shape asserted, then taken out.
+    withoutSwitchoverControlPlaneParity(remainder);
+  } else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
   // named parameter and its corresponding Broker environment reference from the proof-only hash.
