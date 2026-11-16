@@ -2,6 +2,7 @@
 // The gateway is the source of truth for "may this approval spend": its stored approval plus the project's own connected customer key. Anything but a 200 that answers
 // exactly the company, project and approver that were asked about, with provider "customer" and connected true, is "spend not approved" (no grant, no hold, no call).
 import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, PluginConfigSchema, TASK_KEY_PURPOSE, type EvalReservationAdapter, type EvalSpendApprovalRecord, type EvalSpendPlan, type OrgId, type StoredDocument } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
@@ -16,6 +17,10 @@ import { evalSpendKey } from "../../packages/broker/src/core/setup-agent/eval-sp
 import { boundEvalReservation, createBoundEvalSpendCapabilities } from "../../packages/broker/src/core/setup-agent/eval-reservation.js";
 import { evalSpendDigest, evalSpendInputsDigest } from "../../packages/contracts/src/eval-spend.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
+import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+import { createEvalSpendSubject, proposeEvalSpendApproval, EVAL_SPEND_KIND } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
+import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
+import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 
 const ORG_A = "org_evalauthority000000a" as OrgId;
 const ORG_B = "org_evalauthority000000b" as OrgId;
@@ -275,5 +280,68 @@ describe("createEvalSpendCapabilities through the bound adapter", () => {
     const caps = createBoundEvalSpendCapabilities(registryWith(adapter(g.fetchImpl)), { store: await seeded(ORG_A), companyId: ORG_B, members, project: PROJECT, current: async () => plan });
     expect(await caps.approval.read()).toBeUndefined();
     expect(g.seen).toEqual([]);
+  });
+});
+
+describe("the approver a REAL approval records is what the adapter sends (and Cloud's developer id reference)", () => {
+  const inputs = { evalSetHash: "a".repeat(64), judgePin: "b".repeat(64), modelVersion: "v1", model: "model", catalogRowId: "model", commandFingerprint: "c".repeat(64), settingsFingerprint: "d".repeat(64) };
+  const plan: EvalSpendPlan = { selection: "evals/demo", inputs, estimate: { calls: 6, costMicros: 60 }, budget: { usual: { calls: 6, costMicros: 60 }, maximum: { calls: 400, costMicros: 4_000_000 } } };
+  const fixture = JSON.parse(readFileSync(new URL("../../contracts/shared/eval-authority-developer-id.v1.json", import.meta.url), "utf8")) as { function: string; inputs: string[]; vectors: Array<{ provider: string; personId: string; developerId: string }> };
+  const reference = (provider: string, personId: string) => createHash("sha256").update(`developer\u0000${provider}\u0000${personId}`, "utf8").digest("hex");
+
+  // Approves through Code's own decision gate and subject (the setup approval), then reads the eval authority through the real adapter and a recording gateway.
+  async function approvedBy(approver: ReturnType<typeof localOwnerPrincipal>) {
+    const store = new MemoryDocumentStore();
+    const members: SessionMembers = { companyRole: (p) => p.companyId === approver.companyId && p.developerId === developerIdOf(approver) ? "owner" : undefined, projectGrant: () => undefined };
+    const deps = { store, companyId: approver.companyId, members, monthlyCapMicros: 50_000_000 };
+    const gate = createDecisionGate({
+      store, audit: createNoopAuditSink(), subjects: [createEvalSpendSubject(deps)], now: () => new Date("2026-11-16T05:00:00.000Z"),
+      approvers: { requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_request, proof) => ({ approved: true, approver, method: proof.method, proofId: proof.proofId }) },
+    });
+    const row = await proposeEvalSpendApproval(deps, PROJECT, plan);
+    const decided = await gate.decide({ companyId: approver.companyId, kind: EVAL_SPEND_KIND, subjectId: PROJECT, requestId: "eval-decision-1", outcome: "approve", seen: { revision: row.revision, artifactDigest: row.digest }, credentials: [{ method: "local-session", token: ["fake", "session"].join("-") }] });
+    expect(decided.status).toBe("decided");
+    const g = gateway((s) => ok(answer({ company: bodyOf(s)["company"], principal: { companyId: approver.companyId, personId: approver.personId, displayName: approver.displayName, roles: approver.roles, provider: approver.provider } })));
+    const registry = createAdapterRegistry();
+    registry.register("eval-reservation", "http", adapter(g.fetchImpl));
+    const grant = await createBoundEvalSpendCapabilities(registry, { ...deps, project: PROJECT, current: async () => plan }).approval.read();
+    return { g, grant };
+  }
+
+  it("sends the approver's identity pair as Code's identity adapter names it, never a developer id", async () => {
+    const approver = localOwnerPrincipal({ companyId: ORG_A });
+    const { g, grant } = await approvedBy(approver);
+    expect(grant).toMatchObject({ company: ORG_A, project: PROJECT, role: "owner", provider: "customer", connected: true });
+    expect(g.seen).toHaveLength(1);
+    const sent = bodyOf(g.seen[0]!)["approver"] as { personId: string; provider: string };
+    expect(sent).toEqual({ personId: approver.personId, provider: approver.provider });
+    expect(sent).toEqual({ personId: "local-owner", provider: "local-owner" });
+    expect(sent.personId).not.toBe(developerIdOf(approver));
+    // What Cloud converts it to: the developer id Code's own records name this approver by.
+    expect(developerIdOf(sent)).toBe(reference(sent.provider, sent.personId));
+    expect(developerIdOf(sent)).toBe(developerIdOf(approver));
+  });
+
+  it("a hosted-style approver (not the local owner) is sent the same way, and a second company's approver never appears", async () => {
+    const approver = { ...localOwnerPrincipal({ companyId: ORG_B, personId: "person-1" }), provider: "rovara-sign-in" };
+    const { g, grant } = await approvedBy(approver);
+    expect(grant).toMatchObject({ company: ORG_B });
+    expect(bodyOf(g.seen[0]!)).toEqual({ company: ORG_B, project: PROJECT, approver: { personId: "person-1", provider: "rovara-sign-in" } });
+    expect(JSON.stringify(g.seen[0])).not.toContain(ORG_A);
+    expect(developerIdOf({ provider: "rovara-sign-in", personId: "person-1" })).toBe("a2389b50163f927aeb226bdce4345cf12e0bcbac45a00217909d2183b56ffa4d");
+  });
+
+  it("the developer id derivation is pinned by the shared fixture vectors (Cloud's conversion reference)", () => {
+    expect(fixture.function).toBe("developerIdOf");
+    expect(fixture.inputs).toEqual(["provider", "personId"]);
+    expect(fixture.vectors.length).toBeGreaterThanOrEqual(4);
+    for (const v of fixture.vectors) {
+      expect(developerIdOf({ provider: v.provider, personId: v.personId })).toBe(v.developerId);
+      expect(reference(v.provider, v.personId)).toBe(v.developerId);
+      expect(v.developerId).toMatch(/^[0-9a-f]{64}$/u);
+    }
+    // The separator matters: ("ab","c") and ("a","bc") are different people.
+    const [x, y] = fixture.vectors.slice(-2);
+    expect(x!.developerId).not.toBe(y!.developerId);
   });
 });
