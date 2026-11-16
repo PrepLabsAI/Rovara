@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { attestRovaraOnlyBaseCheckout, type ModelEgress, type ModelEgressEvent, type ModelEgressFrame, type ModelEgressScope } from "@agentx/contracts";
-import { createBridgedEvalExec, EVAL_BRIDGE_CALLS_MAX, type FreshEvalSandbox, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
+import { createBridgedEvalExec as create, EVAL_BRIDGE_CALLS_MAX, type FreshEvalSandbox, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { collectModelBridge } from "../../packages/worker/src/model-helper-bridge-client.js";
 import type { EvalSandboxRequest } from "../../packages/worker/src/verification/eval-runner.js";
 import { answer, classAnswer, frame } from "../support/eval-model-access.js";
@@ -17,6 +17,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 const makeRoot = async (): Promise<string> => { const root = await mkdtemp(join(tmpdir(), "eb-")); roots.push(root); return root; };
 const location = { root: "/r", cwd: ".", argument: "report.json", notBeforeMs: 1 };
 const scope = Object.freeze({}) as unknown as ModelEgressScope;
+const createBridgedEvalExec = (o: Omit<Parameters<typeof create>[0], "modelAllowed"> & { modelAllowed?: Parameters<typeof create>[0]["modelAllowed"] }) => create({ modelAllowed: () => true, ...o });
 const send = (run: FreshEvalSandboxRun, f: ModelEgressFrame, token = run.model.token) => collectModelBridge({ socketPath: run.model.socketPath, mode: "real", token, frame: { ...f } });
 
 interface Egress { readonly egress: ModelEgress; readonly seen: ModelEgressFrame[]; readonly scopes: ModelEgressScope[] }
@@ -72,7 +73,8 @@ describe("the token", () => {
       expect(none.status).toBe(403); expect(none.settle).toMatchObject({ refusal: "not_allowed" });
       return ok(input);
     });
-    await createBridgedEvalExec({ sandbox, runDir: root }).run(request(e));
+    // the bridge's own refusals never reached the stage, so the run is failed (Not run), whatever the sandbox wrote
+    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow();
     expect(e.seen).toEqual([]);
   });
   it("is a forwarding token of the check round only: replay mode and a no-token real call never reach the egress", async () => {
@@ -82,7 +84,7 @@ describe("the token", () => {
       expect(replay.settle?.class).not.toBe("ok");
       return ok(input);
     });
-    await createBridgedEvalExec({ sandbox, runDir: root }).run(request(e));
+    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow();
     expect(e.seen).toEqual([]);
   });
   it("stops working when the run ends, whether it ended well or the sandbox threw, and the socket is gone", async () => {
@@ -95,12 +97,15 @@ describe("the token", () => {
     await expect(send(kept!, frame("late"))).rejects.toThrow();
     expect(await readdir(root)).toEqual([]);
   });
-  it("a call still open when the run ends is cut off, and nothing more reaches the egress", async () => {
+  it("a sandbox that returns with a call still open fails the run, the call is cut off at once, and nothing more reaches the egress", async () => {
     const root = await makeRoot(); let release: () => void = () => undefined; const gate = new Promise<void>((resolve) => { release = resolve; });
-    const seen: ModelEgressFrame[] = [];
+    const seen: ModelEgressFrame[] = []; let client: Promise<unknown> = Promise.resolve();
     const slow: ModelEgress = { capabilities: { schemes: [] }, async *forward(_s, f, options) { seen.push(f); await Promise.race([gate, new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve()))]); yield* answer(); } };
-    const sandbox = sandboxOf(async (input) => { void send(input, frame("hang")).catch(() => undefined); await new Promise((resolve) => setTimeout(resolve, 50)); return ok(input); });
-    await createBridgedEvalExec({ sandbox, runDir: root }).run({ ...request(egressOf()), egress: slow });
+    const sandbox = sandboxOf(async (input) => { client = send(input, frame("hang")).catch(() => "cut"); await new Promise((resolve) => setTimeout(resolve, 50)); return ok(input); });
+    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run({ ...request(egressOf()), egress: slow })).rejects.toThrow();
+    // closing the bridge cut the client's call: it ends without anyone releasing the egress
+    const ended = await Promise.race([client.then(() => "ended"), new Promise((resolve) => setTimeout(() => resolve("hung"), 2000))]);
+    expect(ended).toBe("ended");
     release();
     expect(seen).toHaveLength(1);
     expect(await readdir(root)).toEqual([]);
@@ -159,6 +164,35 @@ describe("the result", () => {
   });
 });
 
+describe("what the stage cannot see", () => {
+  it("more calls open at once than the bridge's old default of four are queued by the stage, not refused: all answered, the run is clean", async () => {
+    const root = await makeRoot(); const seen: ModelEgressFrame[] = [];
+    const slow: ModelEgress = { capabilities: { schemes: [] }, async *forward(_s, f) { seen.push(f); await new Promise((resolve) => setTimeout(resolve, 30)); yield* answer(); } };
+    const sandbox = sandboxOf(async (input) => { const all = await Promise.all(Array.from({ length: 12 }, (_, i) => send(input, frame(`p${String(i)}`)))); expect(all.map((a) => a.status)).toEqual(Array(12).fill(200)); return ok(input); });
+    await createBridgedEvalExec({ sandbox, runDir: root }).run({ ...request(egressOf()), egress: slow });
+    expect(seen).toHaveLength(12);
+  });
+  it("the model is the worker's pin: a frame it does not name never reaches the stage, the sandbox sees a failure, and the run is Not run", async () => {
+    const root = await makeRoot(); const e = egressOf(); let status = 0;
+    const sandbox = sandboxOf(async (input) => { status = (await send(input, frame("x"))).status!; return ok(input); });
+    await expect(createBridgedEvalExec({ sandbox, runDir: root, modelAllowed: () => false }).run(request(e))).rejects.toThrow();
+    expect(status).not.toBe(200); expect(e.seen).toEqual([]);
+  });
+  it("a pin that throws or answers a non-true value allows nothing; no pin at all is a refusal before anything starts", async () => {
+    const root = await makeRoot(); const e = egressOf();
+    for (const pin of [() => { throw new Error("x"); }, (() => "yes") as never]) {
+      await expect(createBridgedEvalExec({ sandbox: sandboxOf(async (input) => { await send(input, frame("x")); return ok(input); }), runDir: root, modelAllowed: pin }).run(request(e))).rejects.toThrow();
+    }
+    await expect(create({ sandbox: sandboxOf(ok), runDir: root } as never).run(request(e))).rejects.toThrow();
+    expect(e.seen).toEqual([]); expect(await readdir(root)).toEqual([]);
+  });
+  it("a call that fails at the stage (its own refusal) is the stage's to mark, and does not fail the run by itself", async () => {
+    const root = await makeRoot();
+    const sandbox = sandboxOf(async (input) => { await send(input, frame("x")); return ok(input); });
+    await createBridgedEvalExec({ sandbox, runDir: root }).run(request(egressOf(() => classAnswer("rate_limit", 429))));
+  });
+});
+
 describe("limits", () => {
   it("the bridge's own call limit is far above the default of 200, so the stage's hold is the line that decides", async () => {
     expect(EVAL_BRIDGE_CALLS_MAX).toBeGreaterThanOrEqual(2000);
@@ -170,7 +204,7 @@ describe("limits", () => {
   it("a row that is not a plain catalog word is refused by the bridge and reaches no egress", async () => {
     const root = await makeRoot(); const e = egressOf();
     const sandbox = sandboxOf(async (input) => { const refused = await send(input, { ...frame("x"), row: "Bad Row!" }); expect(refused.status).not.toBe(200); return ok(input); });
-    await createBridgedEvalExec({ sandbox, runDir: root }).run(request(e));
+    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow();
     expect(e.seen).toEqual([]);
   });
 });

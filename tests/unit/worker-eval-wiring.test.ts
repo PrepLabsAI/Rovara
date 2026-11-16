@@ -76,7 +76,7 @@ async function sources(opts: { newPass?: boolean; available?: boolean; grant?: E
     },
   };
   const grant = opts.grant ?? w.grant;
-  return { w, runs, runDir, sources: { plan: () => w.ports.plan(), approval: { read: async () => grant }, cache: w.ports.cache, baselines: w.ports.baselines, sandbox: opts.sandbox?.(inner) ?? inner, runDir, changedPrompt: () => true } };
+  return { w, runs, runDir, sources: { plan: () => w.ports.plan(), approval: { read: async () => grant }, cache: w.ports.cache, baselines: w.ports.baselines, sandbox: opts.sandbox?.(inner) ?? inner, runDir, changedPrompt: () => true, modelAllowed: () => true } };
 }
 const bind = (b: Built, net: Net, over: Partial<Parameters<typeof evalFinalCheckForTask>[0]> = {}) =>
   evalFinalCheckForTask({ requested: true, environment: env, controlPlaneUrl: CONTROL, capability: CAP_A, sources: b.sources, fetch: net.fetchImpl, ...over });
@@ -102,7 +102,7 @@ describe("off by default", () => {
   });
   it("binds nothing for a source set that is not whole, and never throws", async () => {
     const b = await sources(); const net = network();
-    for (const broken of [{ ...b.sources, sandbox: undefined }, { ...b.sources, sandbox: {} }, { ...b.sources, runDir: "relative" }, { ...b.sources, runDir: undefined }, { ...b.sources, plan: undefined }, { ...b.sources, approval: {} }, { ...b.sources, cache: { read: async () => undefined } }, { ...b.sources, baselines: {} }, null, 7]) {
+    for (const broken of [{ ...b.sources, sandbox: undefined }, { ...b.sources, sandbox: {} }, { ...b.sources, runDir: "relative" }, { ...b.sources, runDir: undefined }, { ...b.sources, modelAllowed: undefined }, { ...b.sources, plan: undefined }, { ...b.sources, approval: {} }, { ...b.sources, cache: { read: async () => undefined } }, { ...b.sources, baselines: {} }, null, 7]) {
       expect(evalFinalCheckForTask({ requested: true, environment: env, controlPlaneUrl: CONTROL, capability: CAP_A, sources: broken as never, fetch: net.fetchImpl })).toBeUndefined();
     }
     expect(net.sent).toEqual([]);
@@ -245,6 +245,23 @@ describe("any outage is Not run, with the spend accounted", () => {
     const artifact = await runFinalCheckEval(request, bind(b, net), facts(stop.signal));
     expect(reason(artifact)).toBe("stopped");
     const { readdir } = await import("node:fs/promises"); expect(await readdir(b.runDir)).toEqual([]);
+  });
+});
+
+describe("the model and the meter", () => {
+  it("a frame for another model than the plan's never reaches the gateway: the eval is Not run and no call is made", async () => {
+    const b = await sources(); const net = network();
+    const ports = bind(b, net, { sources: { ...b.sources, modelAllowed: (f) => !new TextDecoder().decode(f.body).startsWith("q") } })!;
+    const artifact = await runFinalCheckEval(request, ports, facts());
+    expect(evalResultFromArtifact(artifact).label).toBe("Not run");
+    expect(net.calls()).toEqual([]);
+  });
+  it("the meter options reach the stage: an answer over the configured byte limit is a provider error with an unknown cost", async () => {
+    const b = await sources(); const net = network();
+    const withLimit = { ...b.sources, meter: { responseBytes: 5 } };
+    expect(reason(await runFinalCheckEval(request, bind(b, net, { sources: withLimit }), facts()))).toBe("provider_error");
+    const b2 = await sources(); const net2 = network();
+    expect((await run(bind(b2, net2))).outcome).toBe("done");
   });
 });
 

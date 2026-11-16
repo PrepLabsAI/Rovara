@@ -32,7 +32,8 @@ export function evalGatewayOriginFrom(environment: NodeJS.ProcessEnv): string | 
   if (raw === undefined || raw === "" || raw.length > 512) return undefined;
   let url: URL;
   try { url = new URL(raw); } catch { return undefined; }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || (raw !== url.origin && raw !== `${url.origin}/`)) return undefined;
+  // Exactly an origin: anything with credentials, a path, a query or a fragment makes the text differ from `origin` (or `origin/`).
+  if (url.protocol !== "https:" || (raw !== url.origin && raw !== `${url.origin}/`)) return undefined;
   return url.origin;
 }
 
@@ -48,6 +49,8 @@ export interface EvalHostSources {
   readonly runDir: string;
   /** The worker's own "this frame carries a changed prompt". Absent: the eval reads "no changed prompt call". */
   readonly changedPrompt?: (frame: ModelEgressFrame) => boolean;
+  /** The worker's own pin of the model, from the trusted plan: true only for a frame that calls the plan's model (and judge). Required: the repository's eval code must not choose the model. */
+  readonly modelAllowed: (frame: ModelEgressFrame) => boolean;
   readonly meter?: EvalMeterOptions;
 }
 
@@ -91,7 +94,7 @@ export function evalGatewayTokenSource(input: { origin: string; controlPlaneUrl:
 
 const isWhole = (sources: EvalHostSources | undefined): sources is EvalHostSources => typeof sources === "object" && sources !== null
   && typeof sources.sandbox === "object" && sources.sandbox !== null && typeof sources.sandbox.available === "function" && typeof sources.sandbox.run === "function"
-  && typeof sources.runDir === "string" && sources.runDir.startsWith("/");
+  && typeof sources.modelAllowed === "function" && typeof sources.runDir === "string" && sources.runDir.startsWith("/");
 
 /** The ports of the final-check eval for this task, or undefined. Never throws. */
 export function evalFinalCheckForTask(input: EvalTaskBindingInput): EvalFinalCheckPorts | undefined {
@@ -110,7 +113,7 @@ export function evalFinalCheckForTask(input: EvalTaskBindingInput): EvalFinalChe
       roundKind: fresh ? "check_unsealed" : "working",
       plan: sources.plan, approval: sources.approval, cache: sources.cache, baselines: sources.baselines,
       modelAccess,
-      exec: createBridgedEvalExec({ sandbox: sources.sandbox, runDir: sources.runDir, ...(sources.changedPrompt === undefined ? {} : { changedPrompt: sources.changedPrompt }), ...(input.now === undefined ? {} : { now: input.now }) }),
+      exec: createBridgedEvalExec({ sandbox: sources.sandbox, runDir: sources.runDir, modelAllowed: sources.modelAllowed, ...(sources.changedPrompt === undefined ? {} : { changedPrompt: sources.changedPrompt }), ...(input.now === undefined ? {} : { now: input.now }) }),
       ...(sources.meter === undefined ? {} : { meter: sources.meter }),
     });
   } catch { return undefined; }
