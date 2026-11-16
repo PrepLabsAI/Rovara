@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, createDocumentBaseScoreCache, evalBaseCacheKey, evalCodeHash, evalCommandFingerprint, evalPlanDigest, evalQuestionHash, evalSpendDigest, evalSpendInputsDigest,
   type Approvers, type EvalBaseRecord, type EvalPlanBody, type EvalReservationAdapter, type EvalSpendApprovalRecord, type EvalSpendPlan, type Principal,
@@ -24,7 +24,7 @@ import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { taskKey } from "../../packages/broker/src/developer/task-records.js";
-import { evalPlanSourcesFor } from "../../packages/worker/src/verification/eval-wiring.js";
+import { EVAL_PLAN_ASK_TIMEOUT_MS, evalPlanSourcesFor } from "../../packages/worker/src/verification/eval-wiring.js";
 import { withEvalPinnedCandidate } from "../../packages/worker/src/verification/eval-plan-source.js";
 import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
@@ -365,6 +365,24 @@ describe("end to end: the signed eval-plan route, the worker's pinned hashes and
     const ports = { roundKind: "check_unsealed" as const, ...e.sources, meter: { reserve: async () => { throw new Error("must not hold"); } }, runner: async () => { throw new Error("must not run"); } };
     const artifact = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports, facts()));
     expect(artifact).toMatchObject({ outcome: "not_run", notRunReason: "not_connected" });
+  });
+
+  it("the one ask is bounded: it carries an abort signal, and an aborted (timed-out) ask reads as no plan, no grant and a cache miss", async () => {
+    const seen: Array<AbortSignal | null | undefined> = [];
+    const hung = (async (_url: string | URL, init?: RequestInit) => {
+      seen.push(init?.signal);
+      return await new Promise<Response>((_resolve, reject) => { init?.signal?.addEventListener("abort", () => { reject(new Error("aborted")); }); });
+    }) as typeof fetch;
+    const invocation = { workspaceId: randomUUID(), operationId: randomUUID(), callbackCapability: "c".repeat(40) };
+    const sources = evalPlanSourcesFor(invocation, { controlPlaneUrl: "http://broker.invalid", fetch: hung });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const read = sources.approval.read();
+      await vi.advanceTimersByTimeAsync(EVAL_PLAN_ASK_TIMEOUT_MS + 1);
+      expect(await read).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
   });
 
   it("delivery is EVAL_PLAN-bound: the route answers the approved plan with its baseline, and an edited stored plan is answered not_available", async () => {
