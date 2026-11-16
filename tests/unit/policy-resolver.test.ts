@@ -86,7 +86,7 @@ describe("policy resolver", () => {
     // broker/core/ci-fix/ci-fix.ts:44–49; broker/core/cost/limits.ts:6,16–20.
     // The five compatibility defaults are the approved Q1 answer: no current setting; feature not built yet.
     const today = { preset_level: null, real_check: "their_ci_fix", ci_fix_rounds: CI_FIX_ROUNDS_MAX, round_time_minutes: TEST_ENV_ROUND_BUDGET_MIN.default,
-      model_budget_usd: null, machine_budget_minutes: null, extra_review: configuredSecondReviewMode({}) !== "off", after_merge_revert: "off", mutation_spot_check: "off", prompt_side_by_side: "off" };
+      model_budget_usd: null, machine_budget_minutes: null, extra_review: configuredSecondReviewMode({}) !== "off", after_merge_revert: "off", mutation_spot_check: "off", prompt_side_by_side: "off", browser_evidence: "off" };
     const got = resolvePolicy({});
     expect(got.status).toBe("resolved");
     expect(Object.fromEntries(Object.entries(got.values).map(([id, row]) => [id, row.value]))).toEqual(today);

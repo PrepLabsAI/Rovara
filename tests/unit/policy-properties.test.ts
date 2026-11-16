@@ -52,7 +52,7 @@ it(`preset and multifield floor property with ceilings and operator off; seed=${
     const careful = i % 2 === 0;
     // Independent minima, not computed by the production preset expansion/comparator.
     const floor: Record<string, PolicyValue> = { preset_level: careful ? "careful" : "balanced", real_check: careful ? "rovara_real_run" : "their_ci_fix", ci_fix_rounds: 3,
-      round_time_minutes: 30 + next() % 91, extra_review: true, after_merge_revert: "offer_revert", mutation_spot_check: careful ? "on" : "off", prompt_side_by_side: careful ? "on" : "off",
+      round_time_minutes: 30 + next() % 91, extra_review: true, after_merge_revert: "offer_revert", mutation_spot_check: careful ? "on" : "off", prompt_side_by_side: careful ? "on" : "off", browser_evidence: "off",
       model_budget_usd: next() % 100, machine_budget_minutes: next() % 100 };
     const patch = () => Object.fromEntries(POLICY_FIELDS.map((field) => [field.id, draw(field, next)]));
     const ceiling = Number(floor["model_budget_usd"]) + next() % 100;
