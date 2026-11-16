@@ -180,8 +180,8 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   const first = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
   // Only reads: the settings and the deployed stacks. No release, no lock, no deploy, either engine.
   if (options.answersFile !== undefined) {
-    if (options.exportDir !== undefined || options.to !== undefined || options.releaseDir !== undefined || options.source !== undefined) {
-      throw agentXError("CONFIG_INVALID", "--answers-from-deployed only writes the deployed environment's answers; pass it without --export, --to, --release or --source");
+    if (options.exportDir !== undefined || options.to !== undefined || options.releaseDir !== undefined || options.source !== undefined || options.yes || options.allowReplace.length > 0) {
+      throw agentXError("CONFIG_INVALID", "--answers-from-deployed only writes the deployed environment's answers; pass it without --export, --to, --release, --source, --yes or --allow-replace");
     }
     const written = await writeAnswersFromDeployed({ file: options.answersFile, settings: first, stacks: deps.stacks, ...(options.images === undefined ? {} : { images: options.images }) });
     return { env, from: first.version, to: first.version, parts: [], answers: written.file };

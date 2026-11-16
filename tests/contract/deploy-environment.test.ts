@@ -942,10 +942,10 @@ describe("an upgrade whose answers leave github.appId out keeps the deployed Git
     const { appId: _appId, ...github } = baseAnswers().github;
     return { ...baseAnswers(), github };
   };
-  async function installedEnvironment(): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
+  async function installedEnvironment(engine: "cdk" | "templates" = "cdk"): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
     const store = new MemoryParameterStore();
     const secrets = memorySecrets();
-    await deployEnvironment({ mode: "install", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: fakeDeployer(scriptedOutputs()).deployer, store, secrets, holder: HOLDER });
+    await deployEnvironment({ mode: "install", engine, answers: baseAnswers(), release: fakeRelease(), deployer: fakeDeployer(scriptedOutputs()).deployer, store, secrets, holder: HOLDER });
     return { store, secrets };
   }
   const deployedControlPlane = (parameters: Record<string, string>) => async (name: string) => (name === stackName("control-plane") ? parameters : undefined);
@@ -964,6 +964,19 @@ describe("an upgrade whose answers leave github.appId out keeps the deployed Git
       expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["GitHubAppId"], dropped: [] });
     });
   }
+
+  it("names GitHubAppId among the kept operator parameters, on the templates engine too", async () => {
+    const { store, secrets } = await installedEnvironment("templates");
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const events: unknown[] = [];
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: withoutAppId(), release: fakeReleaseWithControlPlaneParameters(["BudgetMonthlyUsd", "BudgetScope", "GitHubAppId"]), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: deployedControlPlane({ GitHubAppId: "", BudgetMonthlyUsd: "260", BudgetScope: "account" }), onEvent: (event) => events.push(event),
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).toMatchObject({ GitHubAppId: "", BudgetMonthlyUsd: "260", BudgetScope: "account" });
+    expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["BudgetMonthlyUsd", "BudgetScope", "GitHubAppId"], dropped: [] });
+  });
 
   it("an upgrade whose answers name an appId still sends the answers' one", async () => {
     const { store, secrets } = await installedEnvironment();
@@ -984,6 +997,8 @@ describe("an upgrade whose answers leave github.appId out keeps the deployed Git
         deployedParameters: deployedControlPlane(deployed),
       })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("github.appId") as unknown });
       expect(upgrade.requests).toEqual([]);
+      // Refused before the lock is taken.
+      expect(store.calls.filter((call) => call.op === "put" && call.name === lockParameterName(ENV))).toHaveLength(1);
     }
   });
 

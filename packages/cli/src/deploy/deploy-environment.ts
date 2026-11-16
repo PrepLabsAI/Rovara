@@ -235,6 +235,12 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     throw agentXError("CONFIG_INVALID", "an install needs the GitHub App id (github.appId in the answers)");
   }
 
+  // An upgrade whose answers leave github.appId out keeps the control plane's deployed GitHubAppId,
+  // even an empty one (the broker then reads the App id from the private-key secret). Checked here,
+  // before the lock and the signing key, so a control plane with no such parameter refuses the run.
+  const needsKeptAppId = mode === "upgrade" && answers.github.appId === undefined && deploySet.has("control-plane");
+  if (needsKeptAppId) await deployedGitHubAppId(input.deployedParameters, environmentStackName(env, "control-plane"));
+
   const work = async (): Promise<DeployEnvironmentResult> => {
     // Settings may have changed in the window between the check above and taking the lock (or, with
     // lockHeld, in whatever window the caller's own held lock does not cover); the lock now held (or
@@ -253,12 +259,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     const environmentNamed = existing === undefined || existing.naming === "environment";
     // R7: a control-plane deploy always carries the stored developer sign-in, so no deploy resets it.
     const developerSignIn = answers.developerSignIn ?? (deploySet.has("control-plane") && environmentNamed ? await readStoredDeveloperSignIn(store, env) : undefined);
-    // An upgrade whose answers leave github.appId out keeps the control plane's deployed GitHubAppId,
-    // even an empty one (the broker then reads the App id from the private-key secret). Read before
-    // anything deploys, so a control plane with no such parameter refuses the whole run.
-    const keptAppId = mode === "upgrade" && answers.github.appId === undefined && deploySet.has("control-plane")
-      ? await deployedGitHubAppId(input.deployedParameters, environmentStackName(env, "control-plane"))
-      : undefined;
+    // Read again under the lock: the deploy sends this value, not the one checked before the lock.
+    const keptAppId = needsKeptAppId ? await deployedGitHubAppId(input.deployedParameters, environmentStackName(env, "control-plane")) : undefined;
     const github = keptAppId === undefined ? answers.github : { ...answers.github, appId: keptAppId };
     const fullAnswers: InstallAnswers = { ...answers, github, ...(developerSignIn === undefined ? {} : { developerSignIn }), release: release.manifest, callbackSigningKey: key };
 

@@ -84,7 +84,8 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
       env: "staging", region: "us-east-1", account: "123456789012", models: SETTINGS.models, identity: { mode: "cognito" },
       // The deployed GitHubAppId is empty: no appId, so the upgrade keeps the deployed (empty) one.
       github: { privateKeySecretArn: KEY_ARN, credentialRef: "github-agentx-sdlc" },
-      images: IMAGES, slackAppPostedMessages: "accept", budget: { monthlyUsd: 260, scope: "account" },
+      // The operator's settings (budget, posted messages) are not written: the upgrade keeps the deployed ones.
+      images: IMAGES,
     });
     expect((await stat(file)).mode & 0o777).toBe(0o600);
     // No settings write and no lock: the store is exactly as it was.
@@ -101,14 +102,29 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
     expect(text).not.toContain("CallbackSigningKey");
   });
 
-  it("writes a deployed GitHub App id as appId, and no budget for none", async () => {
-    const h = await harness({ ...CONTROL_PLANE, GitHubAppId: "5389609", BudgetMonthlyUsd: "0" });
+  it("writes a deployed GitHub App id as appId", async () => {
+    const h = await harness({ ...CONTROL_PLANE, GitHubAppId: "5389609" });
     const file = await answersPath();
     await runUpgrade({ ...options, answersFile: file }, h.deps);
     const written = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
     expect(written.github).toEqual({ appId: "5389609", privateKeySecretArn: KEY_ARN, credentialRef: "github-agentx-sdlc" });
     expect(written).not.toHaveProperty("budget");
+    expect(written).not.toHaveProperty("slackAppPostedMessages");
     expect(written).not.toHaveProperty("images");
+  });
+
+  it("writes your own OIDC provider's identity, admin claim and values", async () => {
+    const oidc: EnvironmentSettings = { ...CDK_SETTINGS, identity: { mode: "oidc", issuer: "https://idp.example.com", audience: "agentx", clientId: "cli" } };
+    const h = await harness({ ...CONTROL_PLANE, AdminClaim: "groups", AdminValues: "[\"eng-admins\"]" }, oidc);
+    const file = await answersPath();
+    await runUpgrade({ ...options, answersFile: file }, h.deps);
+    expect((await loadDeployAnswers(file, { mode: "upgrade" })).identity).toEqual({ mode: "oidc", issuer: "https://idp.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["eng-admins"] });
+  });
+
+  it("a file that cannot be written is a fixed CONFIG_INVALID message, not a raw error", async () => {
+    const h = await harness();
+    const file = join(await answersPath(), "missing-dir", "answers.json");
+    await expect(runUpgrade({ ...options, answersFile: file }, h.deps)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("could not be written (ENOENT); nothing was written") as unknown });
   });
 
   it("refuses an existing file, keeping it as it was", async () => {
@@ -119,24 +135,10 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
     expect(await readFile(file, "utf8")).toBe("keep me");
   });
 
-  it("refuses deployed values it cannot write as valid answers, writing nothing", async () => {
-    for (const [controlPlane, message] of [
-      [{ ...CONTROL_PLANE, BudgetMonthlyUsd: "abc" }, "budget parameters"],
-      [{ ...CONTROL_PLANE, BudgetMonthlyUsd: "260", BudgetScope: "galaxy" }, "budget parameters"],
-      [{ ...CONTROL_PLANE, BudgetMonthlyUsd: "99999999" }, "budget parameters"],
-      [{ ...CONTROL_PLANE, SlackAppPostedMessages: "maybe" }, "SlackAppPostedMessages"],
-    ] as const) {
-      const h = await harness(controlPlane);
-      const file = await answersPath();
-      await expect(runUpgrade({ ...options, answersFile: file }, h.deps)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(message) as unknown });
-      await expect(stat(file)).rejects.toThrow();
-    }
-  });
-
   it("refuses being combined with a deploy's or a bundle's flags", async () => {
     const h = await harness();
     const file = await answersPath();
-    for (const extra of [{ exportDir: "/tmp/x" }, { to: "1.3.0" }, { releaseDir: "/tmp/r" }, { source: "/tmp/s" }]) {
+    for (const extra of [{ exportDir: "/tmp/x" }, { to: "1.3.0" }, { releaseDir: "/tmp/r" }, { source: "/tmp/s" }, { yes: true }, { allowReplace: ["Table"] }]) {
       await expect(runUpgrade({ ...options, answersFile: file, ...extra }, h.deps)).rejects.toThrow("--answers-from-deployed only writes the deployed environment's answers");
     }
     await expect(stat(file)).rejects.toThrow();
@@ -148,8 +150,8 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
   });
 
   describe("round-trip through loadDeployAnswers", () => {
-    for (const deployedAppId of ["", "5389609"]) {
-      it(`deploys exactly what agentx upgrade's own answers deploy (deployed GitHubAppId ${JSON.stringify(deployedAppId)})`, async () => {
+    for (const [deployedAppId, engine] of [["", "cdk"], ["5389609", "cdk"], ["", "templates"]] as const) {
+      it(`deploys exactly what agentx upgrade's own answers deploy (deployed GitHubAppId ${JSON.stringify(deployedAppId)}, ${engine} engine)`, async () => {
         const controlPlane = { ...CONTROL_PLANE, GitHubAppId: deployedAppId };
         const h = await harness(controlPlane);
         const file = await answersPath();
@@ -163,10 +165,10 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
 
         const deployWith = async (answers: DeployAnswers) => {
           const store = new MemoryParameterStore();
-          await writeEnvironmentSettings(store, CDK_SETTINGS);
+          await writeEnvironmentSettings(store, { ...CDK_SETTINGS, engine });
           const deployer = scriptedDeployer(allStackOutputs(), Object.keys(allStackOutputs()));
           await deployEnvironment({
-            mode: "upgrade", engine: "cdk", answers, release: fakeRelease("1.3.0"), deployer, store,
+            mode: "upgrade", engine, answers, release: fakeRelease("1.3.0"), deployer, store,
             secrets: memoryInitSecrets({ "agentx/staging/callback-signing-key": "k".repeat(43) }), holder: "arn:aws:iam::123456789012:user/alice",
             deployedParameters: async (name) => (name === "agentx-staging-control-plane" ? controlPlane : name === "agentx-staging-access" ? { OperatorPrincipalArn: "" } : {}),
             declaredParameters: () => new Set(Object.keys(controlPlane)),

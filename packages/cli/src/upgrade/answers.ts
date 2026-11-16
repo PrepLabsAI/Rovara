@@ -5,7 +5,6 @@
 // callback signing key comes from Secrets Manager.
 import { writeFile } from "node:fs/promises";
 import { agentXError } from "@agentx/contracts";
-import { MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import { UpgradeDeployAnswersSchema } from "../deploy/commands.js";
 import type { DeployAnswers } from "../deploy/deploy-environment.js";
 import type { StackReader } from "../environments/adopt.js";
@@ -68,8 +67,9 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
 /**
  * `agentx upgrade --answers-from-deployed <file>`: the answers `agentx deploy --mode upgrade --answers`
  * reads, from the environment itself, without deploying anything and for either engine. The answers
- * come from upgradeAnswers (the settings and the deployed stacks), plus the control plane's deployed
- * budget and posted-message choice. An empty deployed GitHubAppId is written as no appId at all: an
+ * come from upgradeAnswers (the settings and the deployed stacks), the same answers `agentx upgrade`
+ * deploys with. The operator's settings (budget, posted messages, ...) are not written: an upgrade
+ * keeps each deployed one (OPERATOR_PARAMETERS), and drops one the target no longer declares. An empty deployed GitHubAppId is written as no appId at all: an
  * upgrade then keeps the deployed (empty) one. The file is checked against the upgrade answers schema
  * before it is written, and an existing file is never overwritten. No secret is in it: the callback
  * signing key and every provider key stay in Secrets Manager (only ARNs are written).
@@ -78,14 +78,6 @@ export async function writeAnswersFromDeployed(input: {
   file: string; settings: EnvironmentSettings; stacks: StackReader; images?: { worker?: string; slack?: string };
 }): Promise<{ file: string }> {
   const answers = await upgradeAnswers({ settings: input.settings, stacks: input.stacks, ...(input.images === undefined ? {} : { images: input.images }) });
-  const controlPlaneName = input.settings.stacks["control-plane"];
-  // upgradeAnswers has already refused a missing control-plane stack.
-  const deployed = (await input.stacks.describe(controlPlaneName))?.parameters ?? {};
-  const budget = deployedBudget(deployed, controlPlaneName);
-  const posted = deployed.SlackAppPostedMessages;
-  if (posted !== undefined && posted !== "" && posted !== "accept" && posted !== "ignore") {
-    throw agentXError("CONFIG_INVALID", `stack ${controlPlaneName}'s SlackAppPostedMessages parameter is not accept or ignore; nothing was written`);
-  }
   const { appId, ...github } = answers.github;
   const file = {
     env: answers.env,
@@ -98,8 +90,6 @@ export async function writeAnswersFromDeployed(input: {
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
     ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
     ...(answers.images === undefined ? {} : { images: answers.images }),
-    ...(posted === "accept" || posted === "ignore" ? { slackAppPostedMessages: posted } : {}),
-    ...(budget === undefined ? {} : { budget }),
   };
   const checked = UpgradeDeployAnswersSchema.safeParse(file);
   if (!checked.success) {
@@ -108,20 +98,9 @@ export async function writeAnswersFromDeployed(input: {
   try {
     await writeFile(input.file, `${JSON.stringify(file, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw agentXError("CONFIG_INVALID", `${input.file} already exists; choose a new file`);
-    throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") throw agentXError("CONFIG_INVALID", `${input.file} already exists; choose a new file`);
+    throw agentXError("CONFIG_INVALID", `${input.file} could not be written (${typeof code === "string" && /^[A-Z]+$/.test(code) ? code : "error"}); nothing was written`);
   }
   return { file: input.file };
-}
-
-/** The control plane's deployed budget as an answer: none for an absent, empty or "0" budget; refused when malformed. */
-function deployedBudget(parameters: Record<string, string>, stackName: string): { monthlyUsd: number; scope: "tag" | "account" } | undefined {
-  const amount = parameters.BudgetMonthlyUsd;
-  if (amount === undefined || amount === "" || amount === "0") return undefined;
-  const scope = parameters.BudgetScope;
-  const monthlyUsd = /^\d+$/.test(amount) ? Number(amount) : Number.NaN;
-  if (!Number.isSafeInteger(monthlyUsd) || monthlyUsd > MAX_BUDGET_USD || (scope !== "tag" && scope !== "account")) {
-    throw agentXError("CONFIG_INVALID", `stack ${stackName}'s budget parameters (BudgetMonthlyUsd, BudgetScope) are not a budget agentx accepts; nothing was written`);
-  }
-  return { monthlyUsd, scope };
 }
