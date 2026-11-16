@@ -134,7 +134,8 @@ describe("the usage index (A5, A9)", () => {
   });
 
   it("follows the workspace company's task pointer and never reads another company's partition", async () => {
-    const companyA = IMPLICIT_COMPANY_ID;
+    // A non-implicit company: an implementation that reads under the implicit company must fail this test.
+    const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
     const companyB = "org_11111111111111111111";
     const items = [
       { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
