@@ -343,19 +343,6 @@ describe("the core on the dispatcher", () => {
     expect(() => createDispatcherCoreHost(inputs(env()).inputs)).not.toThrow();
   });
 
-  it("builds the declared learned input separately for each company's runtime", async () => {
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on", ROVARA_CORE_LESSONS: "on" }));
-    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
-    const readers = new Map([COMPANY_A, COMPANY_B].map((company) => [company, vi.fn(async () => ({}))]));
-    const declared = vi.fn((_registry: unknown, company: string) => hostedDispatcherFlow(made.inputs.env, readers.get(company)));
-    const built = createDispatcherCoreHost({ ...made.inputs, flow: declared, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
-    for (const company of [COMPANY_A, COMPANY_B]) {
-      const runtime = await built.app.runtimeFor(company);
-      expect(runtime.flow.deps.learned).toBe(readers.get(company));
-    }
-    expect(declared.mock.calls.map((call) => call[1])).toEqual([COMPANY_A, COMPANY_B]);
-  });
-
   it("builds no company's runtime until every flow input a worker job carries is declared, and places the worker on the install's own workers only", async () => {
     // The points Code's modules leave owed, from the fake world, so the registry builds and the flow declaration is what decides.
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
@@ -461,7 +448,7 @@ describe("the core on the dispatcher", () => {
 });
 
 describe("the flow inputs the deployment declares on the dispatcher (lane E2 step 6)", () => {
-  it("declares explicit none while off, and refuses an undeclared lessons reader while on", () => {
+  it("declares each as an explicit none for the first staging run, and nothing at all while lessons are switched on anywhere", () => {
     expect(hostedDispatcherFlow({})).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
     expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" })).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
     for (const value of ["on", `on:${COMPANY_A}`]) expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: value }), value).toBeUndefined();
