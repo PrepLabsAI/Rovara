@@ -402,7 +402,7 @@ it("composes the broker adapters lazily and preserves the L1c builder object inc
 
 it("reads no new wiring environment and answers no new routes with the switch off", async () => {
   const env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "off" };
-  for (const key of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "TASK_TOKEN_KEY_ARN", "ROVARA_CORE_MODEL_GATEWAY_URL", "ROVARA_CORE_AGENT_MODEL", "ROVARA_POLICY_HOOK", "SLACK_MEMBER_WORKSPACE_LIMIT", "SLACK_ORGANIZATION_WORKSPACE_LIMIT"]) {
+  for (const key of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "TASK_TOKEN_KEY_ARN", "ROVARA_CORE_MODEL_GATEWAY_URL", "ROVARA_CORE_AGENT_MODEL", "ROVARA_CORE_AGENT_MODEL_CHOICE", "ROVARA_POLICY_HOOK", "SLACK_MEMBER_WORKSPACE_LIMIT", "SLACK_ORGANIZATION_WORKSPACE_LIMIT"]) {
     Object.defineProperty(env, key, { get() { throw new Error(`unexpected read: ${key}`); } });
   }
   const tables = fakeTables();

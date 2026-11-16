@@ -419,3 +419,4 @@ export * from "./service-contract.js";
 export * from "./service-contract-mock.js";
 export * from "./general-fakes.js";
 export * from "./openapi-fake.js";
+export * from "./agent-model-choice.js";

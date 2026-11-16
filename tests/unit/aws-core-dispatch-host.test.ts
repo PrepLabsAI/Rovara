@@ -1,3 +1,4 @@
+import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 // Engine host (lane E2, step 4): the dispatcher Lambda as the host of the core's dispatch, over Code's EC2 session machines. Ported from the monolith's host test.
 // The core's task flow (on the in-memory store and queue) starts tasks for two companies; their dispatch messages reach the dispatcher as an SQS batch from the core queue, the core hands
 // each operation to that company's EC2 machines, and the worker (which checks each token as the real one does, and lists the real worker's features) is given each job once.
@@ -25,6 +26,7 @@ import { COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/ses
 import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.js";
 import { createCoreHostApp, DispatchOnlyMergeTrackingError, DISPATCH_ONLY_MERGE_TRACKING_REFUSED } from "../../packages/broker/src/core-host/app.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
+import { createFakeOfferedModels } from "../support/offered-models-fake.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
 import { FakeS3 } from "../support/ports/aws-fakes.js";
@@ -384,6 +386,37 @@ describe("the core on the dispatcher", () => {
     // Another company's workspace is not started through this company's runtime.
     await expect(runtime.flow.deps.machines.start({ machineKey: world.workspace(COMPANY_B), companyId: COMPANY_A })).rejects.toMatchObject({ code: "rejected" });
     expect(world.executions).toHaveLength(1);
+  });
+
+  it("ANSWER-3: the dispatcher reads broker-validated stored choices only; switch off leaves the declared route unchanged", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
+    const route = { route: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" }) };
+    const flow = { standingInstructions: null, modelAccess: route, learned: null };
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    // No reader: no step rule (every step runs on the declared route, as before).
+    const plain = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow }).app.runtimeFor(COMPANY_A);
+    expect(plain.flow.deps.stepModels).toBeUndefined();
+    expect(plain.flow.deps.modelAccess).toBe(route);
+    // With the choice switch on, even a missing declared route must fail closed on missing stored validation.
+    const reader = createFakeOfferedModels();
+    reader.set(COMPANY_A, ["claude-sonnet-5-5", "qwen.qwen3-coder-480b-a35b-v1:0"]);
+    reader.set(COMPANY_B, ["claude-haiku-5-5"]);
+    const noRoute = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { ...flow, modelAccess: null }, env: { ...made.inputs.env, ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } }).app.runtimeFor(COMPANY_A);
+    expect(await noRoute.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false, code: "MODEL_STALE" });
+    // With both: the company's own list decides. A is offered the default and a Bedrock model; B (the default is not on its list) is refused its steps.
+    const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow, env: { ...made.inputs.env, [CORE_ENGINE_VARIABLE]: "on", ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } });
+    const a = await host.app.runtimeFor(COMPANY_A);
+    const b = await host.app.runtimeFor(COMPANY_B);
+    expect(a.flow.deps.modelAccess).toBe(route);
+    const registry = await host.app.registry();
+    const choice = createAgentModelChoice({ store: registry.require("storage"), companyId: COMPANY_A, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), reader, defaultModel: async () => "claude-sonnet-5-5", now: Date.now });
+    await choice.service().state();
+    const before = reader.asked.length;
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-sonnet-5-5", api: "anthropic-messages" } } });
+    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    expect(reader.asked).toHaveLength(before);
+    expect(reader.asked).toEqual([COMPANY_A]);
   });
 
   it("builds nothing until a core record arrives, and then refuses by name while the security-list points are owed: the record comes back, no machine is started", async () => {

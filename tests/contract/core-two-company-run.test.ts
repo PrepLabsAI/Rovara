@@ -1,5 +1,7 @@
+import { createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
+import { operationModelProxy } from "../../packages/worker/src/design-review-sessions.js";
 // L6 composition contract: real broker root, registry, dispatch host, callbacks, actions and jobs over fake adapters.
-// Worker transport/gateway invocation stops at the broker's URL + own-company token (ANSWER-1).
+// ANSWER-2: the real worker proxy and model runtime carry each broker answer through to a fake gateway transport.
 import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -121,6 +123,18 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     expect(body.baseUrl).toBe(gateway);
     const claims = JSON.parse(Buffer.from(body.apiKey.split(".")[1], "base64url").toString());
     expect(claims).toMatchObject({ cid: companyId, ws: workspaceId, op: job.operationId, mdl: [MODEL] });
+    const sent: Array<{ url: string; claims: Record<string, unknown> }> = [];
+    const proxy = operationModelProxy({ payload: job.payload, proxyUrl: companyId === A ? "https://old-proxy.example" : undefined, controlPlaneUrl: "https://broker.example", capability: job.callbackCapability,
+      fetch: (async () => { const answer = await get(); return new Response(answer.body, { status: answer.statusCode }); }) as typeof fetch });
+    const runtime = await createConfiguredModelRuntime({ provider: "anthropic", modelId: MODEL }, { proxy: { ...proxy!, route: job.payload.modelRoute! }, onUsage: () => undefined,
+      fetch: (async (url, init) => {
+        const token = new Headers(init?.headers).get("x-api-key")!;
+        sent.push({ url: `${new URL(String(url)).origin}${new URL(String(url)).pathname}`, claims: JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) });
+        return new Response("{}", { status: 400 });
+      }) as typeof fetch });
+    await runtime.completeSimple(runtime.getModel("rovara-route", MODEL)!, { messages: [{ role: "user", content: "fake company model call", timestamp: 0 }] });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ url: `${gateway}/v1/messages`, claims: { cid: companyId, ws: workspaceId, op: job.operationId, mdl: [MODEL] } });
     expect((await get("slot=other-reviewer")).statusCode).toBe(401);
     const operation = (await h.w.store.get(operationKey(workspaceId, job.operationId)))!;
     await h.w.store.update({ key: operationKey(workspaceId, job.operationId), ops: [change.set("workflowMode", "REVIEW"), change.set(["dispatch", "payload", "workflowSecondReviewer"], { provider: "anthropic", modelId: MODEL })] });
@@ -147,7 +161,7 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     await h.w.store.update({ key: taskKey(own.taskId), ops: [change.set("workflow", plain(workflow))] });
     const accepted = await h.root.coreTasks!.route({ method: "POST", path: `/v1/dev/tasks/${own.taskId}/workflow/review-findings`, headers: {}, body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 6, candidateDigest: code.digest, resolutions: [{ findingId: parserId, action: "ACCEPT", note: "Reviewed on the fixture" }] }) }, h.caller(own.person));
     expect(accepted?.statusCode, accepted?.body).toBe(200);
-    expect((await runtime.flow.get({ principal: { companyId: own.companyId as OrgId, personId: own.person, displayName: "Member", provider: "hosted-company", roles: ["member"] } }, own.taskId)).workflow?.acceptedFindings).toHaveLength(1);
+    expect(((await h.w.store.get(taskKey(own.taskId)))!["workflow"] as { acceptedFindings: unknown[] }).acceptedFindings).toHaveLength(1);
     // Same lesson source id and query across both companies; each runtime's search sees only its own record.
     await createTeamRecord({ store: h.w.store, companyId: own.companyId, now: () => h.w.clock.now }).put({ project: "payments", taskId: own.taskId, authorId: own.person, kind: "decision", text: `shared query ${own.companyId}`, sourceRef: "same-source", occurredAt: new Date(h.w.clock.now).toISOString() });
     const due = { pk: companyScoped(own.companyId, "TIER_CHECKS_DUE"), sk: `TASK#${own.taskId}` };
@@ -155,7 +169,7 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     // A poisoned foreign row in this partition must be filtered before its task is touched.
     await h.w.store.put({ item: { pk: due.pk, sk: `TASK#${other.taskId}`, taskId: other.taskId, companyId: other.companyId, lastRunAt: 0 } });
     const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) }]);
-    const waiting = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: own.taskId, ownerId: String(task["ownerKey"]), now: new Date(h.w.clock.now).toISOString() }), stage: "WAIT_FOR_MERGE", state: "WAITING", candidate, pullRequests: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: "OPEN", url: "https://github.com/example/demo/pull/1" }] });
+    const waiting = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: own.taskId, ownerId: String(task["ownerKey"]), now: new Date(h.w.clock.now).toISOString() }), stage: "WAIT_FOR_MERGE", state: "WAITING", candidate, verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: new Date(h.w.clock.now).toISOString(), results: [{ checkId: "unit", status: "PASS" }] }, reviews: [report("CRITIC", "PASS", [], candidate.digest), report("SECURITY", "PASS", [], candidate.digest)], pullRequests: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: "OPEN", url: "https://github.com/example/demo/pull/1" }] });
     await h.w.store.update({ key: taskKey(own.taskId), ops: [change.set("workflow", plain(waiting))] });
     await h.w.store.put({ item: { ...recoveryRowKey(own.taskId), taskId: own.taskId, kind: "tracking", nextAttemptAt: 0 } });
   }

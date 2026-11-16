@@ -46,5 +46,5 @@ export function policyWrite(input: { orgId: OrgId; seenRevision: number; stepOve
     stepOverrides: input.stepOverrides as unknown as JsonValue, updatedAt: input.at, updatedBy: input.by,
     reviewDefault: input.reviewDefault,
   };
-  return { kind: "put", item, condition: input.seenRevision === 0 ? when.absent() : when.eq("revision", input.seenRevision) };
+  return { kind: "put", item, condition: input.seenRevision === 0 ? when.or(when.absent(), when.eq("revision", 0)) : when.eq("revision", input.seenRevision) };
 }

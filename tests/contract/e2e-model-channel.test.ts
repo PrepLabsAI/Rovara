@@ -314,6 +314,21 @@ describe("e2e model channel request", () => {
     expect(E2EModelChannelRequestSchema.safeParse(request({ call: call({ toolChoice: { type: "auto" } }) })).success).toBe(true);
   });
 
+  it("declares the tools whenever the prompt holds a tool call or a tool result (Converse's toolConfig rule, DEC 243c)", () => {
+    const toolCall = { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "tap", input: { target: "x" } }] };
+    const toolResult = { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "tap", output: { type: "text", value: "ok" } }] };
+    const user = { role: "user", content: [{ type: "text", text: "go" }] };
+    const withHistory = (messages: unknown[], tools?: unknown) => request({ call: { prompt: messages, ...(tools === undefined ? {} : { tools }) } });
+    // The ordinary call (tools declared with the history) is accepted: the positive control.
+    expect(E2EModelChannelRequestSchema.safeParse(request({ call: call({ prompt: [user, toolCall, toolResult] }) })).success).toBe(true);
+    // The same history with no tools is refused, for a call and for a result alone.
+    expect(E2EModelChannelRequestSchema.safeParse(withHistory([user, toolCall, toolResult])).success).toBe(false);
+    expect(E2EModelChannelRequestSchema.safeParse(withHistory([user, toolCall])).success).toBe(false);
+    expect(E2EModelChannelRequestSchema.safeParse(withHistory([user, toolResult])).success).toBe(false);
+    // A prompt without tool blocks still needs none (today's behaviour).
+    expect(E2EModelChannelRequestSchema.safeParse(withHistory([user])).success).toBe(true);
+  });
+
   it("bounds maxOutputTokens at 1024, and callIndex (advisory: the worker assigns the real per-step index)", () => {
     expect(E2EModelChannelRequestSchema.safeParse(request({ call: call({ maxOutputTokens: 1025 }) })).success).toBe(false);
     expect(E2EModelChannelRequestSchema.safeParse(request({ call: call({ maxOutputTokens: 0 }) })).success).toBe(false);
