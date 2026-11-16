@@ -265,8 +265,8 @@ describe("holding the dependents at draft", () => {
   it("does not even read the facts when nothing would be taken out of draft", async () => {
     const { w, deps } = await world([edge("app", "payments-lib"), edge("docs", "payments-lib")]);
     let asked = 0;
-    // The checks are failing: nothing is marked ready, so the order is not consulted.
-    for (const pr of w.prs) pr.model.setChecks(pr.head, [{ name: "unit", state: "completed", conclusion: "failure", required: false, url: "", runId: "11" }]);
+    // The checks are still running: nothing is marked ready and nothing fails, so the order is not consulted.
+    for (const pr of w.prs) pr.model.setChecks(pr.head, [{ name: "unit", state: "pending", required: false, url: "" }]);
     await trackTask({ ...deps, repositoryEdges: async () => { asked += 1; return []; } }, TASK_ID);
     expect(asked).toBe(0);
   });
