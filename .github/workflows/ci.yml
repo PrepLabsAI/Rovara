@@ -59,13 +59,24 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
+          # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
+          PLAN_SCRIPT=scripts/ci-plan.ts
+          if [ "$CI_EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            if git cat-file -e "$BASE_SHA:scripts/ci-plan.ts" 2>/dev/null; then
+              PLAN_SCRIPT="$RUNNER_TEMP/ci-plan.ts"
+              git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"
+            fi
+          fi
           if [ "$CI_EVENT" = pull_request ]; then
             git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
           else
             : > "$RUNNER_TEMP/changed.txt"
           fi
-          node scripts/ci-plan.ts "$RUNNER_TEMP/changed.txt"
+          node "$PLAN_SCRIPT" "$RUNNER_TEMP/changed.txt"
 
   # Present (and green) only in a FULL run, so that a merge can require `ci-mode (full)`.
   ci-mode:
@@ -214,9 +225,20 @@ jobs:
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
           CI_EXTRA_TESTS: ${{ runner.temp }}/extra-tests.txt
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
+          # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
+          PLAN_SCRIPT=scripts/ci-plan.ts
+          if [ "$CI_EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            if git cat-file -e "$BASE_SHA:scripts/ci-plan.ts" 2>/dev/null; then
+              PLAN_SCRIPT="$RUNNER_TEMP/ci-plan.ts"
+              git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"
+            fi
+          fi
           git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          node scripts/ci-plan.ts "$RUNNER_TEMP/changed.txt"
+          node "$PLAN_SCRIPT" "$RUNNER_TEMP/changed.txt"
           npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
           if [ -s "$CI_EXTRA_TESTS" ]; then xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
 
@@ -405,7 +427,20 @@ jobs:
       - name: Every job passed?
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci-gate.ts
+          CI_EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-gate.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
+          # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
+          GATE_SCRIPT=scripts/ci-gate.ts
+          if [ "$CI_EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            if git cat-file -e "$BASE_SHA:scripts/ci-gate.ts" 2>/dev/null; then
+              GATE_SCRIPT="$RUNNER_TEMP/ci-gate.ts"
+              git show "$BASE_SHA:scripts/ci-gate.ts" > "$GATE_SCRIPT"
+            fi
+          fi
+          node "$GATE_SCRIPT"
 
   live-aws:
     if: github.event_name == 'workflow_dispatch' && vars.AGENTX_ENABLE_AWS_TESTS == 'true'

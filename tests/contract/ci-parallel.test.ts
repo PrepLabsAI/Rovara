@@ -100,9 +100,10 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       CI_EVENT: "${{ github.event_name }}",
       CI_LABELS: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
       CI_TITLE: "${{ github.event.pull_request.title }}",
+      BASE_SHA: "${{ github.event.pull_request.base.sha }}",
     });
     expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
-    expect(step.run).toContain("node scripts/ci-plan.ts");
+    expect(step.run).toContain('node "$PLAN_SCRIPT"');
     // Untrusted text (the title) reaches the script through the environment, never spliced into the shell.
     expect(step.run).not.toContain("github.event.pull_request.title");
   });
@@ -238,7 +239,60 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect([...(gate.needs as string[])].sort()).toEqual(["plan", ...GATED_JOBS].sort());
     expect(gate["timeout-minutes"]).toBe(5);
     const run = gate.steps.map((step) => step.run ?? "").join("\n");
-    expect(run).toContain("node scripts/ci-gate.ts");
+    expect(run).toContain('node "$GATE_SCRIPT"');
     expect(gate.steps.some((step) => step.env?.NEEDS === "${{ toJSON(needs) }}")).toBe(true);
+  });
+});
+
+describe("on a pull request CI judges the change with the base branch's plan and gate, never the pull request's own copy (DEC 242 follow-up)", () => {
+  const BASE = "${{ github.event.pull_request.base.sha }}";
+
+  /** Every step that runs the plan or the gate script, with the job it is in. */
+  async function runners(script: "ci-plan.ts" | "ci-gate.ts") {
+    const { jobs } = await workflow();
+    return Object.entries(jobs).flatMap(([job, { steps }]) => steps.filter((step) => (step.run ?? "").includes(script)).map((step) => ({ job, step })));
+  }
+
+  it("takes ci-plan.ts from the base sha in the plan job and in the test shards' related-tests step, on pull requests only", async () => {
+    const found = await runners("ci-plan.ts");
+    expect(found.map(({ job }) => job).sort()).toEqual(["plan", "test"]);
+    for (const { job, step } of found) {
+      expect(step.env?.BASE_SHA, job).toBe(BASE);
+      expect(step.env?.CI_EVENT, job).toBe("${{ github.event_name }}");
+      const run = step.run!;
+      expect(run, job).toContain('if [ "$CI_EVENT" = pull_request ]; then');
+      expect(run, job).toContain('git fetch --no-tags --depth=1 origin "$BASE_SHA"');
+      expect(run, job).toContain('git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"');
+      // The checkout's copy is the default only: a push or a manual run has no base sha.
+      expect(run, job).toContain("PLAN_SCRIPT=scripts/ci-plan.ts");
+      expect(run, job).toContain('node "$PLAN_SCRIPT"');
+      // No run of the pull request's own copy is left.
+      expect(run.replace(/^\s*#.*$/gm, ""), job).not.toMatch(/node\s+scripts\/ci-plan\.ts/);
+      // The base copy is read before the script runs.
+      expect(run.indexOf("git show"), job).toBeLessThan(run.indexOf('node "$PLAN_SCRIPT"'));
+    }
+  });
+
+  it("takes ci-gate.ts from the base sha in the local job, on pull requests only", async () => {
+    const found = await runners("ci-gate.ts");
+    expect(found.map(({ job }) => job)).toEqual(["local"]);
+    const { step } = found[0]!;
+    expect(step.env?.BASE_SHA).toBe(BASE);
+    expect(step.env?.CI_EVENT).toBe("${{ github.event_name }}");
+    expect(step.env?.NEEDS).toBe("${{ toJSON(needs) }}");
+    const run = step.run!;
+    expect(run).toContain('if [ "$CI_EVENT" = pull_request ]; then');
+    expect(run).toContain('git fetch --no-tags --depth=1 origin "$BASE_SHA"');
+    expect(run).toContain('git show "$BASE_SHA:scripts/ci-gate.ts" > "$GATE_SCRIPT"');
+    expect(run).toContain("GATE_SCRIPT=scripts/ci-gate.ts");
+    expect(run.replace(/^\s*#.*$/gm, "")).not.toMatch(/node\s+scripts\/ci-gate\.ts/);
+    expect(run.indexOf("git show")).toBeLessThan(run.indexOf('node "$GATE_SCRIPT"'));
+  });
+
+  it("falls back to the checkout's copy only when the base branch does not have the script at all, which a pull request cannot arrange", async () => {
+    for (const [script, name] of [["ci-plan.ts", "plan"], ["ci-gate.ts", "local"]] as const) {
+      const run = (await runners(script)).find(({ job }) => job === name)!.step.run!;
+      expect(run).toContain(`git cat-file -e "$BASE_SHA:scripts/${script}"`);
+    }
   });
 });

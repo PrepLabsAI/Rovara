@@ -40,7 +40,7 @@ describe("the docs-only check (CI skips the heavy steps for a Markdown-only pull
     const step = plan.steps.find((candidate) => candidate.id === "plan")!;
     expect(step.run).toContain('if [ "$CI_EVENT" = pull_request ]');
     expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
-    expect(step.run).toContain("node scripts/ci-plan.ts");
+    expect(step.run).toContain('node "$PLAN_SCRIPT"');
     expect(plan.steps.some((candidate) => candidate.run === "npm ci")).toBe(false);
   });
 
