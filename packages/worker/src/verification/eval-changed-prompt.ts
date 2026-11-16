@@ -37,18 +37,15 @@ export function evalChangedPrompt(frame: ModelEgressFrame): boolean {
 /** A prompt can be loaded at run time from a file F4 cannot classify (assets/persona.txt) or sit in a plain string constant of a module with
  * no AI import. F4 reports nothing for those, which is "not found", never "unchanged". So a changed file that F4 gave no item for is
  * unknown (the whole classification becomes unknown) unless it is code that provably changed no string. Deliberately over-counting:
- * - only the specifier of an import/export-from/require statement line may differ freely;
+ * - no text is masked: a changed import specifier counts as unknown too, since any quoted text on a line might be prompt text;
  * - a file that can hold a multi-line string (a backtick, a triple quote, a line ending in a backslash, a closing JSX tag) is unchanged only when its text
  *   is identical apart from those specifiers;
  * - any other file is unchanged only when its quote-bearing lines are the same lines in the same order (single-line strings cannot hide
  *   on a line without a quote, and no tokenizer state is kept that a stray quote could desynchronise).
  * Every step is one linear pass: no backtracking over the file. */
 const codePath = /\.(?:[cm]?[jt]sx?|py|pyi)$/iu;
-const moduleSpecifier = /(?:\bfrom|\bimport|\brequire\s*\()\s*(['"])[^'"\n]*\1/u;
-// Only a whole import/export/require STATEMENT line has its specifier masked: the same words inside a prompt are prompt text.
-const moduleStatement = /^\s*(?:import\b|export\b[^\n]*\bfrom\b|(?:const|let|var)\b[^=\n]*=\s*(?:await\s+)?require\s*\()/u;
 const multiLineCapable = /\\[ \t]*\r?(?:\n|$)|`|"""|'''|<\//u;
-const quoteBearing = (text: string): string[] => text.split("\n").map(line => moduleStatement.test(line) ? line.replace(moduleSpecifier, "") : line).filter(line => /["']/u.test(line));
+const quoteBearing = (text: string): string[] => text.split("\n").filter(line => /["']/u.test(line));
 function sameCode(before: string | undefined, after: string | undefined): boolean {
   const left = before ?? ""; const right = after ?? "";
   if (left === right) return true;

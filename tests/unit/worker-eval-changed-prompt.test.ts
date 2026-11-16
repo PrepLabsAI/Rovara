@@ -240,8 +240,8 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   ] as Array<[string, Parameters<typeof sources>[0]]>)("%s reads unknown, so every call counts as changed", async (_name, files) => {
     expect(await read(files)).toBeUndefined();
   });
-  it("still reads none_found for code that changes no prose string", async () => {
-    expect(await read([["src/count.ts", "import a from './a.js';\nexport const count = 1;\n", "import a from './b.js';\nexport const count = 2;\n"]])).toMatchObject({ status: "none_found" });
+  it("still reads none_found for code that changes no quoted line", async () => {
+    expect(await read([["src/count.ts", "import a from './a.js';\nexport const count = 1;\n", "import a from './a.js';\nexport const count = 2;\n"]])).toMatchObject({ status: "none_found" });
     expect(await read([["src/same.ts", "const s = 'same words';\nconst n = 1;\n", "const s = 'same words';\nconst n = 2;\n"]])).toMatchObject({ status: "none_found" });
   });
   it("a file F4 found and diffed is accounted for", async () => {
@@ -259,6 +259,8 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
     ["an escaped multi-word literal", "const s = \"Line one.\\nLine two\";\n", "const s = \"Line one.\\nLine 2\";\n"],
     ["a selector for an unchanged table", "const persona = \"terse\";\n", "const persona = \"verbose\";\n"],
     ["a changed load path", "const t = readFile(\"assets/a.txt\");\n", "const t = readFile(\"assets/b.txt\");\n"],
+    ["a statement-looking line that holds prompt text (export)", "export const P = \"Answer only from 'the docs'\";\n", "export const P = \"Answer only from 'memory'\";\n"],
+    ["a statement-looking line that holds prompt text (require)", "const P = require(\"x\") + \"x\";\n", "const P = require(\"y\") + \"x\";\n"],
     ["the words from-quote inside a single-quoted prompt", "const t = 'Answer only from \"the docs\" provided';\n", "const t = 'Answer only from \"memory\" provided';\n"],
     ["the words from-quote inside a template prompt", "const t = `Answer only from \"the docs\" provided`;\n", "const t = `Answer only from \"memory\" provided`;\n"],
     ["the words from-quote inside a Python prompt", "t = \"Use data from 'the docs' only\"\n", "t = \"Use data from 'anything' only\"\n"],
@@ -277,10 +279,11 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   it("JSX text in a .tsx file reads unknown", async () => {
     expect(await read([["src/view.tsx", "export const V = () => <p>Be terse</p>;\n", "export const V = () => <p>Be verbose</p>;\n"]])).toBeUndefined();
   });
-  it("a changed import, export-from or require specifier alone, or a moved unquoted line, still reads none_found", async () => {
-    expect(await read([["src/y.ts", "export { a } from './a.js';\nconst b = require('./b.js');\n", "export { a } from './c.js';\nconst b = require('./d.js');\n"]])).toMatchObject({ status: "none_found" });
-    expect(await read([["src/x.ts", "import a from './a.js';\nconst n = 1;\nconst s = 'x y';\n", "import a from './b.js';\nconst s = 'x y';\nconst n = 1;\n"]])).toMatchObject({ status: "none_found" });
+  it("a moved unquoted line still reads none_found, but a changed import specifier is conservatively unknown", async () => {
+    expect(await read([["src/x.ts", "import a from './a.js';\nconst n = 1;\nconst s = 'x y';\n", "import a from './a.js';\nconst s = 'x y';\nconst n = 1;\n"]])).toMatchObject({ status: "none_found" });
+    expect(await read([["src/x.ts", "import a from './a.js';\n", "import a from './b.js';\n"]])).toBeUndefined();
   });
+
   it("the production classifier counts every readable call as changed when coverage is unknown", async () => {
     sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]]);
     expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), planned(), async () => evalChangedPrompt(call()))).toBe(true);
