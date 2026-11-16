@@ -154,7 +154,7 @@ describe.runIf(wanted)("device evidence: the Android emulator in the device exec
     expect(code, `the container exited with ${String(code)}:\n${stderr.slice(-4_000)}`).toBe(0);
 
     const captured = parseDeviceExecutorOutput(new Uint8Array(Buffer.concat(out)), decoded);
-    if (captured === undefined) throw new Error(`the program's output was not an honest answer to the plan:\n${Buffer.concat(out).toString("utf8").slice(0, 400)}\n${stderr.slice(-3_000)}`);
+    if (captured === undefined) { const all = Buffer.concat(out); throw new Error(`the program's output was not an honest answer to the plan (${String(all.byteLength)} bytes, ends with a newline: ${String(all.at(-1) === 10)}, lines: ${String(all.toString("utf8").split("\n").length)}):\n${all.toString("utf8").slice(0, 300)} ... ${all.toString("utf8").slice(-200)}\n${stderr.slice(-3_000)}`); }
     process.stdout.write(`result: ${JSON.stringify({ ...captured, steps: captured.steps.map((row) => (row.status === "shown" ? { flow: row.flow, step: row.step, status: row.status } : row)) })}\n`);
     if (captured.notRun !== undefined || captured.steps.some((row) => row.status !== "shown")) throw new Error(`the run did not show every step: ${JSON.stringify({ notRun: captured.notRun, steps: captured.steps.map((row) => (row.status === "shown" ? "shown" : row.reason)) })}\n${stderr.slice(-4_000)}`);
     expect(captured.device).toBe("android_emulator");

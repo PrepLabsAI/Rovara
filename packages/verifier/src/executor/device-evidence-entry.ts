@@ -86,7 +86,8 @@ async function main(): Promise<void> {
       command: createNodeCommandPort(), writeFile: (path, text) => { writeFileSync(path, text, { mode: 0o600 }); return Promise.resolve(); },
       ...(talk ? { diag: (stage: string, note: string, detail?: string) => { process.stderr.write(`device ${stage}: ${note}${detail === undefined ? "" : ` | ${detail.replace(/\s+/gu, " ")}`}\n`); } } : {}),
     });
-    process.stdout.write(`${encodeDeviceExecutorOutput(captured)}\n`);
+    // The answer is more than a pipe holds at once (the pictures): wait until it has all been handed over before the process exits, or `process.exit` cuts it off (the first full CI run: a one-line answer cut short).
+    await new Promise<void>((resolve) => { process.stdout.write(`${encodeDeviceExecutorOutput(captured)}\n`, () => { resolve(); }); });
   } catch {
     process.stderr.write("device evidence run failed\n");
     code = 1;
