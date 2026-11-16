@@ -17,6 +17,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { Command } from "commander";
 import { registerSetupAgentCommands } from "../../packages/cli/src/up/setup-agent.js";
@@ -82,7 +83,7 @@ async function launch(extra: { environment?: NodeJS.ProcessEnv } = {}) {
   const nextJob = async (workspaceId: string, seen: Set<string>): Promise<WorkerInvocation> => {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await runtime.tick();
-      const machineId = ((await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))?.["machine"] as { machineId?: string } | undefined)?.machineId;
+      const machineId = ((await locateWorkspace(runtime.app.flow.deps, workspaceId))?.workspace["machine"] as { machineId?: string } | undefined)?.machineId;
       const fresh = machineId === undefined ? undefined : machines.delivered(machineId).find((job) => !seen.has(job.operationId));
       if (fresh !== undefined) { seen.add(fresh.operationId); return fresh; }
     }
@@ -348,7 +349,7 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     expect(forged.ok).toBe(false);
     expect(((await h.api("/v1/dev/projects")).body["projects"] as Array<{ latestRevision: number }>)[0]!.latestRevision).toBe(1);
     // The check's workspace and machine were closed when it ended.
-    const workspace = (await h.store.get({ pk: `WORKSPACE#${(apply["check"] as { workspaceId: string }).workspaceId}`, sk: "META" }))!;
+    const workspace = (await locateWorkspace(h.runtime.app.flow.deps, (apply["check"] as { workspaceId: string }).workspaceId))!.workspace;
     expect(workspace["status"]).toBe("CLOSED");
     const discard = formOf(shown.body, "/discard");
     expect((await h.post(link, discard.action, { ...discard.fields })).headers["location"]).toContain("n=setupdone");
