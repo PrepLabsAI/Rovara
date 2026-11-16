@@ -43,6 +43,22 @@ export const POLICY_FIELDS: readonly PolicyField[] = Object.freeze([
   field({ id: "device_evidence", companyBound: "minimum", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
 ]);
 
+/**
+ * M4a slice 2 (DEC 236j and the page-only rule): who may CHANGE each setting. A field that changes cost (model or machine spend, test or review work) or an approval (what
+ * Rovara may push or run on its own) is changed only on the project's settings page, right after a fresh step-up; a script or assistant holding an ordinary API token cannot.
+ * `api_ok` is for a field that only decides what Rovara reports or offers a person to press. Every field in POLICY_FIELDS must be listed (a contract test pins that), and a field
+ * nobody listed is page-only, so a new field is safe before anyone classifies it.
+ */
+export const POLICY_FIELD_SURFACES: Readonly<Record<string, "page_only" | "api_ok">> = Object.freeze({
+  preset_level: "page_only", real_check: "page_only", ci_fix_rounds: "page_only", round_time_minutes: "page_only", model_budget_usd: "page_only", machine_budget_minutes: "page_only",
+  extra_review: "page_only", after_merge_revert: "api_ok", mutation_spot_check: "page_only", prompt_side_by_side: "page_only",
+  browser_evidence: "page_only", device_evidence: "page_only",
+});
+/** True unless the field is listed as `api_ok` (unknown, inherited and pollution names are page-only). */
+export function policyFieldPageOnly(fieldId: string): boolean {
+  return !(Object.hasOwn(POLICY_FIELD_SURFACES, fieldId) && POLICY_FIELD_SURFACES[fieldId] === "api_ok");
+}
+
 /** default is Q1's explicit compatibility origin; company_ceiling/install_off are §3.2 steps 7/8 additions. */
 export const POLICY_ORIGINS = Object.freeze(["rovara_default", "default", "preset", "measured", "changed_here", "changed_for_branch", "branch_rule", "path_rule", "task_raise", "company_lock", "company_ceiling", "company_minimum", "company_limit", "install_off"] as const);
 export type PolicyOrigin = typeof POLICY_ORIGINS[number];

@@ -98,5 +98,7 @@ async function planOf(
     ...(dependencies === undefined ? {} : { dependencies }),
     ...(flakyRerun ? { flakyRerun: true as const } : {}),
     ...(candidates.length === 0 ? {} : { baselineCandidates: candidates.map((sha) => ({ sha })) }),
+    // TE-MR2b: a project with several repositories asks for one claim per repository (the engine reads `EvidenceRaw.baselines`).
+    ...(candidates.length === 0 || body.repos.length < 2 ? {} : { repositoryBaselines: true as const }),
   };
 }

@@ -26,13 +26,14 @@ type Retry = NonNullable<StuckCancelDependencies["retryCancel"]>;
 
 type PostNote = NonNullable<StuckCancelDependencies["postNote"]>;
 
-function setup(options: { retry?: Retry | false; postNote?: PostNote } = {}) {
+function setup(options: { retry?: Retry | false; postNote?: PostNote; workspaces?: StuckCancelDependencies["workspaces"] } = {}) {
   const db = new FakeDynamoDb();
   const logs: Array<Record<string, unknown>> = [];
   const retryCancel = vi.fn<Retry>(options.retry === false || options.retry === undefined ? async () => ({ outcome: "REQUEUED", cancelOperationId: randomUUID() }) : options.retry);
   const dependencies: StuckCancelDependencies = {
     client: db,
     tableName: "state",
+    ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
     ...(options.retry === false ? {} : { retryCancel }),
     ...(options.postNote === undefined ? {} : { postNote: options.postNote }),
     log: (entry) => { logs.push(entry); },
@@ -625,4 +626,16 @@ describe("where the retry is wired", () => {
     // The broker's name no longer turns the retry on: the reconciler never invokes the broker.
     expect(stuckCancelRetrier({ BROKER_FUNCTION_NAME: "agentx-staging-broker" }, state)).toBeUndefined();
   });
+});
+
+it("release notes retain authoritative company/workspace scope with identical raw thread addresses", async () => {
+  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]] as const) {
+    const postNote = vi.fn<PostNote>(async () => undefined);
+    const { db, sweep } = setup({ postNote, workspaces: { requireCompany: async () => companyId } });
+    const task = seedTask(db, "INTERRUPTED", 1, {}, { ownerKey: "owner-1" });
+    db.get(`WORKSPACE#${task.workspaceId}`, "META")!.orgId = companyId;
+    db.set({ pk: "SLACK_THREAD#owner-1", sk: "META", workspaceId: task.workspaceId, thread: `${teamId}/C0SHARED/1695500000.000001` });
+    await sweep([{ workspaceId: task.workspaceId, compute: "gone" }]);
+    expect(postNote).toHaveBeenCalledExactlyOnceWith({ channelId: "C0SHARED", threadTs: "1695500000.000001", workspace: { companyId, teamId } }, FAILED_CANCEL_RELEASED_MESSAGE);
+  }
 });
