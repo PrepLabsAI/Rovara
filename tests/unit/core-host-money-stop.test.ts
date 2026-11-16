@@ -386,3 +386,14 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     expect(costPartition(A, "t")).not.toEqual(costPartition(B, "t"));
   });
 });
+
+it("refuses unattended staged starts too and gates task.round against its own company's cap", async () => {
+  const w = setup();
+  const admission = createHostedAdmission({ settings: SETTINGS, store: w.store, ledger: w.ledger, now: () => NOW, runStopWired: false });
+  const request = { companyId: A, idempotencyKey: "unattended", action: "automation.run" };
+  expect(await admission.stage(request)).toEqual({ decision: { allowed: false, code: "run_stop_not_wired", message: RUN_STOP_NOT_WIRED }, items: [] });
+  const task = randomUUID();
+  await w.book(A, task, 5_000_000);
+  expect(await admission.admit({ companyId: A, action: "task.round", idempotencyKey: "round-a", subject: { type: "task", id: task } })).toMatchObject({ allowed: false, code: "task_cap" });
+  expect(await admission.admit({ companyId: B, action: "task.round", idempotencyKey: "round-b", subject: { type: "task", id: task } })).toMatchObject({ allowed: true });
+});

@@ -152,3 +152,19 @@ it("the engine seam rereads settings and rejects a foreign opaque scope before r
   await expect(adapter.source.resolve({ key: `${B}/web` }, {})).rejects.toThrow(/^policy_unavailable$/);
   expect(w.send).not.toHaveBeenCalled();
 });
+
+it("uses the hosted JWKS path for the developer API's hook settings and refuses a failed JWKS", async () => {
+  const { policyHookKeyThumbprint } = await import("@agentx/contracts");
+  const w = world();
+  const service = fakeService({ key: hookKey, now: () => now, answer: () => ({ locks: { ci_fix_rounds: 1 } }) });
+  const settings = { address: settingsFor(hookKey).address, jwks: "https://rules.example/keys", thumbprints: [policyHookKeyThumbprint(hookKey.jwk)] };
+  const fetched: string[] = [];
+  w.deps.developer.policyHook = { settings, install: { issuer: ISSUER, signer: signerOf(install) }, fetch: async (url, init) => {
+    fetched.push(String(url));
+    return String(url) === settings.jwks ? Response.json({ keys: [hookKey.jwk] }) : service.fetch(url, init);
+  } };
+  expect(await w.call()).toMatchObject({ values: { ci_fix_rounds: { value: 1 } } });
+  expect(fetched).toEqual([settings.jwks, settings.address]);
+  w.deps.developer.policyHook.fetch = async () => new Response("", { status: 503 });
+  await expect(w.call()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+});

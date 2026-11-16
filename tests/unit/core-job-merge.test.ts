@@ -102,8 +102,8 @@ it("partitions tier due rows by company, rechecks ownership, and reports unowned
   expect(await w.h.store.get(dueKey(companyB, taskId))).toEqual(validB);
   expect(await w.h.store.get(dueKey(companyA, missingOwner.sk.slice(5)))).toBeDefined();
   expect(await w.h.store.get(dueKey(companyA, foreignOwner.sk.slice(5)))).toBeDefined();
-  expect(loggedA).toContainEqual(expect.objectContaining({ event: "tier_checks.unowned_item", taskId: missingOwner.taskId }));
-  expect(loggedA).toContainEqual(expect.objectContaining({ event: "tier_checks.unowned_item", taskId: foreignOwner.taskId }));
+  expect(query.mock.calls.find(([input]) => input.pk === companyScoped(companyA, "TIER_CHECKS_DUE"))?.[0].filter).toEqual({ op: "eq", path: ["companyId"], value: companyA });
+  expect(loggedA).toEqual([]);
 
   await service(companyB).tierChecks();
   expect(await w.h.store.get(dueKey(companyB, taskId))).toBeUndefined();

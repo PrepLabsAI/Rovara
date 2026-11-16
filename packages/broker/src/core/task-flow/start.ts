@@ -5,6 +5,7 @@
 // stage, and (for a workflow that understands first) the dispatch row of its first step. Either all of it exists or none of it does.
 import { ROVARA_CODE_PROGRAM } from "../plan/program.js";
 import {
+  developerTaskPolicy,
   AgentXError,
   WorkOriginSchema,
   UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
@@ -116,6 +117,9 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist`));
   // An archived project accepts no new work (Cloud's requireNewWorkAllowed).
   if (project.archived === true) return refused(agentXError("PROJECT_ARCHIVED", `project \`${request.project}\` is archived; unarchive it to start new work`));
+  const policy = developerTaskPolicy(project.definition);
+  if (!policy.enabled) return refused(agentXError("FORBIDDEN", "tasks from AI tools are turned off for this project"));
+  if (policy.share === "required") return refused(agentXError("FORBIDDEN", "this project requires tasks to be shared to a channel; sharing is not set up on the core yet"));
   // Every repository of the project must live on a code host this install registered, before the budget, the limits and any write.
   if (deps.codeHosts !== undefined) {
     try {
@@ -141,7 +145,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const workflowPath = request.workflowPath ?? "QUICK";
 
   const charge = developerCharge({ companyId: deps.companyId, developerId });
-  const limits = limitsOf(deps);
+  const limits = await limitsOf(deps);
   const full = await limitReached(deps.store, charge, limits);
   if (full !== undefined) return refused(limitError(full, limits));
 

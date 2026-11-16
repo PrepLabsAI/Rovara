@@ -319,6 +319,7 @@ import {
 } from "./channel-conversation.js";
 import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
+import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -15304,8 +15305,18 @@ const coreRoot = createBrokerCoreRoot({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrantKey: repositoryGrantSigningKey,
   repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
+  checkTaskPerson: async (task, developerId, admission) => {
+    if (signIn === undefined) throw new Error("task person proof is unavailable");
+    const deps = developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+      { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null);
+    return await deps.checkTaskPerson!(task, developerId, admission);
+  },
   // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
   codeModules: (core) => brokerCoreModuleDeps(process.env, {
+    dynamo: dynamoClient,
+    objects: { bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), client: s3 },
+    secrets: { namePrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, clientFor: () => secretsManager },
+    workerMachines: () => brokerCoreWorkerMachines({ sessions: ec2Sessions, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
     codeHost: () => brokerCoreCodeHost({
       credentials: github.clientOptions,
       requireInstallationBound: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")).requireBound,

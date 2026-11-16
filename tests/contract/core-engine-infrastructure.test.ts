@@ -414,3 +414,12 @@ describe("L1a broker environment derivation", () => {
   });
 });
 import { createHash } from "node:crypto";
+
+
+it("exposes only the exact core model-access GET without an authorizer on named installs", () => {
+  const routes = resources(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties);
+  expect(routes.find((route) => route.RouteKey === "GET /v1/internal/model-access")).toMatchObject({ AuthorizationType: "NONE" });
+  expect(routes.find((route) => route.RouteKey === "ANY /{proxy+}")).toMatchObject({ AuthorizationType: "JWT" });
+  expect(routes.some((route) => route.RouteKey === "GET /v1/internal/{proxy+}")).toBe(false);
+  expect(resources(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "GET /v1/internal/model-access")).toBe(false);
+});
