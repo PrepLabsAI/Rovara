@@ -92,6 +92,8 @@ import { createLocalChat } from "./chat.js";
 import { createLocalIntake } from "./intake.js";
 import { sessionBindingsOf } from "../../core/sessions/bindings.js";
 import { createLocalAutomation, type LocalAutomation } from "./automation.js";
+import { createLocalAfterMerge } from "./after-merge.js";
+import type { AfterMergeService } from "../../core/after-merge/service.js";
 import { fixedAutomationSwitch, type AutomationSwitch } from "../../core/automation/switch.js";
 import { createScheduleRouter } from "../../core/automation/schedule-router.js";
 import { createChannelSink } from "../../core/channel/sink.js";
@@ -234,6 +236,8 @@ export interface LocalApp {
   readonly setupAgent: LocalSetupAgent;
   /** Chains, triggers, automatic runs and custom agents: hidden, off unless the owner switched them on. */
   readonly automation: LocalAutomation;
+  /** The after-merge watcher (M7 slice 2): off for every project until its own `afterMergeWatch` setting says on. A source of deployment or alarm events hands them in here; the timer runs its periodic pass. */
+  readonly afterMerge: AfterMergeService;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The worker's callbacks (`/v1/internal/...`). */
@@ -468,6 +472,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   // Lane L12: merge tracking by polling. The publish step enrols a task's tracking row; a timer reads the due rows and calls the core's pass for each (pull request status, CI fix, branch sync, ready for review).
+  const afterMerge = createLocalAfterMerge({ flow: flow.deps, registry, companyId, now: () => clock().getTime(), log });
   const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
@@ -696,6 +701,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // The tickets that ask for work are read through the trackers the registry holds; a source that is not due costs nothing.
     await intake.poll().catch(logFailure("local_app.intake_failed"));
   };
+  // The after-merge watcher's pass: windows that ended close, and a report that could not be sent goes out again. It reads and writes nothing for a project whose own setting is off, and has its own timer: the code host is
+  // asked over the network, so neither the dispatch nor the pull request reads wait for it.
+  const tickAfterMerge = async (): Promise<void> => {
+    await afterMerge.pass({ budgetMs: 10_000 }).catch(logFailure("local_app.after_merge_failed"));
+  };
   // What Rovara learns from finished tasks takes model calls that last tens of seconds, so it has its own timer: neither the dispatch nor the pull request reads wait for it.
   const tickLessons = async (): Promise<void> => {
     await lessons.tick().catch(logFailure("local_app.lessons_failed"));
@@ -708,6 +718,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await tickCore();
     await tickTracking();
     await tickTierChecks();
+    await tickAfterMerge();
     await tickLessons();
   };
   // The in-process chat adapters begin to listen. What one hears goes through the sink, which applies the checks of the channel API (bound space, linked person, a card's request); a start that fails
@@ -749,10 +760,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     nightly = { stop: async () => { await nightlyHeard.stop(); await routed.stop(); } };
     every(10_000, tickLessons);
     every(10_000, tickTierChecks);
+    every(60_000, tickAfterMerge);
   }
 
   return {
-    flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation,
+    flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation, afterMerge,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

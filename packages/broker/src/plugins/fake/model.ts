@@ -73,9 +73,21 @@ export class FakeHostModel {
   /** Gitlink targets are revision identities, never ordinary file text. */
   private readonly gitlinks = new Map<string, ReadonlyMap<string, string>>();
   private readonly checksByRevision = new Map<string, Check[]>();
+  private readonly deployments = new Map<string, Map<string, "success" | "failure" | "in_progress">>();
   private readonly logs = new Map<string, string>();
   private serial = 0;
   private clock = Date.parse("2026-10-30T09:00:00.000Z");
+
+  /** M7 slice 2: a deployment of a revision to an environment is now in this state (the newest answer for an environment replaces the older one). */
+  setDeployment(revision: string, environment: string, state: "success" | "failure" | "in_progress"): void {
+    const known = this.deployments.get(revision) ?? new Map<string, "success" | "failure" | "in_progress">();
+    known.set(environment, state);
+    this.deployments.set(revision, known);
+  }
+
+  deploymentStates(revision: string): Array<{ environment: string; state: "success" | "failure" | "in_progress" }> {
+    return [...(this.deployments.get(revision) ?? new Map())].map(([environment, state]) => ({ environment, state }));
+  }
 
   constructor(options: FakeModelOptions) {
     this.url = options.url;
