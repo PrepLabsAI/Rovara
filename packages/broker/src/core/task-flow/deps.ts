@@ -351,6 +351,16 @@ export interface TaskFlowDeps {
    */
   lessonsUsed?: (task: { taskId: string; project: string; startingRevision: number }, repositoryId: string) => Promise<LessonsUsedSection | undefined>;
   /**
+   * MR3b: the lines about the order a task's pull requests merge in (and what happened when one was merged ahead of the one it depends on), for the pull request descriptions and the task page (`mergeOrderLinesOfTask`).
+   * `undefined`, or an empty answer: the descriptions and the page are exactly what they were. Never throws into the flow (a read that fails leaves the lines out).
+   */
+  mergeOrderLines?: (task: TaskRecord, repositoryId?: string) => Promise<readonly string[]>;
+  /**
+   * MR4 (TE-R4): what the task page says about a pull request whose own CI is failing while a repository it depends on has not merged (`ciWaitLinesOfTask`): that CI tests the repository alone, and Rovara is not trying to fix the failure
+   * before then. `undefined`, or an empty answer: the page is exactly what it was. Never throws into the flow.
+   */
+  ciWaitLines?: (task: TaskRecord, repositoryId: string) => Promise<readonly string[]>;
+  /**
    * The lessons a step is given: asked when the step's invocation is built, only for a task step. `features` are the worker's. The answer is the worker's `learnedContext` or none; it never throws into the dispatch, and a slow
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
    */
