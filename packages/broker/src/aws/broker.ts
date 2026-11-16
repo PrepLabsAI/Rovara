@@ -1,6 +1,9 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { createBrokerCoreServices } from "./core-job-services.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
+import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
+import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
@@ -302,7 +305,7 @@ import {
   type ChannelAdapterConfiguration,
   type ChannelAdapterDependencies,
 } from "./channel-adapters.js";
-import { linkedDeveloper, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
+import { linkedDeveloper, removeLink } from "./channel-links.js";
 import {
   channelCharge,
   channelConversationIdentity,
@@ -567,6 +570,10 @@ interface CodeBuildRecord {
 }
 
 interface AwsBrokerDependencies {
+  workspaces?: SlackWorkspaceAccess;
+  companies?: CompanyMembershipReader;
+  /** Install workspace for the additive operator backfill; independent of sign-in being enabled. */
+  slackWorkspaceLegacyTeamId?: string;
   documentClient: DynamoDBDocumentClient;
   s3: S3Client;
   /** Starts deleting an ec2-ebs workspace's instance and volume (#84). */
@@ -596,7 +603,6 @@ interface AwsBrokerDependencies {
     get(installationId: number): Promise<{ installationId: number; accountLogin: string } | undefined>;
     page(page: number): Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }>;
   };
-  companies?: CompanyMembershipReader;
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
   descriptionUpdateMaxMs?: number;
@@ -971,7 +977,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string; getRemainingTimeInMillis?: () => number }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackWorkspaceOperatorEvent | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string; getRemainingTimeInMillis?: () => number }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Lane E2 step 6: a core job's schedule, or a State table stream batch for the outbox. Only with a core root; with its switch off the answer says so and nothing is read.
     if (core !== undefined && (isCoreJobEvent(event) || outboxCompaniesOf(event) !== undefined)) {
       try {
@@ -987,6 +993,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     }
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
+      if (dependencies.workspaces !== undefined) return json({ error: { code: "FORBIDDEN", message: SLACK_WEB_SIGNIN_NOTICE } }, "slack-ingress", 403);
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
       try {
         return json(await pressAdminChange(adminChanges, event), "slack-ingress");
@@ -994,6 +1001,16 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
         return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
       }
+    }
+    if (isSlackWorkspaceOperatorEvent(event)) {
+      const parsed = SlackWorkspaceOperatorEventSchema.safeParse(event);
+      if (!parsed.success) return json({ outcome: "refused" }, "slack-workspace", 404);
+      const workspaces = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
+      try {
+        if (parsed.data.source === "agentx.slack-workspace-backfill") return json({ outcome: "backfilled", ...await workspaces.backfill() }, "slack-workspace");
+        await workspaces.bind(parsed.data.companyId, parsed.data.teamId, parsed.data.by);
+        return json({ outcome: "bound" }, "slack-workspace");
+      } catch { return json({ outcome: "refused" }, "slack-workspace", 404); }
     }
     if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-claim") {
       try {
@@ -1060,6 +1077,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     }
     // Sign in with ChatGPT from Slack (#340): the ingress asks, as the Slack user's own developer.
     if (isSlackChatGptCommandEvent(event) || isSlackChatGptFinishEvent(event)) {
+      if (dependencies.workspaces !== undefined) return json({ error: { code: "FORBIDDEN", message: SLACK_WEB_SIGNIN_NOTICE } }, "slack-ingress", 403);
       try {
         return json(await answerSlackChatGpt({
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -1738,6 +1756,10 @@ async function answerSlackWorkflowEvent(
   run: () => Promise<unknown>,
   options: { outOfDate: string; awsRequestId?: string | undefined },
 ): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  if (dependencies.workspaces !== undefined) {
+    try { await companySlackCaller(dependencies, event.thread, event.userId); }
+    catch { return json({ refused: true, message: SLACK_WEB_SIGNIN_NOTICE }, "slack-ingress"); }
+  }
   // Without an invoke's own request ID (a direct call), each answer is its own attempt.
   const attemptId = options.awsRequestId !== undefined && SLACK_REFUSAL_ID.test(options.awsRequestId) ? options.awsRequestId : randomUUID();
   try {
@@ -2907,6 +2929,7 @@ async function slackServiceIdentity(
     return channelConversationIdentity(channelConversationDependencies(dependencies), conversation.ref, conversation.actor);
   }
   const context = parseSlackHeaders(request.headers);
+  await companySlackCaller(dependencies, context.thread, context.requester.userId);
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   const subject = slackThreadSubject(context.thread);
@@ -2920,6 +2943,7 @@ async function slackServiceIdentity(
   };
   const shared = await sharedThread(dependencies, context.thread);
   if (shared === undefined) return own;
+  await requireSlackTaskCompany(dependencies, context.thread, shared.taskId);
   const sharedTask = { taskId: shared.taskId, workspaceId: shared.workspaceId, developerName: shared.developerName };
   // C11: open only while continue, not closed, and the channel still serves the task's project.
   // A Slack-started task's own thread is driven by its owner's buttons, never by the channel's chat agent: closed to it.
@@ -2930,7 +2954,7 @@ async function slackServiceIdentity(
   }
   if (dependencies.developer === undefined) throw agentXError("FORBIDDEN", "developer task workflows are not configured");
   let access: TaskAccess;
-  try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), shared.taskId, context.requester.userId, "comment")); }
+  try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), shared.taskId, context.requester.userId, "comment", false, context.thread)); }
   catch { throw agentXError("FORBIDDEN", "this Slack member cannot continue the task"); }
   if (access.task.share?.teamId !== context.thread.teamId || access.task.share.channelId !== context.thread.channelId
     || access.task.share.threadTs !== context.thread.threadTs) throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
@@ -3074,6 +3098,7 @@ async function putSlackBinding(
     projectName: input.projectName,
     updatedAt: new Date().toISOString(),
   });
+  if (!await slackCompanyProject(dependencies, binding.teamId, binding.projectName)) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   await requireAdministrator(dependencies, identity, binding.projectName);
   const existing = await getSlackBinding(dependencies, binding.teamId, binding.channelId);
   if (existing && existing.projectName !== binding.projectName) {
@@ -3111,7 +3136,7 @@ async function getSlackBinding(
   channelId: string,
 ): Promise<SlackChannelBinding | undefined> {
   const binding = await getChannelBinding(dependencies, { channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
-  return binding === undefined ? undefined : slackBindingOf(binding);
+  return binding === undefined || !await slackCompanyProject(dependencies, teamId, binding.projectName) ? undefined : slackBindingOf(binding);
 }
 
 /** Spec 062 FR-010: one space's binding on any channel. Rows written before channels followed the latest revision also carry projectRevision; it is ignored. */
@@ -4050,7 +4075,7 @@ async function markThreadNoteAnswered(dependencies: AwsBrokerDependencies, ident
   const body = input.data;
   const own = identity.sharedTask;
   if (own?.taskAnswer !== true || own.taskId !== body.taskId || body.thread.teamId !== thread.teamId || body.thread.channelId !== thread.channelId || body.thread.threadTs !== thread.threadTs
-    || dependencies.developer.slackTeamId !== thread.teamId) {
+    || !await slackWorkspaceEnabled(dependencies, thread)) {
     throw agentXError("FORBIDDEN", "this thread is not that task's own thread");
   }
   const outcome = await markWorkflowThreadNoteAnswered({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now }, { taskId: body.taskId, thread, messageTs: body.messageTs });
@@ -4072,7 +4097,7 @@ async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity
   const body = input.data;
   const own = identity.sharedTask;
   if (own?.taskAnswer !== true || own.taskId !== body.taskId || body.thread.teamId !== thread.teamId || body.thread.channelId !== thread.channelId || body.thread.threadTs !== thread.threadTs
-    || dependencies.developer.slackTeamId !== thread.teamId) {
+    || !await slackWorkspaceEnabled(dependencies, thread)) {
     throw agentXError("FORBIDDEN", "this thread is not that task's own thread");
   }
   let state: "answered" | "failed";
@@ -6041,11 +6066,38 @@ export const isSlackTaskPeopleTakeOwnershipEvent = (event: unknown): event is Sl
   return typeof event.requestId === "string" && Number.isSafeInteger(event.expectedPeopleRevision);
 };
 
+/** Resolve on each backend execution, including requests that waited in a queue. */
+async function companySlackCaller(dependencies: AwsBrokerDependencies, thread: SlackThread, userId: string): Promise<DeveloperCaller> {
+  const legacy = slackWorkflowCaller(userId);
+  if (dependencies.workspaces === undefined) return legacy;
+  try {
+    const person = await slackCompanyPerson(dependencies, thread.teamId, userId);
+    if (person.kind === "linked") return { developerId: person.personId, sessionId: legacy.sessionId, amr: legacy.amr, name: "Rovara member" };
+  } catch { /* One refusal, no directory or member diagnostics. */ }
+  throw agentXError("FORBIDDEN", SLACK_WEB_SIGNIN_NOTICE);
+}
+
+async function slackWorkspaceEnabled(dependencies: AwsBrokerDependencies, thread: SlackThread): Promise<boolean> {
+  if (dependencies.workspaces === undefined) return dependencies.developer?.slackTeamId === thread.teamId;
+  return await getSlackBinding(dependencies, thread.teamId, thread.channelId) !== undefined;
+}
+
+async function requireSlackTaskCompany(dependencies: AwsBrokerDependencies, thread: SlackThread, taskId: string): Promise<void> {
+  if (dependencies.workspaces === undefined) return;
+  try {
+    const company = await dependencies.workspaces.requireCompany(thread.teamId);
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+    if (recordInCompany(task, company) && task !== undefined && await slackCompanyProject(dependencies, thread.teamId, task.project)) return;
+  } catch { /* A foreign, missing or unreadable task has the same answer. */ }
+  throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+}
+
 async function handleSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions,
   event: SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent) {
+  if (dependencies.workspaces !== undefined) throw agentXError("FORBIDDEN", SLACK_WEB_SIGNIN_NOTICE);
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
-  const caller = slackWorkflowCaller(SlackRequesterSchema.shape.userId.parse(event.userId));
+  const caller = await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
   const taskId = randomUUIDSchema.parse(event.taskId);
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   const access = await resolveTaskAccess(routeDeps, caller, taskId, event.action === "task-people-read" ? "read" : event.action === "task-people-change" ? "peopleManage" : "takeOwnership");
@@ -6068,9 +6120,10 @@ export function isSlackTaskPeopleConfirmEvent(event: unknown): event is SlackTas
 }
 
 async function confirmSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackTaskPeopleConfirmEvent) {
+  if (dependencies.workspaces !== undefined) throw agentXError("FORBIDDEN", SLACK_WEB_SIGNIN_NOTICE);
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
-  const caller = slackWorkflowCaller(SlackRequesterSchema.shape.userId.parse(event.userId));
+  const caller = await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
   const taskId = randomUUIDSchema.parse(event.taskId);
   const requestId = randomUUIDSchema.parse(event.requestId);
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
@@ -6090,8 +6143,9 @@ export function isSlackTaskAuthorizationEvent(event: unknown): event is SlackTas
 async function authorizeSlackTaskAction(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackTaskAuthorizationEvent) {
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
-  const caller = slackWorkflowCaller(SlackRequesterSchema.shape.userId.parse(event.userId));
+  const caller = await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
   const taskId = randomUUIDSchema.parse(event.taskId);
+  await requireSlackTaskCompany(dependencies, thread, taskId);
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   // This signed UI port reports the current lifecycle state (for example, a retired button) after
   // a fresh read+role check. The separately invoked mutation route still requires an open task.
@@ -6115,10 +6169,11 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
   const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const caller = await companySlackCaller(dependencies, thread, userId);
   const requestId = randomUUIDSchema.parse(event.requestId);
   const instructions = event.instructions.trim();
   if (!instructions || Buffer.byteLength(instructions, "utf8") > 65_536) throw agentXError("CONFIG_INVALID", "workflow request is empty or too long");
-  if (dependencies.developer.slackTeamId !== thread.teamId) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+  if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (binding === undefined) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   const existingWorkflowThread = await getItem(dependencies, sharedTaskKey(thread));
@@ -6127,8 +6182,8 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   if (existingWorkflowThread !== undefined || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) {
     throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
   }
-  const caller = slackWorkflowCaller(userId);
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller, thread);
+  const developer = dependencies.workspaces === undefined ? dependencies.developer : { ...dependencies.developer, slackTeamId: thread.teamId };
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller, thread);
   const request = {
     method: "POST", path: "/v1/dev/tasks", headers: {}, requestId,
     body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath, shareToChannel: true, channel: thread.channelId }),
@@ -6228,6 +6283,8 @@ async function recordSlackIntake(dependencies: AwsBrokerDependencies, event: Sla
   const choiceId = randomUUIDSchema.parse(event.choiceId);
   const thread = SlackThreadSchema.parse(event.thread);
   const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  await companySlackCaller(dependencies, thread, userId);
+  if (dependencies.workspaces !== undefined && !await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   const text = event.text.trim();
   if (!text || text.length > REQUEST_ROUTE_MESSAGE_MAX) throw agentXError("CONFIG_INVALID", "the request is empty or too long");
   const nowSeconds = Math.floor(Date.now() / 1_000);
@@ -6390,16 +6447,17 @@ async function ownedSlackWorkflowTask(dependencies: AwsBrokerDependencies, event
   const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
   const taskId = randomUUIDSchema.parse(event.taskId);
   const requestId = randomUUIDSchema.parse(event.requestId);
-  if (dependencies.developer.slackTeamId !== thread.teamId) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+  if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
   let caller: DeveloperCaller;
   let task: DeveloperTaskRecord;
   try {
-    const result = await slackTaskAccess(dependencies, developerTaskActions(dependencies), taskId, userId, "read", legacySlackOwner);
+    const result = await slackTaskAccess(dependencies, developerTaskActions(dependencies), taskId, userId, "read", legacySlackOwner, thread);
     caller = result.caller;
     const access = result.access;
     if (access.role !== "owner") throw agentXError("FORBIDDEN", `only a current task owner can ${what}`);
     task = access.task;
-  } catch {
+  } catch (error) {
+    if (dependencies.workspaces !== undefined) throw error;
     // Lane E2: a core task's record is not read here to pick the words (engine-boundary.ts).
     if (await ownerOfTaskId(dependencies, taskId) === "core") throw agentXError("FORBIDDEN", `only a current task owner can ${what}`);
     const stored = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
@@ -6437,6 +6495,7 @@ async function slackTaskAccess(
   userId: string,
   action: TaskAction,
   legacySlackOwner = false,
+  thread?: SlackThread,
 ): Promise<{ caller: DeveloperCaller; routeDeps: ReturnType<typeof developerTaskRouteDependencies>; access: TaskAccess }> {
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
@@ -6444,8 +6503,10 @@ async function slackTaskAccess(
   // Lane E2: a task the core owns is never acted on from the workflow's Slack paths (engine-boundary.ts), not even as the legacy commenter below.
   if (await ownerOfExistingTask(dependencies, taskId) === "core") throw agentXError("FORBIDDEN", "task access could not be verified");
   const sidecar = await getItem<Record<string, unknown>>(dependencies, { pk: `DEVTASK#${taskId}`, sk: "PEOPLE" });
-  const canonical = slackWorkflowCaller(userId);
-  const caller = sidecar === undefined && legacySlackOwner && task.provider === "slack" && task.slackUserId === userId
+  if (dependencies.workspaces !== undefined && thread === undefined) throw agentXError("FORBIDDEN", SLACK_WEB_SIGNIN_NOTICE);
+  const canonical = await companySlackCaller(dependencies, thread ?? { teamId: "", channelId: "", threadTs: "" }, userId);
+  if (thread !== undefined) await requireSlackTaskCompany(dependencies, thread, taskId);
+  const caller = dependencies.workspaces === undefined && sidecar === undefined && legacySlackOwner && task.provider === "slack" && task.slackUserId === userId
     ? { ...canonical, developerId: task.developerId, name: task.developerName }
     : canonical;
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
@@ -6455,7 +6516,7 @@ async function slackTaskAccess(
   } catch (error) {
     // A verified Slack message/service call in the task's exact linked thread is the legacy
     // commenter proof. The caller validates that exact thread before using this result.
-    if (sidecar !== undefined || action !== "comment" || task.share === undefined) throw error;
+    if (dependencies.workspaces !== undefined || sidecar !== undefined || action !== "comment" || task.share === undefined) throw error;
     return { caller, routeDeps, access: { task, role: "commenter", ownerActorIds: [taskOwnerKey(task.developerId, task.taskId)] } };
   }
 }
@@ -6676,13 +6737,13 @@ async function captureSlackWorkflowFeedbackNote(dependencies: AwsBrokerDependenc
   const thread = SlackThreadSchema.parse(event.thread);
   const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
   const taskId = randomUUIDSchema.parse(event.taskId);
-  if (dependencies.developer.slackTeamId !== thread.teamId) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+  if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
   const shared = await getItem<{ taskId?: string; mode?: string; closedAt?: string }>(dependencies, sharedTaskKey(thread));
   if (shared?.taskId !== taskId || shared.closedAt !== undefined) throw agentXError("FORBIDDEN", "this Slack thread is not linked to the task");
   let caller: DeveloperCaller;
   let routeDeps: ReturnType<typeof developerTaskRouteDependencies>;
   let access: TaskAccess;
-  try { ({ caller, routeDeps, access } = await slackTaskAccess(dependencies, tasks, taskId, userId, "feedback", true)); }
+  try { ({ caller, routeDeps, access } = await slackTaskAccess(dependencies, tasks, taskId, userId, "feedback", true, thread)); }
   catch { throw agentXError("FORBIDDEN", "only a current task owner can add a note in this PR review"); }
   if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) {
     throw agentXError("FORBIDDEN", "this PR feedback belongs to another Slack thread");
@@ -6718,11 +6779,11 @@ async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks:
   const userId = SlackRequesterSchema.shape.userId.safeParse(event.userId);
   const taskId = event.taskId;
   const messageTs = SlackMessageTimestampSchema.safeParse(event.messageTs);
-  if (!thread.success || !userId.success || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId) || !messageTs.success || dependencies.developer.slackTeamId !== thread.data.teamId) return { outcome: "refused" };
+  if (!thread.success || !userId.success || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId) || !messageTs.success || !await slackWorkspaceEnabled(dependencies, thread.data)) return { outcome: "refused" };
   const shared = await getItem<{ taskId?: string; workflowThread?: unknown; closedAt?: string }>(dependencies, sharedTaskKey(thread.data));
   if (shared === undefined || shared.taskId !== taskId || shared.workflowThread !== true || shared.closedAt !== undefined) return { outcome: "refused" };
   let access: TaskAccess;
-  try { ({ access } = await slackTaskAccess(dependencies, tasks, taskId, userId.data, "comment", true)); }
+  try { ({ access } = await slackTaskAccess(dependencies, tasks, taskId, userId.data, "comment", true, thread.data)); }
   catch { return { outcome: "refused" }; }
   if (access.task.share?.teamId !== thread.data.teamId || access.task.share.channelId !== thread.data.channelId
     || access.task.share.threadTs !== thread.data.threadTs) return { outcome: "refused" };
@@ -6754,6 +6815,7 @@ export function isSlackStopTaskEvent(event: unknown): event is SlackStopTaskEven
 async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation | { outcome: "NOT_OWNER" }> {
   const thread = SlackThreadSchema.parse(event.thread);
   const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: event.userId });
+  await companySlackCaller(dependencies, thread, requester.userId);
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   // Spec 043 FR-005: a thread running a SWE-bench run stops the run.
@@ -6770,7 +6832,7 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
     if (shared.closedAt !== undefined || binding.projectName !== shared.project) return { outcome: "NOTHING_RUNNING" };
     if (dependencies.developer === undefined) return { outcome: "NOT_OWNER" };
     let access: TaskAccess;
-    try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), shared.taskId, requester.userId, "control", true)); }
+    try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), shared.taskId, requester.userId, "control", true, thread)); }
     catch { return { outcome: "NOT_OWNER" }; }
     if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) return { outcome: "NOT_OWNER" };
     const workspace = await requireWorkspace(dependencies, shared.workspaceId);
@@ -6790,7 +6852,7 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
     }
     if (dependencies.developer === undefined) return { outcome: "NOT_OWNER" };
     let access: TaskAccess;
-    try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), task.taskId, requester.userId, "control", true)); }
+    try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), task.taskId, requester.userId, "control", true, thread)); }
     catch { return { outcome: "NOT_OWNER" }; }
     if (access.peopleRevision === undefined || access.task.share?.teamId !== thread.teamId
       || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) return { outcome: "NOT_OWNER" };
@@ -14422,7 +14484,8 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
   };
 }
 
-function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): { channelLinks?: ChannelLinkDependencies } {
+function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes"> {
+  if (dependencies.workspaces !== undefined) return { channelLinkCodes: createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }) };
   const channelAdapters = dependencies.channelAdapters;
   return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
 }
@@ -14519,6 +14582,7 @@ async function putProjectModel(
   identity: AuthenticatedIdentity,
   value: unknown,
 ): Promise<ProjectModelOptions> {
+  if (dependencies.workspaces !== undefined && (identity.slack !== undefined || identity.channel?.ref.channel === SLACK_CHANNEL)) throw agentXError("FORBIDDEN", SLACK_WEB_SIGNIN_NOTICE);
   const projectName = conversationProjectName(identity);
   const requester = identity.slack?.requester ?? (identity.channel === undefined ? undefined : channelRequester(identity.channel));
   if (!projectName || !requester) throw agentXError("FORBIDDEN", "a conversation's project binding and requester are required");
@@ -15269,6 +15333,7 @@ const sqs = new SQSClient(awsClientConfiguration);
 
 export const handler = createAwsBrokerHandler({
   core: coreRoot,
+  ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
   documentClient,
   s3,
   tableName: requiredEnvironment("STATE_TABLE_NAME"),

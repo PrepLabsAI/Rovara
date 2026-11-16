@@ -164,6 +164,7 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
+  channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
   companies?: CompanyMembershipReader;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
@@ -1434,15 +1435,15 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
   if (url.pathname.startsWith("/review/link/")) {
     const links = deps.channelLinks;
-    if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+    if (links === undefined && deps.channelLinkCodes === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
     return createChannelLinkWeb({
       origin: deps.developer.issuer,
       authenticateSession: async (sessionId) => {
         try { return await authenticateDeveloperSessionId(deps, sessionId); }
         catch { return undefined; }
       },
-      preview: (code) => previewLinkCode(links, code),
-      redeem: (developerId, code) => redeemLinkCode(links, developerId, code),
+      preview: (code, personId) => deps.channelLinkCodes === undefined ? previewLinkCode(links!, code) : deps.channelLinkCodes.preview(personId, code),
+      redeem: (developerId, code) => deps.channelLinkCodes === undefined ? redeemLinkCode(links!, developerId, code) : deps.channelLinkCodes.redeem(developerId, code),
     })(request, url);
   }
   if (url.pathname.startsWith("/review/")) {
