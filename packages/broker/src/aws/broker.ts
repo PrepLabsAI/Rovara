@@ -1253,8 +1253,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (setupArtifact?.[1] && setupArtifact[2] === "evidence/finalize" && request.method === "POST") {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
-      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off. L2b: also its model-access GET.
-      if (core !== undefined && (request.method === "POST" || (request.method === "GET" && url.pathname === CORE_MODEL_ACCESS_PATH))) {
+      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off. L2b: also its model-access GET. Lane L14: also its context-tools GET.
+      if (core !== undefined && (request.method === "POST" || (request.method === "GET" && (url.pathname === CORE_MODEL_ACCESS_PATH || request.path.split("?")[0] === "/v1/internal/context-tools")))) {
         const answer = await core.callback(request);
         if (answer !== undefined) return answer;
       }

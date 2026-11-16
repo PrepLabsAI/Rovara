@@ -7,6 +7,7 @@
 396 record kinds: 42 company-scoped, 13 install-wide, 341 needs-company. 184 routes: 21 company-scoped, 2 install-wide, 161 needs-company.
 395 record kinds: 41 company-scoped, 13 install-wide, 341 needs-company. 186 routes: 22 company-scoped, 2 install-wide, 162 needs-company.
 397 record kinds: 43 company-scoped, 13 install-wide, 341 needs-company. 184 routes: 21 company-scoped, 2 install-wide, 161 needs-company.
+395 record kinds: 41 company-scoped, 13 install-wide, 341 needs-company. 185 routes: 22 company-scoped, 2 install-wide, 161 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -532,6 +533,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/evals/swebench | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/evals/swebench/{id} | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/github/webhooks | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
+| route | /v1/internal/context-tools | company-scoped | State table | no | GET | L14 core catalog: context capability verified before reads and bound to the gateway workspace; company from the workspace, live task-owner membership and project authority on every call. Two-company and no-read refusal tests in tests/unit/core-team-context.test.ts. |
 | route | /v1/internal/evals/{id}/result | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/evals/{id}/started | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/project-setups/{id}/evidence | needs-company | State table | no | pattern alternative (no direct handler) | T2: not membership-checked in R4; remaining dispatch methods require a company check. |

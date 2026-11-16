@@ -25,7 +25,7 @@
 import { relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, isContextSourceStage,
   type PolicySource, type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -69,6 +69,9 @@ import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { CORE_ENGINE_VARIABLE, parseCoreSwitch } from "../core-host/flags.js";
+
+import { CallbackCapabilities } from "../callbacks.js";
+import { handleCoreContextTools } from "../core-host/context-tools.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
@@ -154,7 +157,7 @@ export interface BrokerCoreRoot {
   handleEvent(event: unknown, options?: { remainingMs?: number | undefined }): Promise<unknown>;
   /**
    * A worker's callback (`/v1/internal/workspaces/<id>/operations/<id>/<action>`) for a workspace a CORE task holds: served by that company's core callback layer (its capability, its
-   * repository grant exchange, the lessons' load report). `undefined`: not a core workspace (the old routes answer it), or the switch is off.
+   * repository grant exchange, the lessons' load report), or a gateway-stamped context-tools request verified before reads. `undefined`: not a core workspace, or the switch is off.
    */
   callback(request: BrokerRequest): Promise<BrokerResponse | undefined>;
 }
@@ -378,8 +381,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             lessons.attach();
             lessonsByCompany.set(companyId, lessons);
             // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
-            // context sources' `teamSearch` (kept here for that wiring).
+            // context sources' `teamSearch`; only this company's eligible stages advertise it.
             teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
+            flow.deps.contextSources = { stageHasSources: async (_task, mode) => isContextSourceStage(mode) && teamRecords.has(companyId) };
           }
         }
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
@@ -529,6 +533,15 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     async callback(request) {
       if (coreTasks === undefined) return undefined;
+      // L5: settings that cannot be read refuse the core's context tools too.
+      if (settingsBlocked && (request.path.split("?")[0] ?? "") === "/v1/internal/context-tools") return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
+      const context = await handleCoreContextTools(request, {
+        capabilities: { verify: (token, action) => new CallbackCapabilities(Buffer.from(inputs.callbackSigningKey)).verify(token, action) },
+        ownerOfWorkspace: (workspaceId) => ownerOfWorkspace(table, workspaceId),
+        companyOfWorkspace,
+        runtimeFor: async (companyId) => ({ flow: (await app.runtimeFor(companyId)).flow.deps, teamSearch: teamRecords.get(companyId)?.search }),
+      });
+      if (context !== undefined) return context;
       // L2b: a worker's model-access request names its workspace only inside its signed capability (checked here before any read; the handler checks it again).
       const workspaceId = modelAccessWorkspaceOf(request) ?? CORE_CALLBACK.exec(request.path.split("?")[0] ?? "")?.[1];
       if (workspaceId === undefined || await ownerOfWorkspace(table, workspaceId) !== "core") return undefined;
