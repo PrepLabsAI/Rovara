@@ -233,8 +233,7 @@ async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCap
     if (captureMs < 1_000) { answer = "time_limit"; return answer; }
     const signInPlan = recipe.signIn === undefined ? undefined : { path: recipe.signIn.path, usernameSelector: recipe.signIn.usernameSelector, passwordSelector: recipe.signIn.passwordSelector, submitSelector: recipe.signIn.submitSelector,
       ...(recipe.signIn.successPath === undefined ? {} : { successPath: recipe.signIn.successPath }), ...(recipe.signIn.successSelector === undefined ? {} : { successSelector: recipe.signIn.successSelector }) };
-    // A recipe with a sign-in and no values is never run (the caller refuses it first); here it is a fault, not a signed-out capture.
-    if (signInPlan !== undefined && input.signInValues === undefined) return "sign_in_failed";
+    // (A recipe with a sign-in is never run without its values: `collectBrowserEvidence` refuses it first, and the capture program refuses a plan with a sign-in and no values.)
     const plan = encodeBrowserEvidenceExecutorPlan({ port: recipe.port, ...(recipe.readyPath === undefined ? {} : { readyPath: recipe.readyPath }), ...(signInPlan === undefined ? {} : { signIn: signInPlan }), routes: [...input.routes], maskSelectors: recipeMaskSelectors(recipe),
       runMs: Math.min(120_000, captureMs), pageMs: 15_000 });
     const args = browserEvidenceExecutorArgs({ image: input.executorImage, sandbox: input.sandboxName, name, seccompProfile: input.seccompPath, plan, withSignIn: signInPlan !== undefined });

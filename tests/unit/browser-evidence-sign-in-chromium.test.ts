@@ -126,9 +126,9 @@ describe.skipIf(!haveChromium)("browser evidence behind a login, in a real Chrom
     } finally { await w.stop(); }
   }, 120_000);
 
-  it("refuses the whole sign-in for values that would not mask (never types a value it could not hide)", async () => {
-    const port = await freePort();
-    const driver = createChromiumEvidenceDriver({ browser: browser!, origin: `http://127.0.0.1:${port}`, signIn: { form: FORM, values: { username: "ab", password: "cd" } }, app: { start: async () => "ready", stop: async () => undefined } });
-    expect(await driver.signIn({ timeoutMs: 5_000 })).toBe("sign_in_failed");
-  }, 30_000);
+  it("refuses the whole sign-in for values that would not mask (never types a value it could not hide), even when the app would accept them", async () => {
+    const short: BrowserEvidenceSignInValues = { username: "ab", password: "cd" };
+    const w = await world(short, short);
+    try { expect(await w.driver.signIn({ timeoutMs: 15_000 })).toBe("sign_in_failed"); } finally { await w.stop(); }
+  }, 60_000);
 });
