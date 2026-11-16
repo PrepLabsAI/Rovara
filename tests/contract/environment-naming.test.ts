@@ -1,6 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
+import { DERIVED_BROKER_VARIABLES } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { operatorRoleStatements } from "../../infra/lib/access-policies.js";
 import { environmentNaming, legacyNaming, namingFromContext } from "../../infra/lib/naming.js";
@@ -160,7 +161,9 @@ describe("environment naming", () => {
     // The EC2 worker log group has a fixed name the boot script writes to; retaining it would stop
     // the environment from being deployed again after a teardown.
     expect(logGroups.find(([id]) => id.startsWith("Ec2WorkersWorkerLogs"))?.[1].DeletionPolicy).toBe("Delete");
-    expect(logGroups).toHaveLength(2);
+    // The DNS firewall's query log (/agentx/<env>/dns-firewall) has a fixed name too, and is deleted with the stack for the same reason.
+    expect(logGroups.find(([id]) => id.startsWith("AgentDnsFirewallQueryLogs"))?.[1].DeletionPolicy).toBe("Delete");
+    expect(logGroups).toHaveLength(3);
   });
 
   it("scopes connector secrets to the environment, and grants nothing of retired runtime", () => {
@@ -186,7 +189,11 @@ describe("environment naming", () => {
 
   it("tells the environment's broker its connector secret prefix, and leaves legacy unchanged", () => {
     const stagingControl = productionStacks(buildAgentXApp({ agentxEnv: "staging" })).find((stack) => stack.stackName === "agentx-staging-control-plane")!;
-    expect(JSON.stringify(Template.fromStack(stagingControl).toJSON())).toContain("\"CONNECTOR_SECRET_PREFIX\":\"agentx/staging/connectors/\"");
+    // ENV-ROOM: a named broker derives its prefix from AGENTX_ENV (DERIVED_BROKER_VARIABLES); infra checks at synthesis that the derivation is this value.
+    const stagingJson = JSON.stringify(Template.fromStack(stagingControl).toJSON());
+    expect(stagingJson).toContain("\"AGENTX_ENV\":\"staging\"");
+    expect(DERIVED_BROKER_VARIABLES.find((entry) => entry.variable === "CONNECTOR_SECRET_PREFIX")).toMatchObject({ kind: "text" });
+    expect((DERIVED_BROKER_VARIABLES.find((entry) => entry.variable === "CONNECTOR_SECRET_PREFIX") as { value: (env: string) => string }).value("staging")).toBe("agentx/staging/connectors/");
     const legacyControl = productionStacks(buildAgentXApp()).find((stack) => stack.stackName === "AgentXControlPlane")!;
     expect(JSON.stringify(Template.fromStack(legacyControl).toJSON())).not.toContain("CONNECTOR_SECRET_PREFIX");
   }, 240_000);

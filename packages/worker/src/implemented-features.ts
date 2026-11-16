@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -67,6 +67,8 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.testEnvDetect.v1",
   // Test environment (wire-testenv): a verification run that carries the environment's plan applies its test selection and round budget and reports the selection (verification/test-env-plan.ts).
   "task.testEnvironment.v1",
+  // TE-C6: the plan's `flakyRerun: true` (a failing test of a check that passed before is rerun once; verification/flaky-rerun.ts).
+  TASK_FLAKY_RERUN_FEATURE,
   // Evidence (S-2): the plan's `checks[].coveragePath` (the approved report) is read as a named coverage report (verification/evidence-raw.ts).
   "task.testEnvCoveragePath.v1",
   // N9 (INTG2): the prepare invocation's `registries` (a project's private package registries for the setup and readiness commands; registry-config.ts).
@@ -89,7 +91,13 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   STANDING_INSTRUCTIONS_FEATURE,
   // Lessons replay, the file arm: places a replay copy's lessons file and pointer in its checkout, out of the candidate (eval-files.ts).
   EVAL_FILES_FEATURE,
+  // General fakes (DEC 234): a CHECKS round answers the configured outside services with Rovara-made fakes from their OpenAPI descriptions, on the local shell (general-fakes-round.ts).
+  GENERAL_FAKES_FEATURE,
   // The approved plan a coding run keeps in its conversation summaries (compaction.ts).
   "task.workflowApprovedPlan.v1",
+  // Per-run dollar stop: a run asked for `usageCheckpoints` reports its usage while it runs, not only at its end (run-task.ts `checkpointUsage`).
+  USAGE_CHECKPOINTS_FEATURE,
+  // TE-C1: a verification run whose plan carries `baselineCandidates` finds the nearest one that is an ancestor of the task's base commit, before any check runs, and reports it in evidence-raw.json (verification/baseline-ancestry.ts).
+  TEST_ENV_BASELINE_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];

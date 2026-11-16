@@ -27,6 +27,7 @@ function populatedFake(): Required<CheckRunners> {
     freshServices: method(),
     resetBetweenChecks: method(),
     endRound: method(),
+    markEntries: method(),
   };
 }
 

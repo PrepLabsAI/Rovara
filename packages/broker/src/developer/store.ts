@@ -167,6 +167,8 @@ export class DeveloperSignInStore {
         record.secretHash = current.secretHash;
       }
       if (record.fullAccess === true && record.secretHash === undefined) throw new Error("client unavailable");
+      // DEC 236h: the web app marker is the operator's, on an install-level client: never a company administrator's, and never carried over by an update.
+      if (record.webApp === true && !(options.operator === true && record.installLevel === true)) throw new Error("client unavailable");
       const writes = [{ Put: { TableName: this.input.tableName, Item: { ...signInClientKey(record.clientId), entityType: "SIGN_IN_CLIENT", ...record, createdAt: current?.createdAt ?? record.createdAt } } }, this.reviseClients(revision)];
       if (this.input.now() - started > 10_000) throw new Error("client unavailable");
       if (options.commit !== undefined) await options.commit(writes);

@@ -11,10 +11,10 @@ const job = ci.jobs["device-ios"]!;
 const runs = job.steps.map((step) => step.run ?? "").join("\n");
 
 describe("the CI job that runs the iOS simulator", () => {
-  it("runs on macOS behind the same Markdown-only skip as the other heavy jobs, with its own time limit and read-only permissions, and the one gate does NOT wait for it yet (informational until its first real run has been read)", () => {
+  it("runs on macOS, planned like linux-runtime and device-runtime (only when the device area changes, always in a FULL run), with its own time limit and read-only permissions, and the one gate does NOT wait for it yet (informational until its first real run has been read)", () => {
     expect(job["runs-on"]).toMatch(/^macos-\d+$/u);
-    expect(job.needs).toBe("scope");
-    expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
+    expect(job.needs).toBe("plan");
+    expect(job.if).toBe("needs.plan.outputs.device == 'true'");
     expect(job["timeout-minutes"]).toBeGreaterThan(0);
     expect(job["timeout-minutes"]).toBeLessThanOrEqual(90);
     expect(job.permissions).toBeUndefined();

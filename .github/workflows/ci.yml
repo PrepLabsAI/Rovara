@@ -8,7 +8,8 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `labeled` so that adding the `full-ci` label starts a FULL run. Any other label starts an ordinary run too (a skipped run would leave a skipped `local` that reads as a pass).
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   push:
     branches: [code/next]
 
@@ -21,18 +22,30 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# The checks, the test shards, the release check and the Linux runtime check run side by side, each on its own machine. The
-# job called `local` waits for all of them and is the one check a pull request needs (scripts/ci-gate.ts).
+# Two modes (DEC 242; scripts/ci-plan.ts decides, in the `plan` job, and every other job reads its answer).
+# FULL: a push to code/next, a manual run, a pull request labelled `full-ci` or titled "Batch ..." or "Sync mainline ...". Everything runs: the typecheck and the whole lint
+#   in `quick`, the release check, all 8 `test (n/8)` shards, `linux-runtime`, and the check `ci-mode (full)`, which exists only in this mode: a merge needs it.
+# AFFECTED (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach, in 2 shards (the whole suite when something shared changes);
+#   lint covers the changed files; `linux-runtime` and the release check run only when their area changes; a Markdown-only change that no test reads runs nothing but `plan`.
+# The job called `local` waits for every job and is the one check a pull request needs (scripts/ci-gate.ts). It knows from `plan` which jobs must have run, so a job
+# skipped by design counts as a pass but a job that should have run and did not fails it. `port-guard` is a check of its own. A draft skips every job.
+#
+# Build once: the `build` job builds the packages and hands the output to the test shards as an artifact, so the shards do not each build it again.
 jobs:
-  # A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips the
-  # jobs below (scripts/ci-docs-only.ts). Manual runs always run them. A draft skips every job,
-  # `local` included, so it shows no failed check.
-  scope:
+  # The decision. A few seconds on a runner with no install: Node runs the script directly.
+  plan:
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      docs_only: ${{ steps.scope.outputs.docs_only }}
+      mode: ${{ steps.plan.outputs.mode }}
+      docs_only: ${{ steps.plan.outputs.docs_only }}
+      tests: ${{ steps.plan.outputs.tests }}
+      shards: ${{ steps.plan.outputs.shards }}
+      lint: ${{ steps.plan.outputs.lint }}
+      linux: ${{ steps.plan.outputs.linux }}
+      device: ${{ steps.plan.outputs.device }}
+      release: ${{ steps.plan.outputs.release }}
     steps:
       # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
       - uses: actions/checkout@v5
@@ -41,19 +54,103 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
-      - name: Docs-only change?
-        id: scope
-        if: github.event_name == 'pull_request'
+      - name: Plan the run
+        id: plan
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          CI_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
+          # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
+          PLAN_SCRIPT=scripts/ci-plan.ts
+          if [ "$CI_EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            if git cat-file -e "$BASE_SHA:scripts/ci-plan.ts" 2>/dev/null; then
+              PLAN_SCRIPT="$RUNNER_TEMP/ci-plan.ts"
+              git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"
+            fi
+          fi
+          if [ "$CI_EVENT" = pull_request ]; then
+            git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          else
+            : > "$RUNNER_TEMP/changed.txt"
+          fi
+          node "$PLAN_SCRIPT" "$RUNNER_TEMP/changed.txt"
+
+  # Present (and green) only in a FULL run, so that a merge can require `ci-mode (full)`.
+  ci-mode:
+    name: ci-mode (full)
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "FULL run - every job runs in full (the plan job says why)."
+
+  # What the old `scope`, `checks` and `release` jobs did, in one job: one checkout, one install, one runner.
+  # Each part keeps its own condition and its own step time limit; the job's limit is the sum of the old ones (5 + 15 + 15). A failed step
+  # fails the job, and its name starts with the part it belongs to (checks, release). A Markdown-only change skips the job (the plan says so).
+  quick:
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: "checks: npm ci"
+        timeout-minutes: 15
+        run: npm ci
+      - name: "checks: npm run typecheck"
+        timeout-minutes: 15
+        run: npm run typecheck
+      # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
+      # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
+      - name: "checks: npm run typecheck:all"
+        timeout-minutes: 15
+        run: npm run typecheck:all
+      # The whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts), two eslint processes at a time. One process
+      # over the whole repository needed more than 6 GB; each shard stays under a 4 GB heap cap. It reads the packages' declarations that
+      # `npm run typecheck` just built. A pull request that changes no lint setting lints only its changed TypeScript files, each in its own shard's program.
+      - name: "checks: npm run lint"
+        if: needs.plan.outputs.lint == 'all'
+        timeout-minutes: 15
+        run: npm run lint
+      - name: "checks: lint the changed files"
+        if: needs.plan.outputs.lint == 'changed'
+        timeout-minutes: 15
         run: |
           git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          node scripts/ci-docs-only.ts "$RUNNER_TEMP/changed.txt"
-      - name: Markdown-only change
-        if: steps.scope.outputs.docs_only == 'true'
-        run: echo "Only Markdown that no test reads changed; typecheck, the stricter type check, lint, tests, synth and the release check are skipped."
+          node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"
+      # The release check shares the install above (the old `release` job ran its own `npm ci`); the rest runs as before, when the release area changed (always in a FULL run).
+      - name: "release: npm run build"
+        if: needs.plan.outputs.release == 'true'
+        timeout-minutes: 15
+        run: npm run build
+      - name: "release: npm run infra:synth"
+        if: needs.plan.outputs.release == 'true'
+        timeout-minutes: 15
+        run: npm run infra:synth
+      - name: "release: Release builds are reproducible"
+        if: needs.plan.outputs.release == 'true'
+        timeout-minutes: 15
+        run: |
+          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
+          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
+          diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
+          npm run release:verify -- "$RUNNER_TEMP/release-a"
 
-  checks:
-    needs: scope
-    if: needs.scope.outputs.docs_only != 'true'
+  # Builds the packages once and hands the output to the test shards (they used to run `npm run build` eight times).
+  build:
+    needs: plan
+    if: needs.plan.outputs.tests != 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -65,20 +162,26 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
-      # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
-      - run: npm run typecheck:all
-      # The whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts), two eslint processes at a time. One process
-      # over the whole repository needed more than 6 GB; each shard stays under a 4 GB heap cap. It reads the packages' declarations that
-      # `npm run typecheck` just built.
-      - run: npm run lint
+      # The packages import each other through their built output.
+      - run: npm run build
+      # Everything the build left that git ignores, except node_modules anywhere (each shard installs its own): the packages' dist folders and their tsbuildinfo files.
+      - name: Pack the build output
+        run: |
+          git ls-files --others --ignored --exclude-standard --directory | grep -v 'node_modules/' > "$RUNNER_TEMP/build-files.txt"
+          test -s "$RUNNER_TEMP/build-files.txt"
+          tar -czf "$RUNNER_TEMP/build-output.tgz" -T "$RUNNER_TEMP/build-files.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: ${{ runner.temp }}/build-output.tgz
+          retention-days: 1
+          if-no-files-found: error
 
-  # Vitest hands each shard an even share of the test files. To change the count, change the list:
-  # the shard total below comes from it.
+  # Vitest hands each shard a share of the test files balanced by their recorded run time (tests/support/duration-sequencer.ts, tests/.timings/vitest-durations.json).
+  # The shard list comes from the plan: 8 for a FULL run or a change to something shared, 2 for an ordinary pull request.
   test:
-    needs: scope
-    if: needs.scope.outputs.docs_only != 'true'
+    needs: [plan, build]
+    if: needs.plan.outputs.tests != 'none'
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
@@ -86,7 +189,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -105,32 +208,40 @@ jobs:
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
-      # The packages import each other through their built output, which `npm run typecheck` used to leave behind.
-      - run: npm run build
-      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
-
-  release:
-    needs: scope
-    if: needs.scope.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
+      # The packages import each other through their built output, which the `build` job made.
+      - uses: actions/download-artifact@v4
         with:
-          fetch-depth: 2
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .node-version
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: npm run infra:synth
-      - name: Release builds are reproducible
+          name: build-output
+          path: ${{ runner.temp }}/build-output
+      - name: Unpack the build output
+        run: tar -xzf "$RUNNER_TEMP/build-output/build-output.tgz"
+      - name: Tests (the whole suite)
+        if: needs.plan.outputs.tests == 'all'
+        run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+      # Vitest's --changed follows imports; the plan adds the tests that name a changed file or a package the change reaches (scripts/ci-plan.ts relatedTests).
+      - name: Tests (the ones this change can reach)
+        if: needs.plan.outputs.tests == 'changed'
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          CI_TITLE: ${{ github.event.pull_request.title }}
+          CI_EXTRA_TESTS: ${{ runner.temp }}/extra-tests.txt
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
-          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
-          diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
-          npm run release:verify -- "$RUNNER_TEMP/release-a"
+          # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
+          # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
+          PLAN_SCRIPT=scripts/ci-plan.ts
+          if [ "$CI_EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            if git cat-file -e "$BASE_SHA:scripts/ci-plan.ts" 2>/dev/null; then
+              PLAN_SCRIPT="$RUNNER_TEMP/ci-plan.ts"
+              git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"
+            fi
+          fi
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          node "$PLAN_SCRIPT" "$RUNNER_TEMP/changed.txt"
+          npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          if [ -s "$CI_EXTRA_TESTS" ]; then xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
 
   # Real Chromium E2E checks need a Linux ARM64 Docker host, the platform Rovara's runtime targets. This job
   # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against
@@ -142,8 +253,8 @@ jobs:
   # the fallback only when the mirror copy is missing, and every pull retries with backoff. Everything after that uses the local copy: the executor image is built
   # from it, the tests use it, and the Docker 25 (dind) daemon is loaded from the runner's daemon with docker save | docker load and never pulls.
   linux-runtime:
-    needs: scope
-    if: needs.scope.outputs.docs_only != 'true'
+    needs: plan
+    if: needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 75
     permissions:
@@ -260,14 +371,13 @@ jobs:
   # is not the ARM `linux-runtime` job) and KVM, which GitHub's standard Linux runners give public repositories once /dev/kvm is open to every user. The test checks KVM itself: with none it SKIPS with
   # the reason on the log and as a warning annotation, never a silent pass. It builds a tiny fixture app twice with the runner's own JDK and Android SDK (tests/fixtures/device-evidence-app), starts the
   # device executor beside a network-less container that stands in for the task sandbox, and checks the masked pictures, the arguments as Docker understood them, and the listeners in the shared loopback.
+  # Planned like `linux-runtime` (runs only when the device area changes, and always in a FULL run) and INFORMATIONAL for now: it is not in the `local` gate until its first real run has been read.
+  # It uses no secret and no permission beyond the workflow's `contents: read`: it pulls only the one image the device Dockerfile builds on (the registry fallback in scripts/ci-images.ts needs no login).
   device-runtime:
-    needs: scope
-    if: needs.scope.outputs.docs_only != 'true'
+    needs: plan
+    if: needs.plan.outputs.device == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -283,12 +393,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm || echo "::warning title=No KVM on this runner::/dev/kvm is missing, so the emulator test will be SKIPPED (with its reason)"
-      - name: Log in to the GHCR image mirror (read-only)
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || echo "::warning::GHCR login failed; images will come from their upstream registries"
-      - name: Pull the pinned public images (GHCR mirror first)
-        run: node scripts/ci-images.ts pull --github-env
+      # Only the base image of the device Dockerfile (node-build); it exports ROVARA_CI_IMAGE_NODE_BUILD, the local alias the build below uses.
+      - name: Pull the pinned base image
+        run: node scripts/ci-images.ts pull --github-env node-build
       - name: Build the device executor image
         run: |
           node scripts/ci-images.ts verify node-build
@@ -307,10 +414,10 @@ jobs:
   # Device testing slice 4 (DEC 244): a real iOS simulator with Maestro, on a macOS runner (a simulator runs only on macOS). It runs the laptop's own door (`runHostDeviceEvidence`) on a tiny fixture app
   # (tests/fixtures/device-evidence-ios-app, built with swiftc from two checkouts), so the build and the simulator run on the runner itself, outside a sandbox, exactly as on a developer's Mac; the
   # test checks the masked pictures, that the run left the machine's simulators as it found them, and says plainly when it was skipped (never a silent pass). Maestro is fetched by SHA-256 (the same
-  # release the device executor image pins). INFORMATIONAL for now: it is not in the `local` gate until its first real run has been read (the iOS driver was written without a Mac that has Xcode). The Android emulator on a Mac host is not tested here: GitHub's Apple-silicon runners cannot run it (no nested virtualization).
+  # release the device executor image pins). Planned like `linux-runtime` and `device-runtime` (runs only when the device area changes, and always in a FULL run), and INFORMATIONAL for now: it is not in the `local` gate until its first real run has been read (the iOS driver was written without a Mac that has Xcode). It uses no secret and no permission beyond the workflow's `contents: read`. The Android emulator on a Mac host is not tested here: GitHub's Apple-silicon runners cannot run it (no nested virtualization).
   device-ios:
-    needs: scope
-    if: needs.scope.outputs.docs_only != 'true'
+    needs: plan
+    if: needs.plan.outputs.device == 'true'
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -391,7 +498,7 @@ jobs:
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:
-    needs: [scope, checks, test, release, linux-runtime, device-runtime]
+    needs: [plan, quick, build, test, linux-runtime, ci-mode]
     if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -403,7 +510,20 @@ jobs:
       - name: Every job passed?
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci-gate.ts
+          CI_EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-gate.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
+          # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
+          GATE_SCRIPT=scripts/ci-gate.ts
+          if [ "$CI_EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            if git cat-file -e "$BASE_SHA:scripts/ci-gate.ts" 2>/dev/null; then
+              GATE_SCRIPT="$RUNNER_TEMP/ci-gate.ts"
+              git show "$BASE_SHA:scripts/ci-gate.ts" > "$GATE_SCRIPT"
+            fi
+          fi
+          node "$GATE_SCRIPT"
 
   live-aws:
     if: github.event_name == 'workflow_dispatch' && vars.AGENTX_ENABLE_AWS_TESTS == 'true'

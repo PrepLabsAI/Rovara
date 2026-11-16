@@ -189,8 +189,8 @@ describe("the renewal's infrastructure", () => {
       Sid: "DrainRead", Effect: "Allow", Action: ["dynamodb:Query", "dynamodb:GetItem"],
       Resource: [expect.anything(), expect.anything()],
       Condition: {
-        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] },
-        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["createdAt", "entityType", "pk", "sessionState", "setupExecutionId", "sk", "state", "status", "until", "updatedAt", "workflowE2EAdmission", "workflowMode", "workspaceId"] },
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*", "CORE_ENGINE_IN_USE", "ORG#*#WORKSPACE#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["companyId", "createdAt", "entityType", "orgId", "pk", "sessionState", "setupExecutionId", "sk", "state", "status", "until", "updatedAt", "workflowE2EAdmission", "workflowMode", "workspaceId"] },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
       },
     });

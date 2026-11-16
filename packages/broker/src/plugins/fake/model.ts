@@ -37,6 +37,16 @@ const lines = (text: string) => (text === "" ? 0 : text.split("\n").length);
 export const REPLY_MAX_CHARS = 200;
 export const REPLY_REFUSED_MESSAGE = "the reply is not Rovara's fixed text";
 
+/** TE-B4: the source word the fake's own "Rovara" Check carries (GitHub's is the App's id). */
+export const FAKE_ROVARA_SOURCE = "fake-rovara-app";
+/** TE-B4: one "Rovara" Check the fake host holds. */
+export interface FakeSummaryCheck {
+  runId: string;
+  revision: string;
+  payload: { status: "in_progress" | "completed"; conclusion?: "success" | "failure" | "neutral" | undefined; title: string; summary: string; text: string };
+  detailsUrl?: string;
+}
+
 export class FakeHostModel {
   readonly url: string;
   readonly id: string;
@@ -52,6 +62,12 @@ export class FakeHostModel {
   readonly changeRequests: FakeChangeRequest[] = [];
   /** Names the target branch requires before a merge. */
   requiredChecks: string[] = [];
+  /** TE-B4: the "Rovara" Checks Rovara posted, in order of creation (each update rewrites its entry). */
+  readonly summaryChecks: FakeSummaryCheck[] = [];
+  /** TE-B4: whether the install granted the Check write (false: every write answers `no_permission`). */
+  summaryCheckPermission = true;
+  /** TE-B4: how many Check writes reached the host (creates and updates), so a test can see an unchanged Check was not written again. */
+  summaryCheckWrites = 0;
   /** P6: when set, the host answers every budgeted read as rate limited until this time (milliseconds). A test sets it; nothing in the model reads the real clock. */
   rateLimitedUntil: number | undefined;
   /** Gitlink targets are revision identities, never ordinary file text. */
@@ -396,6 +412,26 @@ export class FakeHostModel {
   setChecks(revision: string, checks: Check[]): void {
     this.revision(revision);
     this.checksByRevision.set(revision, checks.map((check) => ({ ...check })));
+  }
+
+  /** TE-B4: creates or updates the "Rovara" Check of a revision, and shows it among the revision's checks with Rovara's own source. */
+  upsertSummaryCheck(post: { headRevision: string; runId?: string | undefined; detailsUrl?: string | undefined; payload: FakeSummaryCheck["payload"] }): { runId: string } | "no_permission" {
+    if (!this.summaryCheckPermission) return "no_permission";
+    this.revision(post.headRevision);
+    this.summaryCheckWrites += 1;
+    const existing = this.summaryChecks.find((entry) => (post.runId !== undefined ? entry.runId === post.runId : entry.revision === post.headRevision));
+    if (existing !== undefined && existing.revision !== post.headRevision) throw agentXError("RUNTIME_UNAVAILABLE", "the check run belongs to another revision");
+    const entry: FakeSummaryCheck = existing ?? { runId: `rovara-${String(this.summaryChecks.length + 1)}`, revision: post.headRevision, payload: post.payload };
+    entry.payload = post.payload;
+    if (post.detailsUrl !== undefined) entry.detailsUrl = post.detailsUrl; else delete entry.detailsUrl;
+    if (existing === undefined) this.summaryChecks.push(entry);
+    const others = (this.checksByRevision.get(post.headRevision) ?? []).filter((check) => !(check.name === "Rovara" && check.source === FAKE_ROVARA_SOURCE));
+    const shown: Check = {
+      name: "Rovara", state: post.payload.status === "completed" ? "completed" : "pending", ...(post.payload.conclusion === undefined ? {} : { conclusion: post.payload.conclusion }),
+      required: this.requiredChecks.includes("Rovara"), url: "", source: FAKE_ROVARA_SOURCE,
+    };
+    this.checksByRevision.set(post.headRevision, [...others, shown]);
+    return { runId: entry.runId };
   }
 
   checksOf(revision: string): Check[] {

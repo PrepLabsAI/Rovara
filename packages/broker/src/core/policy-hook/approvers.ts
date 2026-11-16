@@ -118,7 +118,9 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
     async verify(request: ApprovalRequest, proof: ApprovalProof) {
       const verdict = await base.verify(request, proof);
       if (!verdict.approved) return verdict;
-      const asked = await ask(request, "verdict", verdict.approver);
+      // A hook that throws is no answer: the verdict is refused and any claim it holds given back (a refusal never burns a one-time proof).
+      let asked: Awaited<ReturnType<typeof ask>>;
+      try { asked = await ask(request, "verdict", verdict.approver); } catch { return refuse(verdict, "company_rules_no_answer"); }
       if (asked === undefined) return refuse(verdict, "company_rules_no_answer");
       if (asked === "unaskable") return refuse(verdict, "company_rules_refused");
       const answer = asked.answer;

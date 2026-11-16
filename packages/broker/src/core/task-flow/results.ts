@@ -11,6 +11,8 @@ import { onOperationEnded, readWorkspace } from "./stage-machine.js";
 import { learnModelNotEnabled } from "../model-selection/learn-not-enabled.js";
 import { iso } from "./support.js";
 import { taskPointerKey } from "./keys.js";
+import { isSpendStopCode, spendStopReason } from "./money-stop.js";
+import { blockStoppedStep } from "./stopped-step.js";
 
 const TERMINAL: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 export const isTerminalStatus = (status: string): boolean => TERMINAL.has(status);
@@ -83,6 +85,11 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
   // The next move is made from what was RECORDED, never from a repeat's own words: a late retry cannot turn a failure into a success.
   const recorded = (ended.result as { outcome?: StepOutcome } | undefined)?.outcome;
   await onOperationEnded(deps, ended, { status: ended.status as OperationResult["status"], ...(ended.error === undefined ? {} : { error: ended.error }), ...(recorded === undefined ? {} : { outcome: recorded }) });
+  // A run stopped at its spending limit (money-stop.ts) waits for its owner with the fixed reason, however its end came (its worker's result, or the backstop's).
+  if (deps.moneyStop !== undefined && ended.status === "CANCELLED" && isSpendStopCode(ended.stopReason)) {
+    const taskId = (await deps.store.get(taskPointerKey(ended.workspaceId)))?.["taskId"];
+    if (typeof taskId === "string" && taskId !== "") await blockStoppedStep(deps, taskId, ended, spendStopReason(ended.stopReason));
+  }
   await syncTaskIndex(deps, ended.workspaceId);
   return { duplicate };
 }

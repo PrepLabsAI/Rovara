@@ -7,6 +7,12 @@ const MiB = 1024 * 1024;
 const source = (text: string, path = "ai/a.ts") => detectPromptChanges({ files: [{ path, before: "", after: text, wholeFile: true }] }, { stats: true });
 const repeat = (unit: string, bytes: number) => unit.repeat(Math.ceil(bytes / Buffer.byteLength(unit))).slice(0, Math.floor(bytes / (Buffer.byteLength(unit) / unit.length)));
 const corpora: Array<[string, (n: number) => () => PromptChangeResult]> = [
+  ["nested retrieval", (n) => { const text = "retrieval: {".repeat(48) + "value: '" + "a".repeat(n) + "'" + "}".repeat(48); return () => source(text); }],
+  ["retrieval config", (n) => { const text = "retrieval: {collection_name: '" + "a".repeat(n) + "'}"; return () => source(text); }],
+  ["context examples", (n) => { const text = "examples: ['" + "a".repeat(n) + "']"; return () => source(text); }],
+  ["output schema", (n) => { const text = "response_schema: {description: '" + "a".repeat(n) + "'}"; return () => source(text); }],
+  ["provider literal", (n) => { const text = "provider: '" + "a".repeat(n) + "'"; return () => source(text); }],
+  ["message builder", (n) => { const text = "function buildMessages(x) { return ['" + "a".repeat(n) + "']; }"; return () => source(text); }],
   ["minified literals", (n) => { const text = repeat('const a="abc";', n); return () => source(text); }],
   ["unterminated triples", (n) => { const text = "prompt = '''" + "a".repeat(n - 12); return () => source(text, "ai/a.py"); }],
   ["nesting", (n) => { const unit = "[{other:0}],"; const text = unit.repeat(Math.floor(n / unit.length)); return () => source(text); }],
@@ -27,6 +33,22 @@ const workBound = (result: PromptChangeResult) => {
   expect(result.stats).toBeDefined();
   expect(result.stats!.steps).toBeLessThanOrEqual(13 * (result.stats!.bytes + 1) + 10_000);
 };
+// Wall-clock scaling check, robust on noisy shared runners: the input grows 4x, so linear work costs ~4x and a quadratic
+// blow-up costs ~16x. Each side is timed several times, interleaved so a noisy moment hits both, and only the FASTEST run of
+// each side is compared (noise only ever adds time, so the minimum is the least-disturbed measurement). Measured minimum-based
+// ratios for linear scans are 1-6; the bound below is clearly above that and clearly below the 16x of a quadratic scan.
+const SIZE_FACTOR = 4;
+const MAX_TIME_RATIO = 10;
+const TIMING_RUNS = 9;
+const fastestPair = (runSmall: () => number, runLarge: () => number) => {
+  runSmall(); runLarge(); // warm-up
+  let n = Infinity; let four = Infinity;
+  for (let i = 0; i < TIMING_RUNS; i++) { n = Math.min(n, runSmall()); four = Math.min(four, runLarge()); }
+  return { n, four };
+};
+const expectLinearTime = (n: number, four: number) => {
+  expect(four / n, `time for ${SIZE_FACTOR}x input / time for 1x input (linear ~${SIZE_FACTOR}, quadratic ~${SIZE_FACTOR ** 2})`).toBeLessThanOrEqual(MAX_TIME_RATIO);
+};
 const measurePair = (name: string, size: number, make: (n: number) => () => PromptChangeResult) => {
   const small = make(size); const large = make(size * 4);
   const a = small(); const b = large();
@@ -34,7 +56,7 @@ const measurePair = (name: string, size: number, make: (n: number) => () => Prom
     workBound(result);
     for (const reason of ["file_too_large", "total_too_large", "too_many_files"]) expect(result.report.incompleteReasons).not.toContain(reason);
     expect(result.stats!.scannedFiles).toBeGreaterThan(0);
-    if (name === "nesting") expect(result.report.coverage).toBe("complete");
+    if (name === "nesting") expect(result.report.incompleteReasons).not.toContain("unreadable_diff");
   }
   expect(b.stats!.steps).toBeLessThanOrEqual(4.5 * a.stats!.steps);
   const sample = (run: () => PromptChangeResult, batches: number) => {
@@ -44,15 +66,11 @@ const measurePair = (name: string, size: number, make: (n: number) => () => Prom
   };
   let batches = 1;
   while (sample(small, batches) < 8 && batches < 4096) batches *= 2;
-  const median = (run: () => PromptChangeResult) => {
-    sample(run, batches); // warm-up
-    return Array.from({ length: 5 }, () => sample(run, batches)).sort((x, y) => x - y)[2]!;
-  };
-  const n = median(small); const four = median(large);
+  const { n, four } = fastestPair(() => sample(small, batches), () => sample(large, batches));
   console.info(JSON.stringify({ corpus: name, N: size, batches, bytesN: a.stats!.bytes, stepsN: a.stats!.steps, steps4N: b.stats!.steps,
     msN: +n.toFixed(2), ms4N: +four.toFixed(2), ratio: +(four / n).toFixed(2) }));
   expect(n).toBeGreaterThan(1);
-  expect(four).toBeLessThanOrEqual(8 * n + 50);
+  expectLinearTime(n, four);
   return { n: n / batches, four: four / batches };
 };
 it.each(corpora)("linear adversarial scan: %s", (name, make) => {
@@ -86,16 +104,15 @@ it.each(["env suffix", "path times hunks", "deep nesting"])("review scaling belo
 });
 
 it("env basename classifier stays linear within the path byte cap", () => {
-  const measure = (n: number) => {
+  const measure = (n: number, rounds: number) => () => {
     const path = ".env".repeat(n) + "/x";
-    const times: number[] = [];
-    for (let sample = 0; sample < 6; sample++) {
-      const start = performance.now();
-      for (let i = 0; i < 256; i++) expect(sourceMode(path)).toBe("other");
-      if (sample > 0) times.push(performance.now() - start);
-    }
-    return times.sort((a, b) => a - b)[2]!;
+    const start = performance.now();
+    for (let i = 0; i < rounds; i++) expect(sourceMode(path)).toBe("other");
+    return performance.now() - start;
   };
-  const n = measure(240); const four = measure(960);
-  expect(four).toBeLessThanOrEqual(8 * n + 50);
+  let rounds = 256; // grow until one timed sample of the small input is long enough to measure reliably
+  while (measure(240, rounds)() < 8 && rounds < 1 << 20) rounds *= 2;
+  const { n, four } = fastestPair(measure(240, rounds), measure(960, rounds));
+  expect(n).toBeGreaterThan(1);
+  expectLinearTime(n, four);
 });

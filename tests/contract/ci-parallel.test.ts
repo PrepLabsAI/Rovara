@@ -2,15 +2,16 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
-import { gateVerdict, needsVerdict } from "../../scripts/ci-gate.js";
+import { GATED_JOBS } from "../../scripts/ci-gate.js";
 
 interface Job {
   name?: string;
+  permissions?: unknown;
   needs?: string | string[];
   if?: string;
   "timeout-minutes"?: number;
-  strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] } };
-  steps: Array<{ name?: string; run?: string; uses?: string; env?: Record<string, string> }>;
+  strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] | string } };
+  steps: Array<{ id?: string; name?: string; if?: string; run?: string; uses?: string; env?: Record<string, string>; "timeout-minutes"?: number }>;
 }
 interface Workflow {
   on?: unknown;
@@ -20,23 +21,99 @@ interface Workflow {
 
 const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
 
-describe("CI runs its checks side by side (a Markdown-only change skips them all)", () => {
-  it("splits the tests across shards that each run on their own machine, and a failing shard does not hide the others", async () => {
-    const test = (await workflow()).jobs.test!;
-    expect(test.strategy?.["fail-fast"]).toBe(false);
-    expect(test.strategy?.matrix?.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(test.steps.some((step) => step.run === "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}")).toBe(true);
+describe("CI runs its checks side by side, as the plan says (a Markdown-only change skips them all)", () => {
+  it("has the jobs of the plan-driven CI, each waiting only on the plan (and the build, for the tests), and no job left over from before", async () => {
+    const { jobs } = await workflow();
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-ios", "device-runtime", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
+    expect(jobs.plan!.needs).toBeUndefined();
+    for (const name of ["ci-mode", "quick", "build", "linux-runtime", "device-runtime", "device-ios"]) expect(jobs[name]!.needs, name).toBe("plan");
+    expect(jobs.test!.needs).toEqual(["plan", "build"]);
+    expect(jobs["port-guard"]!.needs).toBeUndefined();
   });
 
-  it("keeps checks, tests, the release check and the Linux runtime check in jobs of their own, none waiting on another", async () => {
+  it("puts the old scope, checks and release jobs into `quick`: one after another with their own commands, conditions and time limits, on one checkout and one install", async () => {
+    const quick = (await workflow()).jobs.quick! as Job & { "runs-on"?: string };
+    expect(quick["runs-on"]).toBe("ubuntu-latest");
+    // Read-only like the workflow's default: no permissions of its own, so nothing the merged jobs lacked.
+    expect(quick.permissions).toBeUndefined();
+    expect(JSON.stringify(quick)).not.toContain("secrets.");
+    // A Markdown-only change (the plan says so) skips the job whole; a manual run and a push never do.
+    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true'");
+    expect(quick.steps.filter((step) => (step.uses ?? "").startsWith("actions/checkout"))).toHaveLength(1);
+    expect(quick.steps.filter((step) => step.name === "checks: npm ci")).toHaveLength(1);
+    const parts = quick.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
+    expect(parts).toEqual([
+      ["checks: npm ci", undefined, 15, "npm ci"],
+      ["checks: npm run typecheck", undefined, 15, "npm run typecheck"],
+      ["checks: npm run typecheck:all", undefined, 15, "npm run typecheck:all"],
+      ["checks: npm run lint", "needs.plan.outputs.lint == 'all'", 15, "npm run lint"],
+      ["checks: lint the changed files", "needs.plan.outputs.lint == 'changed'", 15, expect.stringContaining('node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"')],
+      ["release: npm run build", "needs.plan.outputs.release == 'true'", 15, "npm run build"],
+      ["release: npm run infra:synth", "needs.plan.outputs.release == 'true'", 15, "npm run infra:synth"],
+      ["release: Release builds are reproducible", "needs.plan.outputs.release == 'true'", 15, expect.stringContaining("npm run release:verify -- \"$RUNNER_TEMP/release-a\"")],
+    ]);
+    // The job's own limit is the sum of the old jobs' (scope 5 + checks 15 + release 15), and each step may take at most its old job's limit.
+    expect(quick["timeout-minutes"]).toBe(35);
+  });
+
+  it("builds once in its own job and hands the output to the test shards as an artifact, instead of each shard building", async () => {
     const { jobs } = await workflow();
-    for (const name of ["checks", "test", "release", "linux-runtime"]) expect(jobs[name]!.needs, name).toBe("scope");
+    const build = jobs.build!;
+    expect(build.if).toBe("needs.plan.outputs.tests != 'none'");
+    expect(build.steps.map((step) => step.run).filter(Boolean)).toContain("npm run build");
+    expect(build.steps.some((step) => (step.uses ?? "").startsWith("actions/upload-artifact@"))).toBe(true);
+    const test = jobs.test!;
+    expect(test.steps.some((step) => (step.uses ?? "").startsWith("actions/download-artifact@"))).toBe(true);
+    expect(test.steps.every((step) => step.run !== "npm run build")).toBe(true);
+    // The artifact is unpacked before any test runs.
+    const order = test.steps.map((step) => step.name ?? step.uses ?? step.run ?? "");
+    expect(order.indexOf("Unpack the build output")).toBeGreaterThan(-1);
+    expect(order.indexOf("Unpack the build output")).toBeLessThan(order.findIndex((name) => name.startsWith("Tests (")));
+  });
+
+  it("runs the whole suite in the shards of a full run and only the tests a change can reach otherwise, from the plan", async () => {
+    const test = (await workflow()).jobs.test as Job & { strategy: { matrix: { shard: string } } };
+    expect(test.strategy["fail-fast"]).toBe(false);
+    expect(test.strategy.matrix.shard).toBe("${{ fromJSON(needs.plan.outputs.shards) }}");
+    const all = test.steps.find((step) => step.name === "Tests (the whole suite)")!;
+    expect(all.if).toBe("needs.plan.outputs.tests == 'all'");
+    expect(all.run).toBe("npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    const changed = test.steps.find((step) => step.name === "Tests (the ones this change can reach)")!;
+    expect(changed.if).toBe("needs.plan.outputs.tests == 'changed'");
+    expect(changed.run).toContain("npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    expect(changed.run).toContain("xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+  });
+
+  it("reports a check called `ci-mode (full)` only in a full run, for the merge to require", async () => {
+    const mode = (await workflow()).jobs["ci-mode"]!;
+    expect(mode.name).toBe("ci-mode (full)");
+    expect(mode.if).toBe("needs.plan.outputs.mode == 'full'");
+  });
+
+  it("makes the plan the first job: from the event, the labels, the title and the changed files, with no install", async () => {
+    const { jobs } = await workflow();
+    const plan = jobs.plan!;
+    expect(plan.if).toBe("github.event.pull_request.draft != true");
+    expect(plan.steps.every((step) => step.run !== "npm ci")).toBe(true);
+    const step = plan.steps.find((candidate) => candidate.id === "plan")!;
+    expect(step.env).toEqual({
+      CI_EVENT: "${{ github.event_name }}",
+      CI_LABELS: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
+      CI_TITLE: "${{ github.event.pull_request.title }}",
+      BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+    });
+    expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
+    expect(step.run).toContain('node "$PLAN_SCRIPT"');
+    // Untrusted text (the title) reaches the script through the environment, never spliced into the shell.
+    expect(step.run).not.toContain("github.event.pull_request.title");
   });
 
   it("runs the Linux runtime check on an ARM64 runner, behind the same Markdown-only skip as the other heavy jobs", async () => {
     const job = (await workflow()).jobs["linux-runtime"] as Job & { "runs-on"?: string };
     expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
-    expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
+    // Only when the plan says its area changed (always in a full run).
+    expect(job.if).toBe("needs.plan.outputs.linux == 'true'");
+    expect(job.steps.every((step) => step.if === undefined)).toBe(true);
     const run = job.steps.map((step) => step.run ?? "").join("\n");
     // The job installs the firewall by running the heredoc inside boot.sh as it is (never a copy of the rules), before anything builds or runs a container.
     const firewall = job.steps.map((step) => step.run ?? "").find((text) => text.includes("<<'FIREWALL'"))!;
@@ -138,10 +215,11 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     const parsed = await workflow();
     expect(parsed.on).toEqual({
       workflow_dispatch: null,
-      pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
+      pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] },
       push: { branches: ["code/next"] },
     });
-    expect(parsed.jobs.scope!.if).toBe("github.event.pull_request.draft != true");
+    // Every job but the plan hangs off it (or the gate does), so a draft's skipped plan skips them all.
+    expect(parsed.jobs.plan!.if).toBe("github.event.pull_request.draft != true");
   });
 
   it("supersedes a pull request's run in progress when it is pushed again, and never cancels a manual run", async () => {
@@ -156,60 +234,66 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(gate.name).toBeUndefined();
     expect(gate.if).toBe("always() && github.event.pull_request.draft != true");
     // port-guard (the Rovara Code port's check, tests/contract/port-guard-ci.test.ts) runs on code/next only; a skipped job would fail the gate on mainline's pull requests.
-    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard").sort();
+    // device-runtime and device-ios (DEC 244, tests/contract/device-executor-image.test.ts and device-ios-ci.test.ts) are informational until their first real runs have been read, so the gate does not wait for them yet.
+    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard" && name !== "device-runtime" && name !== "device-ios").sort();
     expect([...(gate.needs as string[])].sort()).toEqual(others);
+    expect([...(gate.needs as string[])].sort()).toEqual(["plan", ...GATED_JOBS].sort());
+    expect(gate["timeout-minutes"]).toBe(5);
     const run = gate.steps.map((step) => step.run ?? "").join("\n");
-    expect(run).toContain("node scripts/ci-gate.ts");
+    expect(run).toContain('node "$GATE_SCRIPT"');
     expect(gate.steps.some((step) => step.env?.NEEDS === "${{ toJSON(needs) }}")).toBe(true);
   });
 });
 
-describe("the gate behind the local check", () => {
-  const ran = { scope: "success", checks: "success", "test": "success", release: "success" };
+describe("on a pull request CI judges the change with the base branch's plan and gate, never the pull request's own copy (DEC 242 follow-up)", () => {
+  const BASE = "${{ github.event.pull_request.base.sha }}";
 
-  it("passes when every job succeeded", () => {
-    expect(gateVerdict({ docsOnly: false, results: ran }).ok).toBe(true);
-  });
+  /** Every step that runs the plan or the gate script, with the job it is in. */
+  async function runners(script: "ci-plan.ts" | "ci-gate.ts") {
+    const { jobs } = await workflow();
+    return Object.entries(jobs).flatMap(([job, { steps }]) => steps.filter((step) => (step.run ?? "").includes(script)).map((step) => ({ job, step })));
+  }
 
-  it("fails when any job failed, was cancelled or was skipped", () => {
-    for (const result of ["failure", "cancelled", "skipped"]) {
-      const verdict = gateVerdict({ docsOnly: false, results: { ...ran, test: result } });
-      expect(verdict, result).toEqual({ ok: false, reason: `test was ${result}, not success` });
+  it("takes ci-plan.ts from the base sha in the plan job and in the test shards' related-tests step, on pull requests only", async () => {
+    const found = await runners("ci-plan.ts");
+    expect(found.map(({ job }) => job).sort()).toEqual(["plan", "test"]);
+    for (const { job, step } of found) {
+      expect(step.env?.BASE_SHA, job).toBe(BASE);
+      expect(step.env?.CI_EVENT, job).toBe("${{ github.event_name }}");
+      const run = step.run!;
+      expect(run, job).toContain('if [ "$CI_EVENT" = pull_request ]; then');
+      expect(run, job).toContain('git fetch --no-tags --depth=1 origin "$BASE_SHA"');
+      expect(run, job).toContain('git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"');
+      // The checkout's copy is the default only: a push or a manual run has no base sha.
+      expect(run, job).toContain("PLAN_SCRIPT=scripts/ci-plan.ts");
+      expect(run, job).toContain('node "$PLAN_SCRIPT"');
+      // No run of the pull request's own copy is left.
+      expect(run.replace(/^\s*#.*$/gm, ""), job).not.toMatch(/node\s+scripts\/ci-plan\.ts/);
+      // The base copy is read before the script runs.
+      expect(run.indexOf("git show"), job).toBeLessThan(run.indexOf('node "$PLAN_SCRIPT"'));
     }
   });
 
-  it("fails when the scope job did not succeed, even though every job it feeds was skipped", () => {
-    const skipped = { scope: "failure", checks: "skipped", test: "skipped", release: "skipped" };
-    expect(gateVerdict({ docsOnly: false, results: skipped })).toEqual({ ok: false, reason: "scope was failure, not success" });
-    expect(gateVerdict({ docsOnly: true, results: skipped }).ok).toBe(false);
+  it("takes ci-gate.ts from the base sha in the local job, on pull requests only", async () => {
+    const found = await runners("ci-gate.ts");
+    expect(found.map(({ job }) => job)).toEqual(["local"]);
+    const { step } = found[0]!;
+    expect(step.env?.BASE_SHA).toBe(BASE);
+    expect(step.env?.CI_EVENT).toBe("${{ github.event_name }}");
+    expect(step.env?.NEEDS).toBe("${{ toJSON(needs) }}");
+    const run = step.run!;
+    expect(run).toContain('if [ "$CI_EVENT" = pull_request ]; then');
+    expect(run).toContain('git fetch --no-tags --depth=1 origin "$BASE_SHA"');
+    expect(run).toContain('git show "$BASE_SHA:scripts/ci-gate.ts" > "$GATE_SCRIPT"');
+    expect(run).toContain("GATE_SCRIPT=scripts/ci-gate.ts");
+    expect(run.replace(/^\s*#.*$/gm, "")).not.toMatch(/node\s+scripts\/ci-gate\.ts/);
+    expect(run.indexOf("git show")).toBeLessThan(run.indexOf('node "$GATE_SCRIPT"'));
   });
 
-  it("passes a Markdown-only change only when every heavy job was skipped", () => {
-    const skipped = { scope: "success", checks: "skipped", test: "skipped", release: "skipped" };
-    expect(gateVerdict({ docsOnly: true, results: skipped }).ok).toBe(true);
-    expect(gateVerdict({ docsOnly: true, results: { ...skipped, test: "success" } })).toEqual({ ok: false, reason: "test was success, not skipped" });
-    expect(gateVerdict({ docsOnly: true, results: { ...skipped, release: "failure" } }).ok).toBe(false);
-  });
-
-  it("fails a gate that was given no jobs to judge", () => {
-    expect(gateVerdict({ docsOnly: false, results: { scope: "success" } }).ok).toBe(false);
-    expect(gateVerdict({ docsOnly: false, results: {} }).ok).toBe(false);
-  });
-
-  it("reads the needs context GitHub provides", () => {
-    const needs = JSON.stringify({
-      scope: { result: "success", outputs: { docs_only: "false" } },
-      checks: { result: "success", outputs: {} },
-      test: { result: "success", outputs: {} },
-      release: { result: "success", outputs: {} },
-    });
-    expect(needsVerdict(needs).ok).toBe(true);
-    const manualRun = JSON.stringify({
-      scope: { result: "success", outputs: {} },
-      checks: { result: "success", outputs: {} },
-    });
-    expect(needsVerdict(manualRun).ok).toBe(true);
-    expect(needsVerdict("not json").ok).toBe(false);
-    expect(needsVerdict(JSON.stringify({ checks: { result: "success", outputs: {} } })).ok).toBe(false);
+  it("falls back to the checkout's copy only when the base branch does not have the script at all, which a pull request cannot arrange", async () => {
+    for (const [script, name] of [["ci-plan.ts", "plan"], ["ci-gate.ts", "local"]] as const) {
+      const run = (await runners(script)).find(({ job }) => job === name)!.step.run!;
+      expect(run).toContain(`git cat-file -e "$BASE_SHA:scripts/${script}"`);
+    }
   });
 });

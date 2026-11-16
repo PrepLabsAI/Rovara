@@ -64,8 +64,23 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
  */
 export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "budgets", "codebuild", "execute-api", "xray"];
 
-/** Service-linked roles the service role may create while deploying. */
-const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com"];
+/**
+ * Service-linked roles the service role may create while deploying. route53resolver: associating a named environment's DNS firewall query logging config makes Resolver
+ * create AWSServiceRoleForRoute53Resolver for the caller on first use in an account.
+ */
+const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com", "route53resolver.amazonaws.com"];
+
+/**
+ * A named environment's DNS firewall (infra/lib/agent-dns-firewall.ts): its domain lists, rule group, VPC association and query logging config. Not a wildcard service: every
+ * Resolver action is limited to this account and region, and the list actions (which take no resource) are the only ones on `*`. The query log destination is a CloudWatch Logs
+ * group, so CloudFormation also calls the logs delivery actions, which "logs" already covers. The same two statements are in the default boundary, which bounds the service role.
+ */
+function dnsFirewallStatements(scope: Pick<PolicyScope, "partition" | "region" | "account">): PolicyStatementJson[] {
+  return [
+    { Sid: "DnsFirewall", Effect: "Allow", Action: ["route53resolver:*"], Resource: `arn:${scope.partition}:route53resolver:${scope.region}:${scope.account}:*` },
+    { Sid: "DnsFirewallList", Effect: "Allow", Action: ["route53resolver:List*"], Resource: "*" },
+  ];
+}
 
 /** Role management the service role needs on this environment's roles. */
 const ROLE_ACTIONS = [
@@ -151,6 +166,7 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
     // Keep the resource exact to this environment's rule. EventBridge actions that do not
     // support rule resources remain unavailable with this resource constraint.
     { Sid: "EcsFailureEventsRule", Effect: "Allow", Action: ["events:*"], Resource: ecsFailureRuleArn(scope) },
+    ...dnsFirewallStatements(scope),
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
@@ -197,11 +213,15 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
   return [
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
     { Sid: "EcsFailureEventsRule", Effect: "Allow", Action: ["events:*"], Resource: ecsFailureRuleArn(scope) },
+    ...dnsFirewallStatements(scope),
     // The operator's identity check; the only STS action any AgentX role uses.
     { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     // The operator's EC2 quota reads (prerequisites on a resume); named like CallerIdentity above,
     // not scoped further, since scoped ARNs in the identity policy already limit it to two quotas.
     { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
+    // Hosted wiring (a): the sign-in function sends step-up codes through SES. Only sending, and only as an email identity of this account and region (the function's own policy narrows it
+    // to the one identity the StepUpEmailSender parameter names); never ses:* (identity, configuration and suppression-list changes stay outside every AgentX role).
+    { Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: `arn:${partition}:ses:${scope.region}:${account}:identity/*` },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
@@ -228,6 +248,13 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
       Resource: "*",
     },
     { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: defaultBoundaryArn(scope) },
+    // The DNS firewall fails closed and is the VPC's only resolver path: no AgentX role may switch it to fail open, share it, or route DNS around it, whatever a later Allow says.
+    {
+      Sid: "DenyDnsFirewallEscapes",
+      Effect: "Deny",
+      Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"],
+      Resource: "*",
+    },
   ];
 }
 

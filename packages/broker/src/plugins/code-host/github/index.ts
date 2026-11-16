@@ -11,7 +11,7 @@ import {
   agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
   type BranchPage, type CodeOwnersRead, type CommitChanges, type CompareChanges, type PageBudget, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
-  type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef,
+  type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef, type SummaryCheckPost,
 } from "@agentx/contracts";
 import { parseGitHubRepository } from "../../../github-app.js";
 import { githubCodeHostEvents } from "./events.js";
@@ -75,6 +75,8 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
   const deleteBranchOfProvider = typeof provider.deleteLessonsBranch === "function" ? provider.deleteLessonsBranch.bind(provider) : undefined;
   const listComments = typeof provider.listPullRequestComments === "function" ? provider.listPullRequestComments.bind(provider) : undefined;
   const postComment = typeof provider.postPullRequestComment === "function" ? provider.postPullRequestComment.bind(provider) : undefined;
+  const checkSource = typeof provider.summaryCheckSource === "function" ? provider.summaryCheckSource.bind(provider) : undefined;
+  const upsertCheck = typeof provider.upsertRovaraCheck === "function" ? provider.upsertRovaraCheck.bind(provider) : undefined;
   const readTree = fileTrees(provider, options.credentialRef);
   const host: CodeHost = {
     kind: options.name ?? GITHUB_HOST_KIND,
@@ -289,6 +291,17 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
     ...(postComment === undefined ? {} : {
       async postComment(ref: ChangeRequestRef, text: string, scope: HostScope, budget?: ReadBudget): Promise<"posted" | "gone"> {
         return postComment(ref.repository.url, pullRequestNumber(ref), text, checkedScope(scope), budget);
+      },
+    }),
+
+    // TE-B4: both or neither: a Check that cannot be told apart from the customer's CI is never written.
+    ...(checkSource === undefined || upsertCheck === undefined ? {} : {
+      async summaryCheckSource(scope: HostScope): Promise<string | undefined> {
+        checkedScope(scope);
+        return checkSource();
+      },
+      async upsertSummaryCheck(repository: RepositoryRef, post: SummaryCheckPost, scope: HostScope, budget?: ReadBudget): Promise<{ runId: string } | "no_permission"> {
+        return upsertCheck(repository.url, { headSha: post.headRevision, payload: post.payload, ...(post.runId === undefined ? {} : { runId: post.runId }), ...(post.detailsUrl === undefined ? {} : { detailsUrl: post.detailsUrl }) }, checkedScope(scope), budget);
       },
     }),
 

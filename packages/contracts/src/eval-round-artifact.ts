@@ -148,7 +148,7 @@ export function evalResultFromArtifact(input: unknown): EvalCheckResult {
   }
   if (hidden) {
     const worse = !a.privatePass;
-    return { kind: "eval", roundKind: a.roundKind, outcome: "ran", label: worse ? "Worse on eval" : "No drop found", usedHiddenSet: true, casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], summary: `Eval: ${worse ? "Worse on eval" : "No drop found"} on private questions.`, fixRequested: worse && a.evalPass === 1, disposition: { draft: false, check: worse ? "failure" : "success", retry: false } };
+    return { kind: "eval", roundKind: a.roundKind, outcome: "ran", label: worse ? "Worse on eval" : "No regression measured (eval)", usedHiddenSet: true, casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], summary: `Eval: ${worse ? "Worse on eval" : "No regression measured (eval)"} on private questions.`, fixRequested: worse && a.evalPass === 1, disposition: { draft: false, check: worse ? "failure" : "success", retry: false } };
   }
   const questions: EvalQuestionComparison[] = a.questions!.map(q => {
     const samples = (bits: readonly boolean[], answers?: readonly string[]) => bits.map((pass, i) => ({ pass, answer: answers?.[i] ?? "" }));

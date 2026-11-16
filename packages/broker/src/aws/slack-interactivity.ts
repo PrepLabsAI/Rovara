@@ -1,3 +1,6 @@
+import { slackCompanyPerson, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
+import { slackWorkspaceToken } from "./slack-workspace-tokens.js";
+import { slackActionClass, SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
@@ -120,7 +123,7 @@ export interface SlackActionHandler {
   handle(action: SlackBlockAction): Promise<void>;
 }
 
-export interface SlackInteractivityDependencies {
+export interface SlackInteractivityDependencies extends SlackCompanyDependencies {
   secrets: () => Promise<SlackSecrets>;
   handlers: readonly SlackActionHandler[];
   /** Answers the clicking member privately when no handler matches the button (an old button after a rollback). */
@@ -341,6 +344,9 @@ const FINDING_FORM_FILE_MAX = 100;
 const FINDING_REASON_MAX = 500;
 const FINDING_INSTRUCTION_MAX = 1_000;
 
+/** DEC 236h: a security finding is accepted on the Rovara web page only; the form says so and offers Fix alone for it. */
+export const SECURITY_ACCEPT_IN_SLACK = "Open the Rovara web page to accept this.";
+
 const findingBlockIds = (findingId: string) => ({ action: `finding_action_${findingId}`, note: `finding_note_${findingId}` });
 
 /**
@@ -359,9 +365,9 @@ export function workflowFindingsModal(findings: readonly WorkflowOpenFinding[], 
     // Reviewer text and paths are untrusted: redacted, on one line, cut, escaped and never a link (as on the card).
     const where = finding.file === undefined ? "" : ` (${cleanLine(finding.file, FINDING_FORM_FILE_MAX)}${finding.line === undefined ? "" : `:${finding.line}`})`;
     blocks.push(
-      { type: "section", text: { type: "mrkdwn", text: `*${index + 1}. ${finding.role === "SECURITY" ? "Security review" : "Code review"}*${where}\n${cleanLine(finding.text, FINDING_FORM_TEXT_MAX)}` } },
+      { type: "section", text: { type: "mrkdwn", text: `*${index + 1}. ${finding.role === "SECURITY" ? "Security review" : "Code review"}*${where}\n${cleanLine(finding.text, FINDING_FORM_TEXT_MAX)}${finding.role === "SECURITY" ? `\n_${SECURITY_ACCEPT_IN_SLACK}_` : ""}` } },
       { type: "input", block_id: ids.action, label: { type: "plain_text", text: `What should happen to finding ${index + 1}?` },
-        element: { type: "radio_buttons", action_id: "action", options: [fix, accept], initial_option: fix } },
+        element: { type: "radio_buttons", action_id: "action", options: finding.role === "SECURITY" ? [fix] : [fix, accept], initial_option: fix } },
       { type: "input", block_id: ids.note, optional: true, label: { type: "plain_text", text: "Fix instructions, or your reason to accept" },
         hint: { type: "plain_text", text: "A reason is needed to accept this finding." },
         element: { type: "plain_text_input", action_id: "note", multiline: true, max_length: FINDING_INSTRUCTION_MAX } },
@@ -403,6 +409,31 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       log("interaction.rejected", { reason: "malformed_payload" });
       return respond(400, { error: "interaction payload is not JSON" });
     }
+    if (dependencies.workspaces !== undefined) {
+      try {
+        const team = asRecord(payload.team).id;
+        const user = asRecord(payload.user).id;
+        if (typeof team !== "string" || typeof user !== "string" || asRecord(payload.user).team_id !== team) return respond(200, { ok: true });
+        const companyId = await dependencies.workspaces.requireCompany(team);
+        const token = await slackWorkspaceToken(dependencies.workspaces, team);
+        return await slackRequestWorkspace.run({ teamId: team, companyId, token }, async () => {
+          const ids = payload.type === "view_submission" ? [asRecord(payload.view).callback_id]
+            : Array.isArray(payload.actions) && payload.actions.length <= 25 ? payload.actions.map((action) => asRecord(action).action_id) : [];
+          const person = await slackCompanyPerson(dependencies, team, user);
+          const denied = ids.length === 0 || ids.some((id) => slackActionClass(id) !== "member");
+          const text = person.kind === "unlinked" ? await slackLinkNotice(dependencies, team, user) : denied ? SLACK_WEB_SIGNIN_NOTICE : undefined;
+          if (denied || person.kind === "unlinked") {
+            if (payload.type === "view_submission") return respond(200, { response_action: "errors", errors: { [firstInputBlock(asRecord(payload.view))]: text ?? "link your account: Open in Rovara" } });
+            if (text !== undefined && typeof payload.response_url === "string") await dependencies.respondEphemeral?.(payload.response_url, text);
+            return respond(200, { ok: true });
+          }
+          return handle(payload, requestStartedAt);
+        });
+      } catch { return respond(200, { ok: true }); }
+    }
+    return handle(payload, requestStartedAt);
+  };
+  async function handle(payload: Record<string, unknown>, requestStartedAt: number): Promise<HttpResponse> {
     if (payload.type === "view_submission") {
       if (dependencies.routeSubmission !== undefined) {
         try {
@@ -969,7 +1000,7 @@ export function awsWorkflowSlackHandlers(transport: SlackPressTransport) {
   return { workflow, chosenStart, invokeBroker };
 }
 
-export function createAwsSlackInteractivityHandler() {
+export function createAwsSlackInteractivityHandler(company: SlackCompanyDependencies = {}) {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
   const sqs = new SQSClient(clientConfiguration);
@@ -1000,22 +1031,22 @@ export function createAwsSlackInteractivityHandler() {
   // so its interactivity handling, and every variable and grant it reads, is unchanged.
   const adminChange = process.env.ADMIN_CHANGES === "enabled" ? awsAdminChangePress(clientConfiguration, documentClient) : undefined;
   const { workflow, chosenStart, invokeBroker } = awsWorkflowSlackHandlers({
-    openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
+    openView: async (triggerId, view) => slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), "views.open", { trigger_id: triggerId, view }),
     respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
     respondReplace: (responseUrl, message) => respondReplace(responseUrl, message),
-    update: async (input) => slackApi((await secrets()).botToken, "chat.update", input),
+    update: async (input) => slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), "chat.update", input),
     handOff: (event) => handOffToSelf(lambda, event),
     enqueueAnswer: createAnswerQueue({ sqs, queueUrl, changePending: threadPendingCounter(documentClient, threadsTableName) }),
   });
   const openView = async (triggerId: string, view: Record<string, unknown>, timeoutMs?: number) => {
-    await slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }, fetch, timeoutMs);
+    await slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), "views.open", { trigger_id: triggerId, view }, fetch, timeoutMs);
   };
   // #340: finishing a ChatGPT connection can outlast Slack's three seconds, so it runs in an asynchronous invoke of
   // this same Lambda, which has the rest of its own timeout for the broker.
   const chatgptFinish = (event: HandedOffChatGptFinish) => runHandedOffChatGptFinish({
     finish: (input) => invokeBroker({ source: "agentx.slack-ingress", action: "chatgpt-finish", ...input }, HANDED_OFF_START_TIMEOUT_MS),
-    updateView: async (viewId, view) => slackApi((await secrets()).botToken, "views.update", { view_id: viewId, view }, fetch, 5_000),
-    postEphemeral: async (input) => chatPostEphemeral((await secrets()).botToken, input),
+    updateView: async (viewId, view) => slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), "views.update", { view_id: viewId, view }, fetch, 5_000),
+    postEphemeral: async (input) => chatPostEphemeral(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
     log,
   }, event);
   // Spec 062 Phase 7c3: with SlackViaChannel on, the core takes Slack's presses and forms. A press that opens no form
@@ -1041,7 +1072,7 @@ export function createAwsSlackInteractivityHandler() {
     // Slack lets a form open for three seconds after the press; the core gets most of them.
     const answered = await actionClient(channelAction, 2_400 - (Date.now() - action.requestStartedAt));
     if (answered?.open !== undefined) {
-      await slackApi((await secrets()).botToken, "views.open", { trigger_id: action.triggerId, view: slackModalOf(answered.open) }, fetch, Math.max(300, 2_900 - (Date.now() - action.requestStartedAt)));
+      await slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), "views.open", { trigger_id: action.triggerId, view: slackModalOf(answered.open) }, fetch, Math.max(300, 2_900 - (Date.now() - action.requestStartedAt)));
     }
     log("interaction.routed", { actionId: action.actionId.slice(0, 64), opened: answered?.open !== undefined });
     return true;
@@ -1062,6 +1093,7 @@ export function createAwsSlackInteractivityHandler() {
     return true;
   };
   const interactivity = createSlackInteractivityHandler({
+    ...company,
     secrets,
     log,
     ...(viaChannel ? { routePress, routeSubmission, routeAdminChange } : {}),
@@ -1108,7 +1140,7 @@ export function createAwsSlackInteractivityHandler() {
         }));
       },
       async updateMessage(input) {
-        await slackApi((await secrets()).botToken, "chat.update", input);
+        await slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), "chat.update", input);
       },
       respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
       log,
@@ -1116,7 +1148,7 @@ export function createAwsSlackInteractivityHandler() {
       // Spec 014 FR-024: the Details view reads one turn record's non-text fields and opens a modal.
       readDetails: turnRecordsTableName ? dynamoTurnDetailsReader(documentClient, turnRecordsTableName) : detailsNotConfigured,
       openView: async (triggerId, view, timeoutMs) => {
-        const token = (await secrets()).botToken;
+        const token = await slackCompanyToken(company, async () => (await secrets()).botToken);
         await slackApi(token, "views.open", { trigger_id: triggerId, view }, fetch, timeoutMs);
       },
       respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
@@ -1125,10 +1157,19 @@ export function createAwsSlackInteractivityHandler() {
   });
   return async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<HttpResponse> => {
     if (isHandedOffWorkflowStart(event)) {
+      if (company.workspaces !== undefined) {
+        try {
+          const person = await slackCompanyPerson(company, event.thread.teamId, event.userId);
+          if (person.kind !== "linked") return respond(200, { error: SLACK_WEB_SIGNIN_NOTICE });
+          const token = await slackWorkspaceToken(company.workspaces, event.thread.teamId);
+          return await slackRequestWorkspace.run({ teamId: event.thread.teamId, companyId: person.companyId, token }, async () => respond(200, { outcome: await chosenStart(event) }));
+        } catch { return respond(200, { error: SLACK_WEB_SIGNIN_NOTICE }); }
+      }
       const outcome = await chosenStart(event);
       log("workflow.handed_off_start", { outcome });
       return respond(200, { outcome });
     }
+    if (isHandedOffChatGptFinish(event) && company.workspaces !== undefined) return respond(200, { error: SLACK_WEB_SIGNIN_NOTICE });
     if (isHandedOffChatGptFinish(event)) return respond(200, { outcome: await chatgptFinish(event) });
     return interactivity(event);
   };
@@ -1883,7 +1924,8 @@ export function workflowSlackHandlers(deps: {
           const action: "ACCEPT" | "FIX" = chosen === "ACCEPT" ? "ACCEPT" : "FIX";
           const raw = asRecord(asRecord(values[ids.note]).note).value;
           const note = typeof raw === "string" ? raw.trim() : "";
-          if (action === "ACCEPT" && note === "") errors[ids.note] = "Give a reason to accept this finding.";
+          if (action === "ACCEPT" && finding.role === "SECURITY") errors[ids.action] = SECURITY_ACCEPT_IN_SLACK;
+          else if (action === "ACCEPT" && note === "") errors[ids.note] = "Give a reason to accept this finding.";
           else if (action === "ACCEPT" && note.length > FINDING_REASON_MAX) errors[ids.note] = `A reason is at most ${FINDING_REASON_MAX} characters.`;
           else if (action === "FIX" && note.length > FINDING_INSTRUCTION_MAX) errors[ids.note] = "Instructions are at most 1,000 characters.";
           return { findingId: finding.findingId, action, note };

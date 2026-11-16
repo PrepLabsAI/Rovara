@@ -22,7 +22,7 @@ import { isCommentMethod, strictMethodsFor } from "./strong-methods.js";
 export { isCommentMethod, strictMethodsFor } from "./strong-methods.js";
 import {
   INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, checkApprovalSignIn, companyScoped, when,
-  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type Principal,
+  type ApprovalCardRef, type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type Principal,
   type StoredDocument, type TransactItem, type UpdateOp,
 } from "@agentx/contracts";
 
@@ -94,6 +94,11 @@ export interface DecisionAttempt {
    * holds (the account was unlinked or linked to someone else meanwhile), nothing is recorded and the answer is `link_gone`. Absent: none.
    */
   fence?: readonly TransactItem[];
+  /**
+   * The decision card the person answered on and the version they were shown (owner decision 211, gap G4), passed to the Approvers seam as `ApprovalRequest.card`. An adapter that binds a proof to a card
+   * checks it; the card is the caller's word, never proof. Absent: no card is named.
+   */
+  card?: ApprovalCardRef;
 }
 
 export type GateRefusalReason =
@@ -183,10 +188,33 @@ const adapterRequestId = (requestId: string): string => `${requestId}.${randomUU
 /** The decision's request id inside the id the Approvers seam was given (a request id has no dot, so everything before the first one). */
 export const decisionRequestIdOf = (adapterRequest: string): string => adapterRequest.split(".")[0]!;
 
-/** Where a used proof's marker lives: one per (method, token, request). The token itself is never stored, only its hash. */
+/**
+ * How many partitions a company's used-proof markers are spread over (a single partition per company was a hot key on DynamoDB).
+ * STORAGE FORMAT: this number and `approvalProofShard` below decide where every marker lives. Changing either (the byte, the modulus, a salt) makes a stored marker unfindable, so a used proof would be accepted again:
+ * it needs a migration that keeps reading the old placement. Golden vectors in tests/unit/core-approval-proof-shards.test.ts pin it.
+ */
+export const APPROVAL_PROOF_SHARDS = 32;
+
+/** The shard of a proof key: the first byte of the key's SHA-256, modulo the shard count. The key already holds the hash of the token and the request, so the spread is even; hashing again keeps any string safe. */
+const approvalProofShard = (proofKey: string): string =>
+  String(createHash("sha256").update(proofKey, "utf8").digest()[0]! % APPROVAL_PROOF_SHARDS).padStart(2, "0");
+
+/** Where a used proof's marker lives: one per (method, token, request), in one of `APPROVAL_PROOF_SHARDS` partitions picked by a hash of the proof key. The token itself is never stored, only its hash. */
 export function approvalProofMarkerKey(companyId: string, proofKey: string): DocumentKey {
+  return { pk: companyScoped(companyId, `APPROVAL_PROOF#${approvalProofShard(proofKey)}`), sk: proofKey };
+}
+
+/**
+ * Where markers were written before the partition was sharded: one partition per company. Expand then contract, so a mixed fleet or a rollback never lets a proof be used twice:
+ *   this release  writes BOTH keys (each only if absent, in the decision's transaction) and checks both on replay, so a release that only knows the old key and this one block each other;
+ *   a later one   stops writing this key but keeps reading it until the old markers have expired (DEFERRED row APPROVAL-PROOF-LEGACY-READ-DROP, which also holds the release rule).
+ */
+export function legacyApprovalProofMarkerKey(companyId: string, proofKey: string): DocumentKey {
   return { pk: companyScoped(companyId, "APPROVAL_PROOF"), sk: proofKey };
 }
+
+/** Every key a used proof may be found under: the sharded key first, then the old one. A reader outside the gate (a host's courtesy check that a proof was already used) asks all of them. */
+export const approvalProofMarkerKeys = (companyId: string, proofKey: string): readonly [DocumentKey, DocumentKey] => [approvalProofMarkerKey(companyId, proofKey), legacyApprovalProofMarkerKey(companyId, proofKey)];
 
 function recordOf(document: StoredDocument): ApprovalRecord | undefined {
   const text = (name: string) => (typeof document[name] === "string" ? document[name] : undefined);
@@ -244,9 +272,26 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const changesMethods = deps.policy?.changesMethods;
   const proofKeepSeconds = deps.policy?.proofKeepSeconds ?? PROOF_KEEP_SECONDS;
   const reusableMethods = deps.policy?.reusableMethods ?? [LOCAL_SESSION_METHOD_NAME];
+  /** Gap G3: the gate settles every claim a verdict hands back (commit once its transaction applied, release otherwise), so it asks with `settlesClaims` wherever the adapter offers both. */
+  const settlesClaims = typeof deps.approvers.commitClaim === "function" && typeof deps.approvers.releaseClaim === "function";
+  /** Gives claims back; a release that fails leaves the claim to lapse to spent (never free). */
+  const release = async (claimIds: readonly string[]): Promise<void> => {
+    for (const claimId of claimIds) {
+      try { await deps.approvers.releaseClaim?.(claimId); } catch { /* lapses to spent */ }
+    }
+  };
+  /** Spends claims once the decision's transaction applied; a commit that fails leaves the claim to lapse to spent. */
+  const commit = async (claimIds: readonly string[]): Promise<void> => {
+    for (const claimId of claimIds) {
+      try { await deps.approvers.commitClaim?.(claimId); } catch { /* lapses to spent */ }
+    }
+  };
   const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
   /** The marker of a one-decision credential (a comment) that names no request: it is spent once, anywhere. */
   const spentOnceKey = (companyId: string, method: string, token: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: "*" }));
+  // The same two markers as an older release wrote them (one partition per company): written as well as read in this release (expand step), so a proof used under either key is used.
+  const legacyMarkerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => legacyApprovalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
+  const legacySpentOnceKey = (companyId: string, method: string, token: string): DocumentKey => legacyApprovalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: "*" }));
 
   const sameDecision = (record: ApprovalRecord, attempt: DecisionAttempt): boolean =>
     record.kind === attempt.kind && record.subjectId === attempt.subjectId && record.outcome === attempt.outcome && record.revision === attempt.seen.revision && record.artifactDigest === attempt.seen.artifactDigest;
@@ -264,11 +309,11 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
     if (record === undefined || !sameDecision(record, attempt)) return reused;
     const bindingId = approvalBindingId(attempt.companyId, record.kind, record.subjectId, record.revision, record.artifactDigest);
     for (const credential of attempt.credentials) {
-      const marker = await deps.store.get(markerOf(attempt.companyId, credential.method, credential.token, bindingId));
+      const marker = (await deps.store.get(markerOf(attempt.companyId, credential.method, credential.token, bindingId))) ?? (await deps.store.get(legacyMarkerOf(attempt.companyId, credential.method, credential.token, bindingId)));
       if (marker === undefined || marker["requestId"] !== attempt.requestId) continue;
       const request: ApprovalRequest = {
         companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), kind: record.approvalKind, outcome: attempt.outcome, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
-        ...(record.projectName === undefined ? {} : { projectName: record.projectName }),
+        ...(record.projectName === undefined ? {} : { projectName: record.projectName }), ...(attempt.card === undefined ? {} : { card: attempt.card }), ...(settlesClaims ? { settlesClaims: true as const } : {}),
         // The risk the decision was made at: a method that is good only below high risk (a chat press) is asked about the same request again.
         ...(record.risk === "low" || record.risk === "medium" || record.risk === "high" ? { risk: record.risk } : {}),
       };
@@ -276,8 +321,13 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
         proofId: randomUUID(), method: credential.method, requestId: request.requestId, revision: record.revision, artifactDigest: record.artifactDigest, token: credential.token,
         ...(credential.claimedAccount === undefined ? {} : { claimedAccount: credential.claimedAccount }),
       });
+      // A replay changes nothing: a part the adapter claimed for this read is given back at once.
+      if (verdict.approved && verdict.claimId !== undefined) await release([verdict.claimId]);
       // A comment is spent once, so the adapter may remember it; the marker above is what proved this person made the decision.
       if (verdict.approved && verdict.approver.companyId === attempt.companyId && record.approvers.some((entry) => entry.provider === verdict.approver.provider && entry.personId === verdict.approver.personId)) return { status: "replayed", record };
+      // Gap G3: a one-time proof (an adapter that claims parts) is spent by the very decision it made, so the adapter answers `proof_already_used` for it. The used-proof marker above, written in that
+      // decision's transaction for THIS credential and THIS request id, is what proves the holder made it: the same answer again.
+      if (settlesClaims && !verdict.approved && verdict.reason === "proof_already_used") return { status: "replayed", record };
     }
     return reused;
   }
@@ -326,7 +376,10 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
 
       // ---- who may answer, and how
       const bindingId = approvalBindingId(attempt.companyId, attempt.kind, attempt.subjectId, loaded.request.revision, loaded.request.artifactDigest);
-      const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), outcome: attempt.outcome };
+      const request: ApprovalRequest = {
+        ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), outcome: attempt.outcome,
+        ...(attempt.card === undefined ? {} : { card: attempt.card }), ...(settlesClaims ? { settlesClaims: true as const } : {}),
+      };
       const requirement = await deps.approvers.requirement(request);
       const risk = loaded.request.risk ?? "high";
       const policyMethods = strictMethodsFor(attempt.outcome, risk, requirement, { highRiskMethods, rejectMethods, changesMethods });
@@ -343,91 +396,114 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
         proofId: randomUUID(), method: credential.method, requestId: request.requestId, revision: attempt.seen.revision, artifactDigest: attempt.seen.artifactDigest, token: credential.token,
         ...(credential.claimedAccount === undefined ? {} : { claimedAccount: credential.claimedAccount }),
       }));
-      const approvers: Principal[] = [];
-      for (const proof of proofs) {
-        const verdict = await deps.approvers.verify(request, proof);
-        if (!verdict.approved) {
-          // An adapter that remembers proofs it accepted may still say so: a repeat of a decision that has just committed is answered, not refused.
-          if (verdict.reason === "proof_already_used") return (await replayOf(attempt)) ?? refuse("proof_already_used", "That proof was already used.");
-          return refuse(verdict.reason === "expired" ? "expired" : "not_approved", `Not approved: ${verdict.reason}.`);
-        }
-        // Defence in depth: whatever the adapter vouched for must belong to this company.
-        if (verdict.approver.companyId !== attempt.companyId) return refuse("not_approved", "Not approved: wrong_company.");
-        approvers.push(verdict.approver);
-      }
-      const distinct = new Set(approvers.map((approver) => `${approver.provider}\u0000${approver.personId}`));
-      if (distinct.size < Math.max(1, requirement.minApprovers)) return refuse("needs_more_approvers", `This needs ${String(requirement.minApprovers)} different approvers.`);
-      // The company's sign-in rule (decision 62), set by the approvers plug-in, for the answers that need a strong proof. Code sets none.
-      if (requirement.signIn !== undefined && policyMethods !== undefined && attempt.outcome !== "request_changes") {
-        for (const person of approvers) {
-          const fresh = checkApprovalSignIn(requirement.signIn, person, at.getTime(), { companySignIn: deps.identity?.capabilities.companySignIn === true });
-          if (!fresh.ok) return refuse("sign_in_not_fresh", fresh.reason === "no_sign_in_time" ? "Sign in again to do this: Rovara has no record of when you signed in." : fresh.reason === "sign_in_too_old" ? "Sign in again to do this: your sign-in is too old." : "Sign in again to do this: your sign-in cannot be checked.");
-        }
-      }
-      const requester = request.requestedBy;
-      if (!requirement.selfApprovalAllowed && requester !== undefined && approvers.some((approver) => approver.provider === requester.provider && approver.personId === requester.personId)) {
-        return refuse("self_approval_not_allowed", "The person who asked cannot approve their own request.");
-      }
-      const approver = approvers[0]!;
-
-      // ---- what the decision changes
-      const decidedAt = at.toISOString();
-      const reason = attempt.reason === undefined ? undefined : [...attempt.reason].slice(0, REASON_MAX).join("");
-      let applied: AppliedDecision;
+      // Gap G3: every claim a verdict handed back is settled whatever happens next: spent once the decision's transaction applied, given back when it did not (or when the decision stopped before it).
+      const claimIds: string[] = [];
+      let settle: "commit" | "release" | "lapse" = "release";
       try {
-        applied = await subject.apply(loaded, reason === undefined ? attempt : { ...attempt, reason }, approvers, decidedAt);
-      } catch (error) {
-        if (error instanceof SubjectRefusal) return refuse(error.code, error.message);
-        throw error;
-      }
+        const approvers: Principal[] = [];
+        for (const proof of proofs) {
+          const verdict = await deps.approvers.verify(request, proof);
+          if (!verdict.approved) {
+            // An adapter that remembers proofs it accepted may still say so: a repeat of a decision that has just committed is answered, not refused.
+            if (verdict.reason === "proof_already_used") return (await replayOf(attempt)) ?? refuse("proof_already_used", "That proof was already used.");
+            return refuse(verdict.reason === "expired" ? "expired" : "not_approved", `Not approved: ${verdict.reason}.`);
+          }
+          if (verdict.claimId !== undefined) claimIds.push(verdict.claimId);
+          // Defence in depth: whatever the adapter vouched for must belong to this company.
+          if (verdict.approver.companyId !== attempt.companyId) return refuse("not_approved", "Not approved: wrong_company.");
+          approvers.push(verdict.approver);
+        }
+        const distinct = new Set(approvers.map((approver) => `${approver.provider}\u0000${approver.personId}`));
+        if (distinct.size < Math.max(1, requirement.minApprovers)) return refuse("needs_more_approvers", `This needs ${String(requirement.minApprovers)} different approvers.`);
+        // The company's sign-in rule (decision 62), set by the approvers plug-in, for the answers that need a strong proof. Code sets none.
+        if (requirement.signIn !== undefined && policyMethods !== undefined && attempt.outcome !== "request_changes") {
+          for (const person of approvers) {
+            const fresh = checkApprovalSignIn(requirement.signIn, person, at.getTime(), { companySignIn: deps.identity?.capabilities.companySignIn === true });
+            if (!fresh.ok) return refuse("sign_in_not_fresh", fresh.reason === "no_sign_in_time" ? "Sign in again to do this: Rovara has no record of when you signed in." : fresh.reason === "sign_in_too_old" ? "Sign in again to do this: your sign-in is too old." : "Sign in again to do this: your sign-in cannot be checked.");
+          }
+        }
+        const requester = request.requestedBy;
+        if (!requirement.selfApprovalAllowed && requester !== undefined && approvers.some((approver) => approver.provider === requester.provider && approver.personId === requester.personId)) {
+          return refuse("self_approval_not_allowed", "The person who asked cannot approve their own request.");
+        }
+        const approver = approvers[0]!;
 
-      // ---- one transaction: the change under the subject's guard, the decision, the used proofs, the audit
-      const record: ApprovalRecord = {
-        requestId: attempt.requestId, kind: attempt.kind, subjectId: attempt.subjectId, outcome: attempt.outcome, revision: attempt.seen.revision, artifactDigest: attempt.seen.artifactDigest, risk, decidedAt,
-        subjectType: request.subject.type, approvalKind: request.kind, ...(request.projectName === undefined ? {} : { projectName: request.projectName }),
-        approvers: approvers.map((entry, index) => ({ provider: entry.provider, personId: entry.personId, method: proofs[index]!.method, ...(entry.authTime === undefined ? {} : { authTime: entry.authTime }) })),
-        ...(reason === undefined ? {} : { reason }),
-      };
-      const expires = Math.floor(at.getTime() / 1000) + proofKeepSeconds;
-      const items: TransactItem[] = [
-        { kind: "update", key: loaded.key, ops: applied.ops, condition: loaded.guard },
-        { kind: "put", item: recordDocument(attempt.companyId, record, expires), condition: when.absent() },
-        ...proofs.map((proof): TransactItem => ({
-          kind: "put",
-          item: { ...markerOf(attempt.companyId, proof.method, proof.token, bindingId), entityType: "APPROVAL_PROOF_USED", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
-          condition: when.absent(),
-        })),
-        // A credential that is good for one decision (a comment) is also spent for every other request, so it cannot approve a later revision or another subject.
-        ...proofs.filter((proof) => !reusableMethods.includes(proof.method)).map((proof): TransactItem => ({
-          kind: "put",
-          item: { ...spentOnceKey(attempt.companyId, proof.method, proof.token), entityType: "APPROVAL_PROOF_SPENT", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
-          condition: when.absent(),
-        })),
-        ...(applied.extra ?? []),
-        ...deps.audit.stage({
-          eventId: `approval:${attempt.requestId}`, companyId: attempt.companyId, at: decidedAt,
-          actor: { type: "person", id: approver.personId }, action: `decision.${attempt.outcome === "approve" ? "approved" : attempt.outcome === "reject" ? "rejected" : "changes_requested"}`,
-          subject: request.subject, details: { kind: attempt.kind, risk, revision: attempt.seen.revision, method: proofs[0]!.method },
-        }),
-      ];
-      // The caller's fence goes LAST, so the indexes of the steps above do not move.
-      const fenceStart = items.length;
-      items.push(...(attempt.fence ?? []));
-      const committed = await deps.store.transact(items);
-      if (committed.applied) return { status: "decided", record, approver, result: applied.result ?? {} };
+        // ---- what the decision changes
+        const decidedAt = at.toISOString();
+        const reason = attempt.reason === undefined ? undefined : [...attempt.reason].slice(0, REASON_MAX).join("");
+        let applied: AppliedDecision;
+        try {
+          applied = await subject.apply(loaded, reason === undefined ? attempt : { ...attempt, reason }, approvers, decidedAt);
+        } catch (error) {
+          if (error instanceof SubjectRefusal) return refuse(error.code, error.message);
+          throw error;
+        }
 
-      // ---- a lost race: say which rule lost
-      if (committed.failed.some((index) => index >= fenceStart)) return refuse("link_gone", "The account that decided is no longer linked to that person.");
-      const proofStart = 2;
-      const onceCount = proofs.filter((proof) => !reusableMethods.includes(proof.method)).length;
-      const proofEnd = proofStart + proofs.length + onceCount;
-      if (committed.failed.some((index) => index >= proofStart && index < proofEnd)) return refuse("proof_already_used", "That proof was already used.");
-      if (committed.failed.includes(1)) {
-        const again = await replayOf(attempt);
-        return again ?? refuse("request_id_reused", "That request ID was already used for a different decision.");
+        // ---- one transaction: the change under the subject's guard, the decision, the used proofs, the audit
+        const record: ApprovalRecord = {
+          requestId: attempt.requestId, kind: attempt.kind, subjectId: attempt.subjectId, outcome: attempt.outcome, revision: attempt.seen.revision, artifactDigest: attempt.seen.artifactDigest, risk, decidedAt,
+          subjectType: request.subject.type, approvalKind: request.kind, ...(request.projectName === undefined ? {} : { projectName: request.projectName }),
+          approvers: approvers.map((entry, index) => ({ provider: entry.provider, personId: entry.personId, method: proofs[index]!.method, ...(entry.authTime === undefined ? {} : { authTime: entry.authTime }) })),
+          ...(reason === undefined ? {} : { reason }),
+        };
+        const expires = Math.floor(at.getTime() / 1000) + proofKeepSeconds;
+        const items: TransactItem[] = [
+          { kind: "update", key: loaded.key, ops: applied.ops, condition: loaded.guard },
+          { kind: "put", item: recordDocument(attempt.companyId, record, expires), condition: when.absent() },
+          ...proofs.map((proof): TransactItem => ({
+            kind: "put",
+            item: { ...markerOf(attempt.companyId, proof.method, proof.token, bindingId), entityType: "APPROVAL_PROOF_USED", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+            condition: when.absent(),
+          })),
+          // A credential that is good for one decision (a comment) is also spent for every other request, so it cannot approve a later revision or another subject.
+          ...proofs.filter((proof) => !reusableMethods.includes(proof.method)).map((proof): TransactItem => ({
+            kind: "put",
+            item: { ...spentOnceKey(attempt.companyId, proof.method, proof.token), entityType: "APPROVAL_PROOF_SPENT", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+            condition: when.absent(),
+          })),
+          // Expand step: the same markers under the old (unsharded) key, each only if absent, so a proof used here is used for an older release too and the other way round (a rolled-back or mixed fleet). Same facts as the old writer.
+          ...proofs.map((proof): TransactItem => ({
+            kind: "put",
+            item: { ...legacyMarkerOf(attempt.companyId, proof.method, proof.token, bindingId), entityType: "APPROVAL_PROOF_USED", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+            condition: when.absent(),
+          })),
+          ...proofs.filter((proof) => !reusableMethods.includes(proof.method)).map((proof): TransactItem => ({
+            kind: "put",
+            item: { ...legacySpentOnceKey(attempt.companyId, proof.method, proof.token), entityType: "APPROVAL_PROOF_SPENT", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+            condition: when.absent(),
+          })),
+          ...(applied.extra ?? []),
+          ...deps.audit.stage({
+            eventId: `approval:${attempt.requestId}`, companyId: attempt.companyId, at: decidedAt,
+            actor: { type: "person", id: approver.personId }, action: `decision.${attempt.outcome === "approve" ? "approved" : attempt.outcome === "reject" ? "rejected" : "changes_requested"}`,
+            subject: request.subject, details: { kind: attempt.kind, risk, revision: attempt.seen.revision, method: proofs[0]!.method },
+          }),
+        ];
+        // The caller's fence goes LAST, so the indexes of the steps above do not move.
+        const fenceStart = items.length;
+        items.push(...(attempt.fence ?? []));
+        // A transaction that throws may have applied: its claims are then left to lapse to spent, never given back.
+        settle = "lapse";
+        const committed = await deps.store.transact(items);
+        settle = committed.applied ? "commit" : "release";
+        if (committed.applied) return { status: "decided", record, approver, result: applied.result ?? {} };
+
+        // ---- a lost race: say which rule lost
+        if (committed.failed.some((index) => index >= fenceStart)) return refuse("link_gone", "The account that decided is no longer linked to that person.");
+        const proofStart = 2;
+        const onceCount = proofs.filter((proof) => !reusableMethods.includes(proof.method)).length;
+        const proofEnd = proofStart + 2 * (proofs.length + onceCount);
+        if (committed.failed.some((index) => index >= proofStart && index < proofEnd)) return refuse("proof_already_used", "That proof was already used.");
+        if (committed.failed.includes(1)) {
+          const again = await replayOf(attempt);
+          return again ?? refuse("request_id_reused", "That request ID was already used for a different decision.");
+        }
+        const current = await subject.load(attempt.companyId, attempt.subjectId);
+        return current === undefined || !current.waiting ? refuse("not_waiting", "This is no longer waiting for a decision.") : refuse("stale", "This changed while you decided. Open it again to see the current version.");
+      } finally {
+        if (settle === "commit") await commit(claimIds);
+        else if (settle === "release") await release(claimIds);
       }
-      const current = await subject.load(attempt.companyId, attempt.subjectId);
-      return current === undefined || !current.waiting ? refuse("not_waiting", "This is no longer waiting for a decision.") : refuse("stale", "This changed while you decided. Open it again to see the current version.");
     },
   };
 }

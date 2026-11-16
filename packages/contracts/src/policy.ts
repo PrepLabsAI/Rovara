@@ -8,48 +8,46 @@ import { TEST_ENV_ROUND_BUDGET_MIN } from "./test-environment.js";
 export type PolicyValue = string | number | boolean | null;
 export interface PolicyField {
   readonly id: string; readonly kind: "ordered_enum" | "number" | "boolean"; readonly order?: readonly string[];
-  readonly stricter: "higher" | "lower"; readonly raisable: boolean; readonly measured: boolean;
+  readonly companyBound: "minimum" | "limit"; readonly stricter: "higher" | "lower"; readonly raisable: boolean; readonly measured: boolean;
   readonly lockable: boolean; readonly ceilinged: boolean; readonly today: PolicyValue; readonly compatibility?: boolean;
 }
 const field = (row: PolicyField): PolicyField => Object.freeze(row.order === undefined ? row : { ...row, order: Object.freeze([...row.order]) });
-/** Stable display order. Numeric budget rule strictness is LOWER; a company lock is still a numeric FLOOR.
- * These are distinct comparisons: task raises increase budget allowances, only up to the ceiling.
- */
+/** Stable display order. Company minima raise carefulness; limits cap spending and repair attempts. */
 export const POLICY_FIELDS: readonly PolicyField[] = Object.freeze([
   // Q1 compatibility: no current setting; feature not built yet. null means no preset, not Balanced.
-  field({ id: "preset_level", kind: "ordered_enum", order: ["lightweight", "balanced", "careful"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: null, compatibility: true }),
+  field({ id: "preset_level", companyBound: "minimum", kind: "ordered_enum", order: ["lightweight", "balanced", "careful"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: null, compatibility: true }),
   // broker/src/core/ci-fix/ci-fix.ts:44–49: existing CI-fix behavior (still subject to autonomy).
-  field({ id: "real_check", kind: "ordered_enum", order: ["sandbox_only", "their_ci_watch", "their_ci_fix", "rovara_real_run"], stricter: "higher", raisable: true, measured: true, lockable: true, ceilinged: false, today: "their_ci_fix" }),
+  field({ id: "real_check", companyBound: "minimum", kind: "ordered_enum", order: ["sandbox_only", "their_ci_watch", "their_ci_fix", "rovara_real_run"], stricter: "higher", raisable: true, measured: true, lockable: true, ceilinged: false, today: "their_ci_fix" }),
   // contracts/src/rovara-code.ts:40: CI_FIX_ROUNDS_MAX = 3.
   // More automatic repair attempts are not stronger verification. Conservatively, fewer rounds win
-  // between rules; company numeric locks remain minimums (separate from rule strictness).
-  field({ id: "ci_fix_rounds", kind: "number", stricter: "lower", raisable: false, measured: false, lockable: true, ceilinged: false, today: CI_FIX_ROUNDS_MAX }),
+  // between rules; company bounds cap attempts as well.
+  field({ id: "ci_fix_rounds", companyBound: "limit", kind: "number", stricter: "lower", raisable: false, measured: false, lockable: true, ceilinged: false, today: CI_FIX_ROUNDS_MAX }),
   // contracts/src/test-environment.ts:42; worker/src/verification/selection.ts:276: 30 minutes.
-  field({ id: "round_time_minutes", kind: "number", stricter: "higher", raisable: false, measured: true, lockable: true, ceilinged: false, today: 30 }),
+  field({ id: "round_time_minutes", companyBound: "minimum", kind: "number", stricter: "higher", raisable: false, measured: true, lockable: true, ceilinged: false, today: 30 }),
   // broker/src/core/cost/limits.ts:6,16–20: dynamic QUICK/FULL planning + task estimate, no universal scalar.
   // null delegates to that existing calculation; it does NOT switch off the existing money guard.
-  field({ id: "model_budget_usd", kind: "number", stricter: "lower", raisable: true, measured: true, lockable: true, ceilinged: true, today: null }),
+  field({ id: "model_budget_usd", companyBound: "limit", kind: "number", stricter: "lower", raisable: true, measured: true, lockable: true, ceilinged: true, today: null }),
   // Q1 compatibility: no current setting; feature not built yet. null means no per-task machine cap.
-  field({ id: "machine_budget_minutes", kind: "number", stricter: "lower", raisable: true, measured: true, lockable: true, ceilinged: true, today: null, compatibility: true }),
+  field({ id: "machine_budget_minutes", companyBound: "limit", kind: "number", stricter: "lower", raisable: true, measured: true, lockable: true, ceilinged: true, today: null, compatibility: true }),
   // contracts/src/second-review.ts:72–74: default mode off; this additive boolean does not replace shadow mode.
-  field({ id: "extra_review", kind: "boolean", stricter: "higher", raisable: true, measured: false, lockable: true, ceilinged: false, today: false }),
+  field({ id: "extra_review", companyBound: "minimum", kind: "boolean", stricter: "higher", raisable: true, measured: false, lockable: true, ceilinged: false, today: false }),
   // Q1 compatibility: no current setting; feature not built yet (how-we-work-track-record.ts:54).
-  field({ id: "after_merge_revert", kind: "ordered_enum", order: ["off", "report_only", "offer_revert"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
+  field({ id: "after_merge_revert", companyBound: "minimum", kind: "ordered_enum", order: ["off", "report_only", "offer_revert"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
   // Q1 compatibility: no current setting; feature not built yet (TE-B11).
-  field({ id: "mutation_spot_check", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
+  field({ id: "mutation_spot_check", companyBound: "minimum", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
   // Q1 compatibility: no current setting; feature not built yet (TE-F10).
-  field({ id: "prompt_side_by_side", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
+  field({ id: "prompt_side_by_side", companyBound: "minimum", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
   // Q1 compatibility: no current setting; feature not built yet (TE-H1 browser evidence, slice 1 behind this setting; contracts/src/browser-evidence.ts).
-  field({ id: "browser_evidence", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
+  field({ id: "browser_evidence", companyBound: "minimum", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
   // Q1 compatibility: no current setting; feature not built yet (device testing slice 1, DEC 244; contracts/src/device-evidence.ts).
-  field({ id: "device_evidence", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
+  field({ id: "device_evidence", companyBound: "minimum", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
 ]);
 
 /** default is Q1's explicit compatibility origin; company_ceiling/install_off are §3.2 steps 7/8 additions. */
-export const POLICY_ORIGINS = Object.freeze(["rovara_default", "default", "preset", "measured", "changed_here", "changed_for_branch", "branch_rule", "path_rule", "task_raise", "company_lock", "company_ceiling", "install_off"] as const);
+export const POLICY_ORIGINS = Object.freeze(["rovara_default", "default", "preset", "measured", "changed_here", "changed_for_branch", "branch_rule", "path_rule", "task_raise", "company_lock", "company_ceiling", "company_minimum", "company_limit", "install_off"] as const);
 export type PolicyOrigin = typeof POLICY_ORIGINS[number];
 export type PolicyValues = Readonly<Record<string, PolicyValue>>;
-export interface ResolvedPolicyValue { value: PolicyValue; origin: PolicyOrigin; branch?: string; rule?: string; clampedBy?: "company_lock" | "company_ceiling" }
+export interface ResolvedPolicyValue { value: PolicyValue; origin: PolicyOrigin; branch?: string; rule?: string; clampedBy?: "company_lock" | "company_ceiling" | "company_minimum" | "company_limit"; companyBound?: { kind: "minimum" | "limit"; value: PolicyValue }; reason?: "raised to the company limit" }
 export type PolicyIssue = "invalid_input" | "invalid_pattern" | "not_measured" | "not_ceilinged" | "not_raisable" | "not_upward" | "no_ceiling" | "conflicting_bounds" | "work_limit";
 /** Refused results have no values; disabled results have only nulls. Check status before acting. */
 export interface ResolvedPolicy { status: "resolved" | "disabled" | "refused"; values: Record<string, ResolvedPolicyValue>; issues: PolicyIssue[] }
@@ -120,12 +118,12 @@ const asValues = (value: unknown): PolicyValues => value as PolicyValues;
 function expand(values: PolicyValues, floors = false): PolicyValues {
   const level = values["preset_level"];
   if (typeof level !== "string" || !Object.hasOwn(POLICY_PRESETS, level)) return values;
-  const expanded = Object.assign(map<PolicyValue>(), POLICY_PRESETS[level as keyof typeof POLICY_PRESETS]);
+  const preset = POLICY_PRESETS[level as keyof typeof POLICY_PRESETS];
+  const expanded = Object.assign(map<PolicyValue>(), floors ? Object.fromEntries(POLICY_FIELDS.filter((row) => row.companyBound === "minimum").map((row) => [row.id, preset[row.id as keyof typeof preset]])) : preset);
   for (const row of POLICY_FIELDS) {
     const explicit = values[row.id];
-    // Floors use the field's upward order, including numeric minimums. An explicit lock cannot
-    // weaken the company's preset minimum; ordinary project patches may override their preset.
-    if (explicit !== undefined && (!floors || upward(row, explicit, expanded[row.id]!) > 0)) expanded[row.id] = explicit;
+    // A preset contributes only minimum fields. Explicit limits are independent of the preset.
+    if (explicit !== undefined && (!floors || expanded[row.id] === undefined || upward(row, explicit, expanded[row.id]!) > 0)) expanded[row.id] = explicit;
   }
   return expanded;
 }
@@ -190,26 +188,50 @@ function resolveParsed(input: PolicyResolveInput, operator: PolicyOperatorOption
       if (next !== undefined && stricter(row, next, values[row.id]!.value)) values[row.id] = { value: next, origin: rule.values[row.id] === undefined ? "preset" : rule.origin, rule: inertEvidenceText(rule.pattern, 256) };
     }
   }
-  for (const row of POLICY_FIELDS) {
-    const next = input.taskRaises?.[row.id] as PolicyValue | undefined;
-    if (next === undefined) continue;
-    if (!row.raisable) { issues.add("not_raisable"); continue; }
-    if (row.ceilinged && typeof input.companyCeilings?.[row.id] !== "number") { issues.add("no_ceiling"); continue; }
-    const current = values[row.id]!.value;
-    if (next === null || row.ceilinged && current === null || upward(row, next, current) <= 0) { issues.add("not_upward"); continue; }
-    values[row.id] = { value: next, origin: "task_raise" };
-  }
-  const locks = expand(asValues(input.companyLocks ?? {}), true);
-  for (const row of POLICY_FIELDS) {
-    const floor = locks[row.id]; const ceiling = input.companyCeilings?.[row.id] as PolicyValue | undefined;
-    if (ceiling !== undefined && !row.ceilinged) return refuse("not_ceilinged");
-    if (typeof floor === "number" && typeof ceiling === "number" && floor > ceiling) return refuse("conflicting_bounds");
-    if (row.lockable && floor !== undefined && floor !== null && upward(row, values[row.id]!.value, floor) < 0) values[row.id] = { value: floor, origin: "company_lock", clampedBy: "company_lock" };
-    if (typeof ceiling === "number" && (values[row.id]!.value === null || Number(values[row.id]!.value) > ceiling)) values[row.id] = { value: ceiling, origin: "company_ceiling", clampedBy: "company_ceiling" };
-  }
+  const bounded = applyCompanyBounds({ status: "resolved", values, issues: [...issues] }, asValues(input.companyLocks ?? {}), asValues(input.companyCeilings ?? {}), asValues(input.taskRaises ?? {}));
+  if (bounded.status === "refused") return bounded;
   // The install operator's emergency stop alone overrides locks, after all customer layers.
   if (operator.installOff === true) {
-    for (const row of POLICY_FIELDS) values[row.id] = { value: null, origin: "install_off" };
+    for (const row of POLICY_FIELDS) bounded.values[row.id] = { value: null, origin: "install_off" };
   }
-  return { status: operator.installOff === true ? "disabled" : "resolved", values, issues: [...issues].sort() };
+  return { ...bounded, status: operator.installOff === true ? "disabled" : "resolved" };
+}
+
+/** The one company-bound clamp. Pure, validated and shared by row resolution and hook resolution.
+ * Existing bounds travel with the values, so a later hook can tighten but cannot undo them.
+ * `retryRaises` is for budget raises a base PolicySource refused only because it had no ceiling.
+ */
+export function applyCompanyBounds(resolved: ResolvedPolicy, companyLocks: PolicyValues = {}, companyCeilings: PolicyValues = {}, taskRaises: PolicyValues = {}, retryRaises = false): ResolvedPolicy {
+  if (resolved.status !== "resolved") return resolved;
+  if (!PolicyRowsSchema.safeParse({ companyLocks, companyCeilings }).success || !PolicyResolveRequestSchema.safeParse({ taskRaises }).success) return refuse("invalid_input");
+  const locks = expand(companyLocks, true);
+  const values = Object.assign(map<ResolvedPolicyValue>(), resolved.values);
+  const issues = new Set(resolved.issues);
+  if (retryRaises) issues.delete("no_ceiling");
+  for (const row of POLICY_FIELDS) {
+    const prior = values[row.id]!;
+    let bound = prior.companyBound;
+    const nextBound = locks[row.id];
+    if (nextBound !== undefined && nextBound !== null && row.lockable) {
+      if (bound === undefined || (row.companyBound === "limit" ? upward(row, nextBound, bound.value) < 0 : upward(row, nextBound, bound.value) > 0)) bound = { kind: row.companyBound, value: nextBound };
+    }
+    const ceiling = companyCeilings[row.id];
+    if (ceiling !== undefined && !row.ceilinged) return refuse("not_ceilinged");
+    if (typeof ceiling === "number" && (bound === undefined || Number(bound.value) > ceiling)) bound = { kind: "limit", value: ceiling };
+    const raise = taskRaises[row.id];
+    let current = prior;
+    // The base has already evaluated non-budget raises; only retry a budget with no prior bound.
+    if (raise !== undefined && (!retryRaises || row.ceilinged && prior.companyBound === undefined)) {
+      if (!row.raisable) issues.add("not_raisable");
+      else if (row.ceilinged && bound?.kind !== "limit") issues.add("no_ceiling");
+      else if (raise === null || row.ceilinged && prior.value === null || upward(row, raise, prior.value) <= 0) issues.add("not_upward");
+      else current = { value: raise, origin: "task_raise" };
+    }
+    if (bound === undefined) { values[row.id] = current; continue; }
+    const crosses = current.value === null || (bound.kind === "limit" ? upward(row, current.value, bound.value) > 0 : upward(row, current.value, bound.value) < 0);
+    const origin = bound.kind === "limit" ? "company_limit" : "company_minimum";
+    values[row.id] = crosses ? { value: bound.value, origin, clampedBy: origin, companyBound: bound,
+      ...((current.origin === "task_raise" || current.reason === "raised to the company limit") && bound.kind === "limit" ? { reason: "raised to the company limit" as const } : {}) } : { ...current, companyBound: bound };
+  }
+  return { status: "resolved", values, issues: [...issues].sort() };
 }

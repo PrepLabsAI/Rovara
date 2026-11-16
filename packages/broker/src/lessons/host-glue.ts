@@ -3,7 +3,8 @@
 //   loading     at the dispatch of a step: the lessons that fit the task, the load record (so the worker's report is applied to this stage only) and which tasks used which lessons;
 //   reports     the worker's load report, applied to the manifest its dispatch recorded;
 //   the PR      the "Lessons used" section of a task's pull request and the numbered list a comment refers to;
-//   capture     a merged or closed task puts one message of ids on the `lessons-reflect` queue; a pass reads it, takes a lease and reflects;
+//   capture     a merged or closed task puts one message of ids on the `lessons-reflect` queue; a pass reads it, takes a lease and reflects. So does a person's send-back of a task that is still open
+//               (`noteSentBack`, learn on send-back): its correction can help the next task before this one ends;
 //   upkeep      once a day per project: expired lessons swept, stable trials promoted, the repository lessons file's erasure sweep and weekly pass.
 // Nothing here makes a model call by itself: the reflection worker does, through the runtime's model, which the library gates on the switch.
 import { randomUUID } from "node:crypto";
@@ -20,16 +21,20 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import type { LessonsUsedSection } from "../core/proof/pull-request-body.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { applyLoadReport } from "./counters.js";
+import { logTaskCorrections } from "./correction-log.js";
 import { learnedContextForDispatch } from "./load.js";
 import { modeAllows, resolveLearning } from "./policy.js";
 import type { LessonsRuntime } from "./runtime.js";
 import { documentReflectClaims } from "./reflect-claims.js";
-import { reflectQueueOf, queueReflectQueue, queueReflectVisibility } from "./reflect-queue.js";
+import { SEND_BACK_REFLECTIONS_MAX, reflectQueueOf, queueReflectQueue, queueReflectVisibility, sendBackRequestId } from "./reflect-queue.js";
+import { isHumanSendBack } from "./human-send-backs.js";
+import { NO_REASON_TEXT } from "./task-subject.js";
 import { retryDelayFor, runReflectMessage, type ReflectWorkerDeps } from "./reflect-worker.js";
 import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps } from "./task-end.js";
 import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "./used-in-pr.js";
 import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob } from "./repo-file-job.js";
 import { planLoadFacts } from "./plan-facts.js";
+import { LESSON_USE_KEEP_SECONDS } from "./use-count.js";
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
 
 /** The longest a step's dispatch waits for the loader: a slow load sends nothing, and the step runs as it would without lessons. */
@@ -37,7 +42,8 @@ export const LESSON_LOAD_DEADLINE_MS = 2_500;
 /** The messages one pass takes off the reflection queue. */
 export const REFLECT_PER_PASS = 2;
 const LOAD_RECORD_KEEP_SECONDS = 30 * 86_400;
-const USE_RECORD_KEEP_SECONDS = 180 * 86_400;
+/** The use rows ("used in N tasks", `use-count.ts`) are kept as long as that module counts them. */
+const USE_RECORD_KEEP_SECONDS = LESSON_USE_KEEP_SECONDS;
 const INTENT_REQUEST_CHARS = 600;
 
 /** The workflow modes that carry lessons, and the lesson stage each is. Every other mode (the checks, a publication) carries none. */
@@ -73,6 +79,12 @@ export interface LessonsHost {
   nightly(projects: readonly string[]): Promise<void>;
   /** A pull request of the task was reverted: the task is reflected on again, as a reverted one. */
   noteReverted(taskId: string): Promise<void>;
+  /**
+   * Learn on send-back: a person just sent this task back with their words. One message of ids (`sent_back`, its round) is queued, so the correction is reflected on while the task is still open. Nothing is queued
+   * while lessons are off for the company, where the project's mode does not reflect, for another company's task, a closed task, a send-back with no words of the person's, or past
+   * `SEND_BACK_REFLECTIONS_MAX` rounds (those are learned at the task's end). Never throws.
+   */
+  noteSentBack(taskId: string): Promise<void>;
   /** The task, when it is this company's. */
   ownTask(taskId: string): Promise<TaskRecord | undefined>;
 }
@@ -191,6 +203,11 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     source: input.sources.source, rows: input.sources.rows, settings: runtime.settings,
     reflect: { model: runtime.judgeModel, spend: runtime.spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause },
     process: runtime.process, counters: runtime.counters, log: (event, fields) => log(event, fields),
+    // The "same mistake twice" measure's log (no text): only this company's tasks, in this company's partition.
+    correctionLog: async (entry) => {
+      if (entry.workspaceId !== companyId) return;
+      await logTaskCorrections(flow.store, { companyId, project: entry.project, taskId: entry.taskId, corrections: entry.corrections, now: now() });
+    },
   };
   const workerDeps = (visibility?: ReflectWorkerDeps["visibility"], deadlineMs = LESSONS_WORKER_DEADLINE_SECONDS * 1000): ReflectWorkerDeps => ({
     claims, now, deadlineMs: Math.min(deadlineMs, LESSONS_WORKER_DEADLINE_SECONDS * 1000), ...(visibility === undefined ? {} : { visibility }), log: (event, fields) => log(event, fields),
@@ -246,7 +263,27 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     try { await (await sender()).send({ orgId: companyId, taskId, outcome: "reverted", requestId: randomUUID() }); } catch { log("revert_not_queued"); }
   }
 
-  return { learnedFor, onEvents, usedInPullRequest, listKey, milestone, reflectOne, nightly, noteReverted, ownTask };
+  async function noteSentBack(taskId: string): Promise<void> {
+    try {
+      // Behind the switch: with it off nothing is read or queued. Inside the try: a switch that cannot be read is one log line, never a fault in the send-back.
+      if (!enabled()) return;
+      // The task is read now and must be this company's: the message's company is the task's own, never a caller's claim.
+      const task = await ownTask(taskId);
+      if (task === undefined || task.workflow === undefined || task.closedAt !== undefined) return;
+      const sentBack = task.workflow.decisions.filter(isHumanSendBack);
+      const round = sentBack.length;
+      const latest = sentBack.at(-1);
+      if (latest === undefined || round > SEND_BACK_REFLECTIONS_MAX) return;
+      // Only a person's own words are a correction: no reason, or code's fixed sentence, queues nothing.
+      const words = latest.reason.trim();
+      if (words === "" || words === NO_REASON_TEXT) return;
+      const resolved = await resolveLearning(runtime.settings, companyId, task.project);
+      if (!modeAllows(resolved.mode, "reflect")) return;
+      await (await sender()).send({ orgId: companyId, taskId: task.taskId, outcome: "sent_back", round, requestId: sendBackRequestId(task.taskId, round) });
+    } catch { log("send_back_not_queued"); }
+  }
+
+  return { learnedFor, onEvents, usedInPullRequest, listKey, milestone, reflectOne, nightly, noteReverted, noteSentBack, ownTask };
 }
 
 export type ReflectOutcome = Awaited<ReturnType<typeof runReflectMessage>> | { result: "failed"; retry: true };

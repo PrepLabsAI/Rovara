@@ -225,10 +225,12 @@ export class RuntimeRequalify extends Construct {
     // The drain (AR-3), read only: the READY sessions (index), their workspaces' operations, the setup-run markers and the setup executions' state.
     // Only the attributes the drain reads (REQUALIFY_DRAIN_READS: each read names them in its ProjectionExpression) plus the table and index key attributes DynamoDB requires in the list, and only reads that name their attributes. `Select` is IfExists
     // because GetItem has no Select parameter; the drain's queries always send SPECIFIC_ATTRIBUTES. A refused read makes the drain throw, never count 0.
+    // Lane E2: the drain also reads the core's in-use marks (CORE_ENGINE_IN_USE, core-host/engine-stamp.ts; a test ties the two) and a workspace's operations under a company key
+    // (ORG#<company>#WORKSPACE#<id>), so a core operation is counted once T1 moves the core's rows to company keys.
     grant({
       sid: "DrainRead", actions: ["dynamodb:Query", "dynamodb:GetItem"], resources: [props.state.tableArn, `${props.state.tableArn}/index/${WORKSPACE_SESSION_STATE_INDEX.name}`],
       conditions: {
-        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] },
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*", "CORE_ENGINE_IN_USE", "ORG#*#WORKSPACE#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": [...REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES] },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
       },

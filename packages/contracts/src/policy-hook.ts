@@ -17,6 +17,12 @@ export const POLICY_HOOK_ANSWER_MAX_SECONDS = 300;
 export const POLICY_HOOK_SKEW_SECONDS = 30;
 export const POLICY_HOOK_MAX_BODY_BYTES = 8192;
 export const POLICY_HOOK_PINNED_KEYS_MAX = 2;
+/**
+ * The CorePolicyHook stack parameter's longest value. The settings ride in the broker's and the dispatcher's environments, which Lambda holds to 4,096 bytes, so the cap is what fits
+ * there even when every character needs escaping (tests/contract/lambda-environment-size.test.ts). It holds one RSA-2048 key with an address of up to about 90 characters; two keys
+ * (a rotation) do not fit until the follow-up lane moves the keys out of the environment (BROKER-ENV-HEADROOM, DEC 246) and nothing uses the hook before it lands.
+ */
+export const POLICY_HOOK_PARAMETER_MAX_LENGTH = 540;
 export const POLICY_HOOK_TIMEOUT_SECONDS = 5;
 export const POLICY_HOOK_START_HOLD_SECONDS = 300;
 export const POLICY_HOOK_VALUES_GRACE_SECONDS = 300;
