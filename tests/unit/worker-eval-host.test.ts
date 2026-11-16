@@ -69,7 +69,7 @@ describe("a prompt change runs the eval through the model-access port", () => {
     const { w, access, ports, facts } = await bound({ newPass: true });
     const artifact = read(await runFinalCheckEval(request, ports, facts()));
     expect(artifact).toMatchObject({ outcome: "done", roundKind: "check_unsealed", cache: "hit" });
-    expect(evalResultFromArtifact(artifact).label).toBe("No drop found");
+    expect(evalResultFromArtifact(artifact).label).toBe("No regression measured (eval)");
     expect(access.holds[0]).toEqual({ grant: w.grant, calls: 4, costMicros: 40 });
     expect(access.forwarded).toHaveLength(4);
     expect(new Set(access.scopes).size).toBe(1);

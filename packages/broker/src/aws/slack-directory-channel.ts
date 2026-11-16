@@ -54,7 +54,7 @@ export function slackDirectoryCall(deps: ChannelCommandDependencies & { adapter:
           return ok({ channels: page.spaces.map((entry) => ({ id: entry.space, name: entry.name, is_private: entry.private })), response_metadata: { next_cursor: page.nextCursor ?? "" } });
         }
         case "auth.test":
-          return ok({ team_id: (await send("check", {})).tenant });
+          return ok({ team_id: (await send("check", { tenant: deps.teamId })).tenant });
         default:
           throw new Error(`the Slack adapter has no directory read for ${method}`);
       }

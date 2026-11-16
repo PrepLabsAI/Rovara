@@ -90,8 +90,9 @@ describe("the approval gate: a right approval", () => {
     await gate.decide(attempt());
     const everything = JSON.stringify(await Promise.all([store.get(workflowTaskKey(TASK_ID))]));
     expect(everything).not.toContain(SESSION);
-    const markers = await store.query({ pk: approvalProofMarkerKey(COMPANY, "x").pk });
-    expect(JSON.stringify(markers.items)).not.toContain(SESSION);
+    const marker = await store.get(approvalProofMarkerKey(COMPANY, approvalProofKey({ method: LOCAL_SESSION_METHOD, token: SESSION, requestId: binding() })));
+    expect(marker).toBeDefined();
+    expect(JSON.stringify(marker)).not.toContain(SESSION);
   });
 
   it("rejecting closes the task, and asking for changes sends it back to planning", async () => {

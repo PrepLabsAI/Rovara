@@ -1,4 +1,5 @@
 import type { ContextMcpSession } from "../context-sources/pi-mcp.js";
+import type { UsageCheckpointer } from "../usage.js";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -763,7 +764,9 @@ export async function runWorkflowReviews(input: {
   onProgress?: (message: string) => void;
   /** Called once per reviewer session with what it loaded and left out, as references only (K1 C5a). */
   onLoadedKnowledge?: (manifest: LoadedKnowledgeManifest, role: "CRITIC" | "SECURITY") => void;
-  onUsage?: (usage: { role: "CRITIC" | "SECURITY"; stats: ReturnType<PiSessionHandle["getSessionStats"]>; model: WorkspaceModelConfiguration; outcome: "SUCCEEDED" | "FAILED"; secondReviewTry?: number }) => Promise<void>;
+  onUsage?: (usage: { role: "CRITIC" | "SECURITY"; stats: ReturnType<PiSessionHandle["getSessionStats"]>; model: WorkspaceModelConfiguration; outcome: "SUCCEEDED" | "FAILED"; secondReviewTry?: number; checkpoints?: UsageCheckpointer }) => Promise<void>;
+  /** Per-run dollar stop: the checkpoints of one reviewer session (usage.ts `createUsageCheckpointer`), handed back to `onUsage` for its end report. Absent: none. */
+  usageCheckpoints?: (session: PiSessionHandle) => UsageCheckpointer;
   /**
    * SR-1: the second reviewer (another AI company's model), run CONCURRENTLY with the reviews above in this same operation, as an extra code review with its own model: a bounded loop of at most 3 tries in all (the same model
    * once more, then the next candidate; a context-length rejection is no answer, never an unusable model). Its report is handed to `onSecondReview` only, never added to the reports returned here.
@@ -839,6 +842,7 @@ export async function runWorkflowReviews(input: {
     let usageStats: ReturnType<PiSessionHandle["getSessionStats"]> | undefined;
     let specReview: SpecReviewResult | undefined;
     let usageOutcome: "SUCCEEDED" | "FAILED" = "FAILED";
+    let checkpoints: UsageCheckpointer | undefined;
     let statusOverride: "INTERRUPTED" | undefined = interrupted ? "INTERRUPTED" : undefined;
     // The reviewer's last model call, when it failed: a fixed sentence from the model-call monitor's note (never the provider's text), cleared when a later call answers.
     let modelFailure: string | undefined;
@@ -873,7 +877,10 @@ export async function runWorkflowReviews(input: {
       provider = actualModel.provider;
       version = actualModel.modelId;
       let response: string | undefined;
+      const sessionCheckpoints = input.usageCheckpoints?.(session);
+      checkpoints = sessionCheckpoints;
       unsubscribe = session.subscribe((event: unknown) => {
+        sessionCheckpoints?.observe(event);
         const record = event as { type?: unknown; payload?: { type?: unknown }; message?: unknown };
         if (record.type === "message_end" || record.payload?.type === "message_end") response = assistantText(record.message ?? (event as { message?: unknown }).message);
         const note = sanitizeModelCallEvent(event)?.modelCall;
@@ -989,7 +996,7 @@ export async function runWorkflowReviews(input: {
       session?.dispose();
     }
     if (usageStats !== undefined && input.onUsage !== undefined) {
-      try { await input.onUsage({ role, stats: usageStats, model: { provider, modelId: version }, outcome: usageOutcome }); }
+      try { await input.onUsage({ role, stats: usageStats, model: { provider, modelId: version }, outcome: usageOutcome, ...(checkpoints === undefined ? {} : { checkpoints }) }); }
       catch { parsed = { status: "UNKNOWN", findings: [], failureReason: "USAGE_UNAVAILABLE" }; }
     } else if (input.onUsage !== undefined) {
       parsed = { status: "UNKNOWN", findings: [], failureReason: "USAGE_UNAVAILABLE" };

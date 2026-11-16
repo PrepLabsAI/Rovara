@@ -6,6 +6,7 @@ import {
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { splitTextAtLines } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 import { isE2EPlanCorrectionBlockReason } from "./task-records.js";
@@ -293,6 +294,11 @@ function currentReviews(workflow: WorkflowSnapshot) {
   return (workflow.reviews ?? []).filter((review) => current === undefined || review.candidateDigest === current);
 }
 
+/** General fakes (DEC 234): the words that follow any "checks passed" line when a Rovara-made fake answered one of the checks; "" otherwise. */
+function madeChecksNote(workflow: WorkflowSnapshot): string {
+  return workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? ` (${GENERAL_FAKE_MADE_NOTE}: a check was answered by a Rovara-made fake)` : "";
+}
+
 function checkedAndPassing(workflow: WorkflowSnapshot): boolean {
   const current = workflow.candidate?.digest;
   return current !== undefined && workflow.verification?.candidateDigest === current
@@ -512,7 +518,7 @@ function reviewBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
   const unfinished = reviews.filter((review) => ["UNKNOWN", "FAILED", "INTERRUPTED"].includes(review.status));
   const text = unfinished.length > 0
     ? `A review couldn't finish (${unfinished.map((review) => `${review.role === "SECURITY" ? "security" : "code"} review: ${plainReviewFailure(review.failureReason, review.status)}`).join("; ")}). Nothing was sent to GitHub.`
-    : `${context.workflow.verification?.reviewOnly === true && workflowIsReviewOnly(context.workflow.checkPolicy) ? "No automated check applied, and" : "The checks passed, but"} the reviews couldn't finish. ${plainBlockReason(context.workflow.blockReason)} Nothing was sent to GitHub.`;
+    : `${context.workflow.verification?.reviewOnly === true && workflowIsReviewOnly(context.workflow.checkPolicy) ? "No automated check applied, and" : `The checks passed${madeChecksNote(context.workflow)}, but`} the reviews couldn't finish. ${plainBlockReason(context.workflow.blockReason)} Nothing was sent to GitHub.`;
   return { text, buttons: [...exits.retryReviews(), exits.close] };
 }
 
@@ -607,7 +613,7 @@ function publishFailed(context: WorkflowMessageContext, exits: ReturnType<typeof
     return { text: "The code changed after its checks and reviews passed, so I didn't open the pull request. Send it back to coding, or run the checks again on the current code.",
       buttons: [...exits.sendBack(), ...((context.workflow.pullRequests?.length ?? 0) === 0 ? exits.retryChecks("Run checks again") : []), exits.close] };
   }
-  return { text: `Checks and reviews passed, but I couldn't open the draft pull request (${plainPublishFailure(failure.category)}). The checked code is kept.`,
+  return { text: `Checks and reviews passed${madeChecksNote(context.workflow)}, but I couldn't open the draft pull request (${plainPublishFailure(failure.category)}). The checked code is kept.`,
     buttons: [exits.retryPublish, exits.close] };
 }
 
@@ -826,8 +832,10 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
   const passed = workflow.verification?.results.length;
   // Review only: no automated check applied, so nothing "passed".
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
-  const allPassed = reviewOnly ? "No automated check applied." : passed === undefined ? "The checks passed." : passed === 1 ? "The check passed." : `All ${passed} checks passed.`;
-  const checksAndReviewsPassed = reviewOnly ? "Reviews passed (no automated check applied)." : "Checks and reviews passed.";
+  // General fakes (DEC 234): a check a Rovara-made fake answered is never said to have passed on its own word.
+  const madeNote = reviewOnly ? "" : madeChecksNote(workflow);
+  const allPassed = reviewOnly ? "No automated check applied." : `${passed === undefined ? "The checks passed." : passed === 1 ? "The check passed." : `All ${passed} checks passed.`}${madeNote}`;
+  const checksAndReviewsPassed = reviewOnly ? "Reviews passed (no automated check applied)." : `Checks and reviews passed.${madeNote}`;
   if (context.publishFailure !== undefined && workflow.stage === "PULL_REQUEST") return publishFailed(context, exits, context.publishFailure);
   switch (`${workflow.stage}/${workflow.state}`) {
     case "PLAN/RUNNING": return plain(context.planGroundingHeld === true ? PLAN_GROUNDING_HOLD_LINE : planRunning(context));

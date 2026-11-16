@@ -1,6 +1,7 @@
 import type { WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
+import type { MoneyStop } from "./money-stop.js";
 import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
 import type { TaskTestEnvironment } from "../test-env/seam.js";
 import type {
@@ -24,6 +25,7 @@ import type {
   WorkerMachines,
   WorkflowPath,
   WorkflowIntent,
+  WorkflowOwnerAuthority,
   WorkflowReviewPhase,
   WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -57,6 +59,16 @@ export interface TaskCaller {
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
    */
   scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
+  /**
+   * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
+   * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
+   */
+  stepUp?: { at: string; method: string } | undefined;
+  /**
+   * DEC 236h: set only by the host's sign-in, from the verified client's registration, when the request comes from the Rovara web app's own sign-in client (the one the operator marked; never an administrator's
+   * registration, and never another full-access client such as an AI tool's). Only the act that is the web page's alone (accepting a security finding, `security-accept.ts`) reads it.
+   */
+  webApp?: true | undefined;
 }
 
 /** Starting work always names the trusted server surface; other task actions need no origin. */
@@ -93,6 +105,12 @@ export interface TaskAccess {
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
   /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
   checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
+  /**
+   * The owner moves that decide or start paid work on a task already running (send back, review findings, continue): who the engine records as acting when this principal is the task's owner or a co-owner.
+   * `authority` is what the workflow engine checks the actor against (a hosted product's co-owners). `items` are steps for the move's own transaction (a hosted product's live access fence, as `checkStep`'s `items`): a change of who may act between the check and the commit refuses the move. Undefined: not an owner, so the move is refused as a task they cannot see. Absent: Code's own rule,
+   * where the owner of the install, or the person the task runs for, acts as the task's owner (`ownerActingOf`).
+   */
+  ownerActing?(principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<{ actorId: string; authority?: WorkflowOwnerAuthority; items?: readonly TransactItem[] } | undefined>;
 }
 
 /**
@@ -191,6 +209,11 @@ export interface TaskFlowDeps {
   queues: QueueService;
   outbox: TransactionalOutbox;
   machines: WorkerMachines;
+  /**
+   * A deployed install's per-run dollar stop and usage flush (money-stop.ts): a Stop and a close let a running model run send its usage first, a run is stopped at its cap as its usage is
+   * booked, and each model run is admitted (`run.start`) before it is handed to a worker that reports usage while it runs. Absent (the laptop): today's Stop, close and dispatch.
+   */
+  moneyStop?: MoneyStop;
   admission: Admission;
   audit: AuditSink;
   projects: ProjectSource;
@@ -270,6 +293,11 @@ export interface TaskFlowDeps {
    * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.
    */
   keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
+  /**
+   * TE-C6 (behind `ROVARA_FLAKY_RERUN`): the failed checks of a run that may be recorded as passed because every test that failed in them passed on the worker's one rerun, with those tests' ids, and the base's flaky set
+   * (undefined when it is not known: then no test is flaky on the base). Read BEFORE the verification is recorded; a fault, a missing answer or an empty one changes nothing (the check stays failed). Absent: nothing is excused.
+   */
+  flakyChecks?: (input: { task: TaskRecord; operation: OperationRecord; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<{ byCheck: ReadonlyMap<string, readonly string[]>; baseFlaky: readonly string[] | undefined } | undefined>;
   /** The design review stage. Absent: no task enters it. */
   designReview?: DesignReviewSteps;
   /**
@@ -327,6 +355,12 @@ export interface TaskFlowDeps {
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
    */
   learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
+  /**
+   * Learn on send-back: told after a PERSON's send-back of the task to coding is committed (the owner's send-back action calls it, best effort, after its own write). The lessons host queues one reflection of ids so the
+   * correction can help the next task while this one is open; it reads the task itself (company, the send-back's words, the switch and the project's mode), so the caller passes only the task's id. It never throws into the
+   * action. Absent: the install has no lessons, and the send-back is learned from only when the task ends.
+   */
+  lessonsSentBack?: (taskId: string) => Promise<void>;
   /**
    * The lighter flow, install-wide: a change whose plan is estimated exactly small skips its planning steps (plan check, design review, the requirements, design and plan approvals) and gets, after each push, the
    * reviewer's fixed questions and the quick checks of what it touched; one that grows after the build stops and gets the grown tier's reviews on its current head before it can merge. Off or absent: today's flow.

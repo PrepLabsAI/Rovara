@@ -15,6 +15,7 @@ import { recordGrowth, recordTier, tierFromDiff, type TierFile } from "../decisi
 import { changedFilesFromHostFiles, parseChangedFiles } from "../proof/changed-files.js";
 import { recomputeRisk, type ChangedFilesRead, type LessonsUsedSection } from "../proof/pull-request-body.js";
 import { linearIssueKeyOfBindings } from "../proof/linear-close.js";
+import { acceptedByOf } from "../task-flow/finding-accept.js";
 import { workflowPullRequestBody } from "../proof/workflow-pull-request-body.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { workspaceOperations } from "../task-flow/reads.js";
@@ -156,11 +157,16 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
   const linearIssueKey = await ticketIssueKeyOf(deps, task);
+  // Who accepted which finding is shown when it can be read; a read that fails leaves it out of the description (logged by error name only).
+  const acceptedBy = await acceptedByOf(deps.store, task.taskId, candidate.digest).catch((error: unknown) => {
+    log(deps, { event: "build_step.accepted_by_unreadable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    return undefined;
+  });
   for (const entry of hosts) {
     try {
       // Each repository's description names the lessons that repository's readers may read.
       const lessonsUsed = await lessonsUsedOf(deps, task, entry.repositoryId);
-      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
+      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);
       const ref = changeRequestRef(entry.url, entry.number);
       beforeRequest?.();

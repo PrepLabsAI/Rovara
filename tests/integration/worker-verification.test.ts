@@ -15,6 +15,8 @@ import {
   AGENTX_PREAMBLE_VERSION,
   CheckReportSchema,
   EvalRoundArtifactSchema,
+  EvidenceRawSchema,
+  FlakyRerunFileSchema,
   TestProofSchema,
   createCandidateManifest,
   lastAssistantResponse,
@@ -40,6 +42,7 @@ import { commitCandidateWorktree, readCandidateRepositories } from "../../packag
 import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import * as buildSourceExport from "../../packages/worker/src/e2e-build-source-export.js";
+import * as baselineAncestry from "../../packages/worker/src/verification/baseline-ancestry.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -108,6 +111,11 @@ vi.mock("../../packages/worker/src/e2e-build-source-export.js", async (importOri
   return { ...original, exportCandidateBuildSourceInScratch: vi.fn(original.exportCandidateBuildSourceInScratch) };
 });
 
+vi.mock("../../packages/worker/src/verification/baseline-ancestry.js", async (importOriginal) => {
+  const original: typeof baselineAncestry = await importOriginal();
+  return { ...original, findBaselineAncestor: vi.fn(original.findBaselineAncestor) };
+});
+
 /** One model request: the conversation the model was given, without the system message. */
 type Request = Array<{ role: string; content: unknown }>;
 
@@ -117,6 +125,9 @@ async function runTask(options: {
   evalRequest?: Extract<WorkerInvocation, { kind: "task" }>["payload"]["evalRequest"];
   evalFinalCheck?: TaskInvocationDependencies["evalFinalCheck"];
   readiness?: ProjectCommand[];
+  /** TE-C6: the test environment's plan, as the broker sends it (`flakyRerun` asks for the rerun). */
+  testEnvironment?: NonNullable<Extract<WorkerInvocation, { kind: "task" }>["payload"]["testEnvironment"]>;
+  evidenceCapture?: true;
   workflowMode?: "CHECKS" | "IMPLEMENT";
   prepared?: ProjectCommand[];
   runners?: CheckRunners;
@@ -137,6 +148,8 @@ async function runTask(options: {
   originalCode?: OriginalCode;
   /** The scripted model's context window. Pi 1.5 compacts a long transcript on its own, and a compaction asks the scripted model for a summary, which would use up the script; a run with huge outputs gives the model room. */
   contextWindow?: number;
+  /** More payload fields (TE-C1: the test environment's plan and the evidence request). */
+  payloadExtra?: Record<string, unknown>;
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime(options.contextWindow === undefined ? {} : { contextWindow: options.contextWindow });
   const requests: Request[] = [];
@@ -153,7 +166,7 @@ async function runTask(options: {
   const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
     protocolVersion: 1, kind: "task", operationId: options.operationId ?? randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
     callbackCapability: "c".repeat(64),
-    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.evalRequest === undefined ? {} : { evalRequest: options.evalRequest }), ...(options.readiness === undefined ? {} : { readiness: options.readiness }), ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }) },
+    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.evalRequest === undefined ? {} : { evalRequest: options.evalRequest }), ...(options.readiness === undefined ? {} : { readiness: options.readiness }), ...(options.testEnvironment === undefined ? {} : { testEnvironment: options.testEnvironment }), ...(options.evidenceCapture === undefined ? {} : { evidenceCapture: true as const }), ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }), ...(options.payloadExtra ?? {}) },
   };
   const rootPath = options.rootPath ?? await workspaceRoot(options.prepared ?? options.readiness ?? []);
   const events: WorkerEvent[] = [];
@@ -1210,6 +1223,97 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
     expect(lastAssistantResponse(run.events)).toBe(`All good now.\n${DONE}`);
   });
 
+  describe("TE-C6: a failing test that passes on its one rerun (the plan's flakyRerun)", () => {
+    const pytestCheck: ProjectCommand = { cwd: "app", executable: "pytest", args: ["--junitxml=../report.xml"], timeoutSeconds: 60 };
+    const plan = () => ({
+      revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full" as const, alwaysRun: [], fullSuiteOn: [] },
+      checks: [{ id: "unit", kind: "test" as const, selectArgs: ["{tests}"] }], flakyRerun: true as const,
+    });
+    const report = (state: "passed" | "failed") => `<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="1"><testcase classname="tests.test_a" name="test_b" file="tests/test_a.py">${state === "failed" ? '<failure message="x">x</failure>' : ""}</testcase></testsuite></testsuites>`;
+    /** The check's runner: the round's own run fails; each rerun (an id argument) answers `onRerun`. */
+    function runnersFor(rootPath: string, onRerun: "passed" | "failed") {
+      const calls: ProjectCommand[] = [];
+      const runners: CheckRunners = {
+        async runAgentCommand() { throw new Error("no agent commands"); },
+        async runProjectCommand(command) {
+          calls.push(command);
+          const state = command.args.some((arg) => arg.includes("::")) ? onRerun : "failed";
+          await writeFile(join(rootPath, "report.xml"), report(state));
+          return { exitCode: state === "failed" ? 1 : 0, timedOut: false, stdout: "", stderr: "" };
+        },
+      };
+      return { runners, calls };
+    }
+
+    it("flaky: no extra turn, the model is never told, and the report still says regression", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`)], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan() });
+      expect(run.failure).toBeUndefined();
+      expect(run.report).toMatchObject({ status: "regression", extraTry: "not_needed" });
+      expect(run.report!.checks).toEqual([expect.objectContaining({ id: "readiness:0", before: "passed", after: "failed", class: "regression" })]);
+      expect(fake.calls).toHaveLength(2);
+      expect(run.requests.flatMap(checksMessages)).toEqual([]);
+      expect(run.requests).toHaveLength(2);
+    });
+
+    it("a verification run that asked for evidence reruns once and names the flaky test in evidence-raw.json; the report is untouched and the raw file reads the round's own report", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "CHECKS", testEnvironment: plan(), evidenceCapture: true });
+      expect(run.failure).toBeUndefined();
+      expect(run.report).toMatchObject({ status: "regression" });
+      expect(run.report!.checks[0]).toMatchObject({ class: "regression", after: "failed" });
+      expect(fake.calls).toHaveLength(2);
+      const raw = EvidenceRawSchema.parse(JSON.parse(run.artifacts.find((artifact) => artifact.name === "evidence-raw.json")!.content));
+      expect(raw.checks[0]?.tests).toMatchObject({ total: 1, failed: 1, flakyOnRerun: ["tests/test_a.py::test_b"], flakyOnRerunCount: 1 });
+    });
+
+    it("saves the broker's flaky-rerun file for a fully flaky check, from a coding run (no extra turn) and from a checks run with no evidence asked for", async () => {
+      const fileOf = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.filter((artifact) => artifact.name === "flaky-rerun.json").map((artifact) => FlakyRerunFileSchema.parse(JSON.parse(artifact.content)));
+      const coding = await gitWorkspaceRoot([pytestCheck]);
+      const codingRun = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`)], readiness: [pytestCheck], runners: runnersFor(coding, "passed").runners, rootPath: coding, workflowMode: "IMPLEMENT", testEnvironment: plan() });
+      expect(fileOf(codingRun)).toEqual([{ schemaVersion: 1, checks: [{ checkId: "readiness:0", flaky: ["tests/test_a.py::test_b"] }] }]);
+      const checks = await gitWorkspaceRoot([pytestCheck]);
+      const checksRun = await runTask({ steps: [], readiness: [pytestCheck], runners: runnersFor(checks, "passed").runners, rootPath: checks, workflowMode: "CHECKS", testEnvironment: plan() });
+      expect(fileOf(checksRun)).toHaveLength(1);
+    });
+
+    it("saves no such file when the test fails again (control run), when the extra turn is given, or without the plan's flag", async () => {
+      const count = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.filter((artifact) => artifact.name === "flaky-rerun.json").length;
+      const again = await gitWorkspaceRoot([pytestCheck]);
+      expect(count(await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("Tried.\nAgentX result: not done")], readiness: [pytestCheck], runners: runnersFor(again, "failed").runners, rootPath: again, workflowMode: "IMPLEMENT", testEnvironment: plan() }))).toBe(0);
+      const off = await gitWorkspaceRoot([pytestCheck]);
+      expect(count(await runTask({ steps: [], readiness: [pytestCheck], runners: runnersFor(off, "passed").runners, rootPath: off, workflowMode: "CHECKS" }))).toBe(0);
+    });
+
+    it("the same run without the flag reruns nothing and writes no flaky key", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "CHECKS", evidenceCapture: true });
+      expect(fake.calls).toHaveLength(1);
+      const raw = EvidenceRawSchema.parse(JSON.parse(run.artifacts.find((artifact) => artifact.name === "evidence-raw.json")!.content));
+      expect(raw.checks[0]?.tests).not.toHaveProperty("flakyOnRerun");
+    });
+
+    it("control run: a test that fails again still gives the extra turn, with the failure in what the model reads", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "failed");
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("I could not fix it.\nAgentX result: not done")], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan() });
+      expect(run.report).toMatchObject({ status: "regression", extraTry: "given" });
+      expect(run.requests.flatMap(checksMessages)).toHaveLength(1);
+    });
+
+    it("without the plan (the broker sends none for a coding run unless it asks for the rerun) nothing is rerun and the extra turn is given as it always was", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("Tried.\nAgentX result: not done")], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT" });
+      expect(run.report).toMatchObject({ extraTry: "given" });
+      expect(fake.calls.some((call) => call.args.some((arg) => arg.includes("::")))).toBe(false);
+      expect(run.requests.flatMap(checksMessages)).toHaveLength(1);
+    });
+  });
+
   it("5. a model error on the last turn: not_verified/error, and no checks ran (Review Focus 3)", async () => {
     const shell = scriptedShell({ pytest: { exitCode: 0, output: "3 passed\n" } });
     const fake = fakeRunners();
@@ -1994,3 +2098,82 @@ it("the eval shares the CHECKS deadline and joins the runner before reporting st
     expect(run.elapsed).toBeLessThan(7000);
   } finally { await w.cleanup(); }
 }, 10_000);
+
+describe("TE-C1: the baseline claim of a verification run", () => {
+  const BASE_PLAN = { revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "lint", kind: "lint" }] };
+  const git = (directory: string, ...args: string[]): string => execFileSync("git", ["-C", directory, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", ...args], { encoding: "utf8" }).trim();
+  /** A workspace whose repository has two commits; the task's base (the manifest's resolved commit) is the second. */
+  async function twoCommitWorkspace(): Promise<{ rootPath: string; first: string; second: string; repository: string }> {
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const repository = join(rootPath, "app");
+    const first = git(repository, "rev-parse", "HEAD");
+    await writeFile(join(repository, "second.txt"), "two\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "second");
+    const second = git(repository, "rev-parse", "HEAD");
+    const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<Record<string, unknown>> };
+    manifest.repositories[0]!["resolvedCommit"] = second;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    return { rootPath, first, second, repository };
+  }
+  const rawOf = (run: Awaited<ReturnType<typeof runTask>>) => {
+    const artifact = run.artifacts.find((item) => item.name === "evidence-raw.json");
+    return artifact === undefined ? undefined : (JSON.parse(artifact.content) as { baseline?: unknown; checks: unknown[] });
+  };
+  /** What an agent (or a check) can do to a repository's .git: a rewritten ref, a replace ref, a shallow file and grafts. */
+  async function tamper(repository: string, first: string, second: string, stranger: string): Promise<void> {
+    git(repository, "update-ref", "refs/heads/rewritten", first);
+    await writeFile(join(repository, ".git", "shallow"), `${second}\n`);
+    await writeFile(join(repository, ".git", "info", "grafts"), `${second} ${stranger}\n`).catch(() => undefined);
+    await writeFile(join(repository, ".git", "packed-refs"), `${stranger} refs/heads/main\n`);
+  }
+
+  it("writes the nearest ancestor of the base into evidence-raw.json when the plan carried candidates, found BEFORE any check runs, and what the agent or a check did to .git changes nothing", async () => {
+    const { rootPath, first, second, repository } = await twoCommitWorkspace();
+    const stranger = "9".repeat(40);
+    // The agent's sandbox did this before the checks round started.
+    await tamper(repository, first, second, stranger);
+    const gitDirectory = join(repository, ".git");
+    expect(await readFile(join(gitDirectory, "shallow"), "utf8")).toContain(second);
+    const order: string[] = [];
+    vi.mocked(baselineAncestry.findBaselineAncestor).mockClear();
+    vi.mocked(baselineAncestry.findBaselineAncestor).mockImplementationOnce(async (input) => { order.push("ancestry"); return (await vi.importActual<typeof baselineAncestry>("../../packages/worker/src/verification/baseline-ancestry.js")).findBaselineAncestor(input); });
+    const fake = fakeRunners();
+    const tampering: CheckRunners = { ...fake.runners, runProjectCommand: async (command, ...rest) => {
+      order.push("check");
+      // The check itself (project code) does it again, and adds a replace ref.
+      git(repository, "update-ref", "refs/heads/rewritten-by-check", first);
+      return fake.runners.runProjectCommand(command, ...rest);
+    } };
+    const run = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: tampering, rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: stranger }, { sha: first }] } } });
+    expect(run.failure).toBeUndefined();
+    // Positive controls: the ancestry step ran once, before the first check, and the check really ran.
+    expect(vi.mocked(baselineAncestry.findBaselineAncestor)).toHaveBeenCalledTimes(1);
+    expect(order[0]).toBe("ancestry");
+    expect(order).toContain("check");
+    expect(rawOf(run)?.baseline).toEqual({ sha: first, commitsBack: 1 });
+  }, 60_000);
+
+  it("writes nothing for a plan with no candidates (an old engine), and for a task with more than one repository", async () => {
+    const { rootPath } = await twoCommitWorkspace();
+    const plain = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: BASE_PLAN } });
+    expect(plain.failure).toBeUndefined();
+    expect(rawOf(plain)).toBeUndefined();
+    const two = await twoCommitWorkspace();
+    const manifestPath = join(two.rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<Record<string, unknown>> };
+    await mkdir(join(two.rootPath, "second-app"));
+    manifest.repositories.push({ ...manifest.repositories[0]!, name: "second-app", path: "second-app" });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(two.rootPath, "second-app", "README.md"), "second\n");
+    execFileSync("git", ["init", "-q", join(two.rootPath, "second-app")]);
+    git(join(two.rootPath, "second-app"), "add", ".");
+    git(join(two.rootPath, "second-app"), "commit", "-qm", "second app");
+    manifest.repositories[1]!["resolvedCommit"] = git(join(two.rootPath, "second-app"), "rev-parse", "HEAD");
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const many = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }] } } });
+    expect(many.failure).toBeUndefined();
+    expect(rawOf(many)?.baseline).toBeUndefined();
+  }, 60_000);
+});

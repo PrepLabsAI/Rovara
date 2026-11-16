@@ -271,7 +271,8 @@ describe("no callers yet", () => {
     });
   it("nothing outside the new files (and their tests and the contracts barrel) imports them", () => {
     // FIX-0518: the test-account model-host check is the first caller (a test account is never for a model host), and it reads the catalog's rows, so it is allowed to import them.
-    const own = new Set([...NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`), "packages/contracts/src/test-account-model-hosts.ts"]);
+    // General fakes (DEC 234): packages/contracts/src/general-fakes.ts imports the catalog's MODEL_REDIRECT_ENV_NAMES only to REFUSE them as a fake's base-URL variable, so a fake can never take a model client's traffic.
+    const own = new Set([...NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`), "packages/contracts/src/test-account-model-hosts.ts", "packages/contracts/src/general-fakes.ts"]);
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {

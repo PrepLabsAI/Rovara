@@ -1,4 +1,5 @@
 import {
+  Aws,
   CfnOutput,
   type CfnTag,
   RemovalPolicy,
@@ -10,6 +11,8 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { AgentDnsFirewall, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
+import { EgressAlarms, alertsTopicFromName } from "./egress-alarms.js";
 import { Ec2WorkerFoundation } from "./ec2-workers.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 
@@ -19,6 +22,8 @@ export const AGENTX_PRODUCTION_INSTANCE_TYPE = "m6g.large";
 
 const DEFAULT_AZ_IDS: Readonly<Record<string, readonly [string, string]>> = {
   "us-east-1": ["use1-az1", "use1-az2"],
+  // The zones the live staging foundation's subnets use (agentx-staging-foundation, 2026-11-15).
+  "us-west-2": ["usw2-az1", "usw2-az2"],
 };
 
 /**
@@ -99,6 +104,7 @@ export class ProductionFoundationStack extends Stack {
     const privateSubnets: ec2.CfnSubnet[] = [];
     const privateRouteTables: ec2.CfnRouteTable[] = [];
     const privateRoutes: ec2.CfnRoute[] = [];
+    const natGateways: Array<{ az: string; natGateway: ec2.CfnNatGateway }> = [];
 
     for (const index of [0, 1] as const) {
       const suffix = index + 1;
@@ -133,6 +139,7 @@ export class ProductionFoundationStack extends Stack {
         tags: resourceTags(`${naming.resourcePrefix}-nat-${suffix}`, naming),
       });
       natGateway.addResourceDependency(publicRoute);
+      natGateways.push({ az: configuration.availabilityZoneIds[index], natGateway });
 
       const privateSubnet = new ec2.CfnSubnet(this, `PrivateSubnet${suffix}`, {
         availabilityZoneId: configuration.availabilityZoneIds[index],
@@ -203,6 +210,26 @@ export class ProductionFoundationStack extends Stack {
       workspaceKey,
       instanceType: configuration.instanceType,
     });
+
+    // Named environments: the machines in the VPC resolve only an allowlist, and unusual egress raises an alarm. The legacy production template stays as it is.
+    if (naming.env !== undefined) {
+      const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID);
+      const dnsFirewall = new AgentDnsFirewall(this, "AgentDnsFirewall", {
+        env: naming.env,
+        vpcId: vpc.ref,
+        baseAllowDomains,
+        extraAllowDomains: parseExtraAllowDomains(this.node.tryGetContext(EGRESS_ALLOW_DOMAINS_CONTEXT_KEY), baseAllowDomains),
+      });
+      // The project list's id, for whatever keeps the approved project domains on it (the template never owns its contents).
+      new CfnOutput(this, "ProjectAllowListId", { value: dnsFirewall.projectAllowListId });
+      new EgressAlarms(this, "EgressAlarms", {
+        env: naming.env,
+        resourcePrefix: naming.resourcePrefix,
+        dnsFirewallLogGroup: dnsFirewall.logGroup,
+        natGateways,
+        alertsTopic: alertsTopicFromName(this, "OperatorAlerts", naming.alertsTopicName),
+      });
+    }
 
     new CfnOutput(this, "VpcId", { value: vpc.ref });
     new CfnOutput(this, "PrivateSubnetIds", {

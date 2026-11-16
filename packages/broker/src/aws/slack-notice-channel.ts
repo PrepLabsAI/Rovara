@@ -111,7 +111,7 @@ export function createSlackNoticeChannel(deps: SlackNoticeChannelDependencies): 
     },
     async deleteCanvas(canvasId) {
       if (!/^F[A-Z0-9]{8,}$/.test(canvasId)) throw new Error("task Canvas ID is invalid");
-      return (await command("delete_document", { documentId: canvasId })).deleted ? "deleted" : "unknown";
+      return (await command("delete_document", { tenant: deps.teamId, documentId: canvasId })).deleted ? "deleted" : "unknown";
     },
   };
 }

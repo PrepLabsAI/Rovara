@@ -13,7 +13,7 @@ const e2eDockerfile = read("environments/e2e-executor/Dockerfile");
 const instructions = dockerfile.split("\n").filter((row) => !row.startsWith("#") && row.trim() !== "");
 interface Step { name?: string; run?: string; uses?: string; env?: Record<string, string> }
 interface Job { needs?: unknown; if?: string; "runs-on"?: string; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[] }
-const ci = YAML.parse(read(".github/workflows/ci.yml")) as { jobs: Record<string, Job> };
+const ci = YAML.parse(read(".github/workflows/ci.yml")) as { permissions: Record<string, string>; jobs: Record<string, Job> };
 const job = ci.jobs["device-runtime"]!;
 const runs = job.steps.map((step) => step.run ?? "").join("\n");
 
@@ -62,14 +62,15 @@ describe("the device executor image", () => {
 });
 
 describe("the CI job that runs the emulator", () => {
-  it("runs on x86-64 Linux (the emulator image is x86-64 only) behind the same Markdown-only skip as the other heavy jobs, with its own time limit, and the one gate waits for it", () => {
+  it("runs on x86-64 Linux (the emulator image is x86-64 only) planned like linux-runtime (only when the device area changes, always in a FULL run), with its own time limit, read-only permissions, and the one gate does NOT wait for it yet (informational until its first real run has been read)", () => {
     expect(job["runs-on"]).toBe("ubuntu-latest");
-    expect(job.needs).toBe("scope");
-    expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
+    expect(job.needs).toBe("plan");
+    expect(job.if).toBe("needs.plan.outputs.device == 'true'");
     expect(job["timeout-minutes"]).toBeGreaterThan(0);
     expect(job["timeout-minutes"]).toBeLessThanOrEqual(90);
-    expect(ci.jobs["local"]!.needs).toContain("device-runtime");
-    expect(job.permissions).toEqual({ contents: "read", packages: "read" });
+    expect(ci.jobs["local"]!.needs).not.toContain("device-runtime");
+    expect(job.permissions).toBeUndefined();
+    expect(ci.permissions).toEqual({ contents: "read" });
   });
 
   it("opens /dev/kvm on the runner, says plainly when it is missing, builds the image from the pinned base's local copy and runs the one test with Docker and the image named", () => {
@@ -78,6 +79,7 @@ describe("the CI job that runs the emulator", () => {
     expect(runs).toContain('node scripts/ci-images.ts dockerfile environments/device-executor/Dockerfile "$RUNNER_TEMP/device-executor.Dockerfile"');
     expect(runs).toContain('docker build -f "$RUNNER_TEMP/device-executor.Dockerfile" -t rovara-device-executor:ci .');
     expect(runs).not.toContain("-f environments/");
+    expect(runs).toContain("node scripts/ci-images.ts pull --github-env node-build");
     expect(runs.indexOf("ci-images.ts pull")).toBeLessThan(runs.indexOf("docker build"));
     expect(runs.indexOf("npm run build")).toBeLessThan(runs.indexOf("vitest run tests/linux/device-evidence-emulator.test.ts"));
     const test = job.steps.find((step) => (step.run ?? "").includes("tests/linux/device-evidence-emulator.test.ts"))!;

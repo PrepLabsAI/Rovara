@@ -15,7 +15,7 @@ export interface ChannelLinkWebDependencies {
   /** Canonical API origin. */
   origin: string;
   authenticateSession(sessionId: string): Promise<DeveloperCaller | undefined>;
-  preview(code: string): Promise<{ channel: string; maskedUserId: string } | undefined>;
+  preview(code: string, developerId: string): Promise<{ channel: string; maskedUserId: string } | undefined>;
   redeem(developerId: string, code: string): Promise<ChannelLink>;
 }
 
@@ -63,7 +63,7 @@ export function createChannelLinkWeb(deps: ChannelLinkWebDependencies) {
       }
     }
 
-    const preview = await deps.preview(code);
+    const preview = await deps.preview(code, caller.developerId);
     if (preview === undefined) return expired();
     const currentCsrf = parseCookie(request.headers, CSRF_COOKIE);
     const csrf = isCsrf(currentCsrf) ? currentCsrf : randomBytes(32).toString("base64url");

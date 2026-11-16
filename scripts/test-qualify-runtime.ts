@@ -36,7 +36,8 @@ import { acquireRequalifyLock, releaseRequalifyLock } from "../packages/broker/s
 import { recordRenewalSuccess } from "../packages/broker/src/aws/runtime-requalify-heartbeat.js";
 import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
-import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import { environmentE2eFeatureRuntimeCatalogId, environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import { BROKER_NAMES_VARIABLE } from "../packages/contracts/src/broker-environment.js";
 import {
   QUALIFICATION_INSTANCE_TYPE,
   QUALIFICATION_POLL_TIMEOUT_MS,
@@ -524,14 +525,21 @@ function reportLeftovers(state: RunState, options: RunOptions, print: (line: str
   }
 }
 
-/** The feature-verifier catalog ID the deployed Broker is configured with: a literal in its environment, as test-deploy reads it. */
-export function featureCatalogIdFromTemplate(body: unknown): string {
+/**
+ * The feature-verifier catalog ID the deployed Broker is configured with: a literal in its environment, as test-deploy reads it. A named environment's broker whose environment is
+ * packed (ENV-ROOM: it has AGENTX_NAMES) is given no literal: it derives the ID from the environment's name, the value the infrastructure checks at synthesis, so that is the answer
+ * when no function carries a literal. Anything else that has no single literal is refused.
+ */
+export function featureCatalogIdFromTemplate(body: unknown, env?: string): string {
   let template: { Resources?: Record<string, { Type?: string; Properties?: { Environment?: { Variables?: Record<string, unknown> } } }> };
   try { template = typeof body === "string" ? JSON.parse(body) as typeof template : body as typeof template; } catch { throw new Error("the control-plane template is not JSON; cannot find the feature catalog"); }
-  const ids = new Set(Object.values(template.Resources ?? {}).flatMap((resource) => {
-    const value = resource.Type === "AWS::Lambda::Function" ? resource.Properties?.Environment?.Variables?.["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"] : undefined;
+  const functions = Object.values(template.Resources ?? {}).filter((resource) => resource.Type === "AWS::Lambda::Function");
+  const ids = new Set(functions.flatMap((resource) => {
+    const value = resource.Properties?.Environment?.Variables?.["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"];
     return typeof value === "string" ? [value] : [];
   }));
+  const packed = functions.some((resource) => resource.Properties?.Environment?.Variables?.[BROKER_NAMES_VARIABLE] !== undefined);
+  if (ids.size === 0 && packed && env !== undefined) return environmentE2eFeatureRuntimeCatalogId(env);
   const [only] = [...ids];
   if (ids.size !== 1 || only === undefined) throw new Error("the deployed Broker has no single literal AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID, so the registered generation cannot be read");
   return only;
@@ -602,7 +610,7 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
     const controlPlaneName = environmentStackName(args.env, "control-plane");
     const table = requireOutput(outputsOf(await stack(controlPlaneName)), "StateTableName", controlPlaneName);
     const body = (await cloudFormation.send(new GetTemplateCommand({ StackName: controlPlaneName }))).TemplateBody;
-    live = { table, catalogId: featureCatalogIdFromTemplate(body) };
+    live = { table, catalogId: featureCatalogIdFromTemplate(body, args.env) };
     return live;
   };
 

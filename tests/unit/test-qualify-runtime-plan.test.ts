@@ -287,6 +287,14 @@ describe("featureCatalogIdFromTemplate", () => {
     }
     expect(() => featureCatalogIdFromTemplate("not json")).toThrow(/not JSON/);
   });
+  it("answers the derived ID for a named environment whose broker is packed (AGENTX_NAMES) and given no literal, and only then", () => {
+    const packed = { Type: "AWS::Lambda::Function", Properties: { Environment: { Variables: { AGENTX_NAMES: { "Fn::Join": ["", []] } } } } };
+    expect(featureCatalogIdFromTemplate(JSON.stringify({ Resources: { Broker: packed } }), "staging")).toBe("agentx-staging-e2e-mock-runtime-v1");
+    expect(featureCatalogIdFromTemplate(JSON.stringify({ Resources: { Broker: packed, R: lambda("catalog-1") } }), "staging")).toBe("catalog-1");
+    expect(() => featureCatalogIdFromTemplate(JSON.stringify({ Resources: { Broker: packed } }))).toThrow(/CATALOG_ID/);
+    expect(() => featureCatalogIdFromTemplate(JSON.stringify({ Resources: {} }), "staging")).toThrow(/CATALOG_ID/);
+    expect(() => featureCatalogIdFromTemplate(JSON.stringify({ Resources: { Broker: packed, A: lambda("catalog-1"), B: lambda("catalog-2") } }), "staging")).toThrow(/CATALOG_ID/);
+  });
 });
 
 describe("describeRegisteredRows", () => {

@@ -4,7 +4,13 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
 import { DEVELOPER_ACCESS_TOKEN_SECONDS, DEVELOPER_TOKEN_AUDIENCE, type DeveloperSignInMethod, type DeveloperStepUpMethod } from "@agentx/contracts";
 
-export interface PublicSigningJwk { kty: "RSA"; n: string; e: string; kid: string; alg: "RS256"; use: "sig"; rovara_purpose?: "task" | "developer" }
+/**
+ * What a published key is for (`rovara_purpose` in the JWKS): developer access tokens, model-gateway task tokens, or the policy hook's questions (plan v3.2 7.5). A verifier accepts only its own
+ * purpose, so a key published for one can never stand in for another.
+ */
+export const POLICY_QUESTION_KEY_PURPOSE = "policy-question";
+export type SigningKeyPurpose = "task" | "developer" | typeof POLICY_QUESTION_KEY_PURPOSE;
+export interface PublicSigningJwk { kty: "RSA"; n: string; e: string; kid: string; alg: "RS256"; use: "sig"; rovara_purpose?: SigningKeyPurpose }
 
 export interface TokenSigner {
   publicJwk(): Promise<PublicSigningJwk>;

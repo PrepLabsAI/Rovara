@@ -441,6 +441,9 @@ export interface EvidenceTests {
   errored: number;
   skippedBefore?: number;
   skippedAfter?: number;
+  /** TE-C6: failing tests that passed on the round's one rerun, and how many (set by the evidence collector, never by `evidenceTests`). */
+  flakyOnRerun?: string[];
+  flakyOnRerunCount?: number;
   names: EvidenceTest[];
   newTests: string[];
 }

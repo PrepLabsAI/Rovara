@@ -1,0 +1,230 @@
+// Engine boundary (migration plan v3.2 lane E2, step 6 part): every AWS entry point that reads or acts on an EXISTING task goes by the task's stored engine (its stamp,
+// core-host/engine-stamp.ts), never by the switch.
+//
+//   - A task with no stamp (every task that exists today, and every task started while the switch is off) is a spec 056 workflow task: today's AWS readers answer it, unchanged.
+//   - A task stamped `core` is the core's. The developer task routes hand it to the core's own handlers (`CoreTaskEntry`, the core host's dev routes: company-aware, they check the
+//     caller's company on every read). Nothing on the AWS side reads its record, its workspace or its operations. Without a core entry on this install, or for an operation the core
+//     does not serve yet, the answer is a fixed refusal that never says more than a missing task would to someone who may not see it.
+//
+// One owner per operation, for every stamp, including the mixed ones a later lane may write (flow = core with build or merge narrowed to the workflow):
+//   the entry point that reads or acts on a task's rows belongs to the engine that runs its FLOW. Only that engine's start wrote the task's record, workspace, pointer and operations,
+//   so only it may read them. A narrowed area names where that area's steps run inside the flow's engine; it never hands the task's rows to the other engine's readers. A stamp
+//   whose flow is the workflow keeps the whole task on the workflow (the core never reads a task its start did not write), whatever its other areas say.
+//
+// A stamp is written once, with the core task, in the start's own transaction, and never changes; a task without one never gets one. So a verdict about a task that EXISTS is fixed for
+// good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
+import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import { AgentXErrorCodeSchema, agentXError } from "@agentx/contracts";
+import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
+import type { CoreArea } from "../core-host/flags.js";
+import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
+import type { BrokerRequest, BrokerResponse } from "../handler.js";
+import { taskPointerKey } from "../developer/task-records.js";
+
+/** The state table, as every AWS reader holds it. */
+export interface EngineStateTable {
+  documentClient: { send(command: unknown): Promise<unknown> };
+  tableName: string;
+}
+
+/** The developer task routes, each with the area of the work it touches. The owner is decided by `entryOwner`, not by this area (see the header). */
+export const TASK_ENTRY_AREAS = {
+  read: "flow", events: "flow", plan: "flow", messages: "flow", comments: "flow", people: "flow", "people/role": "flow", "people/take-ownership": "flow", "people/requests": "flow",
+  readers: "flow", share: "flow", cancel: "flow", close: "flow", "workflow/decision": "flow", "canvas-closeout/retry": "flow",
+  continue: "build", "workflow/retry": "build", "workflow/review": "build", "workflow/send-back": "build", "workflow/review-findings": "build",
+  diff: "merge", "pull-requests": "merge", "workflow/publish-retry": "merge", "workflow/keep-pull-requests": "merge", "workflow/feedback": "merge", "workflow/feedback-decision": "merge",
+  "workflow/feedback-retry": "merge", "e2e-publication-context": "merge",
+} as const satisfies Record<string, CoreArea>;
+export type TaskEntryOperation = keyof typeof TASK_ENTRY_AREAS;
+
+/** The one owner of an operation of an existing task. No stamp, or one that cannot be read: the workflow. Otherwise the engine that runs the task's flow, whatever the operation's area. */
+export function entryOwner(stamp: EngineStamp | undefined, area: CoreArea): Engine {
+  void area;
+  if (stamp === undefined) return "workflow";
+  return stamp.areas.flow === "core" ? "core" : "workflow";
+}
+
+/** The operation a developer task route path names (everything after `/v1/dev/tasks/<id>`), or undefined for a path that is not one. */
+export function taskEntryOperation(rest: string): TaskEntryOperation | undefined {
+  if (rest === "") return "read";
+  if (!rest.startsWith("/")) return undefined;
+  const name = rest.slice(1);
+  if (/^people\/requests\/[^/]+$/u.test(name)) return "people/requests";
+  if (/^readers(?:\/[^/]+)?$/u.test(name)) return "readers";
+  if (name === "read" || name === "people/requests") return undefined;
+  return Object.hasOwn(TASK_ENTRY_AREAS, name) ? name as TaskEntryOperation : undefined;
+}
+
+const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const VERDICTS_MAX = 2_048;
+const verdicts = new WeakMap<object, Map<string, Engine>>();
+
+function remembered(table: EngineStateTable): { get(key: string): Engine | undefined } {
+  const known = verdicts.get(table.documentClient);
+  return { get: (key) => known?.get(`${table.tableName}\u0000${key}`) };
+}
+
+function remember(table: EngineStateTable, name: string, engine: Engine): void {
+  let known = verdicts.get(table.documentClient);
+  if (known === undefined) verdicts.set(table.documentClient, known = new Map<string, Engine>());
+  const key = `${table.tableName}\u0000${name}`;
+  // Bounded: when full, the oldest verdict goes (it is read again when next needed).
+  if (known.size >= VERDICTS_MAX && !known.has(key)) known.delete(known.keys().next().value as string);
+  known.set(key, engine);
+}
+
+async function readItem(table: EngineStateTable, key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined> {
+  // A strongly consistent read: a stamp is written in the same transaction as its task, so once the task is seen its stamp is too.
+  const response = await table.documentClient.send(new GetCommand({ TableName: table.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  return response.Item;
+}
+
+/**
+ * The task's stamp (undefined: none, which means the workflow). A read that fails throws, and so does a stamp item that is there but cannot be read as one: only the core's start
+ * writes that item, so it is never taken for the workflow.
+ */
+export async function readTaskStamp(table: EngineStateTable, taskId: string): Promise<EngineStamp | undefined> {
+  const item = await readItem(table, engineStampKey(taskId));
+  if (item === undefined) return undefined;
+  const stamp = stampOf(item);
+  if (stamp === undefined) throw new Error("a task's engine stamp could not be read");
+  return stamp;
+}
+
+/**
+ * Who owns this operation of the task with this id, when it is not yet known whether the task exists (a route's first step). Only a `core` verdict is kept.
+ * A malformed id is the workflow's (its own route answers it as it always has).
+ */
+export async function ownerOfTaskId(table: EngineStateTable, taskId: string, area: CoreArea = "flow"): Promise<Engine> {
+  if (!TASK_ID.test(taskId)) return "workflow";
+  const key = `task:${taskId}`;
+  // A kept verdict is fixed (a `workflow` one is kept only for a task that exists).
+  const known = remembered(table).get(key);
+  if (known !== undefined) return known;
+  const owner = entryOwner(await readTaskStamp(table, taskId), area);
+  if (owner === "core") remember(table, key, owner);
+  return owner;
+}
+
+/** Who owns the task, called only after its record was read and found: the verdict is then fixed and kept. */
+export async function ownerOfExistingTask(table: EngineStateTable, taskId: string): Promise<Engine> {
+  const key = `task:${taskId}`;
+  const known = remembered(table).get(key);
+  if (known !== undefined) return known;
+  const owner = entryOwner(await readTaskStamp(table, taskId), "flow");
+  remember(table, key, owner);
+  return owner;
+}
+
+/**
+ * Who owns a workspace's rows (its META, operations, artifacts, pull requests): the engine of the task whose pointer it holds. A workspace with no task pointer is no core task's
+ * (every core start writes its pointer with the task), so it is the workflow's. A pointer is written once, with its task, so a verdict for a workspace with a pointer is kept.
+ */
+export async function ownerOfWorkspace(table: EngineStateTable, workspaceId: string): Promise<Engine> {
+  const key = `workspace:${workspaceId}`;
+  const known = remembered(table).get(key);
+  if (known !== undefined) return known;
+  const pointer = await readItem(table, taskPointerKey(workspaceId));
+  if (pointer === undefined || typeof pointer.taskId !== "string") return "workflow";
+  const owner = TASK_ID.test(pointer.taskId) ? await ownerOfExistingTask(table, pointer.taskId) : "workflow";
+  remember(table, key, owner);
+  return owner;
+}
+
+// ---- the core's own handlers, behind the developer task routes
+
+/** The core's handlers for a developer task request, as the deployment composes them (the core host's dev routes over its caller mapping). Undefined: the core does not serve it. */
+export interface CoreTaskEntry {
+  route(request: BrokerRequest, caller: CoreEntryCaller): Promise<BrokerResponse | undefined>;
+}
+
+/**
+ * The broker's signed-in caller as the core entry takes it. `stepUp` is the step-up the VERIFIED access token states (`stepUpOf`), set only by the broker's token sign-in; `clientId` is the
+ * registered sign-in client whose token made the call (absent for the Rovara CLI).
+ */
+export interface CoreEntryCaller {
+  developerId: string;
+  sessionId: string;
+  name: string;
+  stepUp?: { at: string; method: string } | undefined;
+  clientId?: string | undefined;
+}
+
+/** The developer start route's path: a start is the core's only where the core's routes say so (`undefined` keeps the old start). */
+const DEVELOPER_START = "/v1/dev/tasks";
+const isStart = (request: BrokerRequest): boolean => request.method === "POST" && request.path.split("?")[0] === DEVELOPER_START;
+
+/**
+ * Composes the core host's dev routes (`createCoreDevRoutes`) as the developer task routes' core entry. `deployedCallerOf` is the deployment's identity mapping from the broker's
+ * signed-in caller to the principal the core knows (lane ID): undefined, or a throw, answers the sign-in refusal the core's routes give. Nothing here picks a company: the core's
+ * routes take it from membership.
+ */
+export function coreTaskEntryFrom(
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> },
+  deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
+): CoreTaskEntry {
+  return {
+    async route(request, caller) {
+      let deployed: DeployedCaller | undefined;
+      let unreadable = false;
+      try {
+        deployed = await deployedCallerOf(caller);
+      } catch {
+        deployed = undefined;
+        unreadable = true;
+      }
+      // A start by a person the mapping names no company for is not the core's: the old start answers it, as before. A mapping that failed refuses it.
+      if (deployed === undefined && !unreadable && isStart(request)) return undefined;
+      if (deployed === undefined) return { statusCode: 401, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code: "UNAUTHENTICATED", message: "Sign in again." } }) };
+      return await routes.route(request, deployed);
+    },
+  };
+}
+
+/** The developer routes' own sign-in refusal (developer-routes.ts SIGN_IN_AGAIN). */
+const CORE_SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const CORE_ANSWER_UNREADABLE = "The core engine's answer could not be read.";
+
+/** The core's answer as the developer task routes return it: the value for a 200, else the AgentXError it names (a code outside the closed list, or a body that is not one, is a fixed error). */
+export function coreAnswerValue(answer: BrokerResponse): unknown {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(answer.body);
+  } catch {
+    throw agentXError("RUNTIME_UNAVAILABLE", CORE_ANSWER_UNREADABLE);
+  }
+  if (answer.statusCode === 200) return parsed;
+  // The core's sign-in refusal is the developer routes' own.
+  if (answer.statusCode === 401) throw agentXError("AUTH_REQUIRED", CORE_SIGN_IN_AGAIN);
+  const error = (parsed as { error?: { code?: unknown; message?: unknown } } | null)?.error;
+  const code = AgentXErrorCodeSchema.safeParse(error?.code);
+  if (!code.success || typeof error?.message !== "string") throw agentXError("RUNTIME_UNAVAILABLE", CORE_ANSWER_UNREADABLE);
+  throw agentXError(code.data, error.message);
+}
+
+/**
+ * A developer task route for a task the core owns. The core's handlers answer it when they serve it. When they do not (no core entry on this install, or an operation it has no handler
+ * for), the core's own task read decides what may be said: someone it lets read the task is told the operation is not on the core here yet; anyone else gets `missing()`, which is the
+ * developer route's own answer for an id with no task (input checks, wrong method and words included), so a core task's id answers exactly like an id with no task. Never falls back to
+ * the workflow's readers for the task itself.
+ */
+export async function serveCoreTask(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller, taskId: string, missing: () => Promise<unknown>): Promise<unknown> {
+  if (entry === undefined) return await missing();
+  const answer = await entry.route(request, caller);
+  // The broker has already signed the caller in: a 401 or 404 from the core means only "not the core's to show this caller", which is a missing task's answer here.
+  if (answer !== undefined) return answer.statusCode === 404 || answer.statusCode === 401 ? await missing() : coreAnswerValue(answer);
+  if (request.method === "GET" && request.path.split("?")[0] === `/v1/dev/tasks/${taskId}`) return await missing();
+  const read = await entry.route({ method: "GET", path: `/v1/dev/tasks/${taskId}`, headers: {}, ...(request.requestId === undefined ? {} : { requestId: request.requestId }) }, caller);
+  if (read?.statusCode === 200) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+  return await missing();
+}
+
+/**
+ * The developer start, through the core where the switch sends this caller's company (lane E2 step 6). `undefined`: the old start answers it (no core entry on this install, a company the
+ * switch does not send to the core, or a person with no member company). Otherwise the core's answer, as the developer routes return it.
+ */
+export async function startOnCore(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller): Promise<{ value: unknown } | undefined> {
+  if (entry === undefined || !isStart(request)) return undefined;
+  const answer = await entry.route(request, caller);
+  return answer === undefined ? undefined : { value: coreAnswerValue(answer) };
+}

@@ -1,5 +1,5 @@
-// TE-F2 part A: provenance decides what counts toward "proven with scripted AI replies" (DECISIONS 161). Fail closed: only `before_task` and `independent` count; `task_made`, the failure pack, an unmatched call and any
-// unknown or missing value never do.
+// TE-F2 part A: provenance decides what counts toward "proven with scripted AI replies" (DECISIONS 161, as amended by 192a). Fail closed: `before_task` counts; `task_made` counts only once the real model confirmed the same test;
+// `independent` (parked by 192a), the failure pack, an unmatched call and any unknown or missing value never do.
 import { describe, expect, it } from "vitest";
 import {
   BEFORE_TASK_ORIGINS,
@@ -12,20 +12,30 @@ import {
 } from "../../packages/contracts/src/model-reply-provenance.js";
 
 describe("replyCountsTowardProof", () => {
-  it("counts before_task and independent, and only those", () => {
+  it("counts before_task; task_made only when the real model confirmed it; independent never (DEC 192a)", () => {
     expect([...REPLY_PROVENANCES]).toEqual(["before_task", "independent", "task_made"]);
     expect(replyCountsTowardProof("before_task")).toBe(true);
-    expect(replyCountsTowardProof("independent")).toBe(true);
+    expect(replyCountsTowardProof("independent")).toBe(false);
+    // No real-model result: fail closed.
     expect(replyCountsTowardProof("task_made")).toBe(false);
+    expect(replyCountsTowardProof("task_made", "confirmed")).toBe(true);
+    for (const realModel of ["unconfirmed", "disagreed", "Confirmed", "passed", undefined, null, true]) expect(replyCountsTowardProof("task_made", realModel), String(realModel)).toBe(false);
+  });
+  it("the real-model result changes nothing for any other provenance", () => {
+    for (const realModel of [undefined, "confirmed", "unconfirmed", "disagreed"]) {
+      expect(replyCountsTowardProof("before_task", realModel)).toBe(true);
+      expect(replyCountsTowardProof("independent", realModel)).toBe(false);
+    }
   });
   it("never counts the failure pack, an unmatched call or a refused one", () => {
-    for (const value of ["failure_pack", "unmatched", "not_served", "refused"]) expect(replyCountsTowardProof(value), value).toBe(false);
+    for (const value of ["failure_pack", "unmatched", "not_served", "refused"]) expect(replyCountsTowardProof(value, "confirmed"), value).toBe(false);
     expect([...REPLY_RESULT_CLASSES]).toEqual(["before_task", "independent", "task_made", "failure_pack", "unmatched", "not_served"]);
-    for (const klass of REPLY_RESULT_CLASSES) expect(replyCountsTowardProof(klass), klass).toBe(klass === "before_task" || klass === "independent");
+    for (const klass of REPLY_RESULT_CLASSES) expect(replyCountsTowardProof(klass), klass).toBe(klass === "before_task");
+    for (const klass of REPLY_RESULT_CLASSES) expect(replyCountsTowardProof(klass, "confirmed"), klass).toBe(klass === "before_task" || klass === "task_made");
   });
   it("an unknown, missing or oddly spelled origin never counts (fail closed)", () => {
     const odd: unknown[] = [undefined, null, "", "Before_Task", "before_task ", " independent", "before-task", "real", "recorded", 0, 1, true, {}, [], ["before_task"], { toString: () => "before_task" }, Symbol.for("x"), "__proto__", "constructor", "toString", "hasOwnProperty"];
-    for (const value of odd) expect(replyCountsTowardProof(value), String(typeof value)).toBe(false);
+    for (const value of odd) { expect(replyCountsTowardProof(value), String(typeof value)).toBe(false); expect(replyCountsTowardProof(value, "confirmed"), String(typeof value)).toBe(false); }
   });
   it("a prototype-borne or inherited value cannot raise a count", () => {
     const sneaky = Object.create({ before_task: true }) as Record<string, unknown>;

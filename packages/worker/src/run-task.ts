@@ -1,5 +1,5 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
-import { EVAL_ROUND_ARTIFACT, evalResultFromArtifact } from "@agentx/contracts";
+import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -75,12 +75,15 @@ import { currentWorkspaceSafety } from "./workspace-safety.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine.js";
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
-import { runTestProof, serializeTestProof, withScriptedReplyFacts } from "./verification/test-proof.js";
+import { runTestProof, serializeTestProof, withGeneralFakeFacts, withScriptedReplyFacts } from "./verification/test-proof.js";
+import { generalFakesFactsCollector, generalFakesPlanFor, mergeGeneralFakeFacts, withGeneralFakesRound, type GeneralFakeFacts } from "./general-fakes-round.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
+import { flakyRerunFileFor, flakyRerunFileOf, rerunFlaky, type ReportedFlaky } from "./verification/flaky-rerun.js";
+import { findBaselineAncestor } from "./verification/baseline-ancestry.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
-  usageForControlPlane, reviewUsageArtifactName, spentNothing, statsSince,
+  usageForControlPlane, reviewUsageArtifactName, statsSince, createUsageCheckpointer, type UsageCheckpointer,
   type TaskUsageOutcome, type UsageStats,
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies, type ExecuteSerialWorkflowDependenciesInput, type ExecuteSerialWorkflowDependenciesResult } from "./workflow-dependencies.js";
@@ -192,7 +195,7 @@ export interface TaskInvocationDependencies {
    * PLANINC-3b: the limits on a model call; tests supply short ones. Defaults: the planning deadline (25 minutes, or AGENTX_PLAN_DEADLINE_MS), the stall limit (240 s),
    * the abort confirmation (30 s), the heartbeat (60 s) and the clock's tick (5 s). Only a PLAN run has a deadline and a stall limit.
    */
-  modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number };
+  modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number; usageCheckpointMs?: number };
   /** Where the worker's structured model-call lines go. Default: stdout, as the worker's other log lines. */
   log?: WorkerLogSink;
   /** PLANDRYRUN: how a coding plan's proposed checks are tried on the unchanged code; tests supply a fake. Default: `runPlanDryRun` (a sandbox container per check). */
@@ -448,6 +451,7 @@ async function runTask(
       ...(standingInstructions === undefined ? {} : { standingInstructions }),
       eventSink: dependencies.eventSink, artifactSink: dependencies.artifactSink,
       ...(dependencies.cancellationController === undefined ? {} : { cancellationController: dependencies.cancellationController }),
+      ...(invocation.payload.usageCheckpoints === true ? { usageCheckpoints: { ...(dependencies.modelCallLimits?.usageCheckpointMs === undefined ? {} : { intervalMs: dependencies.modelCallLimits.usageCheckpointMs }) } } : {}),
       ...hooks,
     });
     return { conversationId: invocation.payload.conversationId, reopened: false, agentStepResult };
@@ -547,6 +551,11 @@ async function runTask(
     const plan = planChecks(testEnv?.readiness ?? readiness, recorder, checkHistory);
     const stop = new AbortController();
     const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+    // TE-C1: when the plan carries baseline candidates (an asked-for field), the nearest one that is an ancestor of the task's base commit is found NOW, before any check runs, in the isolated git environment (it reads
+    // objects only: what the agent or a check leaves in `.git` cannot change it). One repository only (the nightly is single-repository); otherwise, or with no answer, the engine keeps today's behaviour.
+    const baselineCandidates = invocation.payload.testEnvironment?.baselineCandidates;
+    const baselineClaim = baselineCandidates === undefined || repositories.length !== 1 ? undefined
+      : await findBaselineAncestor({ directory: repositories[0]!.directory, baseCommit: repositories[0]!.baseCommitSha, candidates: baselineCandidates, signal: stop.signal });
     try {
       await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
       // The broker authorizes the private admission read only after the operation is durably
@@ -563,17 +572,33 @@ async function runTask(
         : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
         ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
-      const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+      // General fakes (DEC 234): only when the broker sent the payload (the project setting is on); slice 1 serves them on the local shell only, and says so otherwise.
+      const fakesCollector = generalFakesFactsCollector();
+      let candidateFakeFactsTaken = false;
+      const fakesPlan = fakesCollector.wrap(generalFakesPlanFor(invocation.payload.generalFakes, {
+        localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+        // Only the candidate round's line is posted; later rounds (the original code's) still add their facts.
+        onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
+      }));
+      if (invocation.payload.generalFakes !== undefined && fakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
+      const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(fakesPlan, withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(sandbox === undefined ? {} : { sandbox }),
         ...(localShell ? { local: true } : {}),
-      }))));
+      })))));
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
+      // TE-C6: with the plan's `flakyRerun` and the evidence asked for, the failing tests of a test check that passed before are rerun once (inside what is left of the round's budget) so the evidence can name the ones that passed. The
+      // checks' entries are not changed. The rerun puts the checks' report files back, so the evidence below reads the round's own reports.
+      const flaky = invocation.payload.testEnvironment?.flakyRerun === true && !round.stopped && !stop.signal.aborted
+        ? await rerunFlaky({ rootPath: canonicalRoot, commands: readiness, checks: invocation.payload.testEnvironment.checks, entries: round.entries, runners, roundStartedAtMs: roundStarted, budgetMs: Math.max(0, roundBudgetMs - (Date.now() - roundStarted)), signal: stop.signal })
+        : undefined;
       const candidateReplyFacts = replyCollector.take();
+      const candidateFakeFacts = fakesCollector.take();
+      candidateFakeFactsTaken = true;
       assertWorkspaceSafe();
       for (const message of repositoryChecks.notes()) await events.append("progress", { message });
       const roundSpentMs = Date.now() - roundStarted;
@@ -597,6 +622,9 @@ async function runTask(
       }
       let candidateAfter = await readCandidateRepositories(repositories);
       await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
+      // TE-C6: what the broker may excuse as flaky (only checks whose every failing test passed on the rerun). Informational for the worker: a failed save leaves the failure standing.
+      const flakyFile = flakyRerunFileOf(flaky);
+      if (flakyFile !== undefined) await dependencies.artifactSink({ name: flakyFile.name, mediaType: "application/json", content: flakyFile.content }).catch(() => undefined);
       const compact = compactCheckReport(checks);
       let workflowE2EEvidence: Awaited<ReturnType<typeof executeWorkflowE2EChecks>> | undefined;
       if (invocation.payload.workflowE2EAdmission !== undefined) {
@@ -622,7 +650,7 @@ async function runTask(
         const edgesStarted = Date.now();
         const repositoryEdges = await repositoryChecks.evidence({ kind: runners.kind, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs });
         const edgesSpentMs = Date.now() - edgesStarted;
-        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
+        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath), ...(flaky === undefined || flaky.size === 0 ? {} : { flaky }), ...(baselineClaim === undefined ? {} : { baselineClaim }),
           baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs - edgesSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
       }
       const evidenceSpentMs = Date.now() - evidenceStarted;
@@ -636,7 +664,8 @@ async function runTask(
         // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
-        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts);
+        // General fakes: the original code's run used the fakes too. A fake answer there can make a new test fail on the old code, so its facts join the candidate's (never proof either way).
+        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts, mergeGeneralFakeFacts(candidateFakeFacts, fakesCollector.take()));
       }
       // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
       if (invocation.payload.evalRequest !== undefined) {
@@ -657,7 +686,7 @@ async function runTask(
         if (createCandidateManifest(afterEval).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterEval;
         if (evalArtifact !== undefined) {
           const result = evalResultFromArtifact(evalArtifact);
-          await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No drop found." });
+          await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No regression measured (eval)." });
           try { await dependencies.artifactSink({ name: EVAL_ROUND_ARTIFACT, mediaType: "application/json", content: JSON.stringify(evalArtifact) }); }
           catch { await events.append("progress", { message: "Eval result could not be saved." }); }
         }
@@ -808,12 +837,18 @@ async function runTask(
     // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
     ...(containerPaths === undefined ? {} : { cdTarget: (target: string) => workspaceRelativeCdTarget(target, containerPaths, canonicalRoot) }),
   });
-  const checkRunners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+  // General fakes (DEC 234, slice 2): the coding run's own verification may use them, when the broker sent the payload (the project setting is on, and the run has checks). Local shell only, as in a CHECKS round, and it says so otherwise.
+  const codingFakesPlan = generalFakesPlanFor(invocation.payload.generalFakes, {
+    localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+    onResult: (result) => { for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
+  });
+  if (invocation.payload.generalFakes !== undefined && codingFakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
+  const checkRunners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(codingFakesPlan, withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
     rootPath: canonicalRoot,
     ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(localShell ? { local: true } : {}),
-  }))));
+  })))));
   const checkBudgetMs = dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS);
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;
@@ -821,6 +856,8 @@ async function runTask(
   let candidateCheckDrift = false;
   // The first round's report when the extra try was given (Ruling N).
   let firstRoundChecks: CheckReport | undefined;
+  // TE-C6: the rerun result that came with a report, and that report (see `flakyRerunFileFor`: the file is saved only next to that very report).
+  let flakyOfReport: ReportedFlaky | undefined;
   const verification = verificationExtension({
     // Review Focus 5: a broker that sends no readiness leaves the agent's own commands.
     plan: () => (checkPlan = planChecks(readiness, recorder, checkHistory)),
@@ -829,9 +866,10 @@ async function runTask(
     signal: verificationStop.signal,
     recorder,
     ...(workflowDependencies === undefined ? {} : { shouldRun: () => graphFinalItemReady }),
-    onReport: async (report) => {
+    onReport: async (report, flakyRerun) => {
       for (const message of repositoryChecks.notes()) await events.append("progress", { message });
       reportedChecks = report;
+      flakyOfReport = flakyRerun === undefined ? undefined : { report, result: flakyRerun };
       reportedChecksCandidate = undefined;
       if (candidateCheckDrift) return;
       // A report of no checks, or of checks that were stopped or errored, binds the code too: the broker accepts it only
@@ -854,6 +892,8 @@ async function runTask(
     onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
     ...(dependencies.originalCode === undefined ? defaultOriginalCode(manifest, canonicalRoot, checkRunners.originalCode) : { originalCode: dependencies.originalCode }),
+    // TE-C6: only when the plan says so (the broker sends the flag only to a worker that lists TASK_FLAKY_RERUN_FEATURE): a failing test of a test check that passed before is rerun once before the extra turn is decided.
+    ...(invocation.payload.testEnvironment?.flakyRerun === true ? { flakyRerun: { rootPath: canonicalRoot, checks: invocation.payload.testEnvironment.checks } } : {}),
   });
 
   // The agent's shell: the devcontainer's or the sandbox's, or the local one when it was chosen.
@@ -974,6 +1014,18 @@ async function runTask(
   const limits = dependencies.modelCallLimits ?? {};
   const stallLimitMs = limits.stallMs ?? PLANNING_STALL_MS;
   const abortConfirmMs = limits.abortConfirmMs ?? PLANNING_ABORT_CONFIRM_MS;
+  // Per-run dollar stop (core money stop): a run asked for checkpoints reports what it spent since its last report after a model call ends (usage.ts `createUsageCheckpointer`); the broker
+  // books each one and stops the run at its cap. A run not asked (any other install) reports once, at its end, as before. A run whose baseline could not be read sends no checkpoint either.
+  const checkpointsAsked = invocation.payload.usageCheckpoints === true;
+  const withRetention = <M extends object>(model: M) => ({ ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) });
+  const sendCheckpoint = (payload: Record<string, unknown>): void => { void emit("usage", payload, { urgent: true }); };
+  const checkpointsFor = (open: { getSessionStats(): UsageStats; getModel(): { provider: string; modelId: string } }, baseline: UsageStats | undefined, enabled = checkpointsAsked): UsageCheckpointer => createUsageCheckpointer({
+    enabled, ...(limits.usageCheckpointMs === undefined ? {} : { intervalMs: limits.usageCheckpointMs }),
+    baseline, stats: () => open.getSessionStats(), model: () => withRetention(open.getModel()), requested: dependencies.model, send: sendCheckpoint,
+  });
+  const checkpoints = checkpointsFor(session, usageBaseline, checkpointsAsked && usageBaselineKnown);
+  /** The checkpoints of the parallel parts and reviewers of this run (a stop sends what each spent before it ends). */
+  const partCheckpoints = new Map<object, UsageCheckpointer>();
   // A planning run has one wall-clock deadline (the first prompt and the format retry share it) and a no-activity limit; the other modes only get the heartbeat-free attempt counter.
   const monitor = new ModelCallMonitor({
     ...(planning || understanding ? { deadlineMs: limits.deadlineMs ?? (understanding ? UNDERSTAND_DEADLINE_MS : planningDeadlineMs()), stallMs: stallLimitMs } : {}),
@@ -1039,6 +1091,9 @@ async function runTask(
       await Promise.all([...partSessions].map((partSession) => within(abortConfirmMs, async () => { await partSession.abort(); })));
       // Bounded: a session whose abort already hung (a deadline abort that was not confirmed) must not hang the cancel too.
       await within(abortConfirmMs, async () => { await session.abort(); });
+      // What the run spent leaves first (with checkpoints asked): the broker waits for it before it ends the run, and the ending's evidence takes time.
+      checkpoints.checkpointNow();
+      for (const part of partCheckpoints.values()) part.checkpointNow();
       // The cancel's own result ends the operation and refuses any later output, so what is buffered is sent first.
       await within(CANCEL_FLUSH_MAX_MS, async () => {
         await emit("progress", { message: "AgentX stopped this run because it was cancelled." }, { urgent: true });
@@ -1087,6 +1142,7 @@ async function runTask(
       lastModelNote = modelNote?.modelCall;
       finalText = assistantText((event as { message?: unknown }).message);
       activeFindings.concludeWith(finalText);
+      checkpoints.observe(event);
     }
     if (loopStop !== undefined) return;
     const action = loopGuard.observe(event);
@@ -1145,6 +1201,9 @@ async function runTask(
         mediaType: "application/json",
         content: checksArtifactContent(finalChecks()),
       });
+      // TE-C6: what the broker may excuse as flaky, only when the report that stands came from the round that reran (an extra turn clears it: `firstRoundChecks` is then the report).
+      const flakyFile = flakyRerunFileFor(reportedChecks, flakyOfReport);
+      if (flakyFile !== undefined) await artifactSink({ name: flakyFile.name, mediaType: "application/json", content: flakyFile.content });
     };
     const runCompletedPrefixProjectChecks = async (
       repositories: readonly CandidateRepositoryInput[],
@@ -1306,12 +1365,15 @@ async function runTask(
         const graph = input.common.graph;
         const reportPartUsage = async (partSession: PiSessionHandle, itemId: string, partOutcome: TaskUsageOutcome): Promise<void> => {
           try {
-            const usage = createTaskUsageTelemetry(partSession.getSessionStats(), {
-              ...partSession.getModel(),
-              ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }),
-            }, partOutcome);
+            const stats = partSession.getSessionStats();
+            const partModel = { ...partSession.getModel(), ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
+            const usage = createTaskUsageTelemetry(stats, partModel, partOutcome);
             const redactedUsage = redactCredentials(usage);
-            await emit("usage", usageForControlPlane(redactedUsage, dependencies.model));
+            // With checkpoints, the end tells only what is left (marked final); without, the whole part as before.
+            const checkpointed = partCheckpoints.get(partSession);
+            partCheckpoints.delete(partSession);
+            const endReport = checkpointed?.checkpointed === true ? checkpointed.endReport(stats, partModel, partOutcome, dependencies.model) : usageForControlPlane(redactedUsage, dependencies.model);
+            if (endReport !== undefined) await emit("usage", endReport);
             await artifactSink({ name: `usage-part-${itemId.slice(0, 8)}.json`, mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
           } catch (error) {
             onDiagnostic(`Rovara could not report the usage of one part: ${errorText(error)}`);
@@ -1343,6 +1405,9 @@ async function runTask(
             );
             const open = partSession;
             partSessions.add(open);
+            // A part reports its usage as it goes too (per-run dollar stop): a part's session is made new, so it starts from nothing.
+            const partUsage = checkpointsFor(open, undefined);
+            partCheckpoints.set(open, partUsage);
             const onAbort = (): void => { void open.abort().catch(() => undefined); };
             if (context.signal.aborted) onAbort();
             else context.signal.addEventListener("abort", onAbort, { once: true });
@@ -1368,6 +1433,7 @@ async function runTask(
                 lastNote = note?.modelCall;
                 lastText = assistantText((event as { message?: unknown }).message);
                 partFindings.concludeWith(lastText);
+                partUsage.observe(event);
               }
               if (stoppedBy !== undefined) return;
               const action = guard.observe(event);
@@ -1736,11 +1802,19 @@ async function runTask(
           ...(fileTools === undefined ? {} : { fileTools }),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
           onLoadedKnowledge: (manifest) => { void emit("progress", loadedKnowledgePayload(manifest)); },
-          onUsage: async ({ role, stats, model, outcome, secondReviewTry }) => {
-            const usage = createTaskUsageTelemetry(stats, { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, outcome);
+          // Per-run dollar stop: each reviewer reports its usage as it goes too (its session is made new, so it starts from nothing).
+          // Kept with the parts' so a stop sends what each reviewer spent at once too.
+          ...(checkpointsAsked ? { usageCheckpoints: (reviewer: PiSessionHandle) => { const made = checkpointsFor(reviewer, undefined); partCheckpoints.set(reviewer, made); return made; } } : {}),
+          onUsage: async ({ role, stats, model, outcome, secondReviewTry, checkpoints: reviewerCheckpoints }) => {
+            // The reviewer has ended: a later stop has nothing more of it to send.
+            for (const [session, made] of partCheckpoints) if (made === reviewerCheckpoints) partCheckpoints.delete(session);
+            const reviewerModel = { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
+            const usage = createTaskUsageTelemetry(stats, reviewerModel, outcome);
             const redactedUsage = redactCredentials(usage);
             // SR-1: the usage event stays exactly the telemetry shape the activity index reads (an extra field would make it unreadable and it would be dropped); the second reviewer's calls are told apart by their own artifact names.
-            await events.append("usage", usageForControlPlane(redactedUsage, dependencies.model));
+            // With checkpoints (a deployed install's broker, which reads only the figures), the end tells what is left, marked final.
+            const endReport = reviewerCheckpoints?.checkpointed === true ? reviewerCheckpoints.endReport(stats, reviewerModel, outcome, dependencies.model) : usageForControlPlane(redactedUsage, dependencies.model);
+            if (endReport !== undefined) await events.append("usage", endReport);
             await artifactSink({ name: reviewUsageArtifactName(role, secondReviewTry), mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
           },
         });
@@ -1933,17 +2007,19 @@ async function runTask(
     try {
       const running = session.getSessionStats();
       const spent = statsSince(running, usageBaseline);
-      const usage = createTaskUsageTelemetry(spent, {
+      const runModel = {
         ...session.getModel(),
         ...(dependencies.model.cacheRetention === undefined
           ? {}
           : { cacheRetention: dependencies.model.cacheRetention }),
-      }, outcome);
+      };
+      const usage = createTaskUsageTelemetry(spent, runModel, outcome);
       const redactedUsage = redactCredentials(usage);
-      // A run that made no model call (a review run's own session is not used: its reviewers have sessions of their own) has nothing to report, on a fresh session and on a reopened one alike.
-      // Without this a reopened run would send the whole conversation's running total again.
-      if (usageBaselineKnown && !spentNothing(spent)) {
-        await emit("usage", usageForControlPlane(redactedUsage, dependencies.model));
+      // What the checkpoints have not reported yet (all of the run's spend when there were none). A run that made no model call (a review run's own session is not used: its reviewers have
+      // sessions of their own) has nothing to report, on a fresh session and on a reopened one alike. Without this a reopened run would send the whole conversation's running total again.
+      const endReport = usageBaselineKnown ? checkpoints.endReport(running, runModel, outcome, dependencies.model) : undefined;
+      if (endReport !== undefined) {
+        await emit("usage", endReport);
         // Kept once the control plane has the event (after the final flush below).
         usageToKeep = running;
       } else if (!usageBaselineKnown) {
@@ -2175,9 +2251,9 @@ async function runTestProofStep(input: {
 }
 
 /** Saves the proof. A failed save is only a missing note, never a failed round. */
-async function saveTestProof(sink: ArtifactSink, proof: NonNullable<Awaited<ReturnType<typeof runTestProofStep>>>, events: EventBatcher, facts: ScriptedReplyFacts | undefined): Promise<void> {
+async function saveTestProof(sink: ArtifactSink, proof: NonNullable<Awaited<ReturnType<typeof runTestProofStep>>>, events: EventBatcher, facts: ScriptedReplyFacts | undefined, fakeFacts?: GeneralFakeFacts): Promise<void> {
   try {
-    await sink({ name: TEST_PROOF_ARTIFACT, mediaType: "application/json", content: serializeTestProof(withScriptedReplyFacts(proof, "project", facts)) });
+    await sink({ name: TEST_PROOF_ARTIFACT, mediaType: "application/json", content: serializeTestProof(withGeneralFakeFacts(withScriptedReplyFacts(proof, "project", facts), fakeFacts)) });
   } catch {
     await events.append("progress", { message: "AgentX could not save its check of the new tests against the original code." }).catch(() => undefined);
   }

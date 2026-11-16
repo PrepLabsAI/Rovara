@@ -1,6 +1,7 @@
 // Spec 051 FR-008 (D-2, D-7): the pull request's checks section, and whether the checks make it a draft. Pure and
 // deterministic: the same checks always give the same text, so a retried callback opens the same pull request.
 import { z } from "zod";
+import { EVIDENCE_TRUST_CLASS_WORDS } from "./check-kinds.js";
 import { CheckReportSchema, type CheckClass, type CheckEntry, type CheckOutcome, type CheckReport } from "./checks.js";
 
 /** GitHub's limit on a pull request description, in characters. */
@@ -264,7 +265,9 @@ function sourceText(source: CheckReport["source"]): string {
 
 function checkLine(check: CheckEntry, atPublish: boolean): string {
   const classText = atPublish && check.class === "regression" ? "regression (passed at preparation, fails now)" : CLASS_TEXT[check.class];
-  return `- ${inlineCode(check.label)}: ${OUTCOME_TEXT[check.before]} → ${OUTCOME_TEXT[check.after]}, ${classText}`;
+  // General fakes: a check a Rovara-made fake answered says so on its own line. Fixed words; no service, variable or path.
+  const made = check.madeByRovara === true ? ` (${EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara}: answered by a fake Rovara made, never change proof)` : "";
+  return `- ${inlineCode(check.label)}: ${OUTCOME_TEXT[check.before]} → ${OUTCOME_TEXT[check.after]}, ${classText}${made}`;
 }
 
 function outputBlock(check: CheckEntry, where: string): string {

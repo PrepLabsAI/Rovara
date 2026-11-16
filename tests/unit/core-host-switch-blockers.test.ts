@@ -55,6 +55,20 @@ describe("the switch blockers list", () => {
   });
 });
 
+describe("a dispatch-only root", () => {
+  const ON = { ROVARA_CORE_ENGINE: "on" } as NodeJS.ProcessEnv;
+  it("is not asked for honest CI (it runs no merge tracking), while an ordinary root with the merge area on is refused", async () => {
+    const world = createFakeWorld();
+    const dispatchOnly = createCoreHostApp({
+      env: ON, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now, dispatchOnly: true, servedCompanies: async () => [],
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined }),
+    });
+    expect((await dispatchOnly.runtimeFor(FAKE_COMPANY)).companyId).toBe(FAKE_COMPANY);
+    const ordinary = appOver(createFakeWorld(), ON, undefined);
+    expect(await rejectionOf(ordinary.runtimeFor(FAKE_COMPANY))).toBeInstanceOf(CoreSwitchBlockedError);
+  });
+});
+
 describe("checkedCiReporting: validated at run time, not only by the type", () => {
   it.each<[string, unknown]>([
     ["absent", undefined],
