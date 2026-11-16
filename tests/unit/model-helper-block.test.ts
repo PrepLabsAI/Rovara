@@ -314,6 +314,8 @@ describe("no callers yet (TE-F1b is additive: only task-sandbox.ts takes the blo
       if ((error as { status?: number }).status !== 1) throw error;
     }
     const importers = found.split("\n").filter((file) => file !== "").filter((file) => !NEW_MODULES.some((name) => file === `packages/worker/src/${name}.ts`) && !/^tests\/unit\/(?:model-helper-|model-sandbox-env|worker-model-helper-network)/u.test(file)
+      // TE-B1 (#800): the eval's fresh sandbox exec starts the model helper inside its own new network and takes the by-name block for it; its model calls go only over the stage's metered bridge socket, with no provider host or key in it. Its own test builds the block plan. Exact files.
+      && !["packages/worker/src/verification/eval-bridged-exec.ts", "tests/unit/worker-eval-fresh-sandbox.test.ts"].includes(file)
       // TE-F1c reads F1-b's evidence words (the Azure sentence and the block facts) in its ledger: exact files.
       && !["packages/worker/src/model-bridge-ledger.ts", "tests/unit/model-bridge-ledger.test.ts"].includes(file));
     expect(importers).toEqual(["packages/worker/src/task-sandbox.ts"]);
