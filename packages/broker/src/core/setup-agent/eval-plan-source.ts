@@ -54,7 +54,9 @@ export function createEvalPlanSources(deps: EvalPlanSourceDeps): EvalPlanSources
           planDigest: spend.plan.evalPlanDigest,
         },
         // The grant of exactly the item this plan was read with: its digest is bound, and its "current" plan is that item's (never a later read's).
-        approval: createBoundEvalSpendCapabilities(deps.registry, { ...table, project: scope.project, digest: spend.digest, current: async () => spend.plan }).approval,
+        approval: createBoundEvalSpendCapabilities(deps.registry, { ...table, project: scope.project, digest: spend.digest,
+          // Re-read at grant time: the same item must still be approved WITH its stored plan bound to it (a plan row lost or edited since gives no grant).
+          current: async () => { const now = await readApprovedEvalPlan(table, scope.project); return now !== undefined && now.spend.digest === spend.digest ? spend.plan : undefined; } }).approval,
       };
     },
     cache(companyId: string): BaseScoreCache | undefined {

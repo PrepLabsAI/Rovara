@@ -303,6 +303,13 @@ describe("the broker's eval plan source", () => {
     const second = (await sources.read({ companyId: A, project }, run()))!;
     expect((second.plan as { planDigest: string }).planDigest).toBe(evalPlanDigest(A, project, changed));
     expect(await second.approval!.read()).toMatchObject({ company: A, project, selection: "evals/demo" });
+    // The plan row lost after the read: the same item no longer has its plan bound, so no grant (review L1).
+    const third = (await sources.read({ companyId: A, project }, run()))!;
+    const planRow = (await a.store.get(evalPlanKey(A, project)))!;
+    await a.store.delete({ key: evalPlanKey(A, project) });
+    expect(await third.approval!.read()).toBeUndefined();
+    await a.store.put({ item: planRow });
+    expect(await third.approval!.read()).toMatchObject({ company: A });
     // While the new item only waits, neither read has a grant.
     await a.propose(evalPlan());
     expect(await second.approval!.read()).toBeUndefined();

@@ -41,6 +41,10 @@ type Side = Map<string, string | undefined>;
 async function hashesAt(directory: string, treeishes: readonly string[], paths: readonly string[], signal: AbortSignal): Promise<Side[]> {
   return await withIsolatedGit(directory, "read", async (git) => {
     const options = { index: "none" as const, signal, timeout: 30_000 };
+    // Each side's commit or tree must itself be here: a missing object is unreadable (no plan), never "every question file is missing".
+    const present = await git.text(["cat-file", "--batch-check=%(objecttype)"], { ...options, input: `${treeishes.join("\n")}\n`, maxBuffer: 64 * 1024 });
+    const types = present.split("\n");
+    if (types.pop() !== "" || types.length !== treeishes.length || types.some(type => type !== "commit" && type !== "tree")) throw new Error("unreadable listing");
     const asked = treeishes.flatMap(treeish => paths.map(path => `${treeish}:${path}`));
     const listing = await git.text(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], { ...options, input: `${asked.join("\n")}\n`, maxBuffer: 1024 * 1024 });
     const lines = listing.split("\n");

@@ -53,6 +53,8 @@ async function world() {
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
   // The sign-in table's live memberships (person -> company and role), changed by the tests.
   const members = new Map<string, { companyId: OrgId; role: "owner" | "admin" | "member" }>([[personA, { companyId: A, role: "owner" }], [personB, { companyId: B, role: "owner" }]]);
+  // The broker's project grants (person -> role on PROJECT); "developer" when unset.
+  const grants = new Map<string, "developer" | "administrator">();
   const client = { async send(command: unknown) {
     if (!(command instanceof GetCommand)) throw new Error("only fake point reads");
     const key = command.input.Key as { pk: string; sk: string };
@@ -60,7 +62,7 @@ async function world() {
       const personId = key.pk.slice("COMPANY_MEMBER#".length), found = members.get(personId);
       return { Item: found === undefined ? undefined : { ...key, entityType: "COMPANY_MEMBERSHIP", personId, companyId: found.companyId, role: found.role, joinedAt: new Date(w.clock.now).toISOString() } };
     }
-    if (key.pk.startsWith("MEMBER#")) return { Item: { ...key, projectName: PROJECT, role: "developer" } };
+    if (key.pk.startsWith("MEMBER#")) return { Item: { ...key, projectName: PROJECT, role: grants.get(key.pk.slice("MEMBER#".length)) ?? "developer" } };
     return { Item: await w.store.get(key) };
   } };
   // The gateway's authority answer: it confirms the approver and the connected customer key, and names roles the broker must NOT use.
@@ -68,7 +70,7 @@ async function world() {
   const authorityAsks: Array<{ company: string; project: string }> = [];
   vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
     if (String(url) !== `${GATEWAY}${EVAL_AUTHORITY_PATH}`) throw new Error("unexpected fetch");
-    const asked = JSON.parse(String(init?.body)) as { company: string; project: string; approver: { personId: string; provider: string } };
+    const asked = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { company: string; project: string; approver: { personId: string; provider: string } };
     authorityAsks.push({ company: asked.company, project: asked.project });
     return new Response(JSON.stringify({ company: asked.company, project: asked.project, provider: "customer", connected: true,
       principal: { companyId: asked.company, personId: asked.approver.personId, displayName: "Approver", roles: gatewayRoles.roles, provider: asked.approver.provider } }), { status: 200, headers: { "content-type": "application/json" } });
@@ -128,7 +130,7 @@ async function world() {
     await proposeEvalSpendApproval(deps, PROJECT, spendPlan(), evalPlan());
     await w.store.update({ key: evalSpendKey(companyId, PROJECT), ops: [change.set("state", "approved"), change.set("approvedBy", { personId: person, provider: HOSTED_IDENTITY_PROVIDER, role: "owner", at: new Date(w.clock.now).toISOString() })] });
   };
-  return { w, root, members, gatewayRoles, authorityAsks, checksRun, approved };
+  return { w, root, members, grants, gatewayRoles, authorityAsks, checksRun, approved };
 }
 
 it("the deployed callback layer answers a CHECKS run's eval-plan from the company's approved plan, with the approver's role from LIVE membership (not the gateway's roles, not the stored role)", async () => {
@@ -151,6 +153,10 @@ it("the deployed callback layer answers a CHECKS run's eval-plan from the compan
   h.gatewayRoles.roles = ["owner"];
   h.members.set(personA, { companyId: A, role: "member" });
   expect((await run.ask()).answer).toMatchObject({ status: "ready", approval: null });
+  // ...a member who administers the project is its maintainer (review L4)...
+  h.grants.set(personA, "administrator");
+  expect((await run.ask()).answer).toMatchObject({ status: "ready", approval: { role: "maintainer" } });
+  h.grants.delete(personA);
   // ...and a person who left, or who is now another company's, gives no grant (the plan is still delivered, so the eval reads "spend not approved").
   h.members.delete(personA);
   expect((await run.ask()).answer).toMatchObject({ status: "ready", approval: null });

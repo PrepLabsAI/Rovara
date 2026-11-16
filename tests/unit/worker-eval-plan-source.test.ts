@@ -7,7 +7,7 @@ import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_REMOVED_HASH, evalCodeHash, evalCommandFingerprint, evalQuestionHash } from "@agentx/contracts";
 import { pinnedEvalPlan, withEvalPinnedCandidate } from "../../packages/worker/src/verification/eval-plan-source.js";
-import { EVAL_PLAN_QUESTIONS_CHANGED } from "../../packages/worker/src/verification/eval-final-check.js";
+import { EVAL_PLAN_QUESTIONS_CHANGED, type EvalFinalCheckPlan } from "../../packages/worker/src/verification/eval-final-check.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
 
 const roots: string[] = [];
@@ -38,11 +38,13 @@ const delivered = (baseCommit: string, over: Record<string, unknown> = {}, keyOv
 });
 type Repo = Awaited<ReturnType<typeof repo>>;
 const inPin = (r: Pick<Repo, "repositories" | "candidates">, plan: unknown, signal = sig()) => withEvalPinnedCandidate(r.repositories, r.candidates, signal, () => pinnedEvalPlan(plan));
+/** A runnable plan only (the stale answer is not one). */
+const planIn = async (r: Pick<Repo, "repositories" | "candidates">, plan: unknown): Promise<EvalFinalCheckPlan | undefined> => { const found = await inPin(r, plan); return found === EVAL_PLAN_QUESTIONS_CHANGED ? undefined : found; };
 
 describe("the worker's per-task eval plan from the pinned candidate", () => {
   it("happy path: computes the base commit, the code hash and each question's base and head hash; an edited question reads edited, a removed one too", async () => {
     const r = await repo({ "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2, "src/app.ts": "a\n" }, { "evals/demo/q2.txt": "question two, edited\n", "src/app.ts": "b\n" });
-    const plan = await inPin(r, delivered(r.baseSha));
+    const plan = await planIn(r, delivered(r.baseSha));
     expect(plan).toEqual({
       company: A, project: "demo", selection: "evals/demo", inputs, settings, evalSetHash: inputs.evalSetHash, evalConfigured: true, judgePin, baselineJudgePin: judgePin, subsetSupported: true, maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 10,
       key: { company: A, project: "demo", baseCommit: r.baseSha, codeHash: evalCodeHash(r.baseSha), judgePin, commandFingerprint: inputs.commandFingerprint, catalogRowId: "model", model: "model", modelVersion: "version-1" },
@@ -64,6 +66,10 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
     expect(await inPin(folder, delivered(folder.baseSha))).toBe(EVAL_PLAN_QUESTIONS_CHANGED);
     // Only a question change on the base reads so: the same stale base under another run's key is still no plan (the key checks come first).
     expect(await inPin(changed, delivered(changed.baseSha, {}, { baseCommit: "d".repeat(40) }))).toBeUndefined();
+    // A base commit that is not in the checkout is unreadable (no plan), never "questions changed" (review L2).
+    const absent = "d".repeat(40);
+    const shallow = { repositories: [{ ...changed.repositories[0]!, baseCommitSha: absent }], candidates: [{ ...changed.candidates[0]!, baseCommitSha: absent }] };
+    expect(await inPin(shallow, delivered(absent))).toBeUndefined();
     // A question the CANDIDATE edits is not stale: it is that run's change.
     const edited = await repo({ "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, { "evals/demo/q1.txt": "edited on the branch\n" });
     expect(await inPin(edited, delivered(edited.baseSha))).toMatchObject({ questions: [{ id: "q1" }, { id: "q2" }] });
@@ -103,7 +109,7 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
     const two = await repo({ "evals/demo/q1.txt": "not this\n" }, {}, "api");
     const both = { repositories: [...two.repositories, ...one.repositories], candidates: [...two.candidates, ...one.candidates] };
     expect(await inPin(both, delivered(one.baseSha))).toBeUndefined();
-    expect((await inPin(both, delivered(one.baseSha, { repository: "web" })))?.key.baseCommit).toBe(one.baseSha);
+    expect((await planIn(both, delivered(one.baseSha, { repository: "web" })))?.key.baseCommit).toBe(one.baseSha);
     expect(await inPin(both, delivered(one.baseSha, { repository: "nowhere" }))).toBeUndefined();
     // Two repositories pinned at the same base: still not runnable when the plan names none.
     const twin = { repositories: [{ ...one.repositories[0]!, repositoryId: "twin" }, ...one.repositories], candidates: [{ ...one.candidates[0]!, repositoryId: "twin" }, ...one.candidates] };
@@ -118,7 +124,7 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
     const shared = await repo({ "evals/demo/all.jsonl": Q1 }, {});
     const questions = Array.from({ length: 1000 }, (_, i) => ({ id: `q${i}`, category: "ordinary", path: "evals/demo/all.jsonl", hash: evalQuestionHash(Buffer.from(Q1)) }));
     const started = Date.now();
-    const many = await inPin(shared, delivered(shared.baseSha, { questions }));
+    const many = await planIn(shared, delivered(shared.baseSha, { questions }));
     expect(many?.questions).toHaveLength(1000);
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(await inPin(shared, delivered(shared.baseSha, { questions: [...questions, { ...questions[0]!, id: "q1000" }] }))).toBeUndefined();
@@ -127,7 +133,7 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
   it("concurrent checks never see each other's pin", async () => {
     const a = await repo({ "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, {});
     const b = await repo({ "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, { "evals/demo/q1.txt": "b edit\n" });
-    const [pa, pb] = await Promise.all([inPin(a, delivered(a.baseSha)), inPin(b, delivered(b.baseSha))]);
+    const [pa, pb] = await Promise.all([planIn(a, delivered(a.baseSha)), planIn(b, delivered(b.baseSha))]);
     expect(pa?.key.baseCommit).toBe(a.baseSha); expect(pb?.key.baseCommit).toBe(b.baseSha);
     expect(pa?.questions[0]?.headHash).toBe(evalQuestionHash(Buffer.from(Q1)));
     expect(pb?.questions[0]?.headHash).toBe(evalQuestionHash(Buffer.from("b edit\n")));
