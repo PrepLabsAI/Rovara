@@ -76,6 +76,9 @@ const matchesAny = (path: string, globs: readonly string[]): boolean => globs.so
 /** `conftest.py` in the glob list means any directory's, as a maintainer writes it; a glob with a slash is a path from the root. */
 const globMatches = (path: string, glob: string): boolean => globRegExp(glob).test(path) || (!glob.includes("/") && globRegExp(glob).test(posix.basename(path)));
 
+/** Whether a changed path (a repository's own) changes what every test means: the built-in floor and the environment's `fullSuiteOn`. */
+export const pathRunsFullSuite = (path: string, config: Pick<TestEnvironmentBody["selection"], "fullSuiteOn">): boolean => [...BUILTIN_FULL_SUITE_ON, ...config.fullSuiteOn].some((glob) => globMatches(path, glob));
+
 const pathsOf = (changes: readonly ChangedPath[]): string[] => [...new Set(changes.flatMap((change) => (change.oldPath === undefined ? [change.path] : [change.path, change.oldPath])))];
 
 const full = (selection: EvidenceSelection): SelectionResult => ({ mode: "full", selection });
@@ -115,7 +118,7 @@ export function selectTests(input: SelectionInput): SelectionResult {
   if (config.method === "full") return full({ method: "full", selected: input.inventory.length, total: input.inventory.length });
   if (check.selectArgs === undefined || check.selectArgs.length === 0) return fellBack(input, "no_template");
   const paths = pathsOf(input.changes);
-  if (paths.some((path) => [...BUILTIN_FULL_SUITE_ON, ...config.fullSuiteOn].some((glob) => globMatches(path, glob)))) return fellBack(input, "full_suite_on_path");
+  if (paths.some((path) => pathRunsFullSuite(path, config))) return fellBack(input, "full_suite_on_path");
 
   const inventory = new Set(input.inventory);
   // A test FILE is one that defines tests of this check. Every other changed file is a SOURCE, even when it looks test-related (a helper or factory under tests/, `test_helpers.py`, `*_test.json`, `*.spec.json`, a

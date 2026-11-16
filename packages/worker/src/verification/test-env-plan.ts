@@ -11,7 +11,9 @@
 // The result says what ran, in the evidence's own words ("37 of 1,240, coverage map, 14 hours old", or "the whole check, map missing"); the broker checks it against the reports it reads.
 import { TEST_ENV_SELECT_PLACEHOLDER, type CandidateRepository, type EvidenceSelectionSchema, type ProjectCommand, type TestEnvTaskPlan, type TestEnvironmentBody } from "@agentx/contracts";
 import type { z } from "zod";
+import { deriveRepositoryFacts, type RepositoryFacts } from "../multi-repo-edges.js";
 import { candidateChanges } from "./diff.js";
+import { MULTI_REPO_SELECTION_LIVE, planRepositorySelections, type SelectionFacts } from "./multi-repo-selection.js";
 import { checkRoundBudgetMs, planSelections, type ChangedPath, type CheckSelectionPlan, type CoverageMap } from "./selection.js";
 
 type EvidenceSelection = z.infer<typeof EvidenceSelectionSchema>;
@@ -28,19 +30,31 @@ export interface AppliedTestEnvPlan {
   digest: string;
 }
 
-/** The changes of the candidate against where the task started, in the shape selection reads, or undefined when they cannot be known (a repository's diff failed) or span more than one repository. */
-async function changesOf(input: { repositories: ReadonlyArray<{ repositoryId: string; directory: string; baseCommitSha?: string | undefined }>; candidateBefore: ReadonlyArray<CandidateRepository> }): Promise<ChangedPath[] | undefined> {
-  const changed: ChangedPath[][] = [];
+/** The changes of the candidate against where the task started, by repository (only a repository with a change appears), or undefined when they cannot be known (a repository's diff failed). */
+async function changesOf(input: { repositories: ReadonlyArray<{ repositoryId: string; directory: string; baseCommitSha?: string | undefined }>; candidateBefore: ReadonlyArray<CandidateRepository> }): Promise<Map<string, ChangedPath[]> | undefined> {
+  const changed = new Map<string, ChangedPath[]>();
   for (const repository of input.repositories) {
     const treeSha = input.candidateBefore.find((entry) => entry.repositoryId === repository.repositoryId)?.treeSha;
     if (repository.baseCommitSha === undefined || !HEX_OBJECT.test(repository.baseCommitSha) || treeSha === undefined || !HEX_OBJECT.test(treeSha)) return undefined;
     let changes;
     try { changes = await candidateChanges({ directory: repository.directory, baseCommitSha: repository.baseCommitSha, treeSha }); } catch { return undefined; }
-    if (changes.length > 0) changed.push(changes.map((change) => ({ path: change.path, status: change.status === "ADDED" ? "added" as const : change.status === "DELETED" ? "deleted" as const : "modified" as const })));
+    if (changes.length > 0) changed.set(repository.repositoryId, changes.map((change) => ({ path: change.path, status: change.status === "ADDED" ? "added" as const : change.status === "DELETED" ? "deleted" as const : "modified" as const })));
   }
-  // Paths in the map and in the globs are a repository's own: with changes in two repositories they cannot be told apart, so nothing is selected.
-  return changed.length > 1 ? undefined : changed[0] ?? [];
+  return changed;
 }
+
+/**
+ * The dependency facts of the repositories (their own manifests, base and candidate), within a short budget: they only decide what may be skipped, so a derivation that cannot finish is "no facts" and the whole check runs.
+ * Never throws.
+ */
+async function derivedFacts(repositories: ReadonlyArray<{ repositoryId: string; directory: string; baseCommitSha?: string | undefined }>): Promise<RepositoryFacts | undefined> {
+  const deadline = Date.now() + FACTS_MAX_MS;
+  try {
+    return await deriveRepositoryFacts(repositories.map((repository) => ({ name: repository.repositoryId, directory: repository.directory, baseCommit: repository.baseCommitSha ?? "" })), { signal: AbortSignal.timeout(FACTS_MAX_MS), remainingMs: () => deadline - Date.now() });
+  } catch { return undefined; }
+}
+/** The most the derivation of the dependency facts may take. */
+const FACTS_MAX_MS = 15_000;
 
 function aggregate(entries: ReadonlyArray<EvidenceSelection>): EvidenceSelection | undefined {
   if (entries.length === 0) return undefined;
@@ -59,28 +73,44 @@ export async function applyTestEnvironmentPlan(input: {
   repositories: ReadonlyArray<{ repositoryId: string; directory: string; baseCommitSha?: string | undefined }>;
   candidateBefore: ReadonlyArray<CandidateRepository>;
   now: Date;
+  /** TE-MR2b, tests only: the switch and the facts' source. Production takes `MULTI_REPO_SELECTION_LIVE` and the repositories' own manifests. */
+  multiRepo?: { live?: boolean | undefined; derive?: ((repositories: ReadonlyArray<{ repositoryId: string; directory: string; baseCommitSha?: string | undefined }>) => Promise<SelectionFacts | undefined>) | undefined } | undefined;
 }): Promise<AppliedTestEnvPlan | undefined> {
   const { plan } = input;
   if (input.readiness.length < plan.checks.length) return undefined;
   const budgetMs = checkRoundBudgetMs({ roundBudgetMin: plan.roundBudgetMin });
   const checks = plan.checks.map((check, index) => ({ id: check.id, label: check.id, kind: check.kind, command: input.readiness[index]!, ...(check.selectArgs === undefined ? {} : { selectArgs: check.selectArgs }) }));
   const environment = { selection: plan.selection, repos: [{ repositoryId: "plan", setupCommands: [], checks }] } as unknown as Pick<TestEnvironmentBody, "selection" | "repos">;
-  const changes = await changesOf(input);
+  const byRepository = await changesOf(input);
+  // With changes in two repositories the repository-less paths and globs cannot be told apart, so nothing is selected (the whole check, `unknown_file`), unless the plan carries the repository-qualified map and the selection is on.
+  const changes = byRepository === undefined || byRepository.size > 1 ? undefined : [...byRepository.values()][0] ?? [];
   const map: CoverageMap | undefined = plan.coverageMap === undefined ? undefined : { builtAt: plan.coverageMap.builtAt, files: plan.coverageMap.files };
   const inventory = map === undefined ? undefined : [...new Set(Object.values(map.files).flat())];
   let plans: Map<string, CheckSelectionPlan>;
-  if (changes === undefined) {
-    // Not known what changed: every check as it was sent, and the test checks say so.
-    plans = new Map(checks.map((check) => [check.id, check.kind === "test" && !plan.selection.alwaysRun.includes(check.id) ? { command: check.command, selection: { method: "full" as const, selected: 0, total: 0, fallbackReason: "unknown_file" as const } } : { command: check.command }]));
-  } else {
-    plans = planSelections(environment, { changes, now: input.now, inventoryOf: () => inventory, coverageMap: map, lastNightlyFailures: plan.lastNightlyFailures });
-    // A selection that is the same command as the whole check, or that picked no test, is the whole check.
+  // A selection that is the same command as the whole check, or that picked no test, is the whole check.
+  const wholeWhenNothingNarrowed = (): void => {
     for (const check of checks) {
       const planned = plans.get(check.id);
       if (planned?.selection === undefined || planned.selection.fallbackReason !== undefined) continue;
       const unchanged = JSON.stringify(planned.command) === JSON.stringify(check.command);
       if (unchanged || planned.selection.selected === 0) plans.set(check.id, { command: check.command, selection: { method: "full", selected: 0, total: 0, fallbackReason: "unknown_file" } });
     }
+  };
+  // TE-MR2b: the plan carries the map across repositories, the task holds two or more, the switch is on, the diff of every repository is known and the dependency facts could be derived. Otherwise: today's path, below.
+  const live = input.multiRepo?.live ?? MULTI_REPO_SELECTION_LIVE;
+  const facts = live && plan.repositoryCoverageMap !== undefined && input.repositories.length >= 2 && byRepository !== undefined ? await (input.multiRepo?.derive ?? derivedFacts)(input.repositories).catch(() => undefined) : undefined;
+  if (plan.repositoryCoverageMap !== undefined && byRepository !== undefined && facts !== undefined) {
+    plans = planRepositorySelections({
+      config: plan.selection, checks: checks.map((check, index) => ({ ...check, repositoryId: plan.checks[index]!.repositoryId ?? "" })), changes: byRepository, map: plan.repositoryCoverageMap, facts,
+      repositories: input.repositories.map((repository) => repository.repositoryId), now: input.now, lastNightlyFailures: plan.lastNightlyFailures,
+    });
+    wholeWhenNothingNarrowed();
+  } else if (changes === undefined) {
+    // Not known what changed: every check as it was sent, and the test checks say so.
+    plans = new Map(checks.map((check) => [check.id, check.kind === "test" && !plan.selection.alwaysRun.includes(check.id) ? { command: check.command, selection: { method: "full" as const, selected: 0, total: 0, fallbackReason: "unknown_file" as const } } : { command: check.command }]));
+  } else {
+    plans = planSelections(environment, { changes, now: input.now, inventoryOf: () => inventory, coverageMap: map, lastNightlyFailures: plan.lastNightlyFailures });
+    wholeWhenNothingNarrowed();
   }
   const readiness = input.readiness.map((command, index) => (index < plan.checks.length ? plans.get(plan.checks[index]!.id)?.command ?? command : command));
   // The approved placeholder is never left in a command, whatever happened above.

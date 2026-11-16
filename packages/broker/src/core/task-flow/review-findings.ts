@@ -21,6 +21,7 @@ import { findingAcceptItem, type FindingAcceptMethod } from "./finding-accept.js
 import { ownerNoteItem, ownerRoundPlaceOf } from "./owner-note.js";
 import { CLOSED_TASK, NEVER_STARTED_TASK, WAITING_FOR_SPEND, admitRound, loadTaskAsOwner, ownerWords, parseBody, requireMayStartWork, waitingForSpend, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
+import { tellLessons } from "./lessons-tell.js";
 import { acceptedOfRole, requirePageForSecurityAccept } from "./security-accept.js";
 import { commitWorkflow, readWorkspace, runDispatchRow } from "./stage-machine.js";
 import { iso, log } from "./support.js";
@@ -76,7 +77,7 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     ...(due === undefined ? [] : [dispatchRowItem(deps, task.taskId, next.revision, due, now)]),
     ...(acting.items ?? []),
     ...(accepts === 0 ? [] : [findingAcceptItem({ taskId: task.taskId, requestId: request.requestId, candidateDigest: request.candidateDigest, person: caller.principal, method: via, fingerprints: request.resolutions.filter((resolution) => resolution.action === "ACCEPT").map((resolution) => resolution.findingId), at: now, now: deps.now?.() ?? new Date() })]),
-    ...(fixes === 0 ? [] : [ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, text: fixInstructions(workflow, next, request), now: deps.now?.() ?? new Date(), place: ownerRoundPlaceOf(next) })]),
+    ...(fixes === 0 ? [] : [ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, ...fixInstructions(workflow, next, request), now: deps.now?.() ?? new Date(), place: ownerRoundPlaceOf(next) })]),
     ...stageAudit(deps, {
       eventId: `task.findings_resolved:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.findings_resolved", subject: { type: "task", id: task.taskId },
       // Counts only: the findings' text is reviewer output and the reasons are the owner's words, kept on the workflow.
@@ -89,6 +90,8 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     if (fresh?.workflow !== undefined && again?.source === "FINDINGS" && again.workflowRevision === request.expectedRevision && sameAnswers(fresh.workflow, request, again.reason)) return taskViewOf(deps, fresh);
     throw agentXError("IDEMPOTENCY_CONFLICT", FINDINGS_OUT_OF_DATE);
   }
+  // A fix sends the task back to coding: the lessons seam is told once, by the call that committed (an answer that only accepts findings is an approval and tells nothing). Best effort, bounded (`lessons-tell.ts`).
+  if (fixes > 0) await tellLessons(deps, task.taskId);
   if (due !== undefined) {
     await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: due })
       .catch((error: unknown) => log(deps, { event: "task_actions.findings_start_deferred", taskId: task.taskId, kind: due, error: error instanceof Error ? error.name : "unknown" }));
@@ -113,19 +116,22 @@ function dueAfter(next: WorkflowSnapshot, fixed: boolean): Due | undefined {
  * What the coder is told besides the problems: only the findings listed are to be fixed, and the owner's instruction for each, numbered in the order the problems are listed (the order the coding step lists them in,
  * which is not always the order the owner answered in). The findings' own text is reviewer output and is not repeated here; the owner's words stand outside the untrusted tags.
  */
-function fixInstructions(before: WorkflowSnapshot, next: WorkflowSnapshot, request: WorkflowResolveFindingsInput): string {
+function fixInstructions(before: WorkflowSnapshot, next: WorkflowSnapshot, request: WorkflowResolveFindingsInput): { text: string; findingNotes: string[] } {
   const answers = new Map(request.resolutions.map((resolution) => [resolution.findingId, resolution]));
   const toFix = openReviewFindings(before).filter((finding) => answers.get(finding.findingId)?.action === "FIX");
   const lines: string[] = [];
+  // The person's own words alone, in the same order, for the lessons reader (the lead-in sentence below is code's).
+  const findingNotes: string[] = [];
   sendBackProblems(next).forEach((problem, index) => {
     const finding = toFix.find((candidate) => { const listed = workflowFindingProblem(candidate.role, candidate); return listed.source === problem.source && listed.text === problem.text; });
     // The owner's words, redacted of anything key-shaped like every other kept instruction.
     const note = finding === undefined ? "" : ownerWords(answers.get(finding.findingId)?.note ?? "");
-    if (note !== "") lines.push(`${index + 1}. ${note}`);
+    if (note !== "") { lines.push(`${index + 1}. ${note}`); findingNotes.push(note); }
   });
-  return lines.length === 0
+  const text = lines.length === 0
     ? "Fix only the problems listed. The owner gave no further instructions for them."
     : `Fix only the problems listed. The owner's instructions for them, numbered in the order the problems are listed:\n${lines.join("\n")}`;
+  return { text, findingNotes };
 }
 
 /**

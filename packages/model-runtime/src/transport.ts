@@ -1,5 +1,5 @@
 import type { Api, AnthropicMessagesCompat, OpenAICompletionsCompat, OpenAIResponsesCompat } from "@earendil-works/pi-ai";
-import type { KeyedModelProvider } from "@agentx/contracts";
+import { canonicalModelName, type KeyedModelProvider } from "@agentx/contracts";
 
 // Shared by the coding runtime (index.ts) and the governed e2e route (e2e-provider-invoke.ts), so both reach a keyed
 // provider the same way. Neither imports the other.
@@ -31,3 +31,19 @@ export function requestCompat(provider: KeyedModelProvider, compat: unknown) {
   return { ...(compat as OpenAIResponsesCompat | undefined), supportsMidConvoSystemMessages: false };
 }
 
+
+/**
+ * The canonical names (contracts `canonicalModelName`) of the five reasoning models that need their earlier reasoning sent back on the next turn of a tool loop:
+ * DeepSeek V3.2, Kimi K2 Thinking, Kimi K3, Kimi K3.1 and MiniMax M2.5 (ROVARA-AI-REASONING-CARRYOVER). Rovara's gateway returns their reasoning as Anthropic
+ * `thinking` blocks with no signature, because Bedrock sends none for them.
+ */
+const UNSIGNED_REASONING_MODELS: ReadonlySet<string> = new Set(["deepseek-v3-2", "kimi-k2-thinking", "kimi-k3", "kimi-k3-1", "minimax-m2-5"]);
+
+/**
+ * Whether a routed model's catalog name is one of those five. For them only, Pi is told (`allowEmptySignature`) to send an unsigned thinking block back as a
+ * `thinking` block with an empty signature. Without it Pi's Anthropic client turns the block into a plain text block (pi-ai anthropic-messages.js, convertMessages),
+ * which the model would read as part of its visible reply and not as its own reasoning. Every other model keeps Pi's rule: Anthropic itself refuses an empty signature.
+ */
+export function carriesUnsignedReasoning(catalogName: string): boolean {
+  return UNSIGNED_REASONING_MODELS.has(canonicalModelName({ provider: "amazon-bedrock", modelId: catalogName }));
+}

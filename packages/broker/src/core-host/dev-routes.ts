@@ -43,6 +43,8 @@ import { createLocalPlaybook } from "../local/app/playbook.js";
 import { developerTaskView } from "../local/app/task-view.js";
 import type { CoreHostApp } from "./app.js";
 import type { CoreRuntime } from "./core-runtime.js";
+import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
+import type { AgentModelChoice } from "./gateway-model-selection.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -117,6 +119,8 @@ export interface CoreDevWiring {
    * asked for). Anything but a positive whole number makes no token (fixed words), never one without the cap.
    */
   sessionCapSeconds?: number;
+  /** The company's agent model choice over the gateway's offered models (`createAgentModelChoice`). Absent: `/v1/app/agent-models` says "not on the core yet". */
+  modelChoice?: AgentModelChoice;
   /** The URL clients reach the API at (a session's `link`). */
   origin: () => string;
   /** Hosted wiring (d): the audit sink for one request, naming the caller it came through (`auditSinkForDeployedCaller`). Absent: the registry's sink as it is. */
@@ -145,6 +149,7 @@ function owns(path: string, method: string): boolean {
   if (path === TASK_START) return method === "POST";
   if (TASK_READ.test(path) || PLAYBOOK.test(path)) return method === "GET";
   if (TASK_ACTION.test(path)) return method === "POST";
+  if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -316,6 +321,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           const reply = await routeDecisionCards(target.wiring.decisions, decisionCaller, { method: request.method, pathname: path, searchParams: url.searchParams, body });
           if (reply === undefined) throw agentXError("NOT_FOUND", "route not found");
           return json(reply.statusCode, reply.body);
+        }
+        if (path === AGENT_MODELS_PATH) {
+          if (target.wiring.modelChoice === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await agentModelRoute({
+            method: request.method, body: request.body, principal: caller.principal, role: membership.role, choice: target.wiring.modelChoice,
+            audit: target.wiring.auditFor === undefined ? undefined : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
+            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
+          });
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {
