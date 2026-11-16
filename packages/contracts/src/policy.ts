@@ -41,6 +41,8 @@ export const POLICY_FIELDS: readonly PolicyField[] = Object.freeze([
   field({ id: "prompt_side_by_side", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
   // Q1 compatibility: no current setting; feature not built yet (TE-H1 browser evidence, slice 1 behind this setting; contracts/src/browser-evidence.ts).
   field({ id: "browser_evidence", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
+  // Q1 compatibility: no current setting; feature not built yet (device testing slice 1, DEC 244; contracts/src/device-evidence.ts).
+  field({ id: "device_evidence", kind: "ordered_enum", order: ["off", "on"], stricter: "higher", raisable: false, measured: false, lockable: true, ceilinged: false, today: "off", compatibility: true }),
 ]);
 
 /** default is Q1's explicit compatibility origin; company_ceiling/install_off are §3.2 steps 7/8 additions. */
