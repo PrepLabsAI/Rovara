@@ -23,7 +23,7 @@ function rig(answer: () => Response | Promise<Response> = () => new Response('{"
   let tokens = 0;
   const egress = createProductGatewayEgress({ gatewayUrl: "https://gateway.example.test", ...(family === undefined ? {} : { family }),
     tokenSource: async () => { tokens++; return TOKEN; },
-    fetch: (async (url, init) => { sent.push({ url: String(url), init: init! }); return answer(); }) as typeof fetch,
+    fetch: (async (url: string | URL | Request, init?: RequestInit) => { sent.push({ url: typeof url === "string" ? url : url instanceof URL ? url.href : url.url, init: init ?? {} }); return answer(); }),
   });
   return { sent, tokens: () => tokens, async run(input = frame()) {
     const events: ModelEgressEvent[] = [];
@@ -57,7 +57,7 @@ describe("Bedrock product contract and request boundary", () => {
     expect(JSON.stringify(r.sent[0])).not.toContain(DUMMY);
   });
   it("strips SDK bookkeeping at the helper boundary too", () => {
-    expect(headersForBackend(Object.fromEntries([...credentials.map(n => [n, DUMMY]), ["content-type", "application/json"]]))).toEqual({ "content-type": "application/json" });
+    expect(headersForBackend(Object.fromEntries([...credentials.map((n): [string, string] => [n, DUMMY]), ["content-type", "application/json"]]) as Record<string, string>)).toEqual({ "content-type": "application/json" });
   });
   it("accepts the SDK's percent-encoded model colon and canonicalizes it", async () => {
     const r = bedrock();
@@ -77,7 +77,7 @@ describe("Bedrock product contract and request boundary", () => {
     const r = bedrock(); const out = await r.run(frame(over));
     expect(r.sent).toEqual([]); expect(r.tokens()).toBe(0);
     expect(tail(out)).toMatchObject({ class: "refused", costMicros: 0 });
-    expect(JSON.parse(bytes(out).toString()).message).toEqual(expect.any(String));
+    expect((JSON.parse(bytes(out).toString()) as { message?: unknown }).message).toEqual(expect.any(String));
     expect(bytes(out).toString()).not.toContain("dummy");
   });
   it.each(["ab", "a".repeat(201)])("accepts the model-pattern boundary %s", async id => {
@@ -117,7 +117,7 @@ describe("Bedrock responses", () => {
     }
     const r = bedrock(() => new Response(JSON.stringify({ error: { type: "not_allowed", message: TOKEN } }), { status: 400 }));
     const out = await r.run();
-    expect(JSON.parse(bytes(out).toString()).message).toBe(c.refusals[0]!.message);
+    expect((JSON.parse(bytes(out).toString()) as { message?: unknown }).message).toBe(c.refusals[0]!.message);
   });
   it.each([302, 500])("makes one attempt for status %i and never passes untrusted words or redirects", async status => {
     const r = bedrock(() => new Response(TOKEN, { status, headers: { location: "https://other.example.test" } }));
