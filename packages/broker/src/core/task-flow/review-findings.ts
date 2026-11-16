@@ -77,7 +77,7 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     ...(due === undefined ? [] : [dispatchRowItem(deps, task.taskId, next.revision, due, now)]),
     ...(acting.items ?? []),
     ...(accepts === 0 ? [] : [findingAcceptItem({ taskId: task.taskId, requestId: request.requestId, candidateDigest: request.candidateDigest, person: caller.principal, method: via, fingerprints: request.resolutions.filter((resolution) => resolution.action === "ACCEPT").map((resolution) => resolution.findingId), at: now, now: deps.now?.() ?? new Date() })]),
-    ...(fixes === 0 ? [] : [ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, text: fixInstructions(workflow, next, request), now: deps.now?.() ?? new Date(), place: ownerRoundPlaceOf(next) })]),
+    ...(fixes === 0 ? [] : [ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, ...fixInstructions(workflow, next, request), now: deps.now?.() ?? new Date(), place: ownerRoundPlaceOf(next) })]),
     ...stageAudit(deps, {
       eventId: `task.findings_resolved:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.findings_resolved", subject: { type: "task", id: task.taskId },
       // Counts only: the findings' text is reviewer output and the reasons are the owner's words, kept on the workflow.
@@ -116,19 +116,22 @@ function dueAfter(next: WorkflowSnapshot, fixed: boolean): Due | undefined {
  * What the coder is told besides the problems: only the findings listed are to be fixed, and the owner's instruction for each, numbered in the order the problems are listed (the order the coding step lists them in,
  * which is not always the order the owner answered in). The findings' own text is reviewer output and is not repeated here; the owner's words stand outside the untrusted tags.
  */
-function fixInstructions(before: WorkflowSnapshot, next: WorkflowSnapshot, request: WorkflowResolveFindingsInput): string {
+function fixInstructions(before: WorkflowSnapshot, next: WorkflowSnapshot, request: WorkflowResolveFindingsInput): { text: string; findingNotes: string[] } {
   const answers = new Map(request.resolutions.map((resolution) => [resolution.findingId, resolution]));
   const toFix = openReviewFindings(before).filter((finding) => answers.get(finding.findingId)?.action === "FIX");
   const lines: string[] = [];
+  // The person's own words alone, in the same order, for the lessons reader (the lead-in sentence below is code's).
+  const findingNotes: string[] = [];
   sendBackProblems(next).forEach((problem, index) => {
     const finding = toFix.find((candidate) => { const listed = workflowFindingProblem(candidate.role, candidate); return listed.source === problem.source && listed.text === problem.text; });
     // The owner's words, redacted of anything key-shaped like every other kept instruction.
     const note = finding === undefined ? "" : ownerWords(answers.get(finding.findingId)?.note ?? "");
-    if (note !== "") lines.push(`${index + 1}. ${note}`);
+    if (note !== "") { lines.push(`${index + 1}. ${note}`); findingNotes.push(note); }
   });
-  return lines.length === 0
+  const text = lines.length === 0
     ? "Fix only the problems listed. The owner gave no further instructions for them."
     : `Fix only the problems listed. The owner's instructions for them, numbered in the order the problems are listed:\n${lines.join("\n")}`;
+  return { text, findingNotes };
 }
 
 /**

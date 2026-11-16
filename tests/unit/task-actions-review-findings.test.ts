@@ -13,7 +13,7 @@ import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/wo
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskCaller, TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { acceptedByOf, findingAcceptItem } from "../../packages/broker/src/core/task-flow/finding-accept.js";
-import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
+import { ownerNoteItem, readOwnerFindingNotes } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { LESSONS_TELL_LIMIT_MS } from "../../packages/broker/src/core/task-flow/lessons-tell.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import type { TaskActionsOptions } from "../../packages/broker/src/core/task-flow/owner-round.js";
@@ -310,6 +310,56 @@ describe("the coder's notes belong to the round they were written for", () => {
     // The same workflow with the owner's findings decision last: the notes are the round's.
     const sentBack = WorkflowSnapshotSchema.parse({ ...auto, decisions: [ownerFindingsDecision] });
     expect(await roundPrompt(sentBack)).toContain("SENTINEL-OWNER-NOTE");
+  });
+});
+
+describe("the person's per-finding notes are kept apart from code's lead-in (for the lessons reader)", () => {
+  it("keeps only the person's own notes for the findings to fix, in the order the problems are listed, and none for an accepted finding or a fix with no note", async () => {
+    const reversed = blockedReview({}, [report("SECURITY", "FINDINGS", [TOKEN]), report("CRITIC", "FINDINGS", [PARSER])]);
+    const { h, caller } = await seed({ workflow: reversed });
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", "About the parser."), answer(tokenId, "FIX", "About the token.")]));
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_A)).toEqual(["About the token.", "About the parser."]);
+    // The stored text still holds code's lead-in for the coder; the notes list does not.
+    const row = await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `OWNER_NOTE#${REQUEST_A}` });
+    expect(row!["text"]).toContain("Fix only the problems listed.");
+    expect(JSON.stringify(row!["findingNotes"])).not.toContain("Fix only");
+
+    const mixedRun = await seed({ workflow: both() });
+    await pageActions(mixedRun.h.deps).resolveFindings(mixedRun.caller, TASK_ID, mixed());
+    // The accepted finding's reason ("Test token only.") is not a fix note.
+    expect(await readOwnerFindingNotes(mixedRun.h.store, TASK_ID, REQUEST_A)).toEqual(["Keep the footer line."]);
+
+    const silent = await seed({ workflow: both() });
+    await pageActions(silent.h.deps).resolveFindings(silent.caller, TASK_ID, request([answer(parserId, "FIX", ""), answer(tokenId, "ACCEPT", "Test token only.")]));
+    expect(await readOwnerFindingNotes(silent.h.store, TASK_ID, REQUEST_A)).toEqual([]);
+    expect(((await silent.h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `OWNER_NOTE#${REQUEST_A}` }))!)["findingNotes"]).toBeUndefined();
+  });
+
+  it("a key-shaped string is redacted from the kept notes too", async () => {
+    const fake = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
+    const { h, caller } = await seed({ workflow: both() });
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", `Keep the footer line, the key ${fake} is fake.`), answer(tokenId, "ACCEPT", "Test token only.")]));
+    const notes = await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_A);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).not.toContain(fake);
+    expect(notes[0]).toContain("Keep the footer line, the key");
+  });
+
+  it("reads nothing from a row that is not this decision's, or whose notes are not a list of words", async () => {
+    const { h } = await seed({ workflow: both() });
+    const key = (requestId: string) => ({ pk: `DEVTASK#${TASK_ID}`, sk: `OWNER_NOTE#${requestId}` });
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_A)).toEqual([]);
+    await h.store.put({ item: { ...key(REQUEST_A), entityType: "OWNER_NOTE", taskId: TASK_ID, requestId: REQUEST_A, text: "x", findingNotes: "not a list" } });
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_A)).toEqual([]);
+    await h.store.put({ item: { ...key(REQUEST_B), entityType: "OWNER_NOTE", taskId: TASK_ID, requestId: REQUEST_B, text: "x", findingNotes: ["ok", 3, "", "  ", { a: 1 }] } });
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_B)).toEqual(["ok"]);
+    await h.store.put({ item: { ...key(REQUEST_B), entityType: "OWNER_NOTE", taskId: TASK_ID, requestId: REQUEST_B, text: "x", findingNotes: Array.from({ length: 60 }, (_, i) => `note ${String(i)}`) } });
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_B)).toHaveLength(50);
+    // A row filed under this request id but naming another request (or task) is not this decision's.
+    await h.store.put({ item: { ...key("44444444-4444-4444-8444-444444444444"), entityType: "OWNER_NOTE", taskId: TASK_ID, requestId: REQUEST_B, text: "x", findingNotes: ["wrong round"] } });
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, "44444444-4444-4444-8444-444444444444")).toEqual([]);
+    await h.store.put({ item: { ...key("55555555-5555-4555-8555-555555555555"), entityType: "OWNER_NOTE", taskId: "other-task", requestId: "55555555-5555-4555-8555-555555555555", text: "x", findingNotes: ["wrong task"] } });
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, "55555555-5555-4555-8555-555555555555")).toEqual([]);
   });
 });
 
