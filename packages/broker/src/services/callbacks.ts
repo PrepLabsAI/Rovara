@@ -16,8 +16,6 @@ import { operationKey, taskPointerKey } from "../core/task-flow/keys.js";
 import { handleCodingRunUpload, isCodingRunUpload } from "./candidate-export.js";
 import { handleE2EEvidenceUpload, readE2EAdmissionChunk, type RoundRecordReaders } from "../core/e2e/callbacks.js";
 import { handleBrowserEvidenceUpload } from "../core/proof/browser-evidence-upload.js";
-import { handleBrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in-callback.js";
-import type { BrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in.js";
 import type { UploadStores } from "../core/e2e/uploads-chunks.js";
 import { openPullRequest } from "../core/build-step/publish.js";
 import { updatePullRequest } from "../core/build-step/maintain.js";
@@ -87,8 +85,6 @@ export interface CallbackDeps {
    * core/task-flow/money-stop.ts) asks the run to stop.
    */
   bookUsage?: ((operation: OperationRecord, events: ReadonlyArray<{ type: string; timestamp: string; payload: unknown }>) => Promise<unknown>) | undefined;
-  /** TE-H1 browser evidence, slice 3: the company's saved sign-ins (a laptop's secret files). Absent: `browser-evidence-sign-in` is answered "not available" (Cloud has no browser evidence yet). */
-  browserEvidenceSignIn?: Pick<BrowserEvidenceSignIn, "read"> | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -107,7 +103,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent"]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "pull-request", "pull-request-update", "setup-agent"]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -303,7 +299,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)) {
+      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
         throw agentXError("NOT_FOUND", "this callback is not available on this install");
@@ -327,16 +323,6 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       }
       // TE-H1 browser evidence (DEC 241): one chunked upload of the run's before and after screenshots, judged by the handler (it needs no e2e admission).
       if (action === "browser-evidence") return json(200, await handleBrowserEvidenceUpload(uploadStores(deps), operation, bodyOf(request)));
-      if (action === "browser-evidence-sign-in") {
-        // The saved sign-in, for this operation's own recipe and project: the body is not read. The values are in this one answer, which no cache may keep.
-        const signIn = deps.browserEvidenceSignIn!;
-        const answer = await handleBrowserEvidenceSignIn({ signIn, companyId: deps.flow.companyId, async projectOf(op) {
-          const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(op.workspaceId)));
-          const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
-          return task !== undefined && task.companyId === deps.flow.companyId ? task.project : undefined;
-        } }, operation);
-        return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
-      }
       if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "setup-agent") {

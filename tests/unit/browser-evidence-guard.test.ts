@@ -236,30 +236,6 @@ describe("browser evidence: creating a capture container", () => {
     }, [sandboxContainer(), { id: "v".repeat(64), name: SERVICE, labels: { "rovara.local.owner": OWNER, "rovara.local.sandbox": "service", "rovara.local.profile": "check" } }, captureContainer("rovara-be-aaaaaaaaaaaa", "d".repeat(64))].slice(0, 2));
   });
 
-  it("lets a recipe's saved sign-in through as ONE environment variable of the fixed name and base64url letters, rebuilt, and nothing else (slice 3)", async () => {
-    const variable = `ROVARA_BE_SIGNIN=${"A".repeat(300)}`;
-    await using({ image: EXECUTOR, seccomp: SECCOMP }, async (w) => {
-      const answer = await create(w, CAPTURE, mutated((v) => { v.Env = [variable]; }));
-      expect(answer.status).toBe(201);
-      const body = JSON.parse(w.forwarded("/containers/create")[0]!.body) as Record<string, any>;
-      expect(body["Env"]).toEqual([variable]);
-      // Everything else of the body is as it was: the environment is the one thing added.
-      expect(body).toMatchObject({ Image: EXECUTOR, Cmd: ["node", ENTRY, PLAN], Entrypoint: null, User: "" });
-    });
-    // The same body with any other environment is refused, forwarding nothing (mutants: the name, the charset, the length, the count).
-    const refusals: Array<[string, unknown]> = [
-      ["another name", ["OTHER=AAAA"]], ["a lower-case name", ["rovara_be_signin=AAAA"]], ["a prefix of the name", ["ROVARA_BE_SIGNIN_X=AAAA"]], ["no value", ["ROVARA_BE_SIGNIN="]], ["no equals", ["ROVARA_BE_SIGNIN"]],
-      ["a value with a space", ["ROVARA_BE_SIGNIN=AA AA"]], ["a value with an equals sign", ["ROVARA_BE_SIGNIN=AA=AA"]], ["a value with a newline", ["ROVARA_BE_SIGNIN=AAAA\nPATH=/x"]], ["a value over 1,536 letters", [`ROVARA_BE_SIGNIN=${"A".repeat(1_537)}`]],
-      ["the name twice", [variable, variable]], ["the name and another", [variable, "PATH=/x"]], ["an object", { ROVARA_BE_SIGNIN: "AAAA" }], ["a number", 5], ["a string", variable],
-    ];
-    await using({ image: EXECUTOR, seccomp: SECCOMP }, async (w) => {
-      for (const [what, env] of refusals) expect((await create(w, CAPTURE, mutated((v) => { v.Env = env; }))).status, what).toBe(403);
-      expect(w.forwarded("/containers/create")).toEqual([]);
-      // The longest the worker sends (1,536 letters) is accepted.
-      expect((await create(w, CAPTURE, mutated((v) => { v.Env = [`ROVARA_BE_SIGNIN=${"A".repeat(1_536)}`]; }))).status).toBe(201);
-    });
-  });
-
   it("refuses a name that is not one of the guard's, an option the guard did not allow, malformed bodies, and a sandbox that is a dev container's or another worker's", async () => {
     await using({ image: EXECUTOR, seccomp: SECCOMP }, async (w) => {
       for (const name of ["", "rovara-be-xyz", "rovara-be-0123456789abc", "evil", "rovara-be-0123456789AB"]) expect((await create(w, name, captureBody())).status, name).toBe(403);

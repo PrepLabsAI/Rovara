@@ -41,9 +41,7 @@ describe("Cloud", () => {
     expect(BROWSER_EVIDENCE_CALLBACK_ACTION).toBe("browser-evidence");
     expect(() => refuseBrowserEvidenceOnCloud("browser-evidence")).toThrow(BROWSER_EVIDENCE_NOT_ON_CLOUD);
     try { refuseBrowserEvidenceOnCloud("browser-evidence"); } catch (error) { expect(error).toMatchObject({ code: "NOT_FOUND" }); }
-    // Slice 3: the sign-in action is refused with the same sentence, and nothing near its name passes for it.
-    expect(() => refuseBrowserEvidenceOnCloud("browser-evidence-sign-in")).toThrow(BROWSER_EVIDENCE_NOT_ON_CLOUD);
-    for (const action of ["events", "artifacts", "result", "e2e-evidence", "browser-evidence2", "browser-evidence-sign-in2", "browser-evidence-sign", ""]) expect(() => refuseBrowserEvidenceOnCloud(action), action).not.toThrow();
+    for (const action of ["events", "artifacts", "result", "e2e-evidence", "browser-evidence2", ""]) expect(() => refuseBrowserEvidenceOnCloud(action), action).not.toThrow();
   });
   it("is wired into Cloud's callback route before the capability is judged (the route is listed and the refusal is called)", () => {
     const source = readFileSync("packages/broker/src/aws/broker.ts", "utf8");

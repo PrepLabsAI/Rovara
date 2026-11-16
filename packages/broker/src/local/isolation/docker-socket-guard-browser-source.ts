@@ -5,7 +5,7 @@
 //
 // What the worker may additionally do, and nothing else: start ONE kind of container, the capture container. Its body is REBUILT by the guard from the fields it understands and compared with ONE shape:
 //   - the image is `policy.browserEvidence.image`, the executor image as a pinned id (`sha256:<64 hex>`, never a tag a registry could move), and the command is exactly `node <the capture program> <plan>`, the plan being one argument of
-//     base64url letters; no entrypoint, no user of its own, an environment only for a recipe's saved sign-in (one variable of a fixed name, base64url letters), no working directory, no stdin, no label but the guard's;
+//     base64url letters; no entrypoint, no environment, no user of its own, no working directory, no stdin, no label but the guard's;
 //   - it joins THE NETWORK NAMESPACE OF ONE OF THE WORKER'S OWN TASK SANDBOXES (`NetworkMode: container:<sandbox>`, a sandbox that exists, carries the guard's own labels and is not a dev container or a service container) and nothing else:
 //     no other network, no published port, no link, no extra host, no name server, no mount, no volume, no device, no host namespace, no capability (every one dropped), never privileged;
 //   - it runs as the e2e Docker host runs the executor: the pinned seccomp profile (the exact text the broker verified against its digest; the CLI's own compact form of the file), no-new-privileges, a read-only root with one
@@ -25,19 +25,12 @@ const BE_LABEL = "rovara.browser-evidence";
 const BE_MAX = 2;
 const BE_TMPFS = "rw,exec,nosuid,nodev,size=512m";
 const BE_SANDBOX_NETWORK = /^container:([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$/;
-const BE_SIGN_IN_ENV = /^ROVARA_BE_SIGNIN=[A-Za-z0-9_-]{1,1536}$/;
 
 function beNumber(value, expected, name) {
   if (value !== expected) deny(name + " is fixed");
 }
 function beNothing(value, name) {
   if (!emptyish(value)) deny(name + " is not allowed");
-}
-// The one environment a capture container may have: the saved sign-in of a recipe that has one, as ONE variable of a fixed name holding base64url letters (never an argument of the command line; the docker CLI takes it from its own environment).
-function beEnvironment(value) {
-  if (emptyish(value)) return null;
-  if (Array.isArray(value) && value.length === 1 && typeof value[0] === "string" && BE_SIGN_IN_ENV.test(value[0])) return [value[0]];
-  deny("a capture container's environment is the sign-in and nothing else");
 }
 
 // The body of a capture container, rebuilt. Every field is compared with its one value; the worker's own spelling is never passed on.
@@ -49,7 +42,7 @@ async function buildBrowserEvidenceBody(text) {
   if (body.Image !== BE.image) deny("a capture container runs the executor image this install pinned");
   if (!Array.isArray(body.Cmd) || body.Cmd.length !== 3 || body.Cmd[0] !== "node" || body.Cmd[1] !== BE_ENTRY || typeof body.Cmd[2] !== "string" || !BE_PLAN.test(body.Cmd[2])) deny("a capture container runs the capture program with one plan");
   beNothing(body.Entrypoint, "an entrypoint");
-  const environment = beEnvironment(body.Env);
+  beNothing(body.Env, "an environment");
   beNothing(body.User, "a user");
   beNothing(body.WorkingDir, "a working directory");
   ["Tty", "OpenStdin", "AttachStdin", "StdinOnce"].forEach(function (key) { if (body[key] !== undefined && body[key] !== null && body[key] !== false) deny("a capture container takes no input"); });
@@ -90,7 +83,7 @@ async function buildBrowserEvidenceBody(text) {
   ["Ulimits", "CpusetCpus", "CgroupnsMode", "Isolation", "MaskedPaths", "ReadonlyPaths"].forEach(function (key) { beNothing(host[key], key); });
 
   const out = {
-    Image: BE.image, Cmd: body.Cmd.slice(), Entrypoint: null, Env: environment, User: "", WorkingDir: "", Tty: false, OpenStdin: false, AttachStdin: false, StdinOnce: false,
+    Image: BE.image, Cmd: body.Cmd.slice(), Entrypoint: null, Env: null, User: "", WorkingDir: "", Tty: false, OpenStdin: false, AttachStdin: false, StdinOnce: false,
     AttachStdout: body.AttachStdout === true, AttachStderr: body.AttachStderr === true,
     Labels: {}, NetworkingConfig: { EndpointsConfig: {} },
     HostConfig: { NetworkMode: host.NetworkMode, CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges", "seccomp=" + BE.seccomp], Privileged: false, ReadonlyRootfs: true, Init: true, AutoRemove: true,

@@ -10,7 +10,6 @@
 //   - an item whose citation does not re-read is shown as "unverified" and is never pre-ticked.
 import { z } from "zod";
 import { AppProjectDetailSchema, isAllowedDomain } from "./app-projects.js";
-import { BrowserEvidenceSuggestionSchema } from "./browser-evidence.js";
 import { GitBranchNameSchema } from "./git-branch.js";
 import { AgentXNameSchema } from "./names.js";
 import { IntakeSystemSchema } from "./intake.js";
@@ -20,7 +19,7 @@ import { ProvenanceSchema, proposedSchema, type Proposed, type ProposalRisk } fr
 export const SETUP_PROPOSAL_VERSION = 2;
 
 /** Every kind of thing a proposal item can be. The id of an item starts with its kind (`setup-api`, `repository-web`), assigned by the reader, never by the model. */
-export const SETUP_ITEM_KINDS = ["repository", "setup", "tests", "check", "test_environment", "devcontainer", "knowledge", "spec_target", "source", "intake", "allowed_domain", "secret", "browser_evidence"] as const;
+export const SETUP_ITEM_KINDS = ["repository", "setup", "tests", "check", "test_environment", "devcontainer", "knowledge", "spec_target", "source", "intake", "allowed_domain", "secret"] as const;
 export type SetupItemKind = (typeof SETUP_ITEM_KINDS)[number];
 
 export const SETUP_COMMANDS_MAX = 16;
@@ -90,10 +89,6 @@ export const SetupIntakeValueSchema = z.object({
   label: z.string().trim().min(1).max(100).regex(/^[^\p{Cc}\p{Cf}]+$/u, "one plain line").optional(),
 }).strict();
 
-/** TE-H1 slice 3: how the app starts, on which port, and which pages which repository files make (a recipe's own fields, nothing secret). Shown with where it came from; saved only through the browser evidence page, by the owner. */
-export const SetupBrowserEvidenceValueSchema = BrowserEvidenceSuggestionSchema;
-export type SetupBrowserEvidenceValue = z.infer<typeof SetupBrowserEvidenceValueSchema>;
-
 export const SetupAllowedDomainValueSchema = z.string().max(253).refine((value) => value === value.toLowerCase() && isAllowedDomain(value), "not a domain the project settings accept");
 export const SetupSecretValueSchema = z.object({ name: z.string().regex(SECRET_NAME_PATTERN), why: z.string().max(300) }).strict();
 
@@ -130,8 +125,6 @@ export const SetupProposalSchema = z.object({
   intake: z.array(proposedSchema(SetupIntakeValueSchema)).max(SETUP_ITEM_LIMITS.intake),
   allowedDomains: z.array(proposedSchema(SetupAllowedDomainValueSchema)).max(SETUP_ITEM_LIMITS.allowedDomains),
   secretsNeeded: z.array(proposedSchema(SetupSecretValueSchema)).max(SETUP_ITEM_LIMITS.secrets),
-  /** TE-H1 slice 3: the pages and the start command for browser evidence. Absent: today's proposal, byte for byte. */
-  browserEvidence: proposedSchema(SetupBrowserEvidenceValueSchema).optional(),
   flaggedCommands: z.array(SetupFlaggedCommandSchema).max(SETUP_ITEM_LIMITS.flagged),
   foundNotUsed: z.array(SetupFoundNotUsedSchema).max(SETUP_ITEM_LIMITS.found),
   notes: z.string().max(2000),
@@ -152,7 +145,7 @@ export interface SetupItem {
 }
 
 /** Every item of a proposal, in the order the page shows them. */
-export function setupItemsOf(proposal: Pick<SetupProposal, "repositories" | "setup" | "tests" | "checks" | "testEnvironment" | "devcontainer" | "knowledge" | "specTarget" | "sources" | "intake" | "allowedDomains" | "secretsNeeded"> & Partial<Pick<SetupProposal, "browserEvidence">>): SetupItem[] {
+export function setupItemsOf(proposal: Pick<SetupProposal, "repositories" | "setup" | "tests" | "checks" | "testEnvironment" | "devcontainer" | "knowledge" | "specTarget" | "sources" | "intake" | "allowedDomains" | "secretsNeeded">): SetupItem[] {
   const items: SetupItem[] = [];
   const add = (kind: SetupItemKind, proposed: ReadonlyArray<Proposed<unknown>> | Proposed<unknown> | undefined) => {
     if (proposed === undefined) return;
@@ -170,7 +163,6 @@ export function setupItemsOf(proposal: Pick<SetupProposal, "repositories" | "set
   add("intake", proposal.intake);
   add("allowed_domain", proposal.allowedDomains);
   add("secret", proposal.secretsNeeded);
-  add("browser_evidence", proposal.browserEvidence);
   return items;
 }
 

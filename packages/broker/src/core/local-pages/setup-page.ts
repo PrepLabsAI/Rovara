@@ -10,7 +10,7 @@ const CHECK_WORDS = { unchecked: "not checked yet", outdated: "checked for an ol
 const CHECK_CLASS = { unchecked: "muted", outdated: "warn", checking: "warn", failed: "bad", ready: "ok" } as const;
 const VERDICT_WORDS = { verified: "confirmed in the repository", unverified: "not found where it says", unchecked: "could not be checked" } as const;
 const VERDICT_CLASS = { verified: "ok", unverified: "bad", unchecked: "warn" } as const;
-const KIND_WORDS: Record<string, string> = { setup: "Setup command", tests: "Test command", repository: "Repository", devcontainer: "Dev container", check: "Check", knowledge: "Knowledge", allowed_domain: "Website", test_environment: "Test environment", source: "Source", intake: "Intake", secret: "Secret", spec_target: "Spec target", browser_evidence: "Browser evidence pages" };
+const KIND_WORDS: Record<string, string> = { setup: "Setup command", tests: "Test command", repository: "Repository", devcontainer: "Dev container", check: "Check", knowledge: "Knowledge", allowed_domain: "Website", test_environment: "Test environment", source: "Source", intake: "Intake", secret: "Secret", spec_target: "Spec target" };
 const STATUS_WORDS = { none: "Rovara has not set this project up yet.", running: "Rovara is running the setup now.", ready: "Rovara finished and has a setup to use.", failed: "The setup run did not finish." } as const;
 
 export function renderSetupIndex(context: PageContext, projects: readonly string[]): string {
@@ -54,9 +54,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     const form = view.status === "ready" && view.apply === undefined && usable
       ? `<form method="post" action="${action("confirm")}" class="decide">${table}${hidden("requestId", requestId)}${hidden("revision", view.revision)}${token("confirm", { requestId, revision: view.revision })}<p>${view.verified ? "" : "<span class=\"warn\">Rovara could not finish checking where each suggestion came from, so it cannot be used yet.</span>"}</p>${view.verified ? button("Use this setup", "primary") : ""}</form><p class="muted">Using a setup does not change the project. Rovara first runs the commands on a fresh workspace; you approve them after that check passes.</p>`
       : table;
-    // TE-H1 slice 3: a suggestion of pages for browser evidence is saved nowhere from here: the owner reads it on the recipe page, changes it and saves it there.
-    const browser = view.items.some((item) => item.kind === "browser_evidence") ? `<p>Rovara suggests pages for browser evidence. <a href="${esc(context.base)}/browser-evidence/${esc(view.project)}">Read it and save it on the browser evidence page.</a></p>` : "";
-    return `<div class="panel"><h2>What Rovara found</h2>${form}${browser}</div>`;
+    return `<div class="panel"><h2>What Rovara found</h2>${form}</div>`;
   };
 
   const apply = (): string => {

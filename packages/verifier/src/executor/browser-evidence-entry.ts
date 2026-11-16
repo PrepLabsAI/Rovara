@@ -6,10 +6,7 @@ import { realpathSync } from "node:fs";
 import type { Browser } from "playwright-core";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
-import {
-  BrowserEvidenceExecutorLineSchema, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_SIGN_IN_ENV, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceSignInEnv, withDefaultMasks,
-  type BrowserEvidenceExecutorLine, type BrowserEvidenceExecutorPlan,
-} from "@agentx/contracts";
+import { BrowserEvidenceExecutorLineSchema, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, decodeBrowserEvidenceExecutorPlan, withDefaultMasks, type BrowserEvidenceExecutorLine, type BrowserEvidenceExecutorPlan } from "@agentx/contracts";
 import type { BrowserEvidenceDriver } from "./browser-evidence.js";
 
 const READY_POLL_MS = 200;
@@ -29,7 +26,7 @@ function answers(port: number, path: string): Promise<boolean> {
 export type CaptureDeps = Readonly<{
   /** Waits until the app answers, for at most `timeoutMs`. */
   waitReady(input: { port: number; readyPath: string; timeoutMs: number }): Promise<"ready" | "app_did_not_start" | "time_limit">;
-  driver: Pick<BrowserEvidenceDriver, "capture"> & Readonly<{ signIn?: (options: { timeoutMs: number }) => Promise<"ok" | "sign_in_failed" | "time_limit"> }>;
+  driver: Pick<BrowserEvidenceDriver, "capture">;
   now?: () => number;
 }>;
 
@@ -51,13 +48,6 @@ export async function runCapture(plan: BrowserEvidenceExecutorPlan, deps: Captur
   const deadline = now() + plan.runMs;
   const lines: BrowserEvidenceExecutorLine[] = [];
   const status = await deps.waitReady({ port: plan.port, readyPath: plan.readyPath ?? "/", timeoutMs: Math.max(1, deadline - now()) });
-  // An app behind a login: signed in once, before any page, within the run's time. A sign-in that did not work is the run's only line after the app's own: no page is taken signed out and shown as signed in.
-  let signed: "ok" | "sign_in_failed" | "time_limit" | undefined;
-  if (status === "ready" && plan.signIn !== undefined) {
-    try { signed = deps.driver.signIn === undefined ? "sign_in_failed" : await deps.driver.signIn({ timeoutMs: Math.max(1, Math.min(plan.pageMs, deadline - now())) }); } catch { signed = "sign_in_failed"; }
-    if (signed === "time_limit") { lines.push({ t: "app", status: "time_limit" }); return lines; }
-    if (signed !== "ok") { lines.push({ t: "app", status: "sign_in_failed" }); return lines; }
-  }
   lines.push({ t: "app", status });
   if (status !== "ready") return lines;
   const maskSelectors = withDefaultMasks(plan.maskSelectors);
@@ -103,19 +93,12 @@ async function openPipeChromium(): Promise<{ browser: Browser; close(): Promise<
 async function main(): Promise<void> {
   const plan = decodeBrowserEvidenceExecutorPlan(process.argv[2]);
   if (plan === undefined || process.argv.length !== 3) { process.stderr.write("browser evidence plan is not valid\n"); process.exit(2); }
-  // The saved sign-in's values come in one environment variable, read once and removed at once: nothing started from here (Chromium has its own environment) can read it, and nothing prints it.
-  const raw = process.env[BROWSER_EVIDENCE_SIGN_IN_ENV];
-  delete process.env[BROWSER_EVIDENCE_SIGN_IN_ENV];
-  const values = raw === undefined ? undefined : decodeBrowserEvidenceSignInEnv(raw);
-  // A plan with a sign-in and no valid values, or values with no plan to use them, is refused before any browser starts.
-  if ((plan.signIn === undefined) !== (raw === undefined) || (raw !== undefined && values === undefined)) { process.stderr.write("browser evidence sign-in is not valid\n"); process.exit(2); }
   const { createChromiumEvidenceDriver } = await import("./browser-evidence-chromium.js");
   const timer = setTimeout(() => { process.stderr.write("browser evidence run timed out\n"); process.exit(1); }, plan.runMs + 20_000);
   const chromium = await openPipeChromium();
   let code = 0;
   try {
-    const driver = createChromiumEvidenceDriver({ browser: chromium.browser, origin: `http://127.0.0.1:${String(plan.port)}`, app: { start: () => Promise.resolve("ready" as const), stop: () => Promise.resolve() },
-      ...(plan.signIn === undefined || values === undefined ? {} : { signIn: { form: plan.signIn, values } }) });
+    const driver = createChromiumEvidenceDriver({ browser: chromium.browser, origin: `http://127.0.0.1:${String(plan.port)}`, app: { start: () => Promise.resolve("ready" as const), stop: () => Promise.resolve() } });
     for (const line of await runCapture(plan, { waitReady: defaultWaitReady, driver })) process.stdout.write(`${JSON.stringify(line)}\n`);
   } catch {
     process.stderr.write("browser evidence capture failed\n");

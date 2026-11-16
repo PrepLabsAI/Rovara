@@ -16,10 +16,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
-import {
-  BROWSER_EVIDENCE_TEXT_MASK, BROWSER_EVIDENCE_TEXT_MASKS, BROWSER_EVIDENCE_TEXT_SCAN_MAX, browserEvidenceSecretMasks, isBrowserEvidenceRoute,
-  type BrowserEvidenceExecutorSignIn, type BrowserEvidenceSignInValues,
-} from "@agentx/contracts";
+import { BROWSER_EVIDENCE_TEXT_MASK, BROWSER_EVIDENCE_TEXT_MASKS, BROWSER_EVIDENCE_TEXT_SCAN_MAX, isBrowserEvidenceRoute } from "@agentx/contracts";
 import type { BrowserEvidenceCaptureAnswer, BrowserEvidenceDriver, BrowserEvidenceSide } from "./browser-evidence.js";
 import { launchLocalChromium } from "./local-browser.js";
 
@@ -32,9 +29,6 @@ const PROBE_TIMEOUT_MS = 1_000;
 const STOP_GRACE_MS = 3_000;
 const STOP_KILLED_MS = 2_000;
 const CLOSE_MS = 5_000;
-/** One step of a sign-in (a field that is not there, a button that does nothing) and the wait for the signed-in page: past these it is a sign-in that did not work, not a run that ran out of time. */
-const SIGN_IN_STEP_MS = 5_000;
-const SIGN_IN_WAIT_MS = 6_000;
 /** The page's nodes and form fields read at most, and its characters in all; a page with more is not photographed. */
 const PAGE_NODES_MAX = 50_000;
 const PAGE_CHARS_MAX = 2_000_000;
@@ -274,15 +268,7 @@ export type ChromiumEvidenceDriverInput = Readonly<{
   /** The app's origin, `http://127.0.0.1:<port>`: the only origin a page may load from. */
   origin: string;
   app: Readonly<{ start(side: BrowserEvidenceSide, timeoutMs: number): Promise<"ready" | "app_did_not_start" | "time_limit">; stop(side: BrowserEvidenceSide): Promise<void> }>;
-  /**
-   * Slice 3, an app behind a login: the form and the saved values. `signIn()` opens the login page in a scratch browser context, fills the two fields, presses the button and waits for the signed-in page; the session
-   * (in memory only) is then the starting point of every page. Both values are also masks of the page's own text, in every encoding an app may echo them in, so a page that shows the account never shows it.
-   */
-  signIn?: Readonly<{ form: BrowserEvidenceExecutorSignIn; values: BrowserEvidenceSignInValues }>;
 }>;
-
-/** The driver `runBrowserEvidence` uses, and, when the recipe has a sign-in, the one step that signs in before any page is taken. */
-export type ChromiumEvidenceDriver = BrowserEvidenceDriver & Readonly<{ signIn(options: { timeoutMs: number }): Promise<"ok" | "sign_in_failed" | "time_limit"> }>;
 
 class StepTimeout extends Error { override name = "TimeoutError"; }
 /** The work, or a `StepTimeout` once `ms` have passed. */
@@ -296,53 +282,12 @@ const timedOut = (error: unknown) => error instanceof Error && error.name === "T
 const originOf = (url: string): string | undefined => { try { return new URL(url).origin; } catch { return undefined; } };
 
 /** The driver `runBrowserEvidence` uses in the sandbox and on a laptop. */
-export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput): ChromiumEvidenceDriver {
+export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput): BrowserEvidenceDriver {
   const origin = new URL(input.origin).origin;
   if (!/^http:\/\/127\.0\.0\.1:\d{4,5}$/u.test(origin)) throw new Error("browser evidence opens only the app on the loopback address");
-  // The signed-in session of this run: set once by `signIn`, in memory only, and never read by anything but the contexts of this driver. `undefined`: no sign-in was asked for or none worked.
-  let session: Awaited<ReturnType<BrowserContext["storageState"]>> | undefined;
-  const secretMasks = input.signIn === undefined ? [] : browserEvidenceSecretMasks(input.signIn.values);
-  /** Only the app's own origin is loaded: anything else (a font, an analytics call, a redirect away, a third-party frame) is aborted. */
-  const onlyOwnOrigin = (context: BrowserContext, ms: () => number) => bounded(context.route("**/*", (routed) => (originOf(routed.request().url()) === origin ? routed.continue() : routed.abort("blockedbyclient"))), ms());
   return Object.freeze({
     startApp: (side: BrowserEvidenceSide, options: { timeoutMs: number }) => input.app.start(side, options.timeoutMs),
     stopApp: (side: BrowserEvidenceSide) => input.app.stop(side),
-    async signIn(options: { timeoutMs: number }): Promise<"ok" | "sign_in_failed" | "time_limit"> {
-      const sign = input.signIn;
-      // No sign-in asked for, or values that would not mask (a value that is not a valid sign-in value never reaches a form): nothing is typed anywhere.
-      if (sign === undefined || secretMasks.length === 0) return "sign_in_failed";
-      const deadline = Date.now() + Math.max(1, options.timeoutMs);
-      const left = () => Math.max(1, deadline - Date.now());
-      let context: BrowserContext | undefined;
-      try {
-        context = await bounded(input.browser.newContext({ viewport: VIEWPORT, serviceWorkers: "block", acceptDownloads: false }), left());
-        await onlyOwnOrigin(context, left);
-        const page: Page = await bounded(context.newPage(), left());
-        const response = await bounded(page.goto(new URL(sign.form.path, origin).href, { waitUntil: "load", timeout: left() }), left());
-        if (response === null || response.status() >= 400 || originOf(page.url()) !== origin) return "sign_in_failed";
-        // Each field must be there and shown: a form that is not what the recipe says is a sign-in that did not work, never a guess at another field.
-        const user = page.locator(sign.form.usernameSelector).first();
-        const password = page.locator(sign.form.passwordSelector).first();
-        const step = () => Math.min(left(), SIGN_IN_STEP_MS);
-        const wait = () => Math.min(left(), SIGN_IN_WAIT_MS);
-        await bounded(user.fill(sign.values.username, { timeout: step() }), left());
-        await bounded(password.fill(sign.values.password, { timeout: step() }), left());
-        await bounded(page.locator(sign.form.submitSelector).first().click({ timeout: step() }), left());
-        if (sign.form.successPath !== undefined) {
-          const wanted = sign.form.successPath;
-          await bounded(page.waitForURL((url) => url.origin === origin && url.pathname === wanted, { timeout: wait() }), left());
-        } else await bounded(page.locator(sign.form.successSelector!).first().waitFor({ state: "visible", timeout: wait() }), left());
-        // Still on the app, and not back on the login page: that is the one thing a bad password leaves behind.
-        if (originOf(page.url()) !== origin || new URL(page.url()).pathname === sign.form.path) return "sign_in_failed";
-        session = await bounded(context.storageState(), left());
-        return "ok";
-      } catch (error) {
-        // Never the error's own words: a failure message from a page or a driver can quote what was typed. Only the run's own time running out is "time limit"; a step or a wait that ended first is a sign-in that did not work.
-        return timedOut(error) && Date.now() >= deadline - 250 ? "time_limit" : "sign_in_failed";
-      } finally {
-        if (context !== undefined) await bounded(context.close(), CLOSE_MS).catch(() => undefined);
-      }
-    },
     async capture(_side: BrowserEvidenceSide, route: string, options: { maskSelectors: readonly string[]; timeoutMs: number }): Promise<BrowserEvidenceCaptureAnswer> {
       if (!isBrowserEvidenceRoute(route)) return { ok: false, reason: "page_did_not_load" };
       const url = new URL(route, origin);
@@ -351,10 +296,9 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
       const left = () => Math.max(1, deadline - Date.now());
       let context: BrowserContext | undefined;
       try {
-        // A run with a sign-in that did not work (or was never made) takes no page: a signed-out page photographed as the signed-in one would be a false picture.
-        if (input.signIn !== undefined && session === undefined) return { ok: false, reason: "capture_failed" };
-        context = await bounded(input.browser.newContext({ viewport: VIEWPORT, serviceWorkers: "block", acceptDownloads: false, ...(session === undefined ? {} : { storageState: session }) }), left());
-        await onlyOwnOrigin(context, left);
+        context = await bounded(input.browser.newContext({ viewport: VIEWPORT, serviceWorkers: "block", acceptDownloads: false }), left());
+        // Only the app's own origin is loaded: anything else (a font, an analytics call, a redirect away, a third-party frame) is aborted.
+        await bounded(context.route("**/*", (routed) => (originOf(routed.request().url()) === origin ? routed.continue() : routed.abort("blockedbyclient"))), left());
         const page: Page = await bounded(context.newPage(), left());
         // The page's own errors only: a console error about a request Rovara blocked (another origin) is not the change's.
         let consoleErrors = 0;
@@ -363,12 +307,10 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
         try {
           const response = await bounded(page.goto(url.href, { waitUntil: "load", timeout: left() }), left());
           if (response === null || response.status() >= 400 || originOf(page.url()) !== origin) return { ok: false, reason: "page_did_not_load" };
-          // Sent back to the login page: the session did not hold, and the login form is not the picture of this page.
-          if (input.signIn !== undefined && url.pathname !== input.signIn.form.path && new URL(page.url()).pathname === input.signIn.form.path) return { ok: false, reason: "capture_failed" };
         } catch (error) {
           return { ok: false, reason: timedOut(error) ? "time_limit" : "page_did_not_load" };
         }
-        const arg = (verify: boolean): PageArg => ({ masks: [...BROWSER_EVIDENCE_TEXT_MASKS.map((item) => ({ ...item })), ...secretMasks], mask: BROWSER_EVIDENCE_TEXT_MASK, maxText: BROWSER_EVIDENCE_TEXT_SCAN_MAX,
+        const arg = (verify: boolean): PageArg => ({ masks: BROWSER_EVIDENCE_TEXT_MASKS.map((item) => ({ ...item })), mask: BROWSER_EVIDENCE_TEXT_MASK, maxText: BROWSER_EVIDENCE_TEXT_SCAN_MAX,
           maxNodes: PAGE_NODES_MAX, maxChars: PAGE_CHARS_MAX, verify, maskedSelector: options.maskSelectors.join(", ") });
         // Every frame the page has: the app's own (and about:/srcdoc ones) are read; a frame of another origin was aborted, so it shows only the browser's error page.
         const everyFrame = async (verify: boolean): Promise<PageVerdict> => {
