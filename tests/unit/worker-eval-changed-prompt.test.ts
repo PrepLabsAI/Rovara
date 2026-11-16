@@ -247,7 +247,7 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
   it.each([
     ["an unrelated change in a file that has a string elsewhere", "const s = 'same words';\nconst n = 1;\n", "const s = 'same words';\nconst n = 2;\n"],
     ["a changed import specifier", "import a from './a.js';\n", "import a from './b.js';\n"],
-    ["a selector edit on a line with no quote", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = A;\n", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = B;\n"],
+    ["a selector edit between two string constants", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = A;\n", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = B;\n"],
     ["a Python f-string replacement field", "t = f\"{\n  foo\n}\"\n", "t = f\"{\n  bar\n}\"\n"],
   ])("%s is conservatively unknown", async (_name, before, after) => {
     expect(await read([["src/x.ts", before, after]])).toBeUndefined();
@@ -256,7 +256,7 @@ describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)"
     expect(await read([["prompts/system.txt", "old", "new prompt"]])).toMatchObject({ status: "changes" });
   });
   it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'", "from '", "import  \"a'", "\\ ", "\\ \n", "export from ", "const x = require ", "export "])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
-    const hostile = unit.repeat(Math.ceil(1024 * 1024 / unit.length));
+    const hostile = unit.repeat(Math.floor((1024 * 1024 - 2) / unit.length)); // plus the one added char, still under the 1 MiB side cap
     const started = Date.now();
     await read([["src/hostile.ts", hostile, `${hostile}x`]]);
     expect(Date.now() - started).toBeLessThan(1500);
