@@ -16,7 +16,7 @@
 //     then every company's runtime is refused (DISPATCHER_FLOW_NOT_DECLARED) and its records come back.
 // A core workspace's worker is placed on the install's own workers (EC2_WORKER_SUBNETS, EC2_WORKER_LAUNCH_TEMPLATE_ID), never on a binding a company writes.
 // The registry still needs the security-list points (admission, metering, identity, approvers, audit-sink) and model keys, which no Code module fills yet: until they land the registry
-// refuses by name and every core record comes back (the intended fail-closed state; the CLI accepts only `off` meanwhile, CORE_ENGINE_BROKER_WIRED).
+// refuses by name and every core record comes back (the intended fail-closed state; the named switch is wired through CORE_ENGINE_BROKER_WIRED).
 import { createHmac } from "node:crypto";
 import {
   CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type DocumentStore, type OrgId,

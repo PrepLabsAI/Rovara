@@ -45,7 +45,7 @@ function rootInputs(env: NodeJS.ProcessEnv, client: { send(command: unknown): Pr
 
 describe("the broker's core root, switch off (the default)", () => {
   it("reads no core setting while off and not draining (CORE_ENGINE_BROKER_WIRED), and reads them when on or draining", async () => {
-    const watched = ["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_TASK_CAP_USD", "ROVARA_CORE_COMPANY_DAY_CAP_USD", "ROVARA_CORE_LESSONS"];
+    const watched = ["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_TASK_CAP_USD", "ROVARA_CORE_COMPANY_DAY_CAP_USD", "ROVARA_CORE_LESSONS", "ROVARA_CORE_AGENT_MODEL_CHOICE"];
     const reads = (base: NodeJS.ProcessEnv) => {
       const seen = new Set<string>();
       const env = new Proxy({ ...base }, { get: (target, key) => { if (typeof key === "string" && watched.includes(key)) seen.add(key); return target[key as string]; } });
@@ -55,6 +55,7 @@ describe("the broker's core root, switch off (the default)", () => {
     for (const env of [{}, { ROVARA_CORE_ENGINE: "off" }, { ROVARA_CORE_ENGINE: "typo" }]) expect(reads({ ...env, ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }), JSON.stringify(env)).toEqual([]);
     expect(reads({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toEqual(expect.arrayContaining(["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_LESSONS"]));
     expect(reads({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toEqual(expect.arrayContaining(["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_LESSONS"]));
+    expect(reads({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_AGENT_MODEL_CHOICE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toContain("ROVARA_CORE_AGENT_MODEL_CHOICE");
   });
 
   it("builds nothing, reads nothing and gives the developer routes no core entry", async () => {

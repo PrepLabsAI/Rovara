@@ -371,15 +371,15 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     return row === undefined || row["revoked"] === true || typeof row["displayName"] !== "string" ? undefined : row["displayName"];
   };
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
+  const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
+  const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true;
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
   // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
-  const modelChoices = createCompanyModelChoices({ reader: parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value.mode !== "off" && env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
+  const modelChoices = createCompanyModelChoices({ reader: coreActive && env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
   const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => modelChoices.flowOptionsFor(registry, companyId, modelGateway()!.flowOptions);
   // Switch off (and not draining): the core settings are never read, so an install without the core reads exactly what it read before (CORE_ENGINE_BROKER_WIRED).
-  const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
-  const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true;
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = coreActive ? readCoreLessonsSwitch(env) : { value: { mode: "off" } };
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
   const readSettings = coreActive ? readHostedAdmissionSettings(env) : undefined;
