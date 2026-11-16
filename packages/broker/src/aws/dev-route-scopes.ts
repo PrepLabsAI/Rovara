@@ -37,6 +37,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/client/projects/{project}/members", requires: "projects:members" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/members/{developerId}", requires: "projects:members" },
   { method: "DELETE", path: "/v1/dev/client/projects/{project}/members/{developerId}", requires: "projects:members" },
+  // Lane W: a project's merge rules; full access only (the route also checks the project and, to loosen, a fresh step-up).
+  { method: "GET", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
+  { method: "PUT", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
@@ -74,6 +77,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/tasks/{taskId}/readers", requires: "tasks:share" },
   { method: "PUT", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
   { method: "DELETE", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
+  // Lane W: merge a task's pull request; full access only, and a fresh step-up from a web client's verified token.
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/merge", requires: "full" },
   // Decisions: approve a plan or request changes; decide on the pull-request feedback proposal.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/decision", requires: "decisions:decide" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-decision", requires: "decisions:decide" },
