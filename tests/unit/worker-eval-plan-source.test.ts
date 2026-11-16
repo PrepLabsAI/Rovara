@@ -39,7 +39,7 @@ const delivered = (baseCommit: string, over: Record<string, unknown> = {}, keyOv
 type Repo = Awaited<ReturnType<typeof repo>>;
 const inPin = (r: Pick<Repo, "repositories" | "candidates">, plan: unknown, signal = sig()) => withEvalPinnedCandidate(r.repositories, r.candidates, signal, () => pinnedEvalPlan(plan));
 /** A runnable plan only (the stale answer is not one). */
-const planIn = async (r: Pick<Repo, "repositories" | "candidates">, plan: unknown): Promise<EvalFinalCheckPlan | undefined> => { const found = await inPin(r, plan); return found === EVAL_PLAN_QUESTIONS_CHANGED ? undefined : found; };
+const planIn = async (r: Pick<Repo, "repositories" | "candidates">, plan: unknown): Promise<EvalFinalCheckPlan | undefined> => { const found = await inPin(r, plan); return found === undefined || found === EVAL_PLAN_QUESTIONS_CHANGED || "notRun" in found ? undefined : found; };
 
 describe("the worker's per-task eval plan from the pinned candidate", () => {
   it("happy path: computes the base commit, the code hash and each question's base and head hash; an edited question reads edited, a removed one too", async () => {
@@ -54,7 +54,7 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
       ],
     });
     const removed = await repo({ "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, { "evals/demo/q2.txt": null });
-    expect(((await inPin(removed, delivered(removed.baseSha))) as { questions: unknown[] } | undefined)?.questions[1]).toEqual({ id: "q2", category: "safety", baseHash: evalQuestionHash(Buffer.from(Q2)), headHash: EVAL_QUESTION_REMOVED_HASH });
+    expect((await planIn(removed, delivered(removed.baseSha)))?.questions[1]).toEqual({ id: "q2", category: "safety", baseHash: evalQuestionHash(Buffer.from(Q2)), headHash: EVAL_QUESTION_REMOVED_HASH });
   });
 
   it("a base that does not hold the approved question is not runnable and says so: changed, missing, or a folder read \"questions changed\" (mutants: the base hash check, the missing-base check, the stale reason)", async () => {
