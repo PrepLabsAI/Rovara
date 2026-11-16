@@ -123,8 +123,8 @@ describe("F-2: the caps do not stop the mask", () => {
     expect(out.endsWith(" end")).toBe(true);
     expect(out).not.toContain(target);
     expect(registry.maskOverflowed()).toBe(true);
-    // The cost must not grow faster than the number of values and the text length together (2,500 values and 187 runs -> 20,000 and 1,500, the original size).
-    expectLinearScaling((values) => { const text = `${`${head}unregistered `.repeat(Math.round(values * 0.075))}${target} end`; return () => { registerAndMask(values, 0, text); }; }, { n: 2_500, label: "mask registration and lookup by value count" });
+    // The cost must not grow faster than the number of values and the text length together (500 values and 37 runs -> 4,000 and 300; the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 20,000 and 1,500 ran once above).
+    expectLinearScaling((values) => { const text = `${`${head}unregistered `.repeat(Math.round(values * 0.075))}${target} end`; return () => { registerAndMask(values, 0, text); }; }, { n: 500, unitBytes: 64, label: "mask registration and lookup by value count" });
   }, 60_000);
 });
 

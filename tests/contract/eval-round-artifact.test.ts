@@ -55,18 +55,19 @@ describe("eval-round artifact", () => {
   });
   it("keeps 1,000 question comparisons below one MiB and bounds text work across the call", () => {
     const large = "x".repeat(1_000_000);
-    let built = undefined as ReturnType<typeof artifact> | undefined;
-    let parsed = false;
-    let bytes = 0;
-    // The work grows 8x (125 to 1,000 comparisons, each with 1 MB answers), so a super-linear walk over them fails on any runner.
+    const comparisons = (count: number) => questions(true, false, count).map((q, i) => ({ ...q, id: `q${i}${"界".repeat(150)}`, old: q.old.map(a => ({ ...a, answer: large })), first: answer(false, large) }));
+    // The work grows 8x, so a super-linear walk over the comparisons fails on any runner. A comparison is about 1,500 bytes besides the one shared 1 MB answer, so N stays small (8N under 256 KiB, in CPU cache); the full 1,000 comparisons run once below.
     expectLinearScaling((count) => {
-      const qs = questions(true, false, count).map((q, i) => ({ ...q, id: `q${i}${"界".repeat(150)}`, old: q.old.map(a => ({ ...a, answer: large })), first: answer(false, large) }));
-      return () => { built = artifact(qs); parsed = EvalRoundArtifactSchema.safeParse(built).success; bytes = Buffer.byteLength(JSON.stringify(built)); };
-    }, { n: 125, label: "eval round artifact of large comparisons" });
+      const qs = comparisons(count);
+      return () => { const made = artifact(qs); EvalRoundArtifactSchema.safeParse(made); Buffer.byteLength(JSON.stringify(made)); };
+    }, { n: 20, unitBytes: 1500, label: "eval round artifact of large comparisons" });
+    const built = artifact(comparisons(1000));
+    const parsed = EvalRoundArtifactSchema.safeParse(built).success;
+    const bytes = Buffer.byteLength(JSON.stringify(built));
     expect(parsed).toBe(true);
     expect(bytes).toBeLessThanOrEqual(1_048_576);
-    expect(built!.questions?.length).toBe(1000);
-    expect(built!.questions?.filter(q => q.answers !== undefined).length).toBeLessThanOrEqual(20);
+    expect(built.questions?.length).toBe(1000);
+    expect(built.questions?.filter(q => q.answers !== undefined).length).toBeLessThanOrEqual(20);
   });
   it("bounds each raw answer and total text passed to the sanitizer", () => {
     const huge = "x".repeat(1_000_000);
@@ -116,10 +117,12 @@ describe("eval-round artifact", () => {
 it("refuses oversized comparisons before walking their contents", () => {
   const a = artifact();
   let result: unknown;
-  // The refusal must not walk the 100,000 entries: 12,500 to 100,000 entries must not cost super-linearly more.
+  // The refusal must not walk the entries: eight times the entries must not cost super-linearly more. Each entry is one 8-byte reference, so 8N stays at 256 KiB (in CPU cache); the full 100,000 entries is refused once below.
   expectLinearScaling((count) => {
     const oversized = { ...a, questions: Array.from({ length: count }, () => a.questions![0]) };
     return () => { result = evalResultFromArtifact(oversized); };
-  }, { n: 12_500, label: "refusal of an oversized comparison" });
+  }, { n: 4_096, unitBytes: 8, label: "refusal of an oversized comparison" });
+  expect(result).toMatchObject({ notRun: { reason: "invalid_question_data" } });
+  result = evalResultFromArtifact({ ...a, questions: Array.from({ length: 100_000 }, () => a.questions![0]) });
   expect(result).toMatchObject({ notRun: { reason: "invalid_question_data" } });
 });

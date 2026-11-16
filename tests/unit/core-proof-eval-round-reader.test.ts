@@ -45,13 +45,13 @@ describe("bound eval-round reader", () => {
     const w = world({}, Array.from({ length: 10_000 }, (_, i) => operation(i)));
     expect(await evalRoundsSoFar(w.actions, task)).toEqual({ done: 0, calls: 0, costMicros: 0 });
     expect(w.operations()).toBe(1); expect(w.listings()).toBe(10_000);
-    // The work grows linearly with the operations (1,250, then 10,000), not faster.
+    // The work grows linearly with the operations (200, then 1,600), not faster. The 8N input (about 150 bytes an operation) stays at or under 256 KiB so it stays in CPU cache; the full 10,000 are checked once above.
     const totals = new Map<number, unknown>();
     await expectLinearScalingAsync((count) => {
       const sized = world({}, Array.from({ length: count }, (_, i) => operation(i)));
       return async () => { totals.set(count, await evalRoundsSoFar(sized.actions, task)); };
-    }, { n: 1_250, label: "eval rounds: operations" });
-    expect([totals.get(1_250), totals.get(10_000)]).toEqual([{ done: 0, calls: 0, costMicros: 0 }, { done: 0, calls: 0, costMicros: 0 }]);
+    }, { n: 200, unitBytes: 150, label: "eval rounds: operations" });
+    expect([totals.get(200), totals.get(1_600)]).toEqual([{ done: 0, calls: 0, costMicros: 0 }, { done: 0, calls: 0, costMicros: 0 }]);
   }, 60_000);
   it.each([undefined, "{private-missing-evidence", JSON.stringify(artifact("b".repeat(64)))])("returns a fixed Not run result for missing or unreadable evidence", async text => {
     const w = world(text === undefined ? {} : { [key(1)]: text });
@@ -88,7 +88,7 @@ describe("bound eval-round reader", () => {
       const w = world(); const operations = Array.from({ length: count }, () => operation(1));
       w.actions.operations = async () => operations; worlds.set(count, w);
       return async () => { results.set(count, await evalRoundsSoFar(w.actions, task)); };
-    }, { n: 12_501, label: "eval rounds: oversized operation list" });
+    }, { n: 12_501, unitBytes: 0, label: "eval rounds: oversized operation list" }); // N cannot shrink below the 10,000 bound; the refusal reads only the array length and touches no element, so no input that grows with n is read (unitBytes 0)
     expect([results.get(12_501), results.get(100_008)]).toEqual([undefined, undefined]);
     expect([worlds.get(12_501)!.listings(), worlds.get(100_008)!.listings()]).toEqual([0, 0]);
   });

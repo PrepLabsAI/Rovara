@@ -325,17 +325,23 @@ describe("the pull request diff", () => {
     const fixture = withPlan();
     const readDiff = (from: PageTaskFixture) => readTaskDiff(from.deps, SAM, from.taskId, at(from, "/diff?repository=demo&number=7"));
     // The work does not grow with the length of a too-long patch: it is refused by its length, never read.
+    // The 15 long patches share one string, so one unit of n is one byte. N stays above the patch limit (30,000) and 8N at 256 KiB so it stays in CPU cache; the full 2,000,000-character patch is read once below.
     const diffs = new Map<number, Awaited<ReturnType<typeof readDiff>>>();
-    await expectLinearScalingAsync((length) => {
+    const sizedFixture = (length: number) => {
       const sized = withPlan();
       const huge = "+".repeat(length);
       withPullRequests(sized, async () => ({
         files: Array.from({ length: 30 }, (_, index) => ({ filename: `src/f${index}.ts`, additions: 5, deletions: 0, patch: index % 2 === 0 ? huge : "+small" })), more: true,
       }));
+      return sized;
+    };
+    await expectLinearScalingAsync((length) => {
+      const sized = sizedFixture(length);
       return async () => { diffs.set(length, await readDiff(sized)); };
-    }, { n: 250_000, label: "task diff: too-long patches" });
-    const diff = diffs.get(250_000)!;
-    expect(diffs.get(2_000_000)).toEqual(diff);
+    }, { n: 32_768, label: "task diff: too-long patches" });
+    const diff = diffs.get(32_768)!;
+    expect(diffs.get(262_144)).toEqual(diff);
+    expect(await readDiff(sizedFixture(2_000_000))).toEqual(diff);
     expect(diff.files).toHaveLength(30);
     expect(diff.files.filter((file) => file.patch === DIFF_PATCH_TOO_LONG)).toHaveLength(15);
     expect(JSON.stringify(diff).length).toBeLessThan(30 * DIFF_PATCH_MAX_CHARS + 10_000);

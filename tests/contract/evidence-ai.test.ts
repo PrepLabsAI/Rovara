@@ -52,11 +52,11 @@ describe("AI evidence projection", () => {
       expect(out.text).toContain("safety-last");
       expect(out.text.length).toBeLessThanOrEqual(9000);
     }
-    // Bounded time as a scaling check: eight times the questions (125 -> 1000) costs about eight times, not sixty-four.
+    // Bounded time as a scaling check: eight times the questions costs about eight times, not sixty-four. A question is about 110 bytes, so N stays small (8N under 256 KiB, in CPU cache); the full 1,000 questions ran once above.
     expectLinearScaling((count) => { const qs = questionsFor(count); const input = artifact({ questions: qs }); return () => {
       const projected = evidenceAiFromArtifact(input, digest)!;
       for (const questionLimit of [10, 5, 2, 0] as const) renderEvidence(v2Pack({ ai: projected }), { questionLimit, compact: questionLimit === 0 });
-    }; }, { n: 125, label: "evidence AI projection by question count" });
+    }; }, { n: 125, unitBytes: 110, label: "evidence AI projection by question count" });
   });
   it("cuts and neutralizes hostile excerpts without links, mentions, blocks or credential fragments", () => {
     const hostile = "![x](https://evil.test) [x][ref] @owner #123 <b>bad</b>\n# heading\n> quote\n---\n```\n~~~\n\u202e\ufe0f";
@@ -242,9 +242,9 @@ it("refuses exotic payloads before a schema can invoke their accessors", () => {
   const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
   expect(readEvidenceAi(cyclic)).toBeUndefined();
   expect(readEvidenceAi({ pad: "CANARY".repeat(200000) })).toBeUndefined();
-  // Refusing a huge payload must not cost more as the payload grows (25,000 -> 200,000 repeats, the original size).
+  // Refusing a huge payload must not cost more as the payload grows (N stays small so 8N is at most 256 KiB and stays in CPU cache; the full 200,000 repeats, 1.2 MB, was refused once above).
   let refused: unknown = "unset";
-  expectLinearScaling((repeats) => { const huge = { pad: "CANARY".repeat(repeats) }; return () => { refused = readEvidenceAi(huge); }; }, { n: 25_000, label: "refusing an oversized evidence payload" });
+  expectLinearScaling((repeats) => { const huge = { pad: "CANARY".repeat(repeats) }; return () => { refused = readEvidenceAi(huge); }; }, { n: 5_461, unitBytes: 6, label: "refusing an oversized evidence payload" });
   expect(refused).toBeUndefined();
 });
 

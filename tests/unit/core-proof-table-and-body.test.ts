@@ -809,8 +809,8 @@ describe("192a agent-written replies", () => {
     expect(JSON.stringify(table)).not.toContain(secret);
     expect(JSON.stringify(table)).not.toContain("never-display-dependency");
     expect(Array.from(label).length).toBeLessThanOrEqual(120);
-    // The cost must not grow faster than the hostile label (131,072 -> 1,048,576 characters, the original size).
-    expectLinearScaling((padding) => { const planned = plan({ checks: { proposed: [check("unit", hostile + "x".repeat(padding))], proves: { unit: ["1.1"] } } }); const given = input({ plan: planned, realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }); return () => { buildProofTable(given); }; }, { n: 131_072, label: "proof table with a hostile long label" });
+    // The cost must not grow faster than the hostile label (32,768 -> 262,144 characters: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1,048,576 characters were checked once above).
+    expectLinearScaling((padding) => { const planned = plan({ checks: { proposed: [check("unit", hostile + "x".repeat(padding))], proves: { unit: ["1.1"] } } }); const given = input({ plan: planned, realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }); return () => { buildProofTable(given); }; }, { n: 32_768, unitBytes: 1, label: "proof table with a hostile long label" });
   });
 });
 

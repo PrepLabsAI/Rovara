@@ -187,8 +187,8 @@ describe("secret-looking values are hidden", () => {
   });
 
   it("is linear in the size of a hostile output", () => {
-    // A scaling check, not a wall-clock bound: the output is timed at N and at 8N (8N is the original size).
-    expectLinearScaling((n) => { const output = `${"a_".repeat(n)}\n${"KEY".repeat(n * 3 / 5)}`; return () => maskSecretValues(output); }, { n: 6_250, label: "maskSecretValues on a hostile output" });
+    // A scaling check, not a wall-clock bound: the output is timed at N and at 8N (8N, about 3.8 bytes a unit, stays at or under 256 KiB so it stays in CPU cache).
+    expectLinearScaling((n) => { const output = `${"a_".repeat(n)}\n${"KEY".repeat(n * 3 / 5)}`; return () => maskSecretValues(output); }, { n: 6_250, unitBytes: 4, label: "maskSecretValues on a hostile output" });
   });
 });
 

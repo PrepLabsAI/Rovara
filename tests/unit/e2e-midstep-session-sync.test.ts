@@ -372,7 +372,7 @@ describe("what a run may teach the worker is bounded: values, bytes, and the wor
       const guard = createE2ECredentialGuard({ passwords: [], emails: [], cookieValues: [], sessionValues: values });
       const prompt = call(promptText);
       return () => { outcome = guard.inspect(prompt); };
-    }, { n: E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES / 8, label: "prompt scan against synced values" });
+    }, { n: E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES / 8, unitBytes: 60, label: "prompt scan against synced values" });
     expect(outcome).toMatchObject({ refuse: false });
   });
 });

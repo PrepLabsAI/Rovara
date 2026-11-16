@@ -110,7 +110,7 @@ describe("reports never hold the matched text", () => {
     expectLinearScaling((units) => {
       const text = `${"1 ".repeat(50 * units)}${"a.".repeat(25 * units)}${"+1".repeat(25 * units)}${"9".repeat(125 * units)}`;
       return () => { found = scanText(text, DENY); };
-    }, { n: 50, label: "data guard: hostile text" });
+    }, { n: 50, unitBytes: 325, label: "data guard: hostile text" });
     expect(Array.isArray(found)).toBe(true);
   }, 120_000);
 });

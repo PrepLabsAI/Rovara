@@ -80,13 +80,14 @@ describe("readModelRequestFacts", () => {
     let deep: unknown = "buried";
     for (let index = 0; index < 40; index += 1) deep = { content: deep };
     expect(facts({ messages: [deep] }).promptText).toBe(""); // past depth 16 nothing is collected
-    let huge = undefined as ReturnType<typeof facts> | undefined;
-    // 112,500 characters, then 900,000: linear work grows about 8x.
+    // 32,000 characters, then 256,000 (the 8N input stays at or under 256 KiB so it stays in CPU cache): linear work grows about 8x. The 900,000-character prompt runs once, un-timed, below.
+    const textOf = (size: number) => JSON.stringify({ messages: [{ role: "user", content: "x".repeat(size) }] });
     expectLinearScaling((size) => {
-      const text = JSON.stringify({ messages: [{ role: "user", content: "x".repeat(size) }] });
-      return () => { huge = facts(text); };
-    }, { n: 112_500, label: "reading the facts of a large prompt" });
-    expect(huge!.promptText?.length).toBe(900_000);
+      const text = textOf(size);
+      return () => facts(text);
+    }, { n: 32_000, label: "reading the facts of a large prompt" });
+    const huge = facts(textOf(900_000));
+    expect(huge.promptText?.length).toBe(900_000);
     const many = facts({ messages: Array.from({ length: 150_000 }, () => ({ content: "a" })) });
     expect((many.promptText?.length ?? 0)).toBeLessThanOrEqual(PROMPT_TEXT_MAX_CHARS);
   });

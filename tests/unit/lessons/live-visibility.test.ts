@@ -425,7 +425,7 @@ describe("rank and filter first, check in pages, one reader per request", () => 
         loaded: () => loaded,
       });
     }
-    await expectLinearScalingAsync((count) => sized.get(count)!.work, { n: 50, label: "lessons load: many lessons" });
+    await expectLinearScalingAsync((count) => sized.get(count)!.work, { n: 50, unitBytes: 600, label: "lessons load: many lessons" });
     for (const count of [50, 400]) expect(sized.get(count)!.loaded()).toHaveLength(12);
     // The 100 narrowed lessons rank first and are withheld; the twelve best open ones follow.
     expect(result.context?.lessons.map((l) => l.id)).toEqual(lessons.slice(100, 112).map((l) => l.id));

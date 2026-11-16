@@ -148,12 +148,12 @@ describe("v1 reply provenance", () => {
     const hostile = `[nested [link]](https://evil.example) ![image][ref]\n[ref]: https://evil.example\n@team #123 <img>\n# heading\n> quote\n---\n\`\`\`\n~~~\n\u200b\u202e\ufe0f ${secret}`;
     const value = { ...proof([item("proves_change", hostile)]), scriptedReplies: facts() };
     expect((await load(value)).lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`]);
-    // Scaling checks: the cost of refusing an oversize label must not grow faster than the label (the largest is the old 1 MiB), nor that of 200 checks faster than their number.
+    // Scaling checks: the cost of refusing an oversize label must not grow faster than the label (8N stays at or under 256 KiB so it stays in CPU cache; the full 1 MiB label is checked once below), nor that of 200 checks faster than their number.
     let refused: string[] | undefined;
     await expectLinearScalingAsync((size) => {
       const oversize = { ...value, items: [item("proves_change", hostile + "x".repeat(size))] };
       return async () => { refused = (await load(oversize)).lines; };
-    }, { n: 131_072, label: "refusing an oversize proof label" });
+    }, { n: 32_768, label: "refusing an oversize proof label" });
     expect(refused).toEqual([]);
     expect((await load({ ...value, items: [item("proves_change", hostile + "x".repeat(1_048_576))] })).lines).toEqual([]);
     let counted: string[] | undefined;
@@ -161,7 +161,7 @@ describe("v1 reply provenance", () => {
       const items = Array.from({ length: count }, (_, i) => item("proves_change", "x".repeat(1024), { checkId: `readiness:${i}` }));
       const many = { ...proof(items), scriptedReplies: items.map(({ checkId }) => ({ checkId, taskMade: 1, counted: 0 })) };
       return async () => { counted = (await load(many)).lines; };
-    }, { n: 25, label: "200 proof checks" });
+    }, { n: 25, unitBytes: 1200, label: "200 proof checks" });
     expect(counted).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: Test proof: 200 checks fail on the original code and pass now`]);
   });
 });

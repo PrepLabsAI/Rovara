@@ -220,12 +220,14 @@ describe("untrusted text", () => {
     const base = v2Read(pack);
     if (base.status !== "v2") throw new Error("not v2");
     // The huge row is put on the read pack directly: the reader itself drops a row that long, so going through it would never show the renderer a megabyte.
-    // A scaling check, not a wall-clock bound: the same block with 125 KB and with 1 MB of text in the not-tested row may take about eight times as long, never sixty-four.
-    let text = "";
-    expectLinearScaling((size) => {
+    // A scaling check, not a wall-clock bound: the same block with 16 KB and with 128 KB of text in the not-tested row may take about eight times as long, never sixty-four.
+    // The timed 8N input (two strings, 2 bytes a unit) stays at or under 256 KiB so it stays in CPU cache; the full 1 MB label is rendered once below, un-timed.
+    const renderWith = (size: number) => {
       const read = { ...base, pack: { ...base.pack, notTested: [{ what: "z".repeat(size), reason: "r".repeat(size), kind: "claim" as const, id: "item-1" }] } } as unknown as EvidencePackRead;
-      return () => { text = status(context({ evidenceWriter: 2 }, { pack, read })).join("\n"); };
-    }, { n: 125_000, label: "pull request body with a 1 MB label" });
+      return () => status(context({ evidenceWriter: 2 }, { pack, read })).join("\n");
+    };
+    expectLinearScaling(renderWith, { n: 16_000, unitBytes: 2, label: "pull request body with a 1 MB label" });
+    const text = renderWith(1_000_000)();
     expect(text).toContain("## Evidence");
     expect(text).toContain("rrrr");
     expect(text).not.toContain("z".repeat(500));

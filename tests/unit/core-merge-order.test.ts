@@ -64,7 +64,7 @@ describe("mergeOrderOf", () => {
     expectLinearScaling((count) => {
       const facts = factsFor(count);
       return () => { orders.set(count, mergeOrderOf(repositories, facts)); };
-    }, { n: MERGE_ORDER_EDGES_MAX / 8, label: "merge order: edges" });
+    }, { n: MERGE_ORDER_EDGES_MAX / 8, unitBytes: 150, label: "merge order: edges" });
     expect(orders.get(MERGE_ORDER_EDGES_MAX / 8)).toMatchObject({ kind: "dependencies" });
     expect(orders.get(MERGE_ORDER_EDGES_MAX)).toMatchObject({ kind: "dependencies", repositories });
     expect(mergeOrderOf(Array.from({ length: 33 }, (_, index) => `r${String(index)}`), [])).toMatchObject({ kind: "no_safe_order", reason: "unreadable" });

@@ -44,14 +44,17 @@ describe("weakeningLines", () => {
     expect(text).toBe("4 tests ran before and not now: a and 3 more");
   });
   it("bounds a very long name and a 1 MB name", () => {
-    // Scaling check: the cost must grow no faster than the input (the largest size is the old 1 MB name + 100,000 snapshots).
+    // Scaling check: the cost must grow no faster than the input (8N stays at or under 256 KiB so it stays in CPU cache; the full 1 MB name + 100,000 snapshots is checked once below).
     let lines: ReturnType<typeof weakeningLines> | undefined;
     expectLinearScaling((size) => {
       const facts = { instructionFiles: ["x".repeat(size)], changedSnapshots: Array.from({ length: size / 10 }, (_unused, n) => `s${String(n)}`) };
       return () => { lines = weakeningLines(facts); };
-    }, { n: 125_000, label: "weakeningLines on a long name and many snapshots" });
+    }, { n: 20_000, unitBytes: 1.6, label: "weakeningLines on a long name and many snapshots" });
     if (lines === undefined) throw new Error("the work did not run");
     for (const line of [...lines.flags, ...lines.weakening]) expect(Array.from(line).length).toBeLessThanOrEqual(WEAKENING_LIMITS.lineMax);
+    const size = 1_000_000;
+    const full = weakeningLines({ instructionFiles: ["x".repeat(size)], changedSnapshots: Array.from({ length: size / 10 }, (_unused, n) => `s${String(n)}`) });
+    for (const line of [...full.flags, ...full.weakening]) expect(Array.from(line).length).toBeLessThanOrEqual(WEAKENING_LIMITS.lineMax);
   });
 });
 
