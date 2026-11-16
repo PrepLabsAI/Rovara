@@ -22,6 +22,24 @@ export const NO_SEND_BACK_FOR_NOW = "there is no current failed check or review 
 export const SEND_BACK_NEEDS_REVISION = "refresh the task and include its current revision before sending it back to coding";
 export const SEND_BACK_OUT_OF_DATE = "this send-back is out of date; refresh the task and try again";
 
+/** The longest the send-back waits for the lessons seam; past it the send-back goes on (the seam's own work is ids only and safe to finish later). */
+export const LESSONS_TELL_LIMIT_MS = 3_000;
+
+async function tellLessons(deps: TaskFlowDeps, taskId: string): Promise<void> {
+  if (deps.lessonsSentBack === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const told = Promise.resolve().then(() => deps.lessonsSentBack?.(taskId));
+    // A seam that fails after the wait ended must not become an unhandled rejection.
+    told.catch(() => undefined);
+    await Promise.race([told, new Promise<void>((resolve) => { timer = setTimeout(resolve, LESSONS_TELL_LIMIT_MS); })]);
+  } catch {
+    log(deps, { event: "task_actions.send_back_lessons_not_told", taskId });
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsOptions, caller: TaskCaller, taskId: string, value: unknown): Promise<TaskView> {
   const request = parseBody(ContinueDeveloperTaskRequestSchema, value);
   const { task, acting } = await loadTaskAsOwner(deps, caller, taskId);
@@ -65,6 +83,9 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
     if (fresh !== undefined && again?.source === "SEND_BACK" && again.reason === words.slice(0, 500).trim()) return taskViewOf(deps, fresh);
     throw agentXError("IDEMPOTENCY_CONFLICT", SEND_BACK_OUT_OF_DATE);
   }
+  // Learn on send-back (lessons seam, filled by the lessons host): the person's correction can help the next task while this one is open. Told once, by the call that committed, with only the task's id; the lessons
+  // host reads the task itself and checks the switch, the company and the mode. Best effort: a seam that fails or throws never fails or delays the send-back (a failure is one fixed log line, no cause).
+  await tellLessons(deps, task.taskId);
   // The coding run starts now; a start that fails leaves the row for the recovery sweep, and the send-back stands.
   await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: returned.revision, kind: "IMPLEMENT" })
     .catch((error: unknown) => log(deps, { event: "task_actions.send_back_start_deferred", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));

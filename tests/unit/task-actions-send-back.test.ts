@@ -4,9 +4,10 @@
 //   3. the money: a task over its cap, a spend nobody can read, a refused admission and a task waiting for more spend start no coding;
 //   4. the coder gets the problems as untrusted data and the owner's words whole (not cut to the decision's 500 characters);
 //   5. the change tier is carried, never reset.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Admission, AdmissionRequest } from "@agentx/contracts";
 import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll, when } from "@agentx/contracts";
+import { LESSONS_TELL_LIMIT_MS } from "../../packages/broker/src/core/task-flow/send-back.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
@@ -18,7 +19,7 @@ import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import {
-  OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, promptOf, report, seed, stateOf, taskOf,
+  NOW, OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, promptOf, report, seed, stateOf, taskOf,
 } from "../support/task-actions-world.js";
 
 const body = (expectedRevision: number | undefined, instructions = "Keep the footer line, and add a test for it.", requestId = REQUEST_A) => ({ requestId, instructions, ...(expectedRevision === undefined ? {} : { expectedRevision }) });
@@ -317,5 +318,97 @@ describe("a second request for the same task by another id", () => {
     await actions.sendBack(caller, TASK_ID, body(6));
     await expect(actions.sendBack(caller, TASK_ID, body(6, "Again.", REQUEST_B))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(await codingOperations(h)).toHaveLength(1);
+  });
+});
+
+// Learn on send-back (the lessons hook line): once a person's send-back has committed, the task flow tells the lessons seam (`lessonsSentBack`, filled by the lessons host) with only the task id, best effort.
+// The send-back itself never waits on or fails for it; a refused, repeated or lost-race send-back tells nothing.
+describe("the lessons hook after a send-back", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("calls the lessons seam once with only the task id, after the send-back is committed (the person's decision is already stored)", async () => {
+    const { h, caller } = await seed();
+    const calls: unknown[][] = [];
+    const seen: Array<{ source?: string | undefined; reason: string } | undefined> = [];
+    const runsAtTell: number[] = [];
+    h.deps.lessonsSentBack = async (...args: unknown[]) => {
+      calls.push(args);
+      runsAtTell.push((await codingOperations(h)).length);
+      const decision = (await taskOf(h)).workflow!.decisions.at(-1);
+      seen.push(decision === undefined ? undefined : { source: decision.source, reason: decision.reason });
+    };
+    await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6, "Keep the footer line."));
+    expect(calls).toEqual([[TASK_ID]]);
+    expect(seen).toEqual([{ source: "SEND_BACK", reason: "Keep the footer line." }]);
+    // Told before the coding run starts, so the run never delays it.
+    expect(runsAtTell).toEqual([0]);
+  });
+
+  it("does not fail or delay the send-back when the seam rejects or throws: the decision stands and the coding run starts", async () => {
+    for (const seam of [async () => { throw new Error("lessons queue down"); }, () => { throw new Error("sync fault"); }]) {
+      const { h, caller } = await seed();
+      h.deps.lessonsSentBack = seam;
+      const view = await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6));
+      expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+      expect((await taskOf(h)).workflow!.decisions.at(-1)).toMatchObject({ source: "SEND_BACK" });
+      expect(await codingOperations(h)).toHaveLength(1);
+    }
+  });
+
+  it("does not wait on a seam that never answers: the send-back goes on after the limit, and the late failure is not an unhandled rejection", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { h, caller } = await seed();
+    let fail: (error: Error) => void = () => undefined;
+    h.deps.lessonsSentBack = () => new Promise<void>((_, reject) => { fail = reject; });
+    const pending = createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6));
+    let done = false;
+    void pending.then(() => { done = true; });
+    await vi.advanceTimersByTimeAsync(LESSONS_TELL_LIMIT_MS - 1);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    const view = await pending;
+    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    expect(await codingOperations(h)).toHaveLength(1);
+    fail(new Error("late"));
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it("runs without a seam exactly as before (an install with no lessons)", async () => {
+    const { h, caller } = await seed();
+    expect(h.deps.lessonsSentBack).toBeUndefined();
+    const view = await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6));
+    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+  });
+
+  it("tells nothing for a send-back that is refused (not the owner, a stale or missing revision, a closed task, a step that cannot be sent back, a body that is not valid)", async () => {
+    const calls: string[] = [];
+    const seam = async (taskId: string): Promise<void> => { calls.push(taskId); };
+    const notOwner = await seed(); notOwner.h.deps.lessonsSentBack = seam;
+    await expect(createTaskActions(notOwner.h.deps).sendBack(notOwner.h.guest, TASK_ID, body(6))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    const stale = await seed(); stale.h.deps.lessonsSentBack = seam;
+    await expect(createTaskActions(stale.h.deps).sendBack(stale.caller, TASK_ID, body(5))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(createTaskActions(stale.h.deps).sendBack(stale.caller, TASK_ID, body(undefined))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(createTaskActions(stale.h.deps).sendBack(stale.caller, TASK_ID, { requestId: REQUEST_A })).rejects.toBeDefined();
+    const closed = await seed({ task: { closedAt: NOW } }); closed.h.deps.lessonsSentBack = seam;
+    await expect(createTaskActions(closed.h.deps).sendBack(closed.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    const wrongStep = await seed({ workflow: WorkflowSnapshotSchema.parse({ ...blockedReview(), stage: "PLAN", state: "RUNNING", blockReason: undefined }) }); wrongStep.h.deps.lessonsSentBack = seam;
+    await expect(createTaskActions(wrongStep.h.deps).sendBack(wrongStep.caller, TASK_ID, body(6))).rejects.toBeDefined();
+    expect(calls).toEqual([]);
+  });
+
+  it("tells once for a repeat of the same request and once for two arriving at once (only the call that committed tells)", async () => {
+    const repeat = await seed();
+    const repeatCalls: string[] = [];
+    repeat.h.deps.lessonsSentBack = async (taskId) => { repeatCalls.push(taskId); };
+    const actions = createTaskActions(repeat.h.deps);
+    await actions.sendBack(repeat.caller, TASK_ID, body(6));
+    await actions.sendBack(repeat.caller, TASK_ID, body(6));
+    expect(repeatCalls).toEqual([TASK_ID]);
+    const race = await seed();
+    const raceCalls: string[] = [];
+    race.h.deps.lessonsSentBack = async (taskId) => { raceCalls.push(taskId); };
+    const racing = createTaskActions(race.h.deps);
+    await Promise.all([racing.sendBack(race.caller, TASK_ID, body(6)), racing.sendBack(race.caller, TASK_ID, body(6))]);
+    expect(raceCalls).toEqual([TASK_ID]);
   });
 });
