@@ -3,8 +3,11 @@
 // process group is ended when it is stopped (the emulator and Maestro start helpers of their own), and the environment is the one the caller gives, plus nothing.
 import { spawn } from "node:child_process";
 
-/** `mergeStderr` adds the program's error output to the end of what it printed (for a program whose failure reasons go there, never for one that prints bytes of a picture). */
-export type DeviceCommandOptions = Readonly<{ timeoutMs: number; maxStdoutBytes: number; env?: Readonly<Record<string, string>>; mergeStderr?: boolean }>;
+/**
+ * `mergeStderr` adds the program's error output to the end of what it printed (for a program whose failure reasons go there, never for one that prints bytes of a picture). `cwd` (slice 4: the project's
+ * own build runs in a checkout) is the directory the program starts in. `discardOutput` keeps none of the output and sets no limit on it (a build prints without end); the result's `stdout` is empty.
+ */
+export type DeviceCommandOptions = Readonly<{ timeoutMs: number; maxStdoutBytes: number; env?: Readonly<Record<string, string>>; mergeStderr?: boolean; cwd?: string; discardOutput?: boolean }>;
 export type DeviceCommandResult = Readonly<{ exitCode: number | null; stdout: Uint8Array; timedOut: boolean; tooLarge: boolean }>;
 export type DeviceBackground = Readonly<{
   /** Whether the program is still running. */
@@ -35,7 +38,10 @@ export function createNodeCommandPort(): DeviceCommandPort {
         let timedOut = false;
         let tooLarge = false;
         let settled = false;
-        const child = spawn(file, [...args], { detached: true, stdio: ["ignore", "pipe", options.mergeStderr === true ? "pipe" : "ignore"], env: { ...(options.env ?? {}) } });
+        const discard = options.discardOutput === true;
+        const child = spawn(file, [...args], {
+          detached: true, stdio: ["ignore", discard ? "ignore" : "pipe", options.mergeStderr === true && !discard ? "pipe" : "ignore"], env: { ...(options.env ?? {}) }, ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        });
         const finish = (exitCode: number | null) => {
           if (settled) return;
           settled = true;
