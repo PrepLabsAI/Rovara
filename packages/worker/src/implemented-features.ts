@@ -63,6 +63,8 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.evidenceCapture.v1",
   // TE-H1 browser evidence (DEC 241): a CHECKS run that carries `browserEvidence` starts the app in its sandbox and photographs the changed pages in the executor image (browser-evidence-run.ts).
   "task.browserEvidence.v1",
+  // TE-H1 slice 4: the same run also records each page of the candidate's side and keeps the video of a page that failed, for a recipe with `video` (the project says its app shows fixture data only; browser-evidence-chromium.ts).
+  "task.browserEvidenceVideo.v1",
   // Learning v2 (L4): approved lessons arrive as `learnedContext`, are re-checked against the base commit and framed as inert advice (learned-run.ts, learned-context.ts).
   "task.learnedContext.v1",
   // Test environment (wire-testenv): a setup draft run that is told `testEnvDetect` also reports the environment the detectors would propose (test-env-detect.ts).

@@ -3,6 +3,7 @@
 //   routes      one page per line: its path, then the repository files that make it (globs, comma or space between): `/checkout src/checkout/**, src/cart/**`
 //   mask        one CSS selector per line
 //   sign-in     the login page, three selectors and the page (or element) that says "signed in"; the saved sign-in is named by the project, never typed here
+//   video       one box: this app shows fixture data only, keep a video of a page that fails (slice 4). Never together with a sign-in: the form is refused whole.
 import { BROWSER_EVIDENCE_MASK_SELECTORS_MAX, BROWSER_EVIDENCE_RECIPE_ROUTES_MAX, browserEvidenceSignInRef } from "@agentx/contracts";
 
 const LINE = /^[^\p{Cc}\p{Cf}]*$/u;
@@ -40,6 +41,11 @@ export function browserEvidenceRecipeFromForm(project: string, form: BrowserEvid
       path: get("signInPath"), usernameSelector: get("signInUsername"), passwordSelector: get("signInPassword"), submitSelector: get("signInSubmit"), credentialRef: ref,
       ...(get("signInSuccessPath") === "" ? {} : { successPath: get("signInSuccessPath") }), ...(get("signInSuccessSelector") === "" ? {} : { successSelector: get("signInSuccessSelector") }),
     };
+  }
+  if (get("videoOn") === "yes") {
+    // A video records a typed account; the two are never saved together, so the form does not read at all (the page says why beside the box).
+    if (recipe["signIn"] !== undefined) return undefined;
+    recipe["video"] = { fixtureDataOnly: true };
   }
   return recipe;
 }

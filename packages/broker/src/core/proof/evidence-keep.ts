@@ -14,7 +14,7 @@ import {
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { deleteEvidenceArtifacts, statEvidenceArtifacts, storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
-import { storeBrowserEvidence } from "./browser-evidence-store.js";
+import { browserEvidenceCapturedDigests, browserEvidenceStoredRefs, storeBrowserEvidence } from "./browser-evidence-store.js";
 import type { EvidenceBlobStore } from "./evidence-blob-store.js";
 import type { PinnedDependency } from "./dependency-evidence.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
@@ -258,13 +258,13 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     let heldBefore = new Map<string, unknown>();
     if (input.browserEvidence !== undefined) {
       try {
-        heldBefore = await statEvidenceArtifacts(deps.store, owner, input.browserEvidence.routes.flatMap((row) => (row.status === "shown" ? [row.before.sha256, row.after.sha256] : [])));
+        heldBefore = await statEvidenceArtifacts(deps.store, owner, browserEvidenceCapturedDigests(input.browserEvidence));
         browser = await storeBrowserEvidence(deps.store, owner, input.browserEvidence);
       } catch { deps.log?.("evidence.browser_not_stored", {}); }
     }
     const abandon = async (): Promise<void> => {
       if (browser === undefined) return;
-      const refs = browser.routes.flatMap((row): ArtifactRef[] => (row.status === "shown" ? [row.before, row.after] : [])).filter((ref) => !heldBefore.has(ref.sha256));
+      const refs = browserEvidenceStoredRefs(browser).filter((ref) => !heldBefore.has(ref.sha256));
       if (refs.length > 0) await deleteEvidenceArtifacts(deps.store, owner, refs);
     };
     abandonBrowser = abandon;

@@ -9,7 +9,7 @@
 // candidate, another task's) is never read by this answer. The reader's right to the task is checked by the caller's `authorize` on EVERY request.
 import { createHash } from "node:crypto";
 import {
-  EVIDENCE_ARTIFACT_CONTENT_TYPES, EVIDENCE_ARTIFACT_MAGIC, EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_ARTIFACT_RETENTION, parseApiSample, servableBrowserEvidenceImage, servableEvidenceArtifact,
+  EVIDENCE_ARTIFACT_CONTENT_TYPES, EVIDENCE_ARTIFACT_MAGIC, EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_ARTIFACT_RETENTION, parseApiSample, servableBrowserEvidenceImage, servableBrowserEvidenceVideo, servableEvidenceArtifact,
   type ArtifactLink, type ArtifactRef, type EvidenceArtifactKind, type EvidencePackV2, type EvidencePackV2Read, type EvidenceRetentionClass, type EvidenceView,
 } from "@agentx/contracts";
 import { EvidenceObjectTooBigError, type EvidenceBlobStore } from "./evidence-blob-store.js";
@@ -116,7 +116,7 @@ export type EvidenceReadDependencies = Readonly<{
   /** The caller's right to the task, checked on every request. Throws (or resolves to undefined) for someone who may not read it; says nothing else about the task. */
   authorize(): Promise<{
     ownerKey: string; workspaceId: string; taskId: string; candidateDigest: string | undefined; view: EvidenceView | undefined;
-    /** TE-H1: the task's v2 pack for the current candidate, as a reader read it. Its browser-evidence pairs are served as pictures (`servableBrowserEvidenceImage`); nothing else of a v2 pack is. */
+    /** TE-H1: the task's v2 pack for the current candidate, as a reader read it. Its browser-evidence pairs are served as pictures (`servableBrowserEvidenceImage`) and its video check's videos as downloads (`servableBrowserEvidenceVideo`); nothing else of a v2 pack is. */
     v2Pack?: EvidencePackV2 | EvidencePackV2Read | undefined;
   } | undefined>;
   store: EvidenceArtifactStore;
@@ -137,7 +137,8 @@ export async function readEvidenceArtifact(deps: EvidenceReadDependencies, sha25
   }
   if (task === undefined) return { status: 403 };
   // A v1 view's artifacts as before; or, for a v2 pack, only a picture its browser-evidence check names as a pair for exactly this candidate (it is served inline as a JPEG and nothing else is).
-  const pair = servableBrowserEvidenceImage(task.v2Pack, task.candidateDigest, sha256);
+  // Slice 4: or a video the pack's video check names (a download, never shown inline: see `disposition`).
+  const pair = servableBrowserEvidenceImage(task.v2Pack, task.candidateDigest, sha256) ?? servableBrowserEvidenceVideo(task.v2Pack, task.candidateDigest, sha256);
   const link: ArtifactLink | undefined = servableEvidenceArtifact(task.view, task.candidateDigest, sha256)
     ?? (pair === undefined ? undefined : { kind: pair.kind, sha256: pair.sha256, bytes: pair.bytes, retentionClass: pair.retentionClass, state: "available" });
   if (link === undefined) return { status: 404 };
