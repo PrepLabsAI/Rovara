@@ -184,6 +184,18 @@ describe("import graph and declared selection", () => {
       };
     }, { n: 375, k: 8, maxRatio: 24, label: "buildImportGraph and selectTests on a long chain" });
   });
+  it("walks a changed source's reverse dependency chain with linear scaling", () => {
+    expectLinearScaling((n) => {
+      const chain = Array.from({ length: n }, (_, index) => ({ path: `m${String(index)}.py`, text: index === 0 ? "" : `import m${String(index - 1)}\n` }));
+      const tests = Array.from({ length: 30 }, (_, index) => ({ path: `tests/test_${String(index)}.py`, text: index === 0 ? `import m${String(n - 1)}\n` : "" }));
+      const graph = buildImportGraph([...chain, ...tests]);
+      const inventory = tests.map(({ path }) => `${path}::t`);
+      return () => {
+        const result = selectTests(input({ config: { method: "import_graph", alwaysRun: [], fullSuiteOn: [] }, importGraph: graph, coverageMap: undefined, inventory, changes: [{ path: "m0.py", status: "modified" }] }));
+        expect(result).toMatchObject({ mode: "selected", tests: ["tests/test_0.py::t"] });
+      };
+    }, { n: 375, k: 8, maxRatio: 24, label: "selectTests reverse closure on a long chain with separate tests" });
+  });
 });
 
 describe("the command line", () => {

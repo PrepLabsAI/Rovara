@@ -218,19 +218,37 @@ export function buildImportGraph(files: ReadonlyArray<{ path: string; text: stri
     if (!roots.seen.has(root)) { roots.seen.add(root); roots.ordered.push(root); }
   };
   for (const path of known) {
-    for (let slash = path.indexOf("/"); slash > 0; slash = path.indexOf("/", slash + 1)) {
-      const suffix = path.slice(slash + 1);
-      if (suffix.endsWith(".py")) {
-        const module = suffix.slice(0, -3);
-        addRoot(module, path.slice(0, slash + 1 + module.length));
+    // Keep sourceRoots' old `indexOf(`/${relative}.py`)` predicate: a `.py` marker may have a suffix,
+    // and a leading slash is skipped while later slashes still contribute roots. Markers are indexed
+    // once so checking each path segment stays linear in the path length.
+    const pythonMarkers: number[] = [];
+    for (let marker = path.indexOf(".py"); marker >= 0; marker = path.indexOf(".py", marker + 3)) pythonMarkers.push(marker);
+    let pythonMarker = 0;
+    let slash = path.indexOf("/");
+    if (slash === 0) slash = path.indexOf("/", 1);
+    while (slash > 0) {
+      while (pythonMarker < pythonMarkers.length && (pythonMarkers[pythonMarker] as number) <= slash) pythonMarker += 1;
+      const marker = pythonMarkers[pythonMarker];
+      if (marker !== undefined) {
+        const module = path.slice(slash + 1, marker);
+        if (module.length > 0) addRoot(module, path.slice(0, marker));
       }
+      slash = path.indexOf("/", slash + 1);
     }
-    for (let slash = path.indexOf("/"); slash > 0; slash = path.indexOf("/", slash + 1)) {
-      const suffix = path.slice(slash + 1);
-      if (suffix.endsWith("/__init__.py")) {
-        const module = suffix.slice(0, -"/__init__.py".length);
-        addRoot(module, path.slice(0, slash + 1 + module.length));
+
+    const packageMarkers: number[] = [];
+    for (let marker = path.indexOf("/__init__.py"); marker >= 0; marker = path.indexOf("/__init__.py", marker + 1)) packageMarkers.push(marker);
+    let packageMarker = 0;
+    slash = path.indexOf("/");
+    if (slash === 0) slash = path.indexOf("/", 1);
+    while (slash > 0) {
+      while (packageMarker < packageMarkers.length && (packageMarkers[packageMarker] as number) <= slash) packageMarker += 1;
+      const marker = packageMarkers[packageMarker];
+      if (marker !== undefined) {
+        const module = path.slice(slash + 1, marker);
+        if (module.length > 0) addRoot(module, path.slice(0, marker));
       }
+      slash = path.indexOf("/", slash + 1);
     }
   }
   const graph = new Map<string, Set<string>>();
