@@ -23,7 +23,7 @@ import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, NO_PEOPLE_HERE, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
-import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js";
+import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { projectTaskCapReader } from "./project-settings.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
@@ -765,7 +765,7 @@ export const handler = withCoreDispatch(workflowHandler, {
           });
         },
         // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.
-        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env) }), ...gatewayModelKeysModules(process.env)],
+        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env), projectTaskCap: projectTaskCapReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, undefined) /* L2-5 (b): the project's stored per-task limit only (no rules-service signer here); the broker's booking stop applies the company's */ }), ...gatewayModelKeysModules(process.env)],
         // The per-run stop's dispatch side (core-money-stop): each model run is admitted and goes only to a worker that reports its usage while it runs; a queued cancel is delivered.
         moneyStop: (registry, companyId) => {
           const read = readHostedAdmissionSettings(process.env);

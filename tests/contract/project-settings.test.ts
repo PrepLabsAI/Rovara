@@ -571,3 +571,63 @@ it("a change of preset that a company preset_level minimum fully hides still lea
   expect(audit).toHaveLength(2);
   expect(audit[1]).toContainEqual({ field: "preset_level", before: "careful", after: "careful", chosenBefore: "careful", chosenAfter: "lightweight" });
 });
+
+// ---- L2-5 (b): company owners and admins may change the project's per-task spending limit (DEC 254n's rule, as #839's lifecycleAccess); everything else stays with the project's admins. ----
+const BUDGET_ONLY = "Company owners and admins can change only this project's per-task spending limit here. Other project settings need one of the project's admins.";
+function companyAdminWorld(role: string, extra: Record<string, unknown> = {}) {
+  const w = stagingWorld();
+  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: COMPANY, role, joinedAt: new Date(now).toISOString(), ...extra });
+  return w;
+}
+
+it.each(["owner", "admin"])("a company %s who is not a project admin changes the per-task limit, with a fresh step-up, and the audit names the basis", async (role) => {
+  const w = companyAdminWorld(role);
+  expect(await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 4 } })).toMatchObject({ revision: 1, overrides: { model_budget_usd: 4 } });
+  expect(w.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([expect.objectContaining({ personId: person, basis: `company-${role}`, changes: [expect.objectContaining({ field: "model_budget_usd", after: 4 })] })]);
+  // Clearing it is a budget change too.
+  expect(await w.call("PUT", { expectedRevision: 1, overrides: {} })).toMatchObject({ revision: 2, overrides: {} });
+  w.setStepUp(noStepUp());
+  await expect(w.call("PUT", { expectedRevision: 2, overrides: { model_budget_usd: 9 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
+});
+
+it("a company admin may not change any other setting, not even beside the limit; the stored others may be sent back unchanged", async () => {
+  const w = stagingWorld();
+  await w.call("PUT", { expectedRevision: 0, preset: "balanced", overrides: { extra_review: true } });
+  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: COMPANY, role: "admin", joinedAt: new Date(now).toISOString() });
+  for (const body of [{ expectedRevision: 1, preset: "careful" }, { expectedRevision: 1, overrides: { extra_review: false, model_budget_usd: 2 } }, { expectedRevision: 1, overrides: { model_budget_usd: 2 } },
+    { expectedRevision: 1, overrides: { extra_review: true, ci_fix_rounds: 1, model_budget_usd: 2 } }]) {
+    await expect(w.call("PUT", body)).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: BUDGET_ONLY });
+  }
+  expect(w.db.find((row) => row.entityType === "COMPANY_LOG")).toHaveLength(1);
+  expect(await w.call("PUT", { expectedRevision: 1, preset: "balanced", overrides: { extra_review: true, model_budget_usd: 2 } })).toMatchObject({ revision: 2, preset: "balanced", overrides: { extra_review: true, model_budget_usd: 2 } });
+});
+
+it.each([
+  ["a plain member", "member", {}],
+  ["a revoked admin", "admin", { revokedAt: new Date(now).toISOString() }],
+  ["an admin of another company", "admin", { companyId: B }],
+  ["an unknown role", "auditor", {}],
+  ["a membership row naming another person", "admin", { personId: "e".repeat(64) }],
+])("%s with no project grant is refused before the body is read", async (_label, role, extra) => {
+  const w = companyAdminWorld(role, extra);
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 4 } })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
+  w.send.mockClear();
+  await expect(w.call("PUT", "not json")).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
+  expect(reads(w).some((input) => input.includes("PROJECT_SETTINGS"))).toBe(false);
+});
+
+it("a company admin of B never changes A's project limit (the same not found)", async () => {
+  const w = companyAdminWorld("admin");
+  w.setCompany(B);
+  w.db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: B, role: "admin", joinedAt: new Date(now).toISOString() });
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 4 } })).rejects.toMatchObject({ code: "NOT_FOUND", message: "project not found" });
+  expect(w.db.find((row) => row.entityType === "PROJECT_SETTINGS")).toEqual([]);
+});
+
+it("a project admin's change is unchanged: any setting, and no basis on the audit row", async () => {
+  const w = stagingWorld();
+  await w.call("PUT", { expectedRevision: 0, preset: "careful", overrides: { extra_review: true } });
+  expect(w.db.find((row) => row.entityType === "COMPANY_LOG")[0]).not.toHaveProperty("basis");
+});

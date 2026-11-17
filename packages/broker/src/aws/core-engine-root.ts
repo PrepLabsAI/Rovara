@@ -22,7 +22,7 @@
 // What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices)
 // refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use. The admission's hold sweep is the root's own (lane L8),
 // and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
-import type { ProjectSettingsHook } from "./project-settings.js";
+import { projectTaskCapReader, type ProjectSettingsHook } from "./project-settings.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -46,7 +46,7 @@ import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
 import {
-  HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, readHostedAdmissionSettings, runSpendState, runStopWiredFrom, type HostedAdmissionSettings, type HostedIdentityOptions,
+  HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, readHostedAdmissionSettings, runSpendState, runStopWiredFrom, taskCapOf, type HostedAdmissionSettings, type HostedIdentityOptions, type ProjectTaskCap,
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
@@ -339,7 +339,7 @@ export { outboxCompaniesOf };
  * One company's money wiring over the sealed registry: the callback layer's usage booking (the usage the company's workers report is booked into the task's cost ledger before the batch
  * is acknowledged, core-host/usage-booking.ts) and the admission's own hold sweep. The company is the runtime's own, never the operation's word (the callback layer has checked they agree).
  */
-export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date, settings?: HostedAdmissionSettings): { bookUsage: NonNullable<CallbackServiceOptions["bookUsage"]>; holdSweep: CoreService } {
+export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date, settings?: HostedAdmissionSettings, projectTaskCap?: ProjectTaskCap): { bookUsage: NonNullable<CallbackServiceOptions["bookUsage"]>; holdSweep: CoreService } {
   const store = registry.require("storage");
   const metering = registry.require("metering");
   const booking = createUsageBooking({ store, metering, now });
@@ -352,11 +352,33 @@ export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, comp
       const booked = await booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events);
       if (settings === undefined || !events.some((event) => event.type === USAGE_EVENT_TYPE)) return booked;
       const taskId = (await store.get((await workspaceKeys({ store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
-      const state = typeof taskId === "string" && taskId !== "" ? await runSpendState({ store, ledger, settings, now }, companyId, taskId) : "spend_unknown";
+      const state = typeof taskId === "string" && taskId !== "" ? await runSpendState({ store, ledger, settings, now, projectTaskCap }, companyId, taskId) : "spend_unknown";
       return state === "within" ? booked : { ...booked, spendStop: state };
     },
     holdSweep: createHostedHoldSweep({ store, companyId, now }),
   };
+}
+
+/**
+ * The owner's round's money check (TaskActionsOptions.roundCap) on a deployed install: the task's cap and what it has spent. L2-5 (b): the cap is the one that applies (the project's own
+ * per-task limit when lower). No caps, a task of another company, or a limit that cannot be read: throws (the round is refused, never let through).
+ */
+export async function hostedRoundCap(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date, settings: HostedAdmissionSettings | undefined, projectTaskCap: ProjectTaskCap | undefined,
+  task: { companyId: string; taskId: string; project: string }): Promise<{ limitUsd: number; spentUsd: number | undefined }> {
+  if (settings === undefined || task.companyId !== companyId) throw new Error("the task cap is unavailable");
+  const store = registry.require("storage");
+  const ledger = createHostedLedger({ store, metering: registry.require("metering"), now });
+  const cap = await taskCapOf({ store, settings, projectTaskCap }, companyId, task.taskId, task.project);
+  return { limitUsd: cap.micros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) };
+}
+
+/** L2-5 (b): the company rules service the engine's per-task limit is resolved through, as the settings page's: none on an install without one; settings that did not read, or no
+ * install signer, throw (the limit is then unreadable and the work refused). */
+export function enginePolicyHook(settings: HostedPolicyHookSettings | undefined, problem: boolean, install: (() => PolicyHookInstall | undefined) | undefined): ProjectSettingsHook | undefined {
+  if (settings === undefined && !problem) return undefined;
+  const signer = install?.();
+  if (settings === undefined || signer === undefined) throw new Error("the policy hook is not usable");
+  return { settings, install: signer };
 }
 
 // ---- the root
@@ -381,6 +403,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     ? async () => undefined
     : membershipWithRoleFromDynamo(inputs.documentClient, inputs.signInTableName);
   const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
+  // L2-5 (b): each task's cap is lowered to its project's own per-task limit (model_budget_usd) when one is set.
+  // The company's rules service, when the install has one, as the settings page reads it (read each time: unreadable settings or no install signer refuse).
+  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall));
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   const displayNameOf = async (personId: string): Promise<string | undefined> => {
     if (inputs.signInTableName === undefined || inputs.signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
@@ -408,7 +433,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -512,11 +537,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {},
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
-          taskActions: { roundCap: async (task) => {
-            if (admissionSettings === undefined || task.companyId !== runtime.companyId) throw new Error("the task cap is unavailable");
-            const ledger = createHostedLedger({ store: registry.require("storage"), metering: registry.require("metering"), now });
-            return { limitUsd: admissionSettings.taskCapMicros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(runtime.companyId, task.taskId)) };
-          } },
+          taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
           canReadProject: (personId, project) => projectGrant(personId, project),
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
@@ -572,7 +593,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const runtime = await app.runtimeFor(companyId);
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
-        const money = coreMoneyWiring(registry, companyId, now, admissionSettings);
+        const money = coreMoneyWiring(registry, companyId, now, admissionSettings, projectTaskCap);
         // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
         const wiring = modelGateway();
         const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps));

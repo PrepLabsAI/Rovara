@@ -30,6 +30,8 @@ export const projectSettingsKey = (companyId: string, projectName: string) => ({
 });
 const rowsOf = (row: SettingsRow | undefined): PolicyRows => row === undefined ? {} : { ...(row.preset === undefined ? {} : { preset: row.preset }), project: row.overrides };
 /** Fixed words (no field, no value): a cost or approval setting is changed on the page, right after a fresh step-up. */
+/** L2-5 (b): a company owner or admin who is not one of the project's administrators may change only the project's per-task spending limit. Fixed words. */
+export const COMPANY_ADMIN_BUDGET_ONLY = "Company owners and admins can change only this project's per-task spending limit here. Other project settings need one of the project's admins.";
 export const SETTINGS_CHANGE_ON_THE_PAGE = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that only holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "policy_unavailable");
 
@@ -68,6 +70,25 @@ export function createProjectSettingsPolicySource(
     } catch { throw unavailable(); }
   }
   return { source: policy, scope, snapshot: () => snapshot, propose: (row: SettingsRow) => { proposed = row; } };
+}
+
+/**
+ * L2-5 (b): the core engine's reader of a project's own per-task limit (`model_budget_usd`), in micros, rounded down; undefined when the resolved value is none (null).
+ * It resolves exactly as the settings page does: the project's stored choice through the same rows reader, then the company's rules service when the install has one (`hook`, read
+ * each time, no grace), so the limit enforced is the limit the page shows (a company limit lowers a preset's "none" and an older, higher override). A row that does not read, a
+ * rules service that does not answer, or a value that is not a non-negative number throws (the caller refuses). `hook` is required (pass `undefined` explicitly only where the
+ * host has no rules-service signer), so a caller cannot drop the company's limit by leaving it out.
+ */
+export function projectTaskCapReader(deps: Pick<DeveloperRouteDependencies, "documentClient" | "tableName" | "now">, hook: (() => ProjectSettingsHook | undefined) | undefined): (companyId: string, project: string) => Promise<number | undefined> {
+  return async (companyId, project) => {
+    const policy = createProjectSettingsPolicySource(deps, { companyId, projectName: project }, hook?.());
+    const value = (await policy.source.resolve(policy.scope, {})).values["model_budget_usd"]?.value;
+    if (value === null) return undefined;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw unavailable();
+    // A limit above any install cap (installs cap a task at $1,000 at most) lowers nothing: kept whole, never wrapped past the safe integer range.
+    if (value >= 1_000_000) return Number.MAX_SAFE_INTEGER;
+    return Math.floor(Math.round(value * 1e9) / 1e3);
+  };
 }
 
 /** The page's values, one per field, in the words the page shows. The project page and the company admin view both use this one function. */
@@ -168,6 +189,28 @@ async function partitionProjectGrant(client: Sender, tableName: string, project:
   return role === "developer" || role === "administrator" ? { role } : undefined;
 }
 
+/** The caller's LIVE role in `companyId` (their membership row in the sign-in table, read now); undefined when it does not read, names another company or person, or was revoked. */
+async function liveCompanyRole(client: Sender, signInTableName: string, personId: string, companyId: string): Promise<string | undefined> {
+  const response = await client.send(new GetCommand({ TableName: signInTableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
+  const member = MembershipRole.safeParse(response.Item);
+  if (!member.success || member.data.personId !== personId || member.data.companyId !== companyId || member.data.revokedAt !== undefined) return undefined;
+  const role = OrgRoleSchema.safeParse(member.data.role);
+  return role.success ? role.data : undefined;
+}
+
+/** L2-5 (b): whether a request changes nothing but `model_budget_usd`: the same preset (or none sent), and every other override present and equal exactly as stored. */
+function onlyBudgetChanges(current: SettingsRow | undefined, input: z.infer<typeof requestSchema>): boolean {
+  if (input.preset !== undefined && input.preset !== current?.preset) return false;
+  if (input.overrides === undefined) return true;
+  const before = (current?.overrides ?? {}) as Record<string, unknown>;
+  const after = input.overrides as Record<string, unknown>;
+  for (const field of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (field === "model_budget_usd") continue;
+    if (Object.hasOwn(before, field) !== Object.hasOwn(after, field) || canonicalJson(before[field]) !== canonicalJson(after[field])) return false;
+  }
+  return true;
+}
+
 async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, encodedName: string) {
   const budget = boundedCompanyReads(deps.documentClient);
   const client = budget.client;
@@ -194,11 +237,20 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
     const projectRow = project.Items?.[0];
     if (projectRow === undefined || !recordInCompany(projectRow, companyId)) throw agentXError("NOT_FOUND", "project not found");
   }
+  // Who may change (L2-5 b, DEC 254n's rule as #839's lifecycleAccess): the project's administrator changes any setting; a live company owner or admin who is not one may change
+  // only the per-task spending limit (checked below, once the body and the stored row are read); anyone else is refused before the body is read.
+  let basis: "project-admin" | "company-owner" | "company-admin" | undefined;
   if (request.method === "PUT") {
     const grant = partition
       ? await partitionProjectGrant(client, deps.tableName, projectName, caller.developerId, companyId)
       : await projectGrant({ documentClient: client, tableName: deps.tableName }, projectName, caller.developerId, companyId);
-    if (grant?.role !== "administrator") throw agentXError("FORBIDDEN", "project administrator required");
+    if (grant?.role === "administrator") basis = "project-admin";
+    else {
+      const role = await liveCompanyRole(client, deps.developer.signInTableName, caller.developerId, companyId);
+      if (role === "owner") basis = "company-owner";
+      else if (role === "admin") basis = "company-admin";
+      else throw agentXError("FORBIDDEN", "project administrator required");
+    }
   }
   let input: z.infer<typeof requestSchema> | undefined;
   if (request.method === "PUT") {
@@ -212,6 +264,7 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
   const { row: current, resolved: before, stored: storedBefore } = view;
   if (input === undefined) { budget.check(); return responseOf(current, before, storedBefore); }
   if (input.expectedRevision !== (current?.revision ?? 0)) throw agentXError("PROJECT_REVISION_MISMATCH", "settings revision conflict");
+  if (basis !== "project-admin" && !onlyBudgetChanges(current, input)) throw agentXError("FORBIDDEN", COMPANY_ADMIN_BUDGET_ONLY);
   const preset = input.preset ?? current?.preset;
   const row: SettingsRow = { companyId, projectName, ...(preset === undefined ? {} : { preset }),
     overrides: (input.overrides ?? current?.overrides ?? {}) as SettingsRow["overrides"], revision: input.expectedRevision + 1,
@@ -263,7 +316,7 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
         ConditionExpression: input.expectedRevision === 0 ? "attribute_not_exists(pk)" : "#revision = :expected",
         ...(input.expectedRevision === 0 ? {} : { ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":expected": input.expectedRevision } }) } },
       { Put: { TableName: deps.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${row.updatedAt}#${randomUUID()}`, entityType: "COMPANY_LOG",
-        event: "project_settings_changed", companyId, personId: caller.developerId, projectName, changes, revision: row.revision, ...presetNamed }, ConditionExpression: "attribute_not_exists(pk)" } },
+        event: "project_settings_changed", companyId, personId: caller.developerId, projectName, changes, revision: row.revision, ...presetNamed, ...(basis === "project-admin" ? {} : { basis }) }, ConditionExpression: "attribute_not_exists(pk)" } },
     ] }));
   } catch (error) {
     const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | undefined)?.CancellationReasons;
