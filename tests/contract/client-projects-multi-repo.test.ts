@@ -380,13 +380,16 @@ describe("company owners and admins create projects", () => {
 
   it.each(["owner", "admin"] as const)("a Slack-signed-in %s creates one, several and one per repository, in their own company, and administers each", async (role) => {
     const h = await signedIn({ companyId: A, role });
+    // L2-1: a company's project gets its own id (the name plus six random characters); the name is the company's own.
     const single = await h.call("/v1/dev/client/projects", { repository: "acme-a/web" });
     expect(single.statusCode).toBe(200);
-    expect(json(single)).toMatchObject({ name: "web", latestRevision: 1, access: "administrator" });
+    expect(json(single)).toMatchObject({ name: expect.stringMatching(/^web-[a-z0-9]{6}$/) as unknown, latestRevision: 1, access: "administrator" });
     const many = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/api", "acme-a2/web"], name: "both" });
-    expect(json(many)).toMatchObject({ name: "both", access: "administrator" });
-    expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/docs"] })).results).toEqual([{ repository: "acme-a/docs", outcome: "created", project: "docs" }]);
-    for (const name of ["web", "both", "docs"]) {
+    expect(json(many)).toMatchObject({ name: expect.stringMatching(/^both-[a-z0-9]{6}$/) as unknown, access: "administrator" });
+    const bulk = json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/docs"] })).results as Array<{ project: string }>;
+    expect(bulk).toEqual([{ repository: "acme-a/docs", outcome: "created", project: expect.stringMatching(/^docs-[a-z0-9]{6}$/) as unknown }]);
+    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    for (const name of [json(single).name as string, json(many).name as string, bulk[0]!.project]) {
       expect(h.db.get(`PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(A);
       expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${name}`)).toMatchObject({ role: "administrator" });
     }
@@ -416,8 +419,28 @@ describe("company owners and admins create projects", () => {
     // And B's admin, the other way round.
     const b = await signedIn({ companyId: B, role: "admin" });
     expect(json(await b.call("/v1/dev/client/projects", { repositories: ["acme-a/web"] }))).toEqual({ error: REFUSED, requestId: "golden" });
-    expect((await b.call("/v1/dev/client/projects", { repositories: ["acme-b/web"] })).statusCode).toBe(200);
-    expect(b.db.get("PROJECT#web", "REV#000000000001")?.companyId).toBe(B);
+    const bWeb = await b.call("/v1/dev/client/projects", { repositories: ["acme-b/web"] });
+    expect(bWeb.statusCode).toBe(200);
+    expect(b.db.get(`PROJECT#${json(bWeb).name as string}`, "REV#000000000001")?.companyId).toBe(B);
+  });
+
+  // L2-1 (DEC 254o a), through the routes: one store, A's admin and B's admin.
+  it("A's admin and B's admin each create a project named web; neither is refused a name only the other has, and bulk outcomes do not change", async () => {
+    const h = await signedIn({ companyId: B, role: "admin" });
+    const bWeb = json(await h.call("/v1/dev/client/projects", { repositories: ["acme-b/web"], name: "web" }));
+    expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-b/secret"] })).results).toEqual([{ repository: "acme-b/secret", outcome: "created", project: expect.stringMatching(/^secret-[a-z0-9]{6}$/) as unknown }]);
+    // A's second web would be refused: B's second web is, in its own company, in today's words.
+    expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-b/secret"], name: "web" }))).toEqual({ error: { code: "CONFIG_INVALID", message: "a project named web already exists; choose another name" }, requestId: "golden" });
+    h.db.set({ ...h.db.get(`COMPANY_MEMBER#${PERSON}`, "COMPANY")!, companyId: A });
+    const aWeb = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web"], name: "web" });
+    expect(aWeb.statusCode).toBe(200);
+    expect(json(aWeb).name).not.toBe(bWeb.name);
+    for (const leak of [bWeb.name as string, B, "acme-b"]) expect(aWeb.body).not.toContain(leak);
+    expect(h.db.get(`PROJECT#${json(aWeb).name as string}`, "REV#000000000001")?.companyId).toBe(A);
+    expect(h.db.get(`PROJECT#${bWeb.name as string}`, "REV#000000000001")?.companyId).toBe(B);
+    // Bulk: A's api is created; A's second web (acme-a2/web) is name_taken only because A itself has web.
+    const results = (json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/api", "acme-a2/web"] })).results as Array<Record<string, unknown>>).map((row) => row.outcome === "created" ? "created" : row.reason);
+    expect(results).toEqual(["created", "name_taken"]);
   });
 
   it("a plain member is refused on every route in the existing words, before any GitHub lookup or write", async () => {

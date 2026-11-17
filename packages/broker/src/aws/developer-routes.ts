@@ -1217,7 +1217,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
     requireRouteScope(route, creator);
     // Guided onboarding PR 19: or a live owner or admin of the caller's own company; the Rovara administrator's path is unchanged and reads nothing more.
-    if (!creator.administrator && !await companyMayCreateProjects(deps, creator)) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+    if (!creator.administrator && !await companyMayCreateProjects(deps, creator)) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project"); const naming: [] | [ClientProjectNaming] = creator.administrator ? [] : [{ perCompany: true }]; // L2-1: a company's creates use its own names; the administrator's calls are unchanged
     if (choosing) {
       if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
@@ -1228,7 +1228,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
       if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-      const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data);
+      const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data, ...naming);
       logDeveloperEvent({ event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
         ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
         created: answer.results.filter((row) => row.outcome === "created").length });
@@ -1244,7 +1244,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       const many = CreateClientProjectsRequestSchema.safeParse(body);
       if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
-      const created = await deps.createClientProjects(creator.developerId, many.data);
+      const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
       logDeveloperEvent({ event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
         ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }) });
       return readClientProject(deps, creator.developerId, created.name, creator.companyId);
@@ -1252,7 +1252,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
     const parsed = CreateClientProjectRequestSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-    const created = await deps.createClientProject(creator.developerId, parsed.data);
+    const created = await deps.createClientProject(creator.developerId, parsed.data, ...naming);
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
     return readClientProject(deps, creator.developerId, created.name, creator.companyId);
   }
