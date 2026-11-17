@@ -31,8 +31,8 @@ async function world(env: NodeJS.ProcessEnv = ON) {
 describe("the switch", () => {
   it("is on by default, can be switched off, and does nothing without the test environment", () => {
     expect(machineSizeEnabled({})).toBe(true);
-    for (const value of ["true", "", " 1", "1 ", "on"]) expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: value }), value).toBe(true);
-    expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: "0" })).toBe(false);
+    for (const value of ["true", "", " 1", "1 ", "on", "yes", "offline", "nope"]) expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: value }), value).toBe(true);
+    for (const value of ["0", "false", "off", "no", "FALSE", " Off ", "No"]) expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: value }), value).toBe(false);
     expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: "1" })).toBe(true);
     expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: "1", ROVARA_TEST_ENVIRONMENT: "0" })).toBe(false);
   });

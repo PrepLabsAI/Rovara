@@ -5,7 +5,7 @@
 //
 //   TESTENV#MACHINE#<digest>     the facts of a measured Prove for exactly that proposal digest (30 days); written only for a proposal that exists, so a worker cannot invent a digest;
 //   TESTENV#MACHINE_CHOICE       the row the person chose (one of the listed rows), replaced by a later choice.
-// Neither is the proof row (`TESTENV#PROVE#`): nothing a worker says here can approve an environment. Switch `ROVARA_MACHINE_SIZE` is on by default; exactly "0" turns it off, so nothing is read or written.
+// Neither is the proof row (`TESTENV#PROVE#`): nothing a worker says here can approve an environment. Switch `ROVARA_MACHINE_SIZE` is on by default; "0", "false", "off" or "no" turn it off, so nothing is read or written.
 //
 // NOT HERE (part C): who may call `recordMachineMeasurement`. It trusts that the caller already authenticated the worker's lease and the operation (as `handleNightlyResultCallback` does); the route, the job queue and
 // the advertising of `task.testEnvProveMeasure.v1` are not built yet, so no production caller exists.
@@ -17,10 +17,11 @@ import { documentOf, expired, expiryOf, type TestEnvDeps } from "./deps.js";
 import { testEnvProposalKey } from "./environment.js";
 import { optIn, testEnvironmentEnabled } from "./switch.js";
 
-/** ROVARA_MACHINE_SIZE: the measured machine size at setup (record, show, choose). On by default; exactly "0" turns it off. Does nothing without the test environment. */
+/** ROVARA_MACHINE_SIZE: the measured machine size at setup (record, show, choose). On by default; "0", "false", "off" or "no" (any case, spaces ignored) turn it off. Does nothing without the test environment. */
 export const MACHINE_SIZE_VARIABLE = "ROVARA_MACHINE_SIZE";
-/** The size suggestion is on by default with test environments; an install may explicitly turn it off. */
-export const machineSizeEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => env[MACHINE_SIZE_VARIABLE] !== "0" && testEnvironmentEnabled(env);
+const MACHINE_SIZE_OFF: ReadonlySet<string> = new Set(["0", "false", "off", "no"]);
+/** The size suggestion is on by default with test environments; an install may explicitly turn it off with any of the natural off words. */
+export const machineSizeEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => !MACHINE_SIZE_OFF.has((env[MACHINE_SIZE_VARIABLE] ?? "").trim().toLowerCase()) && testEnvironmentEnabled(env);
 /** DEC 254zb (part C): ROVARA_MACHINE_SIZE_RUN makes the chosen size change what launches (and what a machine start is estimated to cost). OFF unless exactly "1", and only with the choice on. */
 export const MACHINE_SIZE_RUN_VARIABLE = "ROVARA_MACHINE_SIZE_RUN";
 export const machineSizeRunEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => optIn(env, MACHINE_SIZE_RUN_VARIABLE) && machineSizeEnabled(env);
