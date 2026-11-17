@@ -18,6 +18,7 @@ export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/de
   "POST /v1/dev/company/slack/projects/{id}/channel/check",
   "GET /v1/dev/company/linear", "POST /v1/dev/company/linear/connect", "POST /v1/dev/company/linear/complete", "DELETE /v1/dev/company/linear",
   "GET /v1/dev/company/linear/projects/{id}", "PUT /v1/dev/company/linear/projects/{id}", "DELETE /v1/dev/company/linear/projects/{id}",
+  "GET /v1/dev/company/engine-model", "PUT /v1/dev/company/engine-model",
   "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
   "GET /v1/dev/client/projects/{id}/setup-status", "PUT /v1/dev/client/projects/{id}/setup-status/skips",
 ] as const;

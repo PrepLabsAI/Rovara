@@ -330,6 +330,7 @@ import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type Com
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
+import { installEngineModel } from "../core-host/company-engine-model.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -15450,6 +15451,8 @@ const lambdaClient = new LambdaClient(awsClientConfiguration);
 // Guided onboarding PR 7: Linear by OAuth as the app, only where infra gives the token key (CHATGPT_CONNECTION_KEY_ARN); the app's settings come from its connector secret.
 const linear = linearCompanyWiring({ env: process.env, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), kms: new KMSClient(awsClientConfiguration), secrets: secretsManager,
   connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine });
+// Guided onboarding PR 14 (DEC 254n item 1): the company engine model route's read of the gateway's live list for one company; set only where the gateway's origin is.
+const companyEngineModelOffered = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
 function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
   return createDeveloperApiConfiguration(process.env, (issuer, functionName) => ({
@@ -15476,7 +15479,9 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
       ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
       // Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts), where the token key is given.
-      ...(linear === undefined ? {} : { linearConnect: linear.connect }) } : {}),
+      ...(linear === undefined ? {} : { linearConnect: linear.connect }),
+      // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
+      ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine } }) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // DEC 254b (b): the operator's company import runs BEFORE COMPANY_SIGNIN is switched on, so it is wired with the company layer on or off.
     companyImport: companyImportThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
