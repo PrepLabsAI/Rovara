@@ -36,6 +36,8 @@ export interface SetupState {
   checkedRevision?: number;
   checkedAt?: string;
   failedStep?: string;
+  /** L4-DR: which kind of step the recorded failure names: a setup command (`setup step N (`), a test command (`readiness check N (`), or something else (a clone, a machine, a dev container). Absent when nothing was recorded. */
+  failedStage?: "setup_command" | "test_command" | "other";
 }
 
 type CheckedDefinition = Pick<ProjectDefinition, "revision" | "setup" | "readiness">;
@@ -69,6 +71,12 @@ export function failedStepOf(error: string, definition: Pick<CheckedDefinition, 
   return text === "" ? prefix : `${prefix} - ${shortened(text, FAILED_REASON_MAX - prefix.length - " - ".length)}`;
 }
 
+/** The stage a recorded failure names, from the worker's own fixed wording. Anything else is "other": it says nothing about whether the setup commands work. */
+export function failedStageOf(error: string): NonNullable<SetupState["failedStage"]> {
+  const named = /^(setup step|readiness check) \d{1,4} \(/u.exec(error);
+  return named === null ? "other" : named[1] === "setup step" ? "setup_command" : "test_command";
+}
+
 /** The error the check's preparation recorded, or undefined when it recorded none. */
 async function recordedFailure(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string): Promise<string | undefined> {
   const page = await deps.store.query({ pk: (await workspaceKeys(deps, workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX } });
@@ -96,7 +104,7 @@ export async function setupStateOfCheck(deps: Pick<TaskFlowDeps, "store" | "now"
   }
   if (status === "PREPARATION_FAILED") {
     const error = await recordedFailure(deps, check.workspaceId);
-    return { status: "failed", ...checked, ...(error === undefined ? {} : { failedStep: failedStepOf(error, definition) }) };
+    return { status: "failed", ...checked, ...(error === undefined ? {} : { failedStep: failedStepOf(error, definition), failedStage: failedStageOf(error) }) };
   }
   return { status: "ready", ...checked };
 }

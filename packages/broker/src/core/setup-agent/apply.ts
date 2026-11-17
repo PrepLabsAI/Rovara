@@ -21,7 +21,7 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { readState, verifiedView, type SetupAgentDeps } from "./agent.js";
 import { buildSetupCheck, relayCheck, setupStateOfCheck, type SetupCheckMark } from "./check.js";
 import { setupPartition } from "./keys.js";
-import { snapshotItem, takeSetupSnapshot } from "./snapshot.js";
+import { commitsOf, readCurrentSetupFiles, snapshotItem, takeSetupSnapshot } from "./snapshot.js";
 import { refusedCommand } from "./refused-command.js";
 import { classifySetupChange, type SetupChangeRisk, type SetupRisk } from "./setup-risk.js";
 
@@ -62,6 +62,8 @@ export interface SetupApplyRow {
   check: SetupCheckMark;
   reply: Record<string, unknown>;
   createdAt: string; decidedAt?: string; decidedBy?: string;
+  /** L4-DR: the commit of each repository when the candidate's check was started (the code the check prepares), so the snapshot saved at approval is of THAT code and not of whatever landed meanwhile. Absent: no snapshot is saved. */
+  baseCommits?: Record<string, string>;
 }
 
 /** Whether the project has a proposal waiting (its candidate revision exists and no decision was made). Another new revision is refused meanwhile. */
@@ -161,7 +163,9 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
   const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId: body.requestId, candidate: true });
   const reply = { digest, used: made.used, unchecked: made.unchecked, left: made.left, candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId: view.taskId ?? "", requestId: body.requestId, by, digest, baseRevision: full.definition.revision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now };
+  // L4-DR: the code the candidate's check is about to prepare, read just before it starts (best effort: none read, none saved at approval).
+  const baseCommits = await readBaseCommits(deps.flow, full.definition);
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId: view.taskId ?? "", requestId: body.requestId, by, digest, baseRevision: full.definition.revision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
     { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate.data)) as never }, condition: when.absent() },
@@ -203,16 +207,36 @@ export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "co
 
 // ---- the approval
 
-/** The snapshot of the candidate being approved (L4-DR), or undefined when the install has no code host to read it from, it cannot be read whole, or the candidate cannot be read. Never throws. */
-async function snapshotOfApproved(flow: Pick<TaskFlowDeps, "store" | "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>, row: Pick<SetupApplyRow, "project" | "candidateRevision">, at: string): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
+/** The commit of each repository now (L4-DR), or undefined when it cannot be read whole. Never throws. */
+async function readBaseCommits(flow: Pick<TaskFlowDeps, "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>, definition: Parameters<typeof readCurrentSetupFiles>[1]): Promise<Record<string, string> | undefined> {
   try {
-    if (flow.codeHosts === undefined) return undefined;
+    const read = await readCurrentSetupFiles({ companyId: flow.companyId, ...(flow.codeHosts === undefined ? {} : { codeHosts: flow.codeHosts }) }, definition);
+    return read.status === "read" ? commitsOf(read.repositories) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const SNAPSHOT_DEADLINE_MS = 10_000;
+
+/** The snapshot of the candidate being approved (L4-DR), or undefined when the install has no code host to read it from, it cannot be read whole, or the candidate cannot be read. Never throws. */
+async function snapshotOfApproved(flow: Pick<TaskFlowDeps, "store" | "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>, row: Pick<SetupApplyRow, "project" | "candidateRevision" | "baseCommits">, at: string): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    // Without the commits the check prepared there is no honest baseline: none is saved, and the project's first re-check saves it.
+    if (flow.codeHosts === undefined || row.baseCommits === undefined) return undefined;
+    const deadline = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), SNAPSHOT_DEADLINE_MS); });
+    return await Promise.race([readIt(), deadline]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  async function readIt(): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
     const stored = await flow.store.get(projectRevisionKey(flow.companyId, row.project, row.candidateRevision));
     const definition = ProjectDefinitionSchema.safeParse((stored as { definition?: unknown } | undefined)?.definition);
     if (!definition.success) return undefined;
-    return await takeSetupSnapshot({ companyId: flow.companyId, codeHosts: flow.codeHosts }, { definition: definition.data, setupRevision: row.candidateRevision, at });
-  } catch {
-    return undefined;
+    return await takeSetupSnapshot({ companyId: flow.companyId, codeHosts: flow.codeHosts }, { definition: definition.data, setupRevision: row.candidateRevision, at, commits: row.baseCommits! });
   }
 }
 

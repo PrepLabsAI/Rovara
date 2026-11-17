@@ -38,7 +38,10 @@ export * from "./recheck-rows.js";
 const expiry = (deps: Pick<TaskFlowDeps, "now">): { [INDEX_EXPIRY_ATTRIBUTE]: number } => ({ [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(((deps.now?.() ?? new Date()).getTime()) / 1000) + KEEP_SECONDS });
 const automaticDeps = (deps: TaskFlowDeps): AutomaticRunsDeps => ({ store: deps.store, now: () => (deps.now?.() ?? new Date()).getTime(), companyId: deps.companyId, audit: deps.audit });
 const errorName = (error: unknown): string => (error instanceof Error ? error.name : "unknown");
-const KEEP_SECONDS = 31 * 86_400;
+/** As long as the cap's own claim lives (62 days), so a re-check key that comes back is never answered by a claim whose row is gone. */
+const KEEP_SECONDS = 62 * 86_400;
+/** A failed first check is retried only after this, so a short outage of the host or the machines does not fail both tries. */
+export const RECHECK_RETRY_DELAY_MS = 5 * 60_000;
 /** A task that has waited this long at Build for the re-check goes on: a result that has not come is "unclear", which never blocks (the check's own limit is 50 minutes, and a retry may follow). */
 export const RECHECK_WAIT_MAX_MS = 55 * 60_000;
 /** The most failed-step text a row keeps (the check's own failing step is already redacted, on one line and cut to this). */
@@ -60,13 +63,13 @@ const uuidOf = (text: string): string => {
  */
 export function classifySetupRecheck(state: SetupState): NightlyHealth {
   const step = state.failedStep;
-  if (typeof step !== "string" || step === "") return classifyNightlyHealth(undefined);
+  if (typeof step !== "string" || step === "" || state.failedStage === undefined) return classifyNightlyHealth(undefined);
   if (step === STALLED_STEP) return { class: "unclear", cause: "incomplete_run" };
-  if (step.startsWith("test:") || step === "test") return { class: "tests", setupProved: true };
-  // A preparation that failed with nothing recorded about it is "setup" and no more: nothing says which step, so it is not read as a broken setup.
-  if (step === "setup") return { class: "unclear", cause: "other" };
-  if (step.startsWith("setup")) return classifyNightlyHealth({ steps: [{ step: "setup", status: "failed" }], checks: [], tests: { total: 0, passed: 0, failures: 0, errors: 0, skipped: 0 } });
-  return classifyNightlyHealth(undefined);
+  if (state.failedStage === "test_command") return { class: "tests", setupProved: true };
+  // Only a setup COMMAND the worker names is a broken setup. A failed clone, an expired host credential, a machine that would not start, a dev container: nothing there says the project's own setup commands fail, so none
+  // of them is read as one (an outage of the code host or of the machines never pauses a project).
+  if (state.failedStage === "setup_command") return classifyNightlyHealth({ steps: [{ step: "setup", status: "failed" }], checks: [], tests: { total: 0, passed: 0, failures: 0, errors: 0, skipped: 0 } });
+  return { class: "unclear", cause: "other" };
 }
 
 // ---- the start of a task: read, compare, maybe re-check
@@ -101,12 +104,25 @@ async function driftAtStart(deps: TaskFlowDeps, input: { project: string; taskId
   // No commit to pin means no stable identity for a re-check: the task goes on, and a later start tries again.
   if (commits === undefined) { log(deps, { event: "setup_drift.not_checked", taskId }); return []; }
   const classes = drift.drift === "changed" ? drift.classes : [];
-  const key = recheckKeyOf(definition.revision, commits);
-  const outcome = await ensureRecheck(deps, { project, definition, key, commits, classes });
+  // A change that can be told is one re-check per commit; one that cannot (no baseline, a listing over the limits) is one per revision per day, so a baseline that can never be saved cannot burn the cap on every commit.
+  const key = drift.drift === "changed" ? recheckKeyOf(definition.revision, commits) : recheckKeyOf(definition.revision, { "~unknown": iso(deps).slice(0, 10) });
+  // One re-check in flight per project: a start that finds one running joins it (a newer commit is looked at by the next start once it ends).
+  const running = await runningRecheckOf(deps, project, definition.revision);
+  const outcome = running !== undefined ? "joined" : await ensureRecheck(deps, { project, definition, key, commits, classes });
+  const linkKey = running?.key ?? key;
   if (outcome === "capped") { log(deps, { event: "setup_drift.capped", taskId }); return []; }
   log(deps, { event: "setup_drift.recheck", taskId, outcome, classes: classes.length });
-  const row: DriftTaskRow = { entityType: "SETUP_DRIFT_TASK", orgId, project, taskId, recheckKey: key, state: "pending", at: iso(deps) };
+  const row: DriftTaskRow = { entityType: "SETUP_DRIFT_TASK", orgId, project, taskId, recheckKey: linkKey, state: "pending", at: iso(deps) };
   return [putRow(driftTaskKey(orgId, project, taskId), row.entityType, { ...row, ...expiry(deps) })];
+}
+
+/** The project's latest re-check when it is still running for this revision (and has not outlived the wait limit). */
+async function runningRecheckOf(deps: TaskFlowDeps, project: string, revision: number): Promise<RecheckRow | undefined> {
+  const pointer = await deps.store.get(recheckCurrentKey(deps.companyId, project));
+  if (!isRow(pointer, deps.companyId, project, "SETUP_RECHECK_CURRENT") || typeof pointer?.["key"] !== "string") return undefined;
+  const row = await readRecheck(deps, project, pointer["key"]);
+  if (row === undefined || row.state !== "running" || row.setupRevision !== revision) return undefined;
+  return (deps.now?.() ?? new Date()).getTime() - Date.parse(row.startedAt) > RECHECK_WAIT_MAX_MS ? undefined : row;
 }
 
 type Ensured = "started" | "joined" | "capped";
@@ -191,7 +207,15 @@ export async function advanceRecheck(deps: TaskFlowDeps, project: string, key: s
   const health = classifySetupRecheck(state);
   const failedStep = (state.failedStep ?? "").slice(0, STEP_KEPT);
   if (health.class === "tests") return settled("tests_failing", await baselineMoves(deps, project, revision.definition, row));
-  if (row.attempt === 1) return retryRecheck(deps, project, revision.definition, row, still);
+  if (row.attempt === 1) {
+    // The first failure is noted when it is first seen; the retry waits out `RECHECK_RETRY_DELAY_MS` from then (a short outage must not fail both tries).
+    if (row.failedSeenAt === undefined) {
+      await deps.store.update({ key: recheckRowKey(orgId, project, key), ops: [change.set("failedSeenAt", at)], condition: when.and(still, when.notExists("failedSeenAt")) }).catch(() => undefined);
+      return readRecheck(deps, project, key);
+    }
+    if ((deps.now?.() ?? new Date()).getTime() - Date.parse(row.failedSeenAt) < RECHECK_RETRY_DELAY_MS) return row;
+    return retryRecheck(deps, project, revision.definition, row, still);
+  }
   if (health.class === "environment") {
     const done = await settled("broken", await brokenItems(deps, project, row, failedStep), failedStep);
     if (done?.state === "broken") await markProjectBroken(deps, project, done);
@@ -203,11 +227,29 @@ export async function advanceRecheck(deps: TaskFlowDeps, project: string, key: s
 /** The write that moves the snapshot's baseline to the re-checked commits (the setup was proved on this code). Nothing when it cannot be read whole: the next re-check, for another commit, tries again. */
 async function baselineMoves(deps: TaskFlowDeps, project: string, definition: ProjectDefinition, row: RecheckRow): Promise<TransactItem[]> {
   try {
+    // Only for the project's CURRENT revision: a re-check of an older one proved nothing for a setup that was approved since.
+    if ((await deps.projects.latest(project))?.definition.revision !== row.setupRevision) return [];
     const snapshot = await takeSetupSnapshot(deps, { definition, setupRevision: row.setupRevision, at: iso(deps), commits: row.commits });
     return snapshot === undefined ? [] : [snapshotItem(deps.companyId, project, snapshot)];
   } catch {
     return [];
   }
+}
+
+/**
+ * Whether a "broken" re-check still holds: the project's own setup state is still THIS re-check's failed check. A person's newer check (a "check again" that passed) or a newly approved setup replaced the mark, and the
+ * break no longer holds anyone back. A project with no record to read a mark from is held (nothing could have replaced it).
+ */
+async function brokenStillHolds(deps: Pick<TaskFlowDeps, "store" | "companyId">, project: string, row: RecheckRow): Promise<boolean> {
+  const meta = await deps.store.get(projectMetaKey(deps.companyId, project));
+  if (meta === undefined) return true;
+  return (meta["setupCheck"] as Partial<SetupCheckMark> | undefined)?.workspaceId === row.check.workspaceId;
+}
+
+/** Whether a second attempt of this re-check exists now (its check differs from the first's). */
+async function retryLeftBehind(deps: TaskFlowDeps, project: string, first: RecheckRow): Promise<boolean> {
+  const now = await readRecheck(deps, project, first.key);
+  return now !== undefined && now.attempt === 2 && now.check.workspaceId !== first.check.workspaceId;
 }
 
 /** One retry for a machine fault: a second check, under the cap again. A cap that is full ends the re-check as unclear (never as broken: nothing was proved either way). */
@@ -228,9 +270,13 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
       ...started.items,
       ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, row.key, "2"), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { attempt: 2, classes: row.classes } }),
     ]);
-    if (!result.applied) { await releaseAutomaticRun(auto, { orgId, project, requestId: claimId }); return readRecheck(deps, project, row.key); }
+    if (!result.applied) {
+      // The claim is one per re-check and attempt, so another caller's live second attempt holds it too: it goes back only when no second attempt was left behind.
+      if (!(await retryLeftBehind(deps, project, row))) await releaseAutomaticRun(auto, { orgId, project, requestId: claimId });
+      return readRecheck(deps, project, row.key);
+    }
   } catch (error) {
-    await releaseAutomaticRun(auto, { orgId, project, requestId: claimId });
+    if (!(await retryLeftBehind(deps, project, row).catch(() => false))) await releaseAutomaticRun(auto, { orgId, project, requestId: claimId });
     throw error;
   }
   await relayCheck(deps, started);
@@ -259,6 +305,9 @@ async function markProjectBroken(deps: TaskFlowDeps, project: string, row: Reche
     if (meta === undefined) return;
     const seen = meta["setupCheck"] as Partial<SetupCheckMark> | undefined;
     if (seen?.workspaceId === row.check.workspaceId) return;
+    // Never over a mark of a newer setup (an approval writes its own candidate's check), and never for a revision that is no longer the project's.
+    if (typeof seen?.revision === "number" && seen.revision > row.check.revision) return;
+    if ((await deps.projects.latest(project))?.definition.revision !== row.setupRevision) return;
     if (typeof seen?.workspaceId === "string" && !(Date.parse(String(seen.startedAt)) <= Date.parse(row.check.startedAt))) return;
     await deps.store.update({ key, ops: [change.set("setupCheck", { ...row.check })], condition: seen?.workspaceId === undefined ? when.notExists("setupCheck") : when.eq(["setupCheck", "workspaceId"], seen.workspaceId) });
   } catch (error) {
@@ -274,6 +323,7 @@ export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "co
   const recheck = await deps.store.get(recheckRowKey(deps.companyId, project, notice.key));
   const latest = await deps.projects.latest(project);
   if (!isRow(recheck, deps.companyId, project, "SETUP_RECHECK") || latest === undefined || (recheck as unknown as RecheckRow).setupRevision !== latest.definition.revision) return undefined;
+  if (!(await brokenStillHolds(deps, project, recheck as unknown as RecheckRow))) return undefined;
   return { ...setupRepairCardOf(notice.failedStep), classes: notice.classes, at: notice.at };
 }
 
@@ -307,7 +357,7 @@ export async function setupGateBeforeBuild(deps: TaskFlowDeps, input: { project:
     if (row.state !== "broken") return release();
     const latest = await deps.projects.latest(input.project);
     // A new setup was approved since: it has its own baseline, and this task is no longer held back by the old break.
-    if (latest === undefined || latest.definition.revision !== row.setupRevision) return release();
+    if (latest === undefined || latest.definition.revision !== row.setupRevision || !(await brokenStillHolds(deps, input.project, row))) return release();
     return { answer: "blocked", words: setupBrokenTaskWords(row.failedStep ?? "setup") };
   } catch (error) {
     log(deps, { event: "setup_drift.gate_failed", taskId: input.taskId, error: errorName(error) });

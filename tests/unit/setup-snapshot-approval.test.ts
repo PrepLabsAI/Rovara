@@ -24,7 +24,7 @@ const base: ProjectDefinition = {
 } as ProjectDefinition;
 const candidateOf = (extra: Partial<ProjectDefinition> = {}): ProjectDefinition => ({ ...base, revision: 2, ...extra } as ProjectDefinition);
 
-async function waiting(options: { files?: Record<string, string>; candidate?: ProjectDefinition; withHost?: boolean } = {}) {
+async function waiting(options: { files?: Record<string, string>; candidate?: ProjectDefinition; withHost?: boolean; baseCommits?: "none" } = {}) {
   const h = createHarness({ machines: { startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] } });
   await h.registerProject(base);
   await h.store.put({ item: { ...projectMetaKey(h.deps.companyId, "payments"), entityType: "PROJECT_META" } });
@@ -41,7 +41,8 @@ async function waiting(options: { files?: Record<string, string>; candidate?: Pr
   await relayCheck(h.deps, check);
   await finish(h, check.workspaceId);
   const digest = setupApplyDigest(candidate.setup, candidate.readiness);
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId: h.deps.companyId, project: "payments", taskId: "", requestId: newRequestId(), by: "local-owner", digest, baseRevision: 1, candidateRevision: 2, state: "checking", check: check.mark, reply: {}, createdAt: "2026-11-09T10:00:00.000Z" };
+  const baseCommits = options.baseCommits === "none" ? undefined : { demo: model.headOf("main") };
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId: h.deps.companyId, project: "payments", taskId: "", requestId: newRequestId(), by: "local-owner", digest, baseRevision: 1, candidateRevision: 2, state: "checking", check: check.mark, reply: {}, createdAt: "2026-11-09T10:00:00.000Z", ...(baseCommits === undefined ? {} : { baseCommits }) };
   await h.store.put({ item: { ...setupApplyKey(h.deps.companyId, "payments"), ...(JSON.parse(JSON.stringify(row)) as Record<string, JsonValue>) } });
   return { h, model, host, digest };
 }
@@ -126,6 +127,22 @@ describe("the approval saves the setup snapshot", () => {
     expect(failed.extra?.some((item) => item.kind === "update")).toBe(true);
   });
 
+  it("is of the code the check prepared, not of whatever landed before the approval", async () => {
+    const w = await waiting();
+    const prepared = w.model.headOf("main");
+    w.model.commit("main", { "package-lock.json": "changed after the check", "docker-compose.yml": "services: {}" });
+    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(w)).extra, w) as { item: { snapshot: unknown } }).item.snapshot);
+    expect(saved.repositories[0]!.commit).toBe(prepared);
+    expect(saved.repositories[0]!.files.map((file) => file.path)).not.toContain("docker-compose.yml");
+  });
+
+  it("saves none when the check's commits were not noted (the first re-check saves the baseline instead)", async () => {
+    const w = await waiting({ baseCommits: "none" });
+    const applied = await approve(w);
+    expect(snapshotPut(applied.extra, w)).toBeUndefined();
+    expect(applied.extra?.some((item) => item.kind === "update")).toBe(true);
+  });
+
   it("a store fault while reading the candidate saves no snapshot and does not fail the approval", async () => {
     const w = await waiting();
     const subject = createSetupProposalSubject({ flow: w.h.deps });
@@ -156,12 +173,14 @@ describe("the approval saves the setup snapshot", () => {
       return model2;
     };
     const whole = await waiting({ candidate: two });
-    attach(whole);
+    const model2Whole = attach(whole);
+    await whole.h.store.update({ key: setupApplyKey(whole.h.deps.companyId, "payments"), ops: [{ op: "set", path: ["baseCommits"], value: { demo: whole.model.headOf("main"), web: model2Whole.headOf("main") } as JsonValue }] });
     const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(whole)).extra, whole) as { item: { snapshot: unknown } }).item.snapshot);
     expect(saved.repositories.map((repository) => repository.name).sort()).toEqual(["demo", "web"]);
     expect(saved.repositories.find((repository) => repository.name === "web")!.files.map((file) => file.path)).toEqual(["package.json", "yarn.lock"]);
     const cut = await waiting({ candidate: two });
     const model2 = attach(cut);
+    await cut.h.store.update({ key: setupApplyKey(cut.h.deps.companyId, "payments"), ops: [{ op: "set", path: ["baseCommits"], value: { demo: cut.model.headOf("main"), web: model2.headOf("main") } as JsonValue }] });
     model2.incompleteTrees.add(model2.headOf("main"));
     expect(snapshotPut((await approve(cut)).extra, cut)).toBeUndefined();
   });

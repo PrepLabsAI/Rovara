@@ -50,6 +50,8 @@ export interface RecheckRow {
   attempt: 1 | 2;
   check: SetupCheckMark;
   startedAt: string; decidedAt?: string;
+  /** When the first attempt's failure was first seen (the retry waits from then). */
+  failedSeenAt?: string;
   /** The check's own failing step (redacted, one line, cut), kept when the result was broken. */
   failedStep?: string;
 }
