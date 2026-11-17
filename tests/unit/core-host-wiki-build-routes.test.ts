@@ -372,3 +372,36 @@ describe("hosted wiki build controls: the rest of each control", () => {
     expect((await wiki.readIndex("payments")).map((entry) => entry.pageId)).not.toContain("repo-gone");
   });
 });
+
+describe("hosted wiki build controls: the audit event ids and the start rule", () => {
+  it("a reused request id that acts on another state gets its own audit event id; a true repeat keeps the same one", async () => {
+    const { world, person, call } = await buildWorld();
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    const requestId = id();
+    await call(post(WB("payments", "/agents"), { requestId, on: true }), owner);
+    await call(post(WB("payments", "/agents"), { requestId, on: false }), owner);
+    await call(post(WB("payments", "/agents"), { requestId, on: true }), owner);
+    const ids = wikiEvents(world).map((event) => event.eventId);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids[0]).toBe(ids[2]);
+    expect(wikiEvents(world).map((event) => event.details?.["on"])).toEqual([true, false, true]);
+  });
+
+  it("the flow the starter is made with starts only for the company's live managers of that project", async () => {
+    const { person, call, inputs } = await buildWorld();
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
+    person("p-theirs", OTHER, "owner");
+    await call(post(WB("payments"), { requestId: id() }), owner);
+    const rule = inputs[0]!.flow.access;
+    const principal = (personId: string, companyId: string) => ({ companyId, personId, displayName: "n", roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER }) as never;
+    expect(await rule.checkStart(principal("p-owner", FAKE_COMPANY), "payments")).toEqual({ allowed: true });
+    expect(await rule.checkStart(principal("p-dev", FAKE_COMPANY), "payments")).toMatchObject({ allowed: false, code: "FORBIDDEN" });
+    expect(await rule.checkStart(principal("p-owner", FAKE_COMPANY), "ledger")).toEqual({ allowed: true });
+    expect(await rule.checkStart(principal("p-theirs", OTHER), "payments")).toMatchObject({ allowed: false });
+    expect(await rule.checkStart(principal("p-owner", OTHER), "payments")).toMatchObject({ allowed: false, code: "FORBIDDEN" });
+    expect(await rule.checkStart(principal("p-nobody", FAKE_COMPANY), "payments")).toMatchObject({ allowed: false });
+  });
+});
+
