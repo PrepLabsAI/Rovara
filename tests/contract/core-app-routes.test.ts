@@ -67,6 +67,8 @@ describe("the /v1/app route table", () => {
     // Guided onboarding L2-3: the hosted setup run.
     ["GET", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent/stop", "full"],
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
+    // L4-B3b: approving the project's test environment (the state read keeps its own row above).
+    ["POST", "/v1/app/projects/payments/test-environment/approve", "full"],
     // L4-D: confirm, discard and decide a setup candidate.
     ["POST", "/v1/app/projects/payments/setup-agent/confirm", "full"], ["POST", "/v1/app/projects/payments/setup-agent/discard", "full"], ["POST", "/v1/app/projects/payments/setup-agent/decide", "full"],
   ];
@@ -80,7 +82,7 @@ describe("the /v1/app route table", () => {
     for (const [method, path] of [
       ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
       ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"],
-      ["POST", "/v1/app/projects/payments/test-environment/propose"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
+      ["POST", "/v1/app/projects/payments/test-environment/propose"], ["GET", "/v1/app/projects/payments/test-environment/approve"], ["PUT", "/v1/app/projects/payments/test-environment/approve"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       // The laptop page's own setup acts (a typed command, eval confirm, the setup check) are not served on AWS, nor other methods on the setup run.
       ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],

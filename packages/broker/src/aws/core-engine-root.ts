@@ -42,6 +42,7 @@ import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
+import { createHostedTestEnvironmentApproval } from "../core-host/test-environment-approval.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
@@ -572,6 +573,13 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
           testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },
+          // L4-B3b (DEC 254zm item 4): approving that environment, with a fresh step-up, the risk-based approver rule read live (company role and project grant) and the approvers point's own proof.
+          testEnvironmentApproval: createHostedTestEnvironmentApproval({
+            companyId: runtime.companyId,
+            deps: { store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) },
+            store: registry.require("storage"), approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
+            people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
+          }),
           // Guided onboarding L2-3: the hosted setup run. Its model use is the gateway's (configured: the run is metered); citations are re-read from the company's own code host.
           setupRun: {
             standing: setupRunStanding,
