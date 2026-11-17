@@ -10,6 +10,7 @@ import { createTaskFactsSource } from "../local/app/facts.js";
 import { createCostLedger, costUsdOf } from "../core/cost/ledger.js";
 import { createSessionService } from "../services/sessions.js";
 import { createNoticeService } from "../services/notices.js";
+import { taskPeopleRecipients } from "./task-people-recipients.js";
 import { createMergeTrackingService, createMilestoneService } from "../services/merge-tracking.js";
 import { createIdentityMergePeople, type MergePeople } from "../core/merge/people.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
@@ -106,7 +107,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   const sessionScan = { cursor: undefined as string | undefined };
   const notifyScan = { cursor: undefined as string | undefined };
   const mergeScan = { cursor: undefined as string | undefined, complete: false };
-  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, inbox: true, ...options.notification });
+  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, inbox: true, peopleOf: taskPeopleRecipients(store), ...options.notification });
   return {
     "session-sweep": pass(async (store, deadlineMs) => {
       const deps = depsFor(store);
