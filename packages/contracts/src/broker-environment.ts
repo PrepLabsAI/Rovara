@@ -34,6 +34,41 @@ export const BROKER_SETTINGS_VARIABLE = "AGENTX_SETTINGS";
 export const BROKER_ACCOUNT_VARIABLE = "AGENTX_ACCOUNT_ID";
 
 /**
+ * ENV-ROOM 2 (broker 4 KB, owner decision 2026-11-17): a named environment's AGENTX_NAMES is not in the function's environment at all. The control plane writes it to one SSM
+ * String parameter (BROKER_NAMES_PARAMETER_VARIABLE names it; brokerNamesParameterName says which it must be) and gives the function the revision of what it wrote
+ * (BROKER_NAMES_REVISION_VARIABLE). The parameter's value is `v1:<revision>:<the AGENTX_NAMES list>` (encodeBrokerNamesParameterPrefix, decodeBrokerNamesParameter).
+ * The broker's handler (packages/broker/src/aws/broker-handler.ts) reads it before any broker module loads and refuses to start unless both revisions are the same, so a
+ * function and a parameter from different deploys never run together. Only CloudFormation-generated names go there: they change only when the template replaces a resource,
+ * and a name CloudFormation generates is never reused, so a stale one fails rather than pointing somewhere else. The settings (stack parameters an operator changes with
+ * `agentx config set`) stay in AGENTX_SETTINGS: a change to them changes the function, so every running broker restarts with it. No secret is in the parameter.
+ */
+export const BROKER_NAMES_PARAMETER_VARIABLE = "AGENTX_NAMES_PARAMETER";
+export const BROKER_NAMES_REVISION_VARIABLE = "AGENTX_NAMES_REVISION";
+/** A revision: the sha256, in lowercase hex, of what the control plane writes (infra/lib/broker-names.ts). */
+export const BROKER_NAMES_REVISION = /^[0-9a-f]{64}$/u;
+/** The parameter a named environment's broker names are kept in. */
+export function brokerNamesParameterName(env: string): string {
+  return `${environmentSettingsPrefix(env)}broker-names`;
+}
+/** A Standard-tier String parameter's limit, which the parameter's worst case is held under (tests/contract/broker-names-parameter-infrastructure.test.ts). */
+export const BROKER_NAMES_PARAMETER_MAX_BYTES = 4096;
+const BROKER_NAMES_PARAMETER_FORMAT = "v1";
+
+/** What the control plane writes before the list: the format and the revision. */
+export function encodeBrokerNamesParameterPrefix(revision: string): string {
+  if (!BROKER_NAMES_REVISION.test(revision)) throw new Error("a broker names revision is 64 lowercase hex digits");
+  return `${BROKER_NAMES_PARAMETER_FORMAT}:${revision}:`;
+}
+
+/** The parameter's value, read: the revision it was written for and the AGENTX_NAMES list. Anything else is an error in fixed words, never a partial read. */
+export function decodeBrokerNamesParameter(raw: string): { revision: string; list: string } | { error: string } {
+  if (new TextEncoder().encode(raw).length > BROKER_NAMES_PARAMETER_MAX_BYTES) return { error: "is longer than a parameter can be" };
+  const match = /^v1:([0-9a-f]{64}):([^\n]*)$/u.exec(raw);
+  if (match === null) return { error: "is not in the v1 format" };
+  return { revision: match[1]!, list: match[2]! };
+}
+
+/**
  * How AGENTX_NAMES and AGENTX_SETTINGS are written: `code=value` pairs joined by commas (`ts=agentx-staging-table,ar=agentx-staging-bucket`). Lambda counts the JSON of the map, so a
  * quote inside a value costs two bytes; this form has none. The values hold no quote, comma, equals sign, brace, slash or space (the infrastructure refuses a parameter or a literal
  * that could), so nothing is escaped. Anything else is an error, never a partial read.

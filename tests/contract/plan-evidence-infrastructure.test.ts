@@ -73,7 +73,7 @@ describe("the PlanEvidence function's infrastructure", () => {
     const statements = statementsOf(named, broker);
     const invoke = statements.filter((statement) => actionsOf(statement).includes("lambda:InvokeFunction") && JSON.stringify(statement.Resource).includes(planEvidence[0]));
     expect(invoke).toHaveLength(1);
-    expect(unpackedBrokerVariables(broker[1].Properties.Environment?.Variables ?? {})).toMatchObject({ PLAN_EVIDENCE_FUNCTION_NAME: { Ref: planEvidence[0] } });
+    expect(unpackedBrokerVariables(broker[1].Properties.Environment?.Variables ?? {}, named.toJSON() as never)).toMatchObject({ PLAN_EVIDENCE_FUNCTION_NAME: { Ref: planEvidence[0] } });
     // Nothing else may start it: no other role in the stack names it in an invoke grant.
     const grants = (Object.values(named.findResources("AWS::IAM::Policy")) as Policy[])
       .filter((policy) => JSON.stringify(policy.Properties.PolicyDocument).includes(planEvidence[0]) && JSON.stringify(policy.Properties.PolicyDocument).includes("lambda:InvokeFunction"));

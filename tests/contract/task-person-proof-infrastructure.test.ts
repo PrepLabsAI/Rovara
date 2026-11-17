@@ -10,7 +10,7 @@ import { withoutCoreModelAccessRoute } from "../support/core-model-access-templa
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
-import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
@@ -44,7 +44,7 @@ function runtimeCatalogEnvironmentEntries(template: TemplateJson) {
   const brokerVariables = brokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
   const dispatcherVariables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
   // ENV-ROOM: a named broker derives both catalog ids from AGENTX_ENV (tests/support/broker-environment-template.ts gives the derived literal).
-  return { broker: unpackedBrokerVariables(brokerVariables.Variables), dispatcher: dispatcherVariables.Variables };
+  return { broker: unpackedBrokerVariables(brokerVariables.Variables, template as never), dispatcher: dispatcherVariables.Variables };
 }
 
 function expectRuntimeCatalogEnvironment(template: TemplateJson, prefix: string) {
@@ -206,7 +206,7 @@ describe("the named TEST proof-only installation gate", () => {
       expect(broker, `${label} has exactly one Broker with the workflow flag`).toHaveLength(1);
       const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
       // ENV-ROOM: in a named Broker the flag is the parameter's piece of AGENTX_SETTINGS.
-      expect(unpackedBrokerVariables(variables.Variables).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
+      expect(unpackedBrokerVariables(variables.Variables, template as never).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
     }
     expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
@@ -268,7 +268,8 @@ describe("the named TEST proof-only installation gate", () => {
         },
       });
       // DEC 254h: GitHub sign-in's named-environment additions are asserted and taken out (tests/support/github-signin-template.ts); legacy has none.
-      const pinned = label === "legacy" ? template : withoutGithubSignIn(structuredClone(template), label === "named" ? "agentxlivetest123" : "staging");
+      // ENV-ROOM 2's additions (the broker names parameter and the IAM room made for it) are asserted and taken out first (tests/support/broker-environment-template.ts).
+      const pinned = label === "legacy" ? template : withoutGithubSignIn(withoutBrokerNamesParameter(structuredClone(template)), label === "named" ? "agentxlivetest123" : "staging");
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
@@ -402,7 +403,7 @@ describe("the named TEST proof-only installation gate", () => {
       const envVars = (resource.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
       expect(envVars, `${id} must not receive proof-only runtime configuration`).not.toHaveProperty("TASK_PERSON_PROOF_FUNCTION_ARN");
     }
-    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables);
+    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables, { Resources: resources });
     expect(brokerVars.SLACK_TEAM_ID).toEqual({ Ref: "SlackTeamId" });
     expect(brokerVars.DEVELOPER_SIGNIN_TABLE_NAME).toEqual({ Ref: tableId });
     const notifierVars = (notifier.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;

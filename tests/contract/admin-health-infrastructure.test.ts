@@ -27,7 +27,7 @@ function brokerStatements(template: Template): Statement[] {
 function brokerEnvironment(template: Template): Record<string, unknown> {
   const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
   const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-  return unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {});
+  return unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {}, template.toJSON() as never);
 }
 
 describe("the health route's grants (A13)", () => {
