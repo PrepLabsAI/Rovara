@@ -8,9 +8,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   GENERAL_FAKES_HELPER_PORT, GENERAL_FAKES_RUN_DIR, buildGeneralFakesSetBytes, buildOpenApiFake, parseGeneralFakesSetBytes, type GeneralFakeServiceFake, type TrustedGeneralFakesSummary,
 } from "@agentx/contracts";
-import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_SLOTS, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp } from "../../packages/worker/src/run-network.js";
+import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_SLOTS, RUN_NETWORK_STALE_MARGIN_MS, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp } from "../../packages/worker/src/run-network.js";
 import {
-  GENERAL_FAKES_HELPER_ENTRY, GENERAL_FAKES_HOSTED_FAILURE_SENTENCE, generalFakesArgProblems, generalFakesContainerName, generalFakesHostedOffer, generalFakesRunArgs, generalFakesRunId, hostedCallsBetween,
+  GENERAL_FAKES_HELPER_ENTRY, GENERAL_FAKES_HELPER_GRACE_MS, GENERAL_FAKES_HOSTED_FAILURE_SENTENCE, generalFakesArgProblems, generalFakesContainerName, generalFakesHostedOffer, generalFakesRunArgs, generalFakesRunId, hostedCallsBetween,
   hostedFakesLauncherFor, startGeneralFakesHelper, writeGeneralFakesRunFiles, type GeneralFakesLaunchNetwork, type StartGeneralFakesHelperInput,
 } from "../../packages/worker/src/general-fakes-hosted.js";
 import { TASK_SANDBOX_NETWORK } from "../../packages/worker/src/task-sandbox.js";
@@ -215,9 +215,9 @@ describe("the launch arguments", () => {
     const addresses = runNetworkAddresses(slot);
     return { name: "rovara-svc-0123456789ab", slot, workingSandboxIp: addresses.workingSandboxIp, helperIp: (index) => runNetworkHelperIp(slot, index), labelArgs: () => LABEL_KEYS.flatMap((key) => ["--label", `${key}=x`]) };
   };
-  const launch = { image: IMAGE, runDir: "/run/rovara/job1/fakes", digest: "a".repeat(64), workspaceId: WORKSPACE, operationId: OPERATION };
+  const launch = { image: IMAGE, runDir: "/run/rovara/job1/fakes", digest: "a".repeat(64), workspaceId: WORKSPACE, operationId: OPERATION, lifetimeMs: 900_000 };
   const args = () => generalFakesRunArgs({ net: net(), ...launch });
-  const problems = (list: readonly string[]) => generalFakesArgProblems(list, net(), { digest: launch.digest, workspaceId: WORKSPACE, operationId: OPERATION, runDir: launch.runDir });
+  const problems = (list: readonly string[]) => generalFakesArgProblems(list, net(), { digest: launch.digest, workspaceId: WORKSPACE, operationId: OPERATION, runDir: launch.runDir, lifetimeMs: launch.lifetimeMs });
 
   it("builds a sound, hardened, bounded run for one network, one read-only mount and one tmpfs", () => {
     const list = args();
@@ -235,7 +235,7 @@ describe("the launch arguments", () => {
     expect(pair("--volume")).toBe(`${launch.runDir}:${GENERAL_FAKES_RUN_DIR}:ro`);
     expect(list.filter((arg) => arg === "--volume")).toHaveLength(1);
     expect(list.filter((arg) => arg === "--tmpfs")).toHaveLength(1);
-    expect(list.slice(list.indexOf(IMAGE))).toEqual([IMAGE, GENERAL_FAKES_HELPER_ENTRY, "--listen", "172.30.7.16", "--caller", "172.30.7.3", "--digest", launch.digest, "--workspace", WORKSPACE, "--operation", OPERATION]);
+    expect(list.slice(list.indexOf(IMAGE))).toEqual([IMAGE, GENERAL_FAKES_HELPER_ENTRY, "--listen", "172.30.7.16", "--caller", "172.30.7.3", "--digest", launch.digest, "--workspace", WORKSPACE, "--operation", OPERATION, "--lifetime-ms", "900000"]);
     for (const flag of ["--privileged", "--publish", "-p", "--add-host", "--env", "--env-file", "--cap-add", "--device", "--pid", "--ipc", "--network-alias"]) expect(list, flag).not.toContain(flag);
     expect(list.filter((arg) => arg === "--label")).toHaveLength(4);
   });
@@ -279,6 +279,11 @@ describe("the launch arguments", () => {
       ["company", swap("--workspace", "11111111-1111-4111-8111-111111111111")],
       ["task", swap("--operation", "11111111-1111-4111-8111-111111111111")],
       ["an extra program flag", [...base, "--port", "80"]],
+      ["no lifetime", drop("--lifetime-ms")],
+      ["a longer lifetime than the round's", swap("--lifetime-ms", "86400000")],
+      ["a shorter lifetime than the round's", swap("--lifetime-ms", "1000")],
+      ["a lifetime that is not a plain number", swap("--lifetime-ms", "9e5")],
+      ["a second lifetime", [...base, "--lifetime-ms", "900000"]],
       ["not a run", ["create", ...base.slice(1)]],
     ];
     for (const [name, list] of cases) {
@@ -298,6 +303,7 @@ describe("the launch arguments", () => {
     bad({ digest: "zz" });
     bad({ workspaceId: "w1" });
     bad({ operationId: "o1" });
+    for (const lifetimeMs of [0, -1, 999, 86_400_001, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) bad({ lifetimeMs });
     expect(() => generalFakesRunArgs({ net: { ...net(), name: "evil name" }, ...launch })).toThrow();
   });
 
@@ -350,9 +356,27 @@ describe("starting the helper", () => {
     expect(started.environment).toEqual({ PETS_API_URL: `http://${runNetworkHelperIp(slot, 0)}:${String(GENERAL_FAKES_HELPER_PORT)}/s/0` });
     // All four labels, and the arguments read back sound.
     expect(LABEL_KEYS.every((key) => key in helper.labels)).toBe(true);
-    expect(generalFakesArgProblems(helper.args, { name: network.name, slot, workingSandboxIp: runNetworkAddresses(slot).workingSandboxIp, helperIp: (index) => runNetworkHelperIp(slot, index), labelArgs: () => [] }, { digest: values(helper.args, "--digest")[0]!, workspaceId: WORKSPACE, operationId: OPERATION })).toEqual([]);
+    expect(generalFakesArgProblems(helper.args, { name: network.name, slot, workingSandboxIp: runNetworkAddresses(slot).workingSandboxIp, helperIp: (index) => runNetworkHelperIp(slot, index), labelArgs: () => [] }, { digest: values(helper.args, "--digest")[0]!, workspaceId: WORKSPACE, operationId: OPERATION, lifetimeMs: 600_000 + GENERAL_FAKES_HELPER_GRACE_MS })).toEqual([]);
     await started.stop();
     nothingLeft(daemon);
+  });
+
+  it("gives the helper its own deadline: the round budget plus a grace shorter than the network's 15 minute stale margin, so it stops itself even if stop() never runs", async () => {
+    expect(GENERAL_FAKES_HELPER_GRACE_MS).toBeLessThan(RUN_NETWORK_STALE_MARGIN_MS);
+    const daemon = fakeDaemon();
+    const started = await startGeneralFakesHelper(await input(daemon));
+    const helper = daemon.containers.find((c) => c.name.endsWith("-fakes"))!;
+    expect(values(helper.args, "--lifetime-ms")).toEqual([String(600_000 + GENERAL_FAKES_HELPER_GRACE_MS)]);
+    await started.stop();
+    // A different budget gives a different deadline (the value is derived, not fixed); a test seam shortens it for a real Docker host.
+    const second = fakeDaemon();
+    const short = await startGeneralFakesHelper(await input(second, { roundBudgetMs: 60_000 }));
+    expect(values(second.containers.find((c) => c.name.endsWith("-fakes"))!.args, "--lifetime-ms")).toEqual([String(60_000 + GENERAL_FAKES_HELPER_GRACE_MS)]);
+    await short.stop();
+    const third = fakeDaemon();
+    const override = await startGeneralFakesHelper(await input(third, { helperLifetimeMs: 4000 }));
+    expect(values(third.containers.find((c) => c.name.endsWith("-fakes"))!.args, "--lifetime-ms")).toEqual(["4000"]);
+    await override.stop();
   });
 
   it("one variable per fake, in order: a second service answers /s/1", async () => {

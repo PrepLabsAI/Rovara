@@ -1,9 +1,9 @@
 import { randomInt } from "node:crypto";
 // Independent setup approval. The setup-command candidate/check/owner gate is never reused for spend.
 import {
-  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendApprovalRecordSchema, EvalSpendPlanSchema,
-  agentXError, canonicalJson, change, evalSpendDigest, evalSpendInputsDigest, when,
-  type DocumentStore, type EvalSpendApprovalRecord, type EvalSpendPlan, type EvalSpendGrant, type EvalSpendApproval, type MonthlyMeter, type EvalReservationAdapter, type OrgId, type Principal, type StoredDocument,
+  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalPlanBodySchema, EvalPlanRecordSchema, EvalSpendApprovalRecordSchema, EvalSpendPlanSchema,
+  agentXError, canonicalJson, change, evalPlanDigest, evalSpendDigest, evalSpendInputsDigest, when,
+  type DocumentStore, type EvalPlanBody, type EvalPlanRecord, type EvalSpendApprovalRecord, type EvalSpendPlan, type EvalSpendGrant, type EvalSpendApproval, type MonthlyMeter, type EvalReservationAdapter, type OrgId, type Principal, type StoredDocument,
 } from "@agentx/contracts";
 import { SubjectRefusal, type DecisionSubject } from "../decisions/approval-gate.js";
 import { localOwnerMembers, type SessionMembers, type SessionPerson } from "../sessions/access.js";
@@ -12,9 +12,9 @@ import { setupPartition } from "./keys.js";
 
 export const EVAL_SPEND_KIND = "setup-eval-spend";
 /** Cap and membership come from the trusted host, never the proposal or a stored approver role. */
-type Table = { store: DocumentStore; companyId: OrgId; members?: SessionMembers; monthlyCapMicros?: number; log?: (event: "eval_spend_approval_invalid") => void };
+type Table = { store: DocumentStore; companyId: OrgId; members?: SessionMembers; monthlyCapMicros?: number; log?: (event: "eval_spend_approval_invalid" | "eval_plan_invalid") => void };
 
-async function roleFor(deps: Table, project: string, person: SessionPerson): Promise<"owner" | "admin" | "maintainer" | undefined> {
+export async function roleFor(deps: Pick<Table, "members">, project: string, person: SessionPerson): Promise<"owner" | "admin" | "maintainer" | undefined> {
   try {
     const members = deps.members ?? localOwnerMembers();
     const companyRole = await members.companyRole(person);
@@ -25,6 +25,8 @@ async function roleFor(deps: Table, project: string, person: SessionPerson): Pro
 }
 const sessionPerson = (principal: Principal): SessionPerson => ({ companyId: principal.companyId, developerId: developerIdOf(principal), principal });
 export const evalSpendKey = (company: string, project: string) => ({ pk: setupPartition(company, project), sk: "EVAL_SPEND" });
+/** DEC 253j(1): the trusted eval plan, next to EVAL_SPEND in the same company-scoped setup partition. Only `proposeEvalSpendApproval` writes it. */
+export const evalPlanKey = (company: string, project: string) => ({ pk: setupPartition(company, project), sk: "EVAL_PLAN" });
 
 function parseRecord(deps: Table, project: string, raw: StoredDocument | undefined): EvalSpendApprovalRecord | undefined {
   if (raw === undefined) return undefined;
@@ -45,33 +47,100 @@ async function readRecord(deps: Table, project: string): Promise<EvalSpendApprov
 const fitsMonthlyCap = (deps: Table, plan: EvalSpendPlan): boolean =>
   Number.isSafeInteger(deps.monthlyCapMicros) && deps.monthlyCapMicros! >= plan.budget.maximum.costMicros;
 
+/**
+ * The approver's CURRENT role. EVAL-APPROVED-ROLE-NO-PRINCIPAL: the person is named by the approval's own stored identity as a principal of the record's company (its person id and identity
+ * provider; no role is carried), so a members reader that resolves people by principal (the hosted `deployedSessionMembers`) can find them. Before, no principal was passed, every hosted
+ * approval read "approval needs renewing" and a same-item re-propose never reused it. The role itself is still read live from the members seam; the stored `approvedBy.role` is never used.
+ */
 async function approvedRole(deps: Table, row: EvalSpendApprovalRecord) {
   if (row.approvedBy === undefined) return undefined;
-  return roleFor(deps, row.project, { companyId: row.company, developerId: developerIdOf(row.approvedBy) });
+  const principal: Principal = { companyId: row.company, personId: row.approvedBy.personId, provider: row.approvedBy.provider, displayName: "", roles: [] };
+  return roleFor(deps, row.project, { companyId: row.company, developerId: developerIdOf(row.approvedBy), principal });
 }
 
 /** Called only with the trusted discovery/estimate, never request JSON or a model's approval claim.
  * A refresh may reuse approval through the producers; proposing a changed item always asks again. */
-export async function proposeEvalSpendApproval(deps: Table, project: string, input: Omit<EvalSpendPlan, "budget"> & { budget?: EvalSpendPlan["budget"] }): Promise<EvalSpendApprovalRecord> {
-  const plan = EvalSpendPlanSchema.parse({ ...input, budget: input.budget ?? { usual: input.estimate, maximum: { calls: EVAL_DEFAULT_CALL_BUDGET, costMicros: EVAL_DEFAULT_COST_BUDGET_MICROS } } });
+export async function proposeEvalSpendApproval(deps: Table, project: string, input: Omit<EvalSpendPlan, "budget" | "evalPlanDigest"> & { budget?: EvalSpendPlan["budget"] }, evalPlan?: EvalPlanBody): Promise<EvalSpendApprovalRecord> {
+  // DEC 253j(1): the plan's digest is the broker's own, computed here from the trusted plan; a caller's `evalPlanDigest` is never taken.
+  const { evalPlanDigest: _ignored, ...fields } = input as typeof input & { evalPlanDigest?: unknown };
+  void _ignored;
+  const body = evalPlan === undefined ? undefined : EvalPlanBodySchema.parse(evalPlan);
+  if (body !== undefined && (body.selection !== fields.selection || evalSpendInputsDigest(body.inputs) !== evalSpendInputsDigest(fields.inputs))) throw agentXError("CONFIG_INVALID", "The eval plan does not match the eval spend item.");
+  const plan = EvalSpendPlanSchema.parse({ ...fields, budget: fields.budget ?? { usual: fields.estimate, maximum: { calls: EVAL_DEFAULT_CALL_BUDGET, costMicros: EVAL_DEFAULT_COST_BUDGET_MICROS } },
+    ...(body === undefined ? {} : { evalPlanDigest: evalPlanDigest(deps.companyId, project, body) }) });
   if (!fitsMonthlyCap(deps, plan)) throw agentXError("CONFIG_INVALID", "The eval budget does not fit the monthly cap.");
   const key = evalSpendKey(deps.companyId, project);
   const raw = await deps.store.get(key);
   const before = parseRecord(deps, project, raw);
   const digest = evalSpendDigest(deps.companyId, project, plan);
-  if (before?.digest === digest && (before.state === "waiting" || (before.state === "approved" && await approvedRole(deps, before) !== undefined))) return before;
+  const planRecord = body === undefined ? undefined : EvalPlanRecordSchema.parse({ entityType: "EVAL_PLAN", schemaVersion: 1, company: deps.companyId, project, planDigest: plan.evalPlanDigest, spendDigest: digest, plan: body });
+  if (before?.digest === digest && (before.state === "waiting" || (before.state === "approved" && await approvedRole(deps, before) !== undefined))) {
+    // The same item, so the same plan: its digest is in the item's. A missing or unreadable plan row is written again with exactly the content the item's digest covers.
+    if (planRecord !== undefined && parsePlanRecord(deps, project, await deps.store.get(evalPlanKey(deps.companyId, project)), before) === undefined) {
+      // Only while the item is still this one: a newer proposal's plan is never overwritten with an older one.
+      const written = await deps.store.transact([
+        { kind: "check", key, condition: when.and(when.eq("digest", before.digest), when.eq("revision", before.revision)) },
+        { kind: "put", item: { ...evalPlanKey(deps.companyId, project), ...planRecord } as unknown as StoredDocument },
+      ]);
+      if (!written.applied) throw agentXError("CHANGE_STALE", "The eval approval changed. Read it again.");
+    }
+    return before;
+  }
   // Corrupt records need a new revision even when their previous revision is unreadable,
   // so an old DecisionGate replay cannot masquerade as the new decision.
   const previousRevision = before?.revision ?? (raw === undefined ? 0 : randomInt(1, 2 ** 48));
   const row = EvalSpendApprovalRecordSchema.parse({ entityType: "EVAL_SPEND_APPROVAL", schemaVersion: 1, company: deps.companyId, project, revision: previousRevision + 1, digest, inputsDigest: evalSpendInputsDigest(plan.inputs), plan, state: "waiting" });
   const { approvedBy, ...waiting } = row;
   void approvedBy;
-  const result = await deps.store.put({ item: { ...key, ...waiting }, condition: raw === undefined ? when.absent() : when.and(
+  const condition = raw === undefined ? when.absent() : when.and(
     ...Object.entries(raw).map(([name, value]) => when.eq([name], value)),
     ...["revision", "digest", "state", "approvedBy"].filter(name => !Object.hasOwn(raw, name)).map(name => when.notExists([name])),
-  ) });
+  );
+  if (planRecord === undefined) {
+    const result = await deps.store.put({ item: { ...key, ...waiting } as unknown as StoredDocument, condition });
+    if (!result.applied) throw agentXError("CHANGE_STALE", "The eval approval changed. Read it again.");
+    return row;
+  }
+  // The item and its plan are written together or not at all; the plan row is the broker's only writer.
+  const result = await deps.store.transact([
+    { kind: "put", item: { ...key, ...waiting } as unknown as StoredDocument, condition },
+    { kind: "put", item: { ...evalPlanKey(deps.companyId, project), ...planRecord } as unknown as StoredDocument },
+  ]);
   if (!result.applied) throw agentXError("CHANGE_STALE", "The eval approval changed. Read it again.");
   return row;
+}
+
+/** The plan row, only when it is this company's and project's, unedited (its digest recomputed from its body) and the very plan the spend item `spend` names. */
+function parsePlanRecord(deps: Table, project: string, raw: StoredDocument | undefined, spend: EvalSpendApprovalRecord): EvalPlanRecord | undefined {
+  if (raw === undefined) return undefined;
+  const { pk, sk, ...value } = raw;
+  void pk; void sk;
+  const parsed = EvalPlanRecordSchema.safeParse(value);
+  if (parsed.success) {
+    const row = parsed.data;
+    let digest: string | undefined;
+    try { digest = evalPlanDigest(row.company, row.project, row.plan); } catch { digest = undefined; }
+    if (row.company === deps.companyId && row.project === project && spend.company === deps.companyId && spend.project === project
+      && digest !== undefined && row.planDigest === digest && spend.plan.evalPlanDigest === digest && row.spendDigest === spend.digest
+      && row.plan.selection === spend.plan.selection && evalSpendInputsDigest(row.plan.inputs) === spend.inputsDigest) return row;
+  }
+  deps.log?.("eval_plan_invalid");
+  return undefined;
+}
+
+/**
+ * DEC 253j(1): the trusted eval plan of this company's project, with the spend item that covers it, or undefined. Only a plan bound to an APPROVED item is answered: no item, a waiting
+ * or rejected one, another company's or project's row, a plan edited after approval (its digest no longer matches its body, or no longer the one the approved item names) is no plan.
+ * The approval's authority to spend is not decided here (that is `createEvalSpendCapabilities`, through the injected `EvalReservationAdapter`).
+ */
+export async function readApprovedEvalPlan(deps: Pick<Table, "store" | "companyId" | "log">, project: string): Promise<{ plan: EvalPlanBody; spend: EvalSpendApprovalRecord } | undefined> {
+  try {
+    const [rawSpend, rawPlan] = await deps.store.getMany([evalSpendKey(deps.companyId, project), evalPlanKey(deps.companyId, project)]);
+    const spend = parseRecord(deps, project, rawSpend);
+    if (spend === undefined || spend.state !== "approved" || spend.approvedBy === undefined || spend.plan.evalPlanDigest === undefined) return undefined;
+    const row = parsePlanRecord(deps, project, rawPlan, spend);
+    return row === undefined ? undefined : { plan: row.plan, spend };
+  } catch { return undefined; }
 }
 
 export async function readEvalSpendItem(deps: Table, project: string) {
@@ -113,12 +182,15 @@ export function createEvalSpendSubject(deps: Table): DecisionSubject {
 }
 
 /** No reservation implementation lives here. F1e binds the trusted adapter; absent/unreadable is zero spend. */
-export function createEvalSpendCapabilities(options: Table & { project: string; current(): Promise<EvalSpendPlan | undefined>; adapter?: EvalReservationAdapter }): { approval: EvalSpendApproval; meter: MonthlyMeter } {
+export function createEvalSpendCapabilities(options: Table & { project: string; current(): Promise<EvalSpendPlan | undefined>; adapter?: EvalReservationAdapter;
+  /** EVAL-PLAN-SNAPSHOT: the digest of the ONE approved item the caller read its plan from. Set: only that item answers (a re-approval in between, of another item, is no grant). */
+  digest?: string }): { approval: EvalSpendApproval; meter: MonthlyMeter } {
   const issued = new WeakMap<EvalSpendGrant, EvalSpendApprovalRecord>();
   const resolve = async () => {
     if (options.adapter === undefined) return undefined;
     const row = await readRecord(options, options.project);
     if (row?.state !== "approved" || row.approvedBy === undefined) return undefined;
+    if (options.digest !== undefined && row.digest !== options.digest) return undefined;
     const parsed = EvalSpendPlanSchema.safeParse(await options.current());
     if (!parsed.success) return undefined;
     const current = parsed.data;

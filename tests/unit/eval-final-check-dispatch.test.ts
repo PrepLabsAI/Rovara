@@ -69,11 +69,15 @@ describe("eval CHECKS dispatch", () => {
     expect(job).toBeDefined();
     if (feature) expect(job).toMatchObject({ payload: { evalRequest: { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 } } });
     else { expect(job).not.toHaveProperty("payload.evalRequest"); expect(JSON.stringify(w.logs)).toContain("eval_request_dropped_unsupported_worker"); }
+    // DEC 253c: the run asked for an eval may fetch its eval plan (`eval-plan`); a worker that is not sent the request is not given the action either.
+    const actions = (JSON.parse(Buffer.from(String((job as { callbackCapability?: string }).callbackCapability).split(".")[0]!, "base64url").toString("utf8")) as { actions: string[] }).actions;
+    expect(actions.includes("eval-plan")).toBe(feature);
   });
   it("leaves ordinary checks payloads untouched when the tier has no eval hint", async () => {
     const w = await world(true, false);
     expect(await startChecksRerun(w.h.deps, { taskId: w.task.taskId, workflowRevision: w.workflow.revision }, { requestId: newRequestId(), actorId: "owner" })).toBe("STARTED");
     const operation = (await workspaceOperations(w.h.deps, w.task.workspaceId)).find(op => op.workflowMode === "CHECKS")!;
     expect(operation.dispatch.payload).not.toHaveProperty("evalRequest");
+    expect(operation.dispatch.extraActions ?? []).not.toContain("eval-plan");
   });
 });

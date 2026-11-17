@@ -22,7 +22,7 @@ import {
 import { failureCategory, taskKey, taskPointerKey, type TaskRunSpend } from "../developer/task-records.js";
 import type { StreamRecord } from "../developer/notifications.js";
 import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
-import { workspaceKey } from "../core/task-flow/keys.js";
+import { taskPointerKey as scopedTaskPointerKey, workspaceKey } from "../core/task-flow/keys.js";
 
 /** A4: aborted at the index's deadline; a store passes it to each request it sends. */
 export interface IndexStoreOptions { signal?: AbortSignal }
@@ -90,6 +90,7 @@ async function contextOf(store: IndexStore, workspaceId: string): Promise<Contex
   const legacyKey = { pk: `WORKSPACE#${workspaceId}`, sk: "META" };
   let workspace = await store.get(legacyKey);
   let operationPk: string | undefined;
+  let companyId: string | undefined;
   let operationReadable = true;
   if (workspace?.entityType === "WORKSPACE_COMPANY_POINTER") {
     const company = OrgIdSchema.safeParse(workspace.companyId);
@@ -102,10 +103,13 @@ async function contextOf(store: IndexStore, workspaceId: string): Promise<Contex
     } else {
       workspace = scoped;
       operationPk = scopedKey.pk;
+      companyId = company.data;
     }
   }
   const project = text(workspace?.projectName)?.slice(0, PROJECT_MAX) ?? "unknown";
-  const pointer = await store.get(taskPointerKey(workspaceId));
+  // The task pointer lives in the workspace's own partition: the company's (through the workspace pointer) or the legacy one.
+  const taskPointerAt = !operationReadable ? undefined : companyId === undefined ? taskPointerKey(workspaceId) : scopedTaskPointerKey(companyId, workspaceId);
+  const pointer = taskPointerAt === undefined ? undefined : await store.get(taskPointerAt);
   const taskId = text(pointer?.taskId);
   if (taskId !== undefined) {
     const task = await store.get(taskKey(taskId));

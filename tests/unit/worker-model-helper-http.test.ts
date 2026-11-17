@@ -2,6 +2,8 @@
 // replies and the failure pack, and writes a ledger that never holds a body, a header value, a query or a prompt.
 import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import { isInboundCredentialHeader } from "@agentx/contracts";
+import { isInboundCredentialHeader as isInboundCredentialHeaderFromEntry } from "@agentx/contracts/model-helper";
 import { createModelLedgerWriter } from "../../packages/worker/src/model-helper-ledger.js";
 import { MODEL_HELPER_LIMITS, REAL_NOT_AVAILABLE_SENTENCE, headersForBackend, parseModelTarget, startModelHelperLoop, type ModelBackend } from "../../packages/worker/src/model-helper-http.js";
 import { GEMINI_BODY, OPENAI_BODY, ROWS, ZERO_DIGEST, cleanupWorlds, fakeKey, geminiPath, request, stampSet, startWorld, type World } from "../support/model-helper-world.js";
@@ -46,6 +48,30 @@ describe("headersForBackend", () => {
     const key = fakeKey();
     const kept = headersForBackend({ authorization: `Bearer ${key}`, "x-api-key": key, "x-goog-api-key": key, "api-key": key, cookie: key, "proxy-authorization": key, "x-amz-security-token": key, "x-goog-user-project": "p", "content-type": "application/json", "anthropic-version": "2023-06-01" });
     expect(kept).toEqual({ "content-type": "application/json", "anthropic-version": "2023-06-01" });
+  });
+});
+
+// BEDROCK-HELPER-CREDENTIAL-RULE-ONE-SOURCE: the helper (in the sandbox) and the gateway side drop credential headers by ONE rule, `isInboundCredentialHeader`, which the helper reaches through its narrow contracts entry.
+// A second copy of the rule would drift (it did: the helper missed x-authorization and x-amzn-bedrock-authorization, the contracts rule missed amz-sdk-*).
+describe("the helper's credential-header rule is the gateway's rule", () => {
+  const NAMES = [
+    "authorization", "Authorization", "proxy-authorization", "proxy-connection", "x-api-key", "x-goog-api-key", "X-Goog-Api-Key", "api-key", "x-goog-user-project", "cookie", "cookie2", "set-cookie",
+    "x-amz-security-token", "x-amz-date", "x-amz-content-sha256", "x-authorization", "x-amzn-bedrock-authorization", "x-amzn-bedrock-trace", "amz-sdk-invocation-id", "amz-sdk-request", "x-custom-api-key", "x-apikey", "my-authorization-header", "authorization:", "Authorization\r\n x",
+    "content-type", "accept", "anthropic-version", "x-goog-api-client", "user-agent", "x-request-id",
+  ];
+  it("the helper keeps a header exactly when the shared rule says it is not a credential, for every name in the corpus", () => {
+    for (const name of NAMES) {
+      const kept = Object.keys(headersForBackend({ [name]: "v" }));
+      expect(kept.length === 0, name).toBe(isInboundCredentialHeader(name));
+    }
+  });
+  it("drops the names the two copies used to disagree on (x-authorization, x-amzn-bedrock-authorization, amz-sdk-*), and keeps the plain ones (control)", () => {
+    expect(headersForBackend({ "x-authorization": "k", "x-amzn-bedrock-authorization": "k", "amz-sdk-invocation-id": "i", "amz-sdk-request": "attempt=1", "content-type": "application/json" })).toEqual({ "content-type": "application/json" });
+    for (const name of ["x-authorization", "x-amzn-bedrock-authorization", "amz-sdk-invocation-id"]) expect(isInboundCredentialHeader(name), name).toBe(true);
+    expect(["content-type", "accept", "user-agent"].map((name) => isInboundCredentialHeader(name))).toEqual([false, false, false]);
+  });
+  it("is one function: the helper's narrow entry exports the very function the contracts' gateway side uses", () => {
+    expect(isInboundCredentialHeaderFromEntry).toBe(isInboundCredentialHeader);
   });
 });
 
