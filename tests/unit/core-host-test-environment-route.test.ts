@@ -62,7 +62,7 @@ async function setup(switches: NodeJS.ProcessEnv) {
 const bodyOf = (answer: { body: string } | undefined) => JSON.parse(answer!.body) as Record<string, unknown> & { error?: { message: string } };
 
 describe("the route table", () => {
-  it("has one row for the state read, full access only, and none for proposing, approving or the laptop's image routes", () => {
+  it("has one row for the state read, full access only, and none for proposing or the laptop's image routes (approving has its own POST row: core-host-test-environment-approval.test.ts)", () => {
     expect(appRouteOf("GET", PATH)).toEqual({ method: "GET", path: "/v1/app/projects/{project}/test-environment", requires: "full" });
     for (const [method, path] of [["POST", PATH], ["PUT", PATH], ["DELETE", PATH], ["POST", `${PATH}/propose`], ["POST", `${PATH}/open`], ["GET", `${PATH}/service-images`], ["POST", `${PATH}/service-images/approve`], ["POST", `${PATH}/machine`]] as const) {
       expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();

@@ -8,9 +8,14 @@
 //     window (FRESH_SIGN_IN_SECONDS, ten minutes; the company's own "fresh sign-in" setting, the policy hook wrapper and the dev routes may only shorten it). A Slack, Google or GitHub round trip never counts.
 // Anything else (another subject type, another person, a company admin, a code host comment, a chat press) is refused: the install offers one method, `rovara-step-up`.
 //
-// L4-D (DEC 254z b): a project's SETUP CANDIDATE (`setup_proposal`, its id the project's name) is the one other subject. Its proof is issued for that subject only (`issueSetupStepUpApproval`,
+// L4-D (DEC 254z b): a project's SETUP CANDIDATE (`setup_proposal`, its id the project's name) is one other subject. Its proof is issued for that subject only (`issueSetupStepUpApproval`,
 // marked so a task proof can never stand for it and the other way round) and needs the same fresh step-up, card binding and one-time part; the person must be a live member of the company.
 // Who may decide at the candidate's risk (a project maintainer, or a company admin for high risk) is the setup subject's own rule, read live in the decision (apply.ts, the host's `approval`).
+//
+// L4-B3b (DEC 254zm item 4): a project's TEST ENVIRONMENT (`test-environment`, its id the project's name) is the third subject, with the same shape and its own marker: its proof is issued by
+// `issueTestEnvironmentStepUpApproval`, names the project, the proposal's digest, the revision its approval makes, the request id, the answer and the card `test-environment:<project>` at that
+// digest, and needs the same fresh step-up and one-time part. The marker is signed into the token, so a task, setup or test environment proof each stand for their own subject only. Who may
+// decide at the proposal's risk is the test environment subject's own rule, read live in the decision (core/test-env/environment.ts, the host's `approval`).
 //
 // The proof. The broker's dev route checks the step-up on the VERIFIED access token (`DeployedCaller.stepUp`, `freshStepUp` in dev-routes.ts); the deployment's decision performer
 // (lane L11) then asks `issueStepUpApproval` for a proof of that one act. The proof's token is signed with a key derived from the install's callback signing key (never stored or
@@ -37,6 +42,10 @@ import { taskKey } from "../core/task-flow/keys.js";
 
 /** L4-D: the subject type of a project's setup candidate (apply.ts `createSetupProposalSubject`). */
 export const SETUP_PROPOSAL_SUBJECT = "setup_proposal";
+/** L4-B3b: the subject type of a project's test environment proposal (core/test-env/environment.ts `createTestEnvironmentSubject`). */
+export const TEST_ENVIRONMENT_SUBJECT = "test-environment";
+/** The subject types a proof can be marked for besides a task (which has no marker). */
+type ProofSubject = typeof SETUP_PROPOSAL_SUBJECT | typeof TEST_ENVIRONMENT_SUBJECT;
 /** The one way to answer a decision on a deployed install: a fresh step-up, proved for one act. */
 export const STEP_UP_APPROVAL_METHOD = "rovara-step-up";
 /** How long an issued proof is good for: the act follows the step-up check at once. */
@@ -81,7 +90,7 @@ interface ProofClaims {
   m: string; // step-up factor
   e: number; // expires (ms)
   n: string; // the one-time part
-  t?: typeof SETUP_PROPOSAL_SUBJECT; // the subject type when it is not a task (L4-D)
+  t?: ProofSubject; // the subject type when it is not a task (L4-D setup, L4-B3b test environment)
 }
 
 const b64 = (value: Buffer | string): string => Buffer.from(value).toString("base64url");
@@ -145,11 +154,23 @@ export type SetupStepUpApprovalInput = Omit<StepUpApprovalInput, "taskId"> & { p
 
 /** A proof of one act on a project's setup candidate (L4-D), for the hosted setup route. Same rules as `issueStepUpApproval`; the token names its subject type, so it never stands for a task. */
 export function issueSetupStepUpApproval(key: Buffer, input: SetupStepUpApprovalInput, nowMs: number): { method: typeof STEP_UP_APPROVAL_METHOD; token: string } {
+  return issueProjectSubjectApproval(key, input, nowMs, SETUP_PROPOSAL_SUBJECT);
+}
+
+/** What one act on a project's test environment binds (L4-B3b): as a setup act, with the proposal's digest and the revision its approval makes. */
+export type TestEnvironmentStepUpApprovalInput = SetupStepUpApprovalInput;
+
+/** A proof of one act on a project's test environment (L4-B3b), for the hosted approve route. Same rules as the setup proof; the token's marker is its own, so it never stands for a task or a setup. */
+export function issueTestEnvironmentStepUpApproval(key: Buffer, input: TestEnvironmentStepUpApprovalInput, nowMs: number): { method: typeof STEP_UP_APPROVAL_METHOD; token: string } {
+  return issueProjectSubjectApproval(key, input, nowMs, TEST_ENVIRONMENT_SUBJECT);
+}
+
+function issueProjectSubjectApproval(key: Buffer, input: SetupStepUpApprovalInput, nowMs: number, subject: ProofSubject): { method: typeof STEP_UP_APPROVAL_METHOD; token: string } {
   if (typeof input?.project !== "string" || !PROJECT_NAME.test(input.project)) throw new Error("a step-up approval cannot be issued for this input");
   // The task id check is for a task proof; the rest of the input is checked as for one.
   const { project, ...rest } = input;
   checkProofInput({ ...rest, taskId: TASK_ID_FOR_CHECK });
-  return signProof(key, { ...claimsOf({ ...rest, taskId: project }, nowMs), t: SETUP_PROPOSAL_SUBJECT });
+  return signProof(key, { ...claimsOf({ ...rest, taskId: project }, nowMs), t: subject });
 }
 
 /** The signed claims of a token, or undefined for anything this file did not sign or cannot read whole. */
@@ -172,7 +193,7 @@ function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   if (typeof c["c"] !== "string" || typeof c["p"] !== "string" || typeof c["r"] !== "string" || typeof c["q"] !== "string" || typeof c["s"] !== "string" || !Number.isSafeInteger(c["v"]) || typeof c["d"] !== "string"
     || !ANSWERS.has(c["o"]) || !Array.isArray(card) || card.length !== 2 || typeof card[0] !== "string" || typeof card[1] !== "string" || typeof c["a"] !== "string"
     || typeof c["m"] !== "string" || !Number.isSafeInteger(c["e"]) || typeof c["n"] !== "string" || !NONCE.test(c["n"])
-    || (Object.hasOwn(c, "t") && c["t"] !== SETUP_PROPOSAL_SUBJECT)) return undefined;
+    || (Object.hasOwn(c, "t") && c["t"] !== SETUP_PROPOSAL_SUBJECT && c["t"] !== TEST_ENVIRONMENT_SUBJECT)) return undefined;
   return c as unknown as ProofClaims;
 }
 
@@ -244,8 +265,10 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       if (request?.settlesClaims !== true) return refuse(NEEDS_SETTLING_CALLER);
       const companyId = request.companyId;
       const subject = request.subject;
-      // A core task (its own person decides), or a project's setup candidate (L4-D: a live member here; the setup subject's rule decides who at the candidate's risk). Nothing else.
-      const setup = subject?.type === SETUP_PROPOSAL_SUBJECT;
+      // A core task (its own person decides), a project's setup candidate (L4-D) or a project's test environment (L4-B3b): for those two a live member here, and the subject's own rule decides who
+      // at the proposal's risk. Nothing else.
+      const marker: ProofSubject | undefined = subject?.type === SETUP_PROPOSAL_SUBJECT || subject?.type === TEST_ENVIRONMENT_SUBJECT ? subject.type : undefined;
+      const setup = marker !== undefined;
       if (typeof companyId !== "string" || !OrgIdSchema.safeParse(companyId).success || typeof subject?.id !== "string"
         || !(setup ? PROJECT_NAME.test(subject.id) && request.projectName === subject.id : subject.type === "task" && TASK_ID.test(subject.id))) return refuse("no_rule_for_this_request");
       if (proof.requestId !== request.requestId || typeof request.requestId !== "string") return refuse("other_request");
@@ -256,7 +279,7 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       if (claims.c !== companyId) return refuse("wrong_company");
       if (claims.r !== decisionRequestIdOf(request.requestId)) return refuse("other_request");
       if (claims.q !== request.kind) return refuse("other_kind");
-      if (claims.s !== subject.id || (setup ? claims.t !== SETUP_PROPOSAL_SUBJECT : claims.t !== undefined)) return refuse("other_subject");
+      if (claims.s !== subject.id || claims.t !== marker) return refuse("other_subject");
       if (claims.v !== request.revision) return refuse("other_revision");
       if (claims.d !== request.artifactDigest) return refuse("other_content");
       if (claims.o !== (request.outcome ?? "approve")) return refuse("other_answer");

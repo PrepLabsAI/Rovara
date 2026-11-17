@@ -16,6 +16,8 @@
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
 //     only for a person the company lets read that project; proposing and approving are not on the core here (no hosted approval path for a test environment yet);
+//   - approving that environment (`POST /v1/app/projects/<p>/test-environment/approve`, L4-B3b): a fresh step-up, the person's right to read the project, then the risk-based approver rule (a company owner or admin, or
+//     the project's maintainer for low and medium risk; high risk a company owner or admin only), read live again inside the decision, with the approvers point's own proof; served only where the deployment wires it;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
 //     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with a fresh step-up and the risk-based approver rule; the rules are setup-run-routes.ts's;
 //   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
@@ -61,6 +63,8 @@ import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "
 import { isWikiMapPath, routeHostedWikiMap, type HostedWikiMapWiring } from "./wiki-map-routes.js";
 import { isWikiPath, routeHostedWiki, type HostedWikiWiring } from "./wiki-routes.js";
 import { isWikiCorrectionPath, routeHostedWikiCorrections, type HostedWikiCorrectionsWiring } from "./wiki-corrections-routes.js";
+import type { HostedTestEnvironmentDecider } from "./hosted-test-environment-decision.js";
+import { z } from "zod";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -76,6 +80,14 @@ const TASK_ANSWERS = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/answers$/u;
 const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:how-we-work|playbook)$/u;
 const SCRIPT_TOKENS = /^\/v1\/app\/script-tokens(?:\/([^/]+)\/revoke)?$/u;
 const TEST_ENVIRONMENT = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/test-environment$/u;
+/** L4-B3b: approving the proposal that waits (a POST). */
+const TEST_ENVIRONMENT_APPROVE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/test-environment\/approve$/u;
+/** What the person saw, as the approve route's body (strict: nothing else is read from the client). */
+const ApproveTestEnvironmentBodySchema = z.object({
+  requestId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/u),
+  revision: z.number().int().min(1),
+  artifactDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict();
 
 export const NOT_ON_THE_CORE_YET = "That is not on the core engine on this install yet.";
 export const MAKE_SCRIPT_TOKEN_ON_A_PAGE = "A script token is made right after you confirm it's you on the sign-in page: it is a long-lived credential, so a tool that holds an API token cannot make one. Confirm it's you, then try again within a few minutes.";
@@ -139,6 +151,11 @@ export interface CoreDevWiring {
    * pin dependencies from (hosted: the owner starter list, `hostedServiceCatalog`), `catalogName` how the answer names it. Served only with `canReadProject`.
    */
   testEnvironment?: { env: NodeJS.ProcessEnv; serviceCatalog?: ServiceCatalogSource | undefined; catalogName: "owner-starter-list" };
+  /**
+   * L4-B3b (DEC 254zm item 4): approving the project's test environment (`POST /v1/app/projects/<p>/test-environment/approve`): a fresh step-up, the risk-based approver rule read live, the approvers
+   * point's own proof, the approval gate (test-environment-approval.ts). Absent: that path says "not on the core yet". Served only with `canReadProject`.
+   */
+  testEnvironmentApproval?: HostedTestEnvironmentDecider;
   /** Script tokens' list and revoke (the token store is the core's; the audit sink is the registry's). */
   scriptTokens?: { enabled?: () => boolean };
   /**
@@ -185,6 +202,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
   if (TASK_ANSWERS.test(path)) return method === "POST";
   if (TASK_READ.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path)) return method === "GET";
+  if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isWikiMapPath(path, method)) return true;
@@ -446,6 +464,23 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           if (!(await target.wiring.canReadProject(caller.principal.personId, playbook[1]!).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           const answer = (await target.playbook.routes(request)) ?? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND));
           return answer.statusCode === 404 ? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND)) : answer;
+        }
+        const approveEnvironment = TEST_ENVIRONMENT_APPROVE.exec(path);
+        if (approveEnvironment !== null) {
+          const approval = target.wiring.testEnvironmentApproval;
+          if (approval === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          // A decision needs a fresh step-up, checked before anything else is read (a tool holding an ordinary API token has none).
+          const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), DECIDE_ON_A_PAGE);
+          const project = approveEnvironment[1]!;
+          // A live company owner or admin (the risk rule's top approvers, who need no grant on the project), or a person the company lets read the project; anyone else gets the words of a missing project
+          // and nothing is decided for them. A project that does not exist is the decision's own "not found" for an owner or admin.
+          if (membership.role !== "owner" && membership.role !== "admin" && !(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          const parsedBody = ApproveTestEnvironmentBodySchema.safeParse(jsonBodyOf(request));
+          if (!parsedBody.success) throw agentXError("CONFIG_INVALID", `${parsedBody.error.issues[0]?.path.join(".") || "body"}: invalid`);
+          const result = await approval.approve({ personId: caller.principal.personId, stepUp, project, approval: parsedBody.data });
+          if (result.ok) return json(200, { project, message: result.message });
+          // The decision's own words (fixed, never an echo); the status by reason.
+          throw agentXError(result.reason === "off" ? "NOT_AVAILABLE_HERE" : result.reason === "stale" ? "CHANGE_STALE" : result.reason === "not_found" || result.reason === "not_wired" ? "NOT_FOUND" : "FORBIDDEN", result.message);
         }
         const testEnvironment = TEST_ENVIRONMENT.exec(path);
         if (testEnvironment !== null) {
