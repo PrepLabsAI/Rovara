@@ -30,6 +30,8 @@ export const ATTENTION_EMAIL_VARIABLE = "ROVARA_ATTENTION_EMAIL";
 const OWN_OIDC_ISSUER_VARIABLE = "DEVELOPER_OIDC_ISSUER";
 export const ATTENTION_EMAIL_UNAVAILABLE = "the attention email could not be sent now";
 export const ATTENTION_EMAIL_REFUSED = "the attention email was refused";
+/** The invoke went out but its outcome is not known: the email may have gone, so it is never sent again (at most once). Not retryable. */
+export const ATTENTION_EMAIL_UNKNOWN = "the attention email may have been sent and is not sent again";
 const FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/u;
 
 /** `on` turns it on; unset, empty or `off` is off; anything else is off and reported (the caller logs a fixed line). */
@@ -53,23 +55,31 @@ export function lambdaAttentionEmailSender(options: { lambda: Pick<LambdaClient,
       if (emailRefusal(message) !== undefined) throw new EmailError("refused", ATTENTION_EMAIL_REFUSED);
       const wait = message.deadline === undefined ? 10_000 : message.deadline - now();
       if (wait <= 0) throw new EmailError("unavailable", ATTENTION_EMAIL_UNAVAILABLE);
+      // At most once: once the invoke may have reached the function, an outcome that is not a definite "not sent" is never retried (the queue then keeps its claim).
+      const unknown = () => new EmailError("refused", ATTENTION_EMAIL_UNKNOWN);
       let answer: unknown;
       try {
         const response = await options.lambda.send(new InvokeCommand({
           FunctionName: options.functionName, InvocationType: "RequestResponse",
           Payload: new TextEncoder().encode(JSON.stringify({ v: 1, to: message.to, subject: message.subject, text: message.text })),
         }), { abortSignal: AbortSignal.timeout(Math.min(wait, 10_000)) });
-        if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("no answer");
+        if (response.FunctionError !== undefined || response.Payload === undefined) throw unknown();
         answer = JSON.parse(new TextDecoder().decode(response.Payload)) as unknown;
-      } catch {
-        // The SDK's error can quote the request: it is dropped here.
-        throw new EmailError("unavailable", ATTENTION_EMAIL_UNAVAILABLE);
+      } catch (error) {
+        if (error instanceof EmailError) throw error;
+        // The SDK's error can quote the request: only its status is kept. Lambda refused the invoke itself (throttled, no such function): the function never ran, so it is tried again later.
+        // Anything else (an abort at the deadline, a lost connection, an unreadable answer) may have sent it.
+        const status = (error as { $metadata?: { httpStatusCode?: unknown } } | null)?.$metadata?.httpStatusCode;
+        if (status === 429 || status === 404) throw new EmailError("unavailable", ATTENTION_EMAIL_UNAVAILABLE);
+        throw unknown();
       }
-      // The function's answer (attention-email-sender.ts): only `{ ok: true }` is a send, `{ refused: true }` is a refusal, anything else did not go.
+      // The function's answer (attention-email-sender.ts): `{ ok: true }` is a send, `{ refused: true }` a refusal, `{ unavailable: true }` a definite "SES did not take it" (tried again);
+      // anything else may have gone, and is not sent again.
       const fields = typeof answer === "object" && answer !== null ? answer as Record<string, unknown> : {};
       if (fields["ok"] === true) return;
       if (fields["refused"] === true) throw new EmailError("refused", ATTENTION_EMAIL_REFUSED);
-      throw new EmailError("unavailable", ATTENTION_EMAIL_UNAVAILABLE);
+      if (fields["unavailable"] === true) throw new EmailError("unavailable", ATTENTION_EMAIL_UNAVAILABLE);
+      throw unknown();
     },
   };
 }

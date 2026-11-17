@@ -10,7 +10,8 @@
 //     IAM's size limit. Same account, so the function policy alone grants it; the permissions boundary still bounds the broker's role (it allows lambda);
 //   - the broker's environment grows by the packed switch only (`ae=off`, 7 bytes at worst): the function's name is fixed (`coreAttentionEmailFunctionName`) and derived by the broker, and the web
 //     app's host goes to the sender function alone (the broker writes the email's links on a reserved placeholder origin that the sender replaces with `https://<host>`).
-// A template rule refuses `on` without a sender identity, or with the step-up sender's identity (M1: a complaint about attention mail must not hurt the step-up codes' sender).
+// A template rule refuses `on` without a sender identity, or with the step-up sender's exact identity, so the two do not share an identity's reputation. It does NOT separate them fully: SES's
+// suppression list, complaint-rate review and sending pause are per account, so a complaint about attention mail can still suppress step-up codes to that address (see the C8B guard note).
 import { CfnCondition, CfnParameter, CfnResource, CfnRule, Duration, Fn, Stack, aws_iam as iam, type aws_lambda as lambda } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { ATTENTION_EMAIL_FUNCTION_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, coreAttentionEmailFunctionName } from "@agentx/contracts";

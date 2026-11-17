@@ -20,8 +20,13 @@ export const ATTENTION_EMAIL_LINK_PLACEHOLDER = "https://web-app.rovara.invalid"
 
 /** What the broker sends: exactly these fields. */
 export interface AttentionEmailRequest { v: 1; to: string; subject: string; text: string }
-/** What the function answers. `refused`: the request is not one it sends (never tried again); `unavailable`: SES did not take it now. */
-export type AttentionEmailAnswer = { ok: true } | { refused: true } | { unavailable: true };
+/**
+ * What the function answers. `refused`: the request is not one it sends (never tried again); `unavailable`: SES answered and did not take it (tried again later); `unknown`: no answer from SES
+ * (timed out or the connection failed), so it may have gone: never tried again (at most once).
+ */
+export type AttentionEmailAnswer = { ok: true } | { refused: true } | { unavailable: true } | { unknown: true };
+/** The most the sender waits for SES: well under the broker's own wait for the invoke (ATTENTION_SEND_TIMEOUT_MS, 2.5 s), so the broker hears a definite answer whenever it can. */
+export const ATTENTION_SES_TIMEOUT_MS = 1_500;
 
 const SUBJECT = /^Rovara(?: digest: [1-9][0-9]{0,4} tasks?|: [1-9][0-9]{0,4} tasks? (?:finished|needs your attention|need your attention))$/u;
 const HEADINGS: ReadonlySet<string> = new Set(["Your Rovara digest:", "A task finished in Rovara:", "These tasks finished in Rovara:", "A task needs your attention in Rovara:", "These tasks need your attention in Rovara:"]);
@@ -29,7 +34,8 @@ const HEADINGS: ReadonlySet<string> = new Set(["Your Rovara digest:", "A task fi
 const hasControl = (text: string): boolean => /[\p{Cc}\u2028\u2029]/u.test(text.replace(/[\n\t]/gu, ""));
 const LINE_OR_CONTROL = /[\p{Cc}\u2028\u2029]/u;
 const SENDER = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\.[A-Za-z]{2,63}$/u;
-const WEB_LINK = /\b(?:https?|ftp):\/\/[^\s]*/giu;
+/** Anything a mail client may turn into a link: a scheme's `//` anywhere (even inside a word) or a `www.` name. */
+const WEB_LINK = /(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s]*/giu;
 
 /** The sender's own address, or undefined for anything that is not one plain address. */
 export function attentionSenderAddress(value: string | undefined): string | undefined {
@@ -40,8 +46,10 @@ export function attentionSenderAddress(value: string | undefined): string | unde
 export function attentionSenderOrigin(value: string | undefined): string | undefined {
   if (value === undefined || value === "") return undefined;
   try {
+    // `https://<host>` as the parameter gives it (any case, an explicit :443 allowed); nothing after the host.
+    if (!/^https:\/\/[^/?#\s]+$/iu.test(value)) return undefined;
     const url = new URL(value);
-    return url.protocol === "https:" && url.username === "" && url.password === "" && url.origin === value ? url.origin : undefined;
+    return url.protocol === "https:" && url.username === "" && url.password === "" ? url.origin : undefined;
   } catch { return undefined; }
 }
 
@@ -85,11 +93,14 @@ export function attentionEmailSenderHandler(options: { ses: Pick<SESv2Client, "s
         FromEmailAddress: from,
         Destination: { ToAddresses: [request.to] },
         Content: { Simple: { Subject: { Data: request.subject, Charset: "UTF-8" }, Body: { Text: { Data: request.text, Charset: "UTF-8" } } } },
-      }), { abortSignal: AbortSignal.timeout(options.timeoutMs ?? 5_000) });
-    } catch {
-      // The SDK's error can quote the request (the address, the text): it is dropped here.
-      log({ event: "attention_email.unavailable" });
-      return { unavailable: true };
+      }), { abortSignal: AbortSignal.timeout(options.timeoutMs ?? ATTENTION_SES_TIMEOUT_MS) });
+    } catch (error) {
+      // The SDK's error can quote the request (the address, the text): only whether SES answered is kept. SES answered with a status: it did not take the message. No status (a timeout, a lost
+      // connection): it may have taken it, so it is never sent again.
+      const status = (error as { $metadata?: { httpStatusCode?: unknown } } | null)?.$metadata?.httpStatusCode;
+      if (typeof status === "number" && status >= 400) { log({ event: "attention_email.unavailable" }); return { unavailable: true }; }
+      log({ event: "attention_email.unknown" });
+      return { unknown: true };
     }
     log({ event: "attention_email.sent" });
     return { ok: true };

@@ -20,7 +20,7 @@ import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/ho
 import { GITHUB_ISSUER } from "../../packages/broker/src/developer/providers.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
 import {
-  ATTENTION_EMAIL_REFUSED, ATTENTION_EMAIL_UNAVAILABLE, ATTENTION_EMAIL_VARIABLE, attentionEmailFromEnvironment, attentionEmailLinks, attentionEmailSwitch,
+  ATTENTION_EMAIL_REFUSED, ATTENTION_EMAIL_UNAVAILABLE, ATTENTION_EMAIL_UNKNOWN, ATTENTION_EMAIL_VARIABLE, attentionEmailFromEnvironment, attentionEmailLinks, attentionEmailSwitch,
   hostedAttentionAddress, lambdaAttentionEmailSender, verifiedSignInAddress,
 } from "../../packages/broker/src/aws/attention-email.js";
 import { ATTENTION_EMAIL_LINK_PLACEHOLDER as PLACEHOLDER, attentionEmailSenderHandler, checkedAttentionEmailRequest } from "../../packages/broker/src/aws/attention-email-sender.js";
@@ -141,18 +141,28 @@ describe("the broker's adapter: one invoke of the sender function", () => {
     expect([refusing.code, refusing.message]).toEqual(["refused", ATTENTION_EMAIL_REFUSED]);
   });
 
-  it("is 'unavailable' in fixed words for a failed invoke, a function error, an answer that is not ok, or a passed deadline (no call)", async () => {
-    const cases = [fakeLambda(undefined, { fail: new Error("dana@example.test rejected: secret subject") }), fakeLambda({ ok: true }, { functionError: "Unhandled" }), fakeLambda({ unavailable: true }), fakeLambda({ ok: "yes" }), fakeLambda(null), fakeLambda("ok")];
-    for (const f of cases) {
+  it("is 'unavailable' (tried again) only when the email surely did not go: Lambda refused the invoke, or SES answered no", async () => {
+    const throttled = Object.assign(new Error("dana@example.test throttled"), { name: "TooManyRequestsException", $metadata: { httpStatusCode: 429 } });
+    for (const f of [fakeLambda(undefined, { fail: throttled }), fakeLambda({ unavailable: true })]) {
       const failure = await lambdaAttentionEmailSender({ lambda: f.lambda, functionName: FUNCTION, now: () => NOW }).send(message()).catch((error: unknown) => error) as EmailError;
-      expect(failure).toBeInstanceOf(EmailError);
-      expect([failure.code, failure.message]).toEqual(["unavailable", ATTENTION_EMAIL_UNAVAILABLE]);
+      expect([failure.code, failure.message, failure.retryable]).toEqual(["unavailable", ATTENTION_EMAIL_UNAVAILABLE, true]);
       expect(JSON.stringify([failure.message, failure.stack ?? ""])).not.toContain("dana@example.test");
     }
     const late = fakeLambda();
     const failure = await lambdaAttentionEmailSender({ lambda: late.lambda, functionName: FUNCTION, now: () => NOW }).send(message({ deadline: NOW - 1 })).catch((error: unknown) => error) as EmailError;
     expect(failure.code).toBe("unavailable");
     expect(late.calls).toEqual([]);
+  });
+
+  it("never retries an email that may have gone (at most once): an aborted or lost invoke, a function error, or an answer that is not a definite one", async () => {
+    const aborted = Object.assign(new Error("dana@example.test"), { name: "AbortError" });
+    const cases = [fakeLambda(undefined, { fail: aborted }), fakeLambda(undefined, { fail: new Error("socket hang up") }), fakeLambda({ ok: true }, { functionError: "Unhandled" }), fakeLambda({ unknown: true }), fakeLambda({ ok: "yes" }), fakeLambda(null), fakeLambda("ok")];
+    for (const f of cases) {
+      const failure = await lambdaAttentionEmailSender({ lambda: f.lambda, functionName: FUNCTION, now: () => NOW }).send(message()).catch((error: unknown) => error) as EmailError;
+      expect(failure).toBeInstanceOf(EmailError);
+      expect([failure.code, failure.message, failure.retryable]).toEqual(["refused", ATTENTION_EMAIL_UNKNOWN, false]);
+      expect(JSON.stringify([failure.message, failure.stack ?? ""])).not.toContain("dana@example.test");
+    }
   });
 
   it("will not be built without a plain function name", () => {
@@ -205,7 +215,8 @@ describe("the sender function", () => {
       request({ text: noStop.text }), request({ text: otherOrigin.text }),
       // A link of anywhere else, even in the owner's own title, is not sent.
       request({ text: coreMail(undefined, "see https://phish.example.test/login").text }), request({ text: coreMail(undefined, "see http://app.example.test.evil.test/x").text }),
-      request({ text: coreMail(undefined, `see ${PLACEHOLDER}.evil.test/x`).text }),
+      request({ text: coreMail(undefined, `see ${PLACEHOLDER}.evil.test/x`).text }), request({ text: coreMail(undefined, "see _https://evil.example.test/x").text }),
+      request({ text: coreMail(undefined, "see xhttps://evil.example.test/x").text }), request({ text: coreMail(undefined, "see www.evil.example.test").text }),
       // Links the broker did not write on the placeholder (even on the web app's own origin) are not ones it sends.
       request({ text: onRealOrigin.text }), request({ text: coreMail(undefined, `see ${ORIGIN}/app/inbox`).text }),
     ];
@@ -217,14 +228,18 @@ describe("the sender function", () => {
   });
 
   it("sends nothing without its own sender and origin, and is 'unavailable' in fixed words when SES fails, never quoting the request", async () => {
+    expect(await attentionEmailSenderHandler({ ses: ses().ses, env: { ...ENV, ATTENTION_EMAIL_LINK_ORIGIN: "https://APP.example.test:443" }, log: () => undefined })(request())).toEqual({ ok: true });
     for (const env of [{}, { ...ENV, ATTENTION_EMAIL_FROM: "" }, { ...ENV, ATTENTION_EMAIL_FROM: "Rovara <a@b.test>" }, { ...ENV, ATTENTION_EMAIL_LINK_ORIGIN: "http://app.example.test" }, { ...ENV, ATTENTION_EMAIL_LINK_ORIGIN: "https://" }, { ...ENV, ATTENTION_EMAIL_LINK_ORIGIN: `${ORIGIN}/path` }]) {
       const f = ses();
       expect(await attentionEmailSenderHandler({ ses: f.ses, env, log: () => undefined })(request()), JSON.stringify(env)).toEqual({ refused: true });
       expect(f.sent).toEqual([]);
     }
     const logs: Array<Record<string, unknown>> = [];
-    const failing = await attentionEmailSenderHandler({ ses: ses(new Error("dana@example.test rejected")).ses, env: ENV, log: (entry) => logs.push(entry) })(request());
-    expect(failing).toEqual({ unavailable: true });
+    // SES answered no: not sent, tried again. No answer (timeout, lost connection): it may have gone, never again.
+    const rejected = Object.assign(new Error("dana@example.test rejected"), { $metadata: { httpStatusCode: 400 } });
+    expect(await attentionEmailSenderHandler({ ses: ses(rejected).ses, env: ENV, log: (entry) => logs.push(entry) })(request())).toEqual({ unavailable: true });
+    expect(await attentionEmailSenderHandler({ ses: ses(Object.assign(new Error("dana@example.test"), { name: "TimeoutError" })).ses, env: ENV, log: (entry) => logs.push(entry) })(request())).toEqual({ unknown: true });
+    expect(logs).toEqual([{ event: "attention_email.unavailable" }, { event: "attention_email.unknown" }]);
     expect(JSON.stringify(logs)).not.toContain("dana@example.test");
   });
 });
@@ -420,7 +435,7 @@ describe("POST /v1/app/notify/unsubscribe", () => {
     const bad = [tokenFor(OWNER_ID), tokenFor(danaId, OTHER_ORG), tokenFor(danaId, ORG, NOW - UNSUBSCRIBE_LINK_DAYS * 86_400_000 - 1), `${v}.${body}.${sig.slice(0, -2)}AA`, "x", "", 5, null, undefined];
     for (const token of bad) {
       const refused = await r.call(dana, { requestId: REQUEST, token });
-      expect(refused.status, String(token).slice(0, 20)).toBe(token === undefined || token === null || token === 5 || token === "" || token === "x" ? 400 : 400);
+      expect(refused.status, String(token).slice(0, 20)).toBe(400);
       expect((refused.body as { message: string }).message).toBe(UNSUBSCRIBE_BAD_LINK);
     }
     expect((await r.prefs(danaId)).emailUnsubscribed).toBe(false);
@@ -452,13 +467,14 @@ describe("a hosted person with no chat is told by email, in the core's words", (
   const T0 = "2026-11-09T10:00:00.000Z";
   const AGENT = { agentId: "rovara-code", name: "Rovara Code", version: 1 };
   const HOSTED = { companyId: ORG, personId: PERSON, displayName: "Pat", roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER } as const;
-  async function world(options: { record?: Record<string, unknown> | undefined; companyId?: OrgId; sender?: boolean } = {}) {
+  async function world(options: { record?: Record<string, unknown> | undefined; companyId?: OrgId; sender?: boolean; abort?: boolean } = {}) {
+    const invokes = { count: 0 };
     const store = new MemoryDocumentStore();
     const registry = createAdapterRegistry();
     const sent: Array<Record<string, unknown>> = [];
     const ses = { async send(command: unknown) { sent.push((command as SendEmailCommand).input as unknown as Record<string, unknown>); return {}; } };
     const handler = attentionEmailSenderHandler({ ses, env: { ATTENTION_EMAIL_FROM: "notices@example.test", ATTENTION_EMAIL_LINK_ORIGIN: ORIGIN }, log: () => undefined });
-    const lambda = { async send(command: unknown) { const payload = JSON.parse(new TextDecoder().decode((command as InvokeCommand).input.Payload as Uint8Array)) as unknown; return { StatusCode: 200, Payload: new TextEncoder().encode(JSON.stringify(await handler(payload))) }; } };
+    const lambda = { async send(command: unknown) { invokes.count += 1; if (options.abort === true) throw Object.assign(new Error("aborted"), { name: "AbortError" }); const payload = JSON.parse(new TextDecoder().decode((command as InvokeCommand).input.Payload as Uint8Array)) as unknown; return { StatusCode: 200, Payload: new TextEncoder().encode(JSON.stringify(await handler(payload))) }; } };
     const signInReads: unknown[] = [];
     const documentClient = { async send(command: unknown) { signInReads.push(command); return { Item: "record" in options ? options.record : { email: "pat@example.test", provider: "github", issuer: GITHUB_ISSUER, subject: "7" } }; } };
     const parts = attentionEmailFromEnvironment({ env: ENV_ON, lambda: () => lambda, documentClient, signInTableName: "signin", callbackSigningKey: "callback-signing-key-for-tests", now: () => NOW, membershipOf: async (personId) => (personId === PERSON ? { companyId: options.companyId ?? ORG } : undefined), log: () => undefined })!;
@@ -474,7 +490,7 @@ describe("a hosted person with no chat is told by email, in the core's words", (
     let ms = NOW - 3_600_000;
     const deps: SummaryDependencies = { store, facts: { read: async () => facts.value }, cost: { costUsd: async () => 0 }, now: () => new Date(ms), log: () => undefined, onChange: [async (change) => { await notices.queue(change); }] };
     for (const [stage, state] of [["IMPLEMENT", "RUNNING"], ["PLAN_REVIEW", "WAITING"]] as const) { facts.value = { ...facts.value, workflow: { stage, state } }; ms += 1_000; await refreshSessionSummary(deps, ORG, sessionId); }
-    return { store, notices, sent, signInReads, sessionId };
+    return { store, notices, sent, signInReads, sessionId, invokes };
   }
 
   it("finds the person through the index written with the attention rows, and sends one email of the core's words from the attention identity, with the signed way out", async () => {
@@ -502,6 +518,15 @@ describe("a hosted person with no chat is told by email, in the core's words", (
       await expect(w.notices.deliver()).resolves.toBeDefined();
       expect(w.sent, JSON.stringify(options)).toEqual([]);
     }
+  });
+
+  it("does not send again an email whose invoke was cut off at the deadline (the claim is kept)", async () => {
+    const w = await world({ abort: true });
+    // Given up on at once, not counted as a failure to try again later.
+    expect(await w.notices.deliver()).toMatchObject({ emails: 0, gaveUp: 1, failed: 0 });
+    expect(w.invokes.count).toBe(1);
+    await w.notices.deliver({});
+    expect(w.invokes.count).toBe(1);
   });
 
   it("sends nothing at all and writes no index when the switch is off: Code's default sender is in place and nothing is read", async () => {
