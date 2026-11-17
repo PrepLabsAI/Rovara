@@ -108,6 +108,17 @@ describe("start: who, the key, the map, the commits and the payer", () => {
     await expect(startWikiBuild(world({ defaultBranchHeads: async () => [] }).deps, ADMIN, "beacon", { requestId: randomUUID() })).rejects.toMatchObject(refusal("CONFIG_INVALID", WIKI_BUILD_WORDS.noRepositories));
   });
 
+  it("a committed start whose response is lost still holds its company slot", async () => {
+    const w = world();
+    const realStart = w.starter.start.bind(w.starter);
+    w.starter.start = async (request) => { await realStart(request); throw new Error("response lost"); };
+    await expect(startWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() })).rejects.toThrow("response lost");
+    expect(await readWikiBuildPointer(w.store, COMPANY_A, "beacon")).toBeDefined();
+    w.starter.start = realStart;
+    await startWikiBuild(w.deps, ADMIN, "second", { requestId: randomUUID() });
+    await expect(startWikiBuild(w.deps, ADMIN, "third", { requestId: randomUUID() })).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
+  });
+
   it("one run at a time; a repeat of the request id answers the first and starts nothing", async () => {
     const w = world();
     const requestId = randomUUID();
