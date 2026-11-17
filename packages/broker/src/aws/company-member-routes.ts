@@ -20,6 +20,7 @@ import { z } from "zod";
 import { OrgIdSchema, agentXError, type OrgRole } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
+import { profileDisplayName } from "../developer/github-profile.js";
 import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
@@ -148,7 +149,8 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
 // ---- the member list
 
 const MemberView = CompanyMember.extend({ name: z.string().optional(), email: z.string().optional() });
-const PersonRecord = z.object({ displayName: z.string().max(200).optional(), email: z.string().max(320).optional() });
+// A GitHub name is cut by github-profile.ts, so any stored length is read; every other person's name keeps the old 200-character limit (checked below).
+const PersonRecord = z.object({ displayName: z.string().max(100_000).optional(), email: z.string().max(320).optional(), provider: z.unknown().optional(), issuer: z.unknown().optional(), subject: z.unknown().optional() });
 
 async function listMembers(ctx: CompanyMemberRouteContext, caller: DeveloperCaller, companyId: string, url: URL) {
   const query: Record<string, string> = {};
@@ -170,9 +172,10 @@ async function listMembers(ctx: CompanyMemberRouteContext, caller: DeveloperCall
     try {
       const answer = await ctx.documentClient.send(new GetCommand({ TableName: ctx.signInTableName, Key: { pk: `DEVELOPER#${member.personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: unknown };
       const parsed = PersonRecord.safeParse(answer.Item);
-      person = parsed.success ? parsed.data : undefined;
+      person = parsed.success && (parsed.data.provider === "github" || (parsed.data.displayName ?? "").length <= 200) ? parsed.data : undefined;
     } catch { throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
-    return MemberView.parse({ ...member, ...(person?.displayName === undefined ? {} : { name: person.displayName }), ...(person?.email === undefined ? {} : { email: person.email }) });
+    const name = person === undefined ? undefined : profileDisplayName(person);
+    return MemberView.parse({ ...member, ...(name === undefined ? {} : { name }), ...(person?.email === undefined ? {} : { email: person.email }) });
   }));
   return { members, more: page.more, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) };
 }

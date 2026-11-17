@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { claimValues } from "../aws/lambda.js";
+import { GITHUB_ISSUER_URL, githubDisplayName } from "./github-profile.js";
 import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod } from "@agentx/contracts";
 
 /** `administrator` (spec 063 FR-005): the company sign-in's ID token carried the administrator claim. Slack never sets it. */
@@ -243,7 +244,7 @@ export function oidcSignInProvider(input: {
 }
 
 /** DEC 254h: GitHub's issuer, as Code records it (GitHub is OAuth 2, not OpenID Connect: there is no ID token and no discovery). */
-export const GITHUB_ISSUER = "https://github.com";
+export const GITHUB_ISSUER = GITHUB_ISSUER_URL;
 /** What Code asks GitHub for: the profile (the stable numeric id and a name) and the email addresses, to find the primary verified one. */
 export const GITHUB_SCOPES = "read:user user:email";
 const GITHUB_API = "https://api.github.com";
@@ -314,7 +315,8 @@ export function githubSignInProvider(input: { clientId: string; clientSecret: ()
         ok: true,
         identity: {
           method: "github", issuer: GITHUB_ISSUER, subject,
-          displayName: (typeof profile.name === "string" ? cleanDisplayName(profile.name) : undefined) ?? cleanDisplayName(profile.login) ?? profile.login,
+          // DEC 254p (a): the GitHub name, or the login when none is set; untrusted text, cut and stripped of markup (github-profile.ts).
+          displayName: githubDisplayName(profile.name, profile.login),
           ...(email === undefined ? {} : { email }),
         },
       };

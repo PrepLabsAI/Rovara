@@ -95,6 +95,16 @@ it("reports people gaps read-only, then writes only explicit valid people and gr
   expect(db.get(projectMemberKey("web", personId).pk, projectMemberKey("web", personId).sk)).toEqual({ ...projectMemberKey("web", personId), entityType: "PROJECT_MEMBER", role: "developer", grantedAt: at });
   expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 0, skippedExisting: 4 });
 });
+it("backfills a GitHub person like any other and still refuses a provider it does not know (DEC 254p (a))", async () => {
+  const { db, deps } = setup(); seedPerson(db);
+  db.set({ ...db.get(`DEVELOPER#${personId}`, "META")!, provider: "github", issuer: "https://github.com", subject: "2001" });
+  expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 4, failed: 0 });
+  expect(db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toMatchObject({ companyId: A, role: "member" });
+  const other = setup(); seedPerson(other.db);
+  other.db.set({ ...other.db.get(`DEVELOPER#${personId}`, "META")!, provider: "saml" });
+  expect((await backfillCorePage(other.deps, { ...operatorInput(), dryRun: false })).issues).toContainEqual({ phase: 2, index: 0, reason: "conflict" });
+  expect(other.db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toBeUndefined();
+});
 it("refuses a reverse member row with a different role without changing either row", async () => {
   const { db, deps } = setup(); seedPerson(db);
   db.set({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", companyId: A, personId, role: "member", joinedAt: at });

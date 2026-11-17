@@ -296,7 +296,7 @@ const planCredential: Planner = async (deps, identity, input) => {
 
 /** How a developer is named: by profile once they signed in, else by what the admin gave. */
 function describeDeveloper(resolved: ResolvedDeveloper): string {
-  if (resolved.profile !== undefined) return `${resolved.profile.displayName} (signs in with ${resolved.profile.provider === "slack" ? "Slack" : "the company sign-in"})`;
+  if (resolved.profile !== undefined) return `${resolved.profile.displayName} (signs in with ${resolved.profile.provider === "slack" ? "Slack" : resolved.profile.provider === "github" ? "GitHub" : "the company sign-in"})`;
   if (resolved.slackUserId !== undefined) return `Slack user ${resolved.slackUserId}`;
   return `developer ${resolved.developerId.slice(0, 12)}`;
 }
