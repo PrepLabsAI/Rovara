@@ -48,6 +48,11 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Lane W: a project's merge rules; full access only (the route also checks the project and, to loosen, a fresh step-up).
   { method: "GET", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
+  // Guided onboarding PR 16 (DEC 254n item 3): a project's archive and restore, preview first; full access only, then a live company owner or admin, or the project's administrator.
+  { method: "GET", path: "/v1/dev/client/projects/{project}/archive-preview", requires: "full" },
+  { method: "POST", path: "/v1/dev/client/projects/{project}/archive", requires: "full" },
+  { method: "GET", path: "/v1/dev/client/projects/{project}/restore-preview", requires: "full" },
+  { method: "POST", path: "/v1/dev/client/projects/{project}/restore", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },

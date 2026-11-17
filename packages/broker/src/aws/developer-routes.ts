@@ -3,7 +3,7 @@ import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBin
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
-import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
+import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -1146,6 +1146,27 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
   });
 }
+const CLIENT_LIFECYCLE = /^\/v1\/dev\/client\/projects\/([^/]+)\/(archive-preview|archive|restore-preview|restore)$/;
+
+/**
+ * Guided onboarding PR 16: `GET .../archive-preview`, `POST .../archive`, `GET .../restore-preview`, `POST .../restore` on `/v1/dev/client/projects/{project}`. The token and its route row
+ * first (like every row); then only with the company layer (the live membership names the company and the role). The rule and the writes are project-lifecycle-routes.ts's.
+ */
+async function routeClientLifecycle(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, action: LifecycleAction, route: DevRoute): Promise<unknown> {
+  const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, person);
+  // Without the company layer there is no company role to judge by: every project looks missing.
+  const reader = deps.companies;
+  if (reader?.membershipOf === undefined) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
+  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
+  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  return routeProjectLifecycle({
+    documentClient: deps.documentClient, tableName: deps.tableName, now: deps.now,
+    membershipOf: async (personId) => await reader.membershipOf!(personId),
+    grantRole: async (personId, project) => (await projectGrant(memberActions(deps), project, personId))?.role,
+    linkedSlackChannels: async (companyId, project) => (await bindingsOf(deps, undefined, companyId)).filter((binding) => binding.projectName === project).length,
+  }, { personId: person.developerId, project: rawProject, action, body: request.body });
+}
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
 /**
@@ -1189,6 +1210,9 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
     return readClientProject(deps, creator.developerId, created.name, creator.companyId);
   }
+  // Guided onboarding PR 16 (DEC 254n item 3): a project's archive and restore, preview first (project-lifecycle-routes.ts).
+  const lifecycle = CLIENT_LIFECYCLE.exec(url.pathname);
+  if (lifecycle !== null) return routeClientLifecycle(deps, request, lifecycle[1]!, lifecycle[2] as LifecycleAction, route);
   // Lane W: a project's merge rules (contract v0 client.projects.codeSettings), in Code's own CodeSettings shape.
   const settings = CLIENT_CODE_SETTINGS.exec(url.pathname);
   if (settings !== null && (request.method === "GET" || request.method === "PUT")) return routeClientCodeSettings(deps, request, settings[1]!, route);
