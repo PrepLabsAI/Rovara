@@ -139,6 +139,38 @@ describe("wiki store: two companies and two projects never meet", () => {
     await expect(w.a.readPage("alpha", "overview", "person")).rejects.toThrow("A wiki row could not be read.");
   });
 
+  it("refuses a row a store hands back from another partition (the key check behind the query)", async () => {
+    const w = world();
+    await w.b.writePage("alpha", page("B-alpha"));
+    const foreign = (await everything(w.store)).filter((item) => item.pk === wikiPartition(B, "alpha"));
+    // A store that answers a query of A's partition with B's rows, relabelled with A's company: only the partition check can catch it.
+    const lying = { ...w.store, get: w.store.get.bind(w.store), getMany: async (keys: readonly { pk: string; sk: string }[]) => await w.store.getMany(keys.map((key) => ({ pk: wikiPartition(B, "alpha"), sk: key.sk }))).then((items) => items.map((item) => (item === undefined ? undefined : { ...item, companyId: A }))),
+      query: async (request: Parameters<MemoryDocumentStore["query"]>[0]) => ({ items: foreign.filter((item) => item.sk.startsWith((request.sk as { prefix?: string } | undefined)?.prefix ?? "")).map((item) => ({ ...item, companyId: A })) }) } as unknown as MemoryDocumentStore;
+    const fooled = createWikiStore({ store: lying, companyId: A, now: () => T0 });
+    await expect(fooled.readIndex("alpha")).rejects.toThrow("A wiki row could not be read.");
+    await expect(fooled.readPage("alpha", "overview", "person")).rejects.toThrow("A wiki row could not be read.");
+  });
+
+  it("deleting a page never takes the notes or flags of a page whose id it begins (overview vs overview-2)", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("one"));
+    await w.a.writePage("alpha", page("two", { pageId: "overview-2" }));
+    await w.a.addNote("alpha", { pageId: "overview-2", text: "second page note", authorId: "person-1" });
+    await w.a.addFlag("alpha", { pageId: "overview-2", claimId: "c0001", by: { kind: "person", personId: "person-1" } });
+    await w.a.addNote("alpha", { pageId: "overview", text: "first page note", authorId: "person-1" });
+    // Reading one page never shows the other's notes or flags, and a mark on overview-2 never hides overview from agents.
+    await w.a.addFlag("alpha", { pageId: "overview-2", by: { kind: "person", personId: "person-1" } });
+    const first = (await w.a.readPage("alpha", "overview", "person"))!;
+    expect(first.notes.map((note) => note.text)).toEqual(["first page note"]);
+    expect(first.flags).toEqual([]);
+    expect(await w.a.readPage("alpha", "overview", "agent")).toBeDefined();
+    expect(await w.a.readPage("alpha", "overview-2", "agent")).toBeUndefined();
+    expect(await w.a.deletePage("alpha", "overview")).toBe(true);
+    const second = (await w.a.readPage("alpha", "overview-2", "person"))!;
+    expect(second.notes.map((note) => note.text)).toEqual(["second page note"]);
+    expect(second.flags).toHaveLength(2);
+  });
+
   it("a row copied into another company's partition is refused, not shown", async () => {
     const w = world();
     await w.a.writePage("alpha", page("A-alpha"));
@@ -191,10 +223,24 @@ describe("wiki store: pages and claims", () => {
     expect(await everything(w.store)).toEqual([]);
   });
 
-  it("refuses a new page past 300 pages, but rewrites an existing one", async () => {
+  it("refuses a new page past 300 pages, but rewrites an existing one; reads never fail on the cap", async () => {
     const w = world();
-    for (let i = 0; i < 300; i += 1) await w.store.put({ item: { pk: wikiPartition(A, "alpha"), sk: `PAGE#p${String(i)}`, filler: true } });
-    await expect(w.a.writePage("alpha", page("x"))).rejects.toThrow("The wiki already has as many pages as a project can.");
+    await w.a.writePage("alpha", page("x"));
+    const row = (await w.store.get({ pk: wikiPartition(A, "alpha"), sk: "PAGE#overview" }))!;
+    for (let i = 0; i < 300; i += 1) await w.store.put({ item: { ...row, sk: `PAGE#p${String(i).padStart(3, "0")}`, pageId: `p${String(i).padStart(3, "0")}` } });
+    await expect(w.a.writePage("alpha", page("x", { pageId: "brand-new" }))).rejects.toThrow("The wiki already has as many pages as a project can.");
+    await w.a.writePage("alpha", page("x2"));
+    // 301 pages (two writes at once can pass the cap by one): the index still answers, with at most 300.
+    expect(await w.a.readIndex("alpha")).toHaveLength(300);
+  });
+
+  it("only open marks count toward a page's mark limit", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("x"));
+    for (let i = 0; i < 200; i += 1) await w.a.addFlag("alpha", { pageId: "overview", claimId: "c0001", by: { kind: "task", taskId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}` } });
+    await expect(w.a.addFlag("alpha", { pageId: "overview", claimId: "c0001", by: { kind: "person", personId: "person-1" } })).rejects.toThrow("This page has as many marks as it can hold.");
+    await w.a.resolveFlags("alpha", "overview");
+    await expect(w.a.addFlag("alpha", { pageId: "overview", claimId: "c0001", by: { kind: "person", personId: "person-1" } })).resolves.toMatchObject({ state: "open" });
   });
 
   it("marks claims changed or not found and counts them in the index", async () => {
@@ -226,6 +272,8 @@ describe("wiki store: what agents get", () => {
     expect(agent.page.blocks.map((block) => block.blockId)).toEqual(["h0001", "p0001", "p0004"]);
     expect(agent.staleBlockIds).toEqual(["p0004"]);
     expect(JSON.stringify(agent)).not.toContain("my private reason");
+    expect(agent.flags.map((flag) => Object.keys(flag).sort())).toEqual([["claimId", "flagId", "pageId", "state"]]);
+    expect(agent.flags[0]).toMatchObject({ pageId: "overview", claimId: "c0002", state: "open" });
     expect(JSON.stringify(agent)).not.toContain("pending words");
     const person = (await w.a.readPage("alpha", "overview", "person"))!;
     expect(person.notes.map((note) => note.noteId).sort()).toEqual([pending.noteId, approved.noteId].sort());
@@ -273,6 +321,10 @@ describe("wiki store: deleting", () => {
     expect(await w.a.deleteRepository("alpha", "web")).toEqual({ pages: 2, notes: 1, flags: 1 });
     expect((await w.a.readIndex("alpha")).map((entry) => entry.pageId)).toEqual(["repo-api"]);
     expect(JSON.stringify(await everything(w.store))).not.toMatch(/repo-web|connections/u);
+    // A cross-repo page goes whichever place the removed repository has in its list.
+    await w.a.writePage("alpha", page("links", { pageId: "connections", kind: "connections", repos: [{ repo: "web", commit: SHA }, { repo: "api", commit: SHA }] }));
+    expect(await w.a.deleteRepository("alpha", "api")).toEqual({ pages: 2, notes: 0, flags: 0 });
+    expect(await w.a.readIndex("alpha")).toEqual([]);
   });
 
   it("pruning keeps pages whose repositories are all current and deletes the rest, in this project only", async () => {
@@ -347,16 +399,70 @@ describe("wiki store: person erase and answer expiry", () => {
     expect(raw).not.toMatch(/"personId":"person-1"/u);
   });
 
-  it("an answer record is gone 30 days after it was written, and carries the table's expiry attribute", async () => {
+  it("redacts every stored answer source quote and cuts it to 200 characters", async () => {
+    const w = world();
+    const secret = ["ghp", "_", "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"].join("");
+    await w.a.writeAnswer("alpha", { answerId: "answer-0001", askedBy: "person-1", channel: "web", question: "q", answer: "a", outcome: "answered", sources: [{ repo: "web", path: "src/a.ts", commit: SHA, line: 1, quote: `token = "${secret}" ${"y".repeat(300)}` }], pagesRead: [] });
+    expect(JSON.stringify(await everything(w.store))).not.toContain(secret);
+    const quote = (await w.a.readAnswer("alpha", "answer-0001"))!.sources[0]!.quote;
+    expect(quote).toContain("[REDACTED]");
+    expect([...quote].length).toBeLessThanOrEqual(WIKI_QUOTE_MAX);
+  });
+
+  it("the erase also stops naming the person as a note's approver or a build's starter", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("x"));
+    const note = await w.a.addNote("alpha", { pageId: "overview", text: "someone else's", authorId: "person-2" });
+    await w.a.approveNote("alpha", "overview", note.noteId, "person-1");
+    await w.a.writeBuild("alpha", { buildId: "build-0001", kind: "first", state: "done", startedBy: "person-1", startedAt: "2026-11-17T09:00:00.000Z", repos: [], counts: { pagesWritten: 0, claimsKept: 0, claimsDropped: 0, skipped: 0 }, dropped: [], skipped: [] });
+    await w.a.erasePerson(["alpha"], "person-1");
+    expect(JSON.stringify(await everything(w.store))).not.toContain("person-1");
+    expect((await w.a.readPage("alpha", "overview", "person"))!.notes[0]!.approval).toMatchObject({ state: "approved", by: WIKI_FORMER_MEMBER });
+    expect((await w.a.readBuild("alpha", "build-0001"))!.startedBy).toBe(WIKI_FORMER_MEMBER);
+  });
+
+  it("an answer record is gone 30 days after it was written (app-driven expiry: no table TTL attribute)", async () => {
     const w = world();
     const written = await w.a.writeAnswer("alpha", { answerId: "answer-0001", askedBy: "person-1", channel: "web", question: "q", answer: "a", outcome: "answered", sources: [], pagesRead: [] });
     expect(written.expiresAt).toBe(Math.floor(T0 / 1000) + 30 * 86_400);
     const row = await w.store.get({ pk: wikiPartition(A, "alpha"), sk: "ANSWER#answer-0001" });
-    expect(row?.["indexExpiresAt"]).toBe(written.expiresAt);
+    expect(row?.["indexExpiresAt"]).toBeUndefined();
+    expect(row?.["expiresAt"]).toBe(written.expiresAt);
     w.clock.now = T0 + 30 * 86_400_000 - 1_000;
     expect(await w.a.readAnswer("alpha", "answer-0001")).toBeDefined();
     w.clock.now = T0 + 30 * 86_400_000;
     expect(await w.a.readAnswer("alpha", "answer-0001")).toBeUndefined();
+  });
+});
+
+describe("wiki store: the answer expiry sweep", () => {
+  const answer = (answerId: string) => ({ answerId, askedBy: "person-1", channel: "web" as const, question: `q ${answerId}`, answer: "a", outcome: "answered" as const, sources: [], pagesRead: [] });
+  it("deletes expired answer records, keeps current ones, and stays in its own project and company", async () => {
+    const w = world();
+    await w.a.writeAnswer("alpha", answer("old-0001"));
+    await w.a.writeAnswer("beta", answer("old-0002"));
+    await w.b.writeAnswer("alpha", answer("old-0003"));
+    w.clock.now = T0 + 30 * 86_400_000;
+    await w.a.writeAnswer("alpha", answer("new-0001")); // the write runs the sweep
+    const left = async (company: OrgId, project: string) => (await everything(w.store)).filter((item) => item.pk === wikiPartition(company, project) && item.sk.startsWith("ANSWER#")).map((item) => item.sk);
+    expect(await left(A, "alpha")).toEqual(["ANSWER#new-0001"]);
+    expect(await left(A, "beta")).toEqual(["ANSWER#old-0002"]);
+    expect(await left(B, "alpha")).toEqual(["ANSWER#old-0003"]);
+    expect(await w.a.expireAnswers("beta")).toBe(1);
+    expect(await left(A, "beta")).toEqual([]);
+    expect(await left(B, "alpha")).toEqual(["ANSWER#old-0003"]);
+  });
+
+  it("deletes at most its bound in one sweep", async () => {
+    const w = world();
+    for (let i = 0; i < 5; i += 1) await w.a.writeAnswer("alpha", answer(`old-000${String(i)}`));
+    w.clock.now = T0 + 31 * 86_400_000;
+    expect(await w.a.expireAnswers("alpha", 2)).toBe(2);
+    expect(await w.a.expireAnswers("alpha", 2)).toBe(2);
+    expect(await w.a.expireAnswers("alpha", 2)).toBe(1);
+    expect(await w.a.expireAnswers("alpha", 2)).toBe(0);
+    await expect(w.a.expireAnswers("alpha", 201)).rejects.toThrow("That is not a valid wiki input.");
+    await expect(w.a.expireAnswers("alpha", 0)).rejects.toThrow("That is not a valid wiki input.");
   });
 });
 
