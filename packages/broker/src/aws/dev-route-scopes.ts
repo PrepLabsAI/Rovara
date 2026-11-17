@@ -199,6 +199,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
   // Lead 4 W2: the project wiki's reads (core-host/wiki-routes.ts): full access only, then any live role on the project (a company owner or admin, or a project grant). No writes here.
   { method: "GET", path: "/v1/app/projects/{project}/wiki", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/search", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).

@@ -283,6 +283,7 @@ export * from "./wiki-keys.js";
 // ---- Read routes (W2; Cloud's Wiki tab calls them as the signed-in person) ------------------------------------------------------------------------------------------------------------
 //
 //   GET /v1/app/projects/{project}/wiki                               the page index and the last build's state
+//   GET /v1/app/projects/{project}/wiki/search?q=                      bounded title, summary and page-text results
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}                one page: prose, claims (no quotes), notes (pending ones marked), open flag count
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}/sources        the files and lines the page cites, at their commits (no quotes)
 //
@@ -302,10 +303,21 @@ export const WikiIndexResponseSchema = z.object({
   project: WikiProjectSchema,
   /** `empty`: no page yet ("No wiki yet. A project admin builds it on Project setup."). */
   state: z.enum(["empty", "ready"]),
+  /** The project's company-and-project scoped switch. Missing or unreadable switch rows mean false. */
+  agentsEnabled: z.boolean(),
   pages: z.array(WikiIndexEntrySchema).max(WIKI_LIMITS.pagesPerProject),
   lastBuild: WikiLastBuildSchema.optional(),
 }).strict();
 export type WikiIndexResponse = z.infer<typeof WikiIndexResponseSchema>;
+
+/** Bounded title, summary and page-text search for one project. Snippets contain only page prose, never stored citations. */
+export const WikiSearchResponseSchema = z.object({
+  project: WikiProjectSchema,
+  query: z.string().min(1).max(80),
+  results: z.array(z.object({ pageId: WikiPageIdSchema, title: z.string(), summary: z.string(), snippet: z.string().max(240) }).strict()).max(20),
+  trustLine: z.literal(WIKI_TRUST_LINE),
+}).strict();
+export type WikiSearchResponse = z.infer<typeof WikiSearchResponseSchema>;
 
 /** A claim as people see it: no quotes. */
 export const WikiShownClaimSchema = z.object({
@@ -408,6 +420,8 @@ export interface WikiStore {
   pageSink(project: string): WikiPageSink;
   /** The page index (bounded by `WIKI_LIMITS.pagesPerProject`). */
   readIndex(project: string): Promise<WikiIndexEntry[]>;
+  /** Page title, summary and text blocks for bounded search; does not read notes or flags. */
+  readPageBody(project: string, pageId: string): Promise<{ title: string; summary: string; blocks: WikiBlock[] } | undefined>;
   readPage(project: string, pageId: string, audience: WikiAudience): Promise<WikiPageRead | undefined>;
   /** Writes (or rewrites) one page: its index row and body together. Notes and flags on it are kept. Refused past `pagesPerProject` pages. */
   writePage(project: string, page: WikiPageWrite): Promise<void>;

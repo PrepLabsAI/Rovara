@@ -122,6 +122,17 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     return (await pageRows(name)).map(indexEntryOf).sort((a, b) => (a.parentId ?? "").localeCompare(b.parentId ?? "") || a.order - b.order || a.pageId.localeCompare(b.pageId)).slice(0, WIKI_LIMITS.pagesPerProject);
   }
 
+  async function readPageBody(project: string, pageId: string): Promise<{ title: string; summary: string; blocks: WikiBlock[] } | undefined> {
+    const name = projectOf(project);
+    const id = pageIdOf(pageId);
+    const [pageItem, bodyItem] = await store.getMany([wikiPageKey(companyId, name, id), wikiBodyKey(companyId, name, id)]);
+    const row = readRow(PageRow, pageItem, name);
+    const body = readRow(BodyRow, bodyItem, name);
+    if (row === undefined || body === undefined) return undefined;
+    if (row.pageId !== id || body.pageId !== id || row.revision !== body.revision) throw unreadable();
+    return { title: row.title, summary: row.summary, blocks: body.blocks };
+  }
+
   async function notesOf(project: string, pageId: string): Promise<WikiNote[]> {
     return (await family(project, `${WIKI_SK.note}${pageId}#`)).map((item) => readRow(NoteRow, item, project)!.note).filter((note) => note.pageId === pageId);
   }
@@ -434,5 +445,5 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     };
   }
 
-  return { companyId, pageSink, readIndex, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson };
+  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson };
 }
