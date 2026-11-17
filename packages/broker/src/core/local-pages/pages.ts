@@ -387,7 +387,9 @@ export function renderTestEnvironment(context: PageContext, view: TestEnvironmen
       + (view.proposal.lessSafe.length === 0 ? "" : `<p class="warn">Less safe than the approved revision: ${view.proposal.lessSafe.map((word) => esc(word.replace(/_/gu, " "))).join(", ")}.</p>`)
       + `<h3>What changes</h3>${view.proposal.changes.length === 0 ? "<p class=\"muted\">Nothing differs from the approved revision.</p>" : `<ul>${view.proposal.changes.map((line) => `<li><code>${untrusted(line)}</code></li>`).join("")}</ul>`}${form}`;
   }
-  const machine = view.machine === undefined || view.machine.length === 0 ? "" : `<section class="panel"><h2>Machine size</h2><ul>${view.machine.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
+  const machine = view.machine === undefined || view.machine.length === 0 ? "" : `<section class="panel"><h2>Machine size</h2><ul>${view.machine.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul>${view.machineChoices === undefined ? "" : options.fresh === true
+    ? `<form class="decide" method="post" action="${esc(context.base)}/test-environment/${esc(encodeURIComponent(view.project))}/machine"><label>Choose a size<br><select name="rowId">${view.machineChoices.map((choice) => `<option value="${esc(choice.id)}"${view.machineChoice === choice.id ? " selected" : ""}>${esc(choice.label)}</option>`).join("")}</select></label>${hidden("ft", context.formToken({ action: "testenv.machine", subject: view.project }))}<div class="row"><button class="primary" type="submit">Save size choice</button></div></form>`
+    : `<p class="muted">Open this page from the terminal to choose a size. Today’s runs do not use the stored choice yet.</p>`}</section>`;
   const extra = view.extra === undefined || view.extra.length === 0 ? "" : `<section class="panel"><h2>More</h2><ul>${view.extra.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
   const serviceImages = view.serviceImages === undefined ? "" : renderServiceImages(context, view.project, view.serviceImages, options.fresh === true);
   return layout({

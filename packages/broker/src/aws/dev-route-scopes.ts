@@ -24,6 +24,8 @@ export interface DevRoute {
 }
 
 export const DEV_ROUTES: readonly DevRoute[] = [
+  { method: "GET", path: "/v1/dev/projects/{project}/machine-size", requires: "tasks:read" },
+  { method: "POST", path: "/v1/dev/projects/{project}/machine-size", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{name}/settings", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{name}/settings", requires: "full" },
   // M4a slice 3 (TE-D8): the company administrator's read of every project against the company's bounds.

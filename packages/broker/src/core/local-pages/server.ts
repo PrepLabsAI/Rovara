@@ -84,6 +84,8 @@ const NOTICES: Record<string, string> = {
   envapproved: "Approved. Tasks that start from now on use it.",
   imageapproved: "Approved and pinned. Test services use it from the next `rovara up`.",
   imageremoved: "Removed. It stops being offered from the next `rovara up`.",
+  machine: "Saved. Today's runs do not use this size yet.",
+  machinefresh: "Changing the machine size needs a page you opened in the last ten minutes. Run `rovara test-env open <project>` again.",
   imagefresh: "Approving or removing a service image needs a page you opened in the last few minutes. Run `rovara test-env open <project>` to open one.",
   imagerefused: "That image was not approved: Rovara could not pull and pin it, it is built in already, or it is not a kind Rovara can run.",
   linked: "That chat account is linked to you.",
@@ -482,7 +484,17 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     } },
     { method: "GET", pattern: /^\/test-environment\/([A-Za-z0-9._-]{1,100})$/, handle: async (request, match) => {
       const view = await options.data.getTestEnvironmentPage?.(match[1] ?? "");
-      return view === undefined ? notFound() : page(request, (context) => renderTestEnvironment(context, view, { fresh: tokenPageIsFresh(request) && options.actions.approveServiceImage !== undefined }));
+      return view === undefined ? notFound() : page(request, (context) => renderTestEnvironment(context, view, { fresh: tokenPageIsFresh(request) && (options.actions.approveServiceImage !== undefined || options.actions.setTestEnvironmentMachine !== undefined) }));
+    } },
+    { method: "POST", pattern: /^\/test-environment\/([A-Za-z0-9._-]{1,100})\/machine$/, handle: async (request, match) => {
+      const project = match[1] ?? "";
+      const back = `${request.base}/test-environment/${encodeURIComponent(project)}`;
+      const rowId = request.form?.get("rowId") ?? "";
+      if (options.actions.setTestEnvironmentMachine === undefined || rowId.length > 64) return notFound();
+      if (!tokenPageIsFresh(request)) return redirect(`${back}?n=machinefresh`);
+      if (!verified(request, { action: "testenv.machine", subject: project })) return redirect(`${back}?n=form`);
+      const result = await options.actions.setTestEnvironmentMachine({ project, rowId });
+      return redirect(`${back}?n=${outcomeCode(result, "machine")}`);
     } },
     { method: "POST", pattern: /^\/test-environment\/([A-Za-z0-9._-]{1,100})\/decide$/, handle: async (request, match) => {
       const project = match[1] ?? "";
