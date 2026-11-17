@@ -5,7 +5,7 @@ import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { testServicesSwitchedOn } from "../core/test-env/test-services-switch.js";
+import { hostedWorkersRunTestServices } from "./hosted-test-services.js";
 import { MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager } from "./sessions.js";
@@ -66,8 +66,8 @@ export interface SessionStepsDependencies {
   /** GET on the worker's /ping; resolves to what it reported, rejects when unreachable. */
   ping: (url: string) => Promise<WorkerPing | undefined>;
   /**
-   * DEC 254z-amend3: whether the install's test services switch is on (ROVARA_TEST_SERVICES, anything but exactly "0"). On, the boot configuration carries `testServices`, which the contract renders as
-   * AGENTX_TEST_SERVICES=1 for a named-environment worker only; Code launches none, so its boot script is byte-identical either way (aws/hosted-test-services.ts says why test services are unavailable here).
+   * DEC 254zm: whether this install's workers run test services (`hostedWorkersRunTestServices`: the switch is on AND TestServiceImages is `mirrored`). Then the boot configuration carries `testServices`, rendered
+   * as AGENTX_TEST_SERVICES=1, and the worker's boot runs the test-services stage its image carries. Otherwise nothing is added and the boot script is byte-identical to before.
    */
   testServices?: boolean;
 }
@@ -229,5 +229,5 @@ export const handler = createSessionStepsHandler({
   controlPlaneUrl: process.env.CONTROL_PLANE_URL ?? "",
   logGroupName: process.env.WORKER_LOG_GROUP_NAME ?? "",
   ping: (url) => pingWorker(url),
-  testServices: testServicesSwitchedOn(process.env),
+  testServices: hostedWorkersRunTestServices(process.env),
 });

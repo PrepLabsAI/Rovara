@@ -154,6 +154,14 @@ describe("the hosted host's facts", () => {
     const ready: Record<string, string | undefined> = { ROVARA_TEST_SERVICES: "1" };
     expect(markHostedTestServices(ready, true)).toBeUndefined();
     expect(ready).toEqual({ ROVARA_TEST_SERVICES: "1" });
+    // DEC 254zm: the workers run them once the operator set TestServiceImages=mirrored (exactly); any other value keeps the marker.
+    const mirrored: Record<string, string | undefined> = { ROVARA_TEST_SERVICES_HOSTED_IMAGES: "mirrored" };
+    expect(markHostedTestServices(mirrored)).toBeUndefined();
+    expect(mirrored).toEqual({ ROVARA_TEST_SERVICES_HOSTED_IMAGES: "mirrored" });
+    for (const value of ["none", "Mirrored", "", "mirrored\n"]) {
+      const other: Record<string, string | undefined> = { ROVARA_TEST_SERVICES_HOSTED_IMAGES: value };
+      expect(markHostedTestServices(other), value).toBe("workers");
+    }
   });
 
   it("the hosted catalog is the starter list exactly: the same families, versions and pinned digests as the laptop, nothing else; none with the opt-out", async () => {
@@ -171,7 +179,7 @@ describe("the hosted functions' start", () => {
   it("broker-environment-init marks test services unavailable for 'workers' after unpacking the settings, and an opt-out in the settings means no marker", async () => {
     const saved = { ...process.env };
     try {
-      for (const key of ["AGENTX_NAMES", "AGENTX_SETTINGS", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_UNAVAILABLE"]) delete process.env[key];
+      for (const key of ["AGENTX_NAMES", "AGENTX_SETTINGS", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_HOSTED_IMAGES", "ROVARA_TEST_SERVICES_UNAVAILABLE"]) delete process.env[key];
       vi.resetModules();
       await import("../../packages/broker/src/aws/broker-environment-init.js");
       expect(process.env["ROVARA_TEST_SERVICES_UNAVAILABLE"]).toBe("workers");
@@ -181,6 +189,18 @@ describe("the hosted functions' start", () => {
       await import("../../packages/broker/src/aws/broker-environment-init.js");
       expect(process.env["ROVARA_TEST_SERVICES"]).toBe("0");
       expect(process.env["ROVARA_TEST_SERVICES_UNAVAILABLE"]).toBeUndefined();
+      // DEC 254zm: the packed `ti=mirrored` lets the workers run them: no marker.
+      for (const key of ["AGENTX_SETTINGS", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_HOSTED_IMAGES", "ROVARA_TEST_SERVICES_UNAVAILABLE"]) delete process.env[key];
+      Object.assign(process.env, { AGENTX_SETTINGS: "td=1,ti=mirrored" });
+      vi.resetModules();
+      await import("../../packages/broker/src/aws/broker-environment-init.js");
+      expect(process.env["ROVARA_TEST_SERVICES_HOSTED_IMAGES"]).toBe("mirrored");
+      expect(process.env["ROVARA_TEST_SERVICES_UNAVAILABLE"]).toBeUndefined();
+      for (const key of ["AGENTX_SETTINGS", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_HOSTED_IMAGES", "ROVARA_TEST_SERVICES_UNAVAILABLE"]) delete process.env[key];
+      Object.assign(process.env, { AGENTX_SETTINGS: "td=1,ti=none" });
+      vi.resetModules();
+      await import("../../packages/broker/src/aws/broker-environment-init.js");
+      expect(process.env["ROVARA_TEST_SERVICES_UNAVAILABLE"]).toBe("workers");
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);

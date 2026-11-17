@@ -85,6 +85,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreModelGatewayHost", "CoreAgentModel",
     // DEC 254z-amend3: the test services switch (default on); an operator's opt-out survives every upgrade.
     "TestServices",
+    // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
+    "TestServiceImages",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
     "StepUpEmailSender",
     // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).

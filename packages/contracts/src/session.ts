@@ -443,7 +443,10 @@ export const Ec2WorkerBootConfigSchema = z
     modelProxyUrl: z.string().url().max(512).regex(/^https?:\/\//).regex(SHELL_SAFE, "model proxy URL has unsafe characters").optional(),
     /** AGENTX_ENVIRONMENT_KIND: set for a named environment's worker, whose launcher keeps it off the host network and away from the metadata service. Absent for the legacy deployment. */
     environmentKind: z.literal("named").optional(),
-    /** AGENTX_TEST_SERVICES=1: test services (`tx`) are on for this install, so the boot pre-pulls the catalog images. Absent when they are off (no list read, no registry login, no pull). Named environments only. */
+    /**
+     * AGENTX_TEST_SERVICES=1: test services are on for this install, so the boot pre-pulls the service images. Absent when they are off (no list read, no registry login, no pull). A named-environment launch pulls its
+     * catalog in stage 2; Code's own launch (DEC 254zm) runs the test-services stage its worker image carries (packages/worker/ec2/test-services-stage.sh) and pulls the install's copies of the starter images.
+     */
     testServices: z.literal(true).optional(),
     /**
      * AGENTX_BOOT_STAGE2_SHA256: the SHA-256 of the stage 2 boot script (`boot-stage2.sh`) that the worker image carries at /opt/agentx/boot/stage2.sh.
@@ -490,7 +493,7 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.openaiSecretArn) variables.push([KEYED_MODEL_PROVIDERS.openai.secretArnVariable, parsed.openaiSecretArn]);
   if (parsed.modelProxyUrl) variables.push(["AGENTX_MODEL_PROXY_URL", parsed.modelProxyUrl]);
   if (parsed.environmentKind) variables.push(["AGENTX_ENVIRONMENT_KIND", parsed.environmentKind]);
-  if (parsed.testServices && parsed.environmentKind === "named") variables.push(["AGENTX_TEST_SERVICES", "1"]);
+  if (parsed.testServices) variables.push(["AGENTX_TEST_SERVICES", "1"]);
   if (parsed.bootStage2Sha256) variables.push([AGENTX_BOOT_STAGE2_SHA256, parsed.bootStage2Sha256]);
   if (parsed.executorImage) variables.push(["EXECUTOR_IMAGE", parsed.executorImage]);
   if (parsed.modelFallback) variables.push(["AGENTX_MODEL_FALLBACK", parsed.modelFallback]);

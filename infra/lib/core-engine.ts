@@ -24,7 +24,7 @@ import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch 
 import { Construct } from "constructs";
 import {
   CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
-  TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -34,6 +34,8 @@ import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
 export const CORE_ENGINE_PARAMETER = "CoreEngine";
 /** DEC 254z-amend3: the stack parameter that holds the test services switch. */
 export const TEST_SERVICES_PARAMETER = "TestServices";
+/** DEC 254zm: the stack parameter that says the install's copies of the starter images are in place (`mirrored`), so Code's workers run test services. */
+export const TEST_SERVICE_IMAGES_PARAMETER = "TestServiceImages";
 
 /** The broker's actions on the core dispatch queue and its dead letters. */
 export const CORE_BROKER_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
@@ -68,6 +70,8 @@ export class CoreEngine extends Construct {
   private readonly agentModel: CfnParameter;
   /** DEC 254z-amend3: the install's test services switch ("1" on, the default; "0" off), packed for the broker and the dispatcher (`td`) and given to the session steps whole. */
   readonly testServices: CfnParameter;
+  /** DEC 254zm: `none` (the default) or `mirrored`, packed for the broker and the dispatcher (`ti`) and given whole to the session steps. */
+  readonly testServiceImages: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
@@ -120,6 +124,10 @@ export class CoreEngine extends Construct {
     this.testServices = new CfnParameter(stack, TEST_SERVICES_PARAMETER, { type: "String", default: TEST_SERVICES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICES_PARAMETER_VALUES], description: "Test services: 1 on (the default), 0 off" });
     addBrokerSetting(broker, props.naming, "testServices", this.testServices.valueAsString);
     addPackedSetting(dispatcher, "testServices", this.testServices.valueAsString);
+    // DEC 254zm: whether the five starter copies are in place. `none` until the operator copied and checked them (scripts/test-services-mirror.ts), then `mirrored`: kept across upgrades (OPERATOR_PARAMETERS).
+    this.testServiceImages = new CfnParameter(stack, "TestServiceImages", { type: "String", default: TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICE_IMAGES_PARAMETER_VALUES], description: "Test service images: none (the default) or mirrored once the starter copies are checked" });
+    addBrokerSetting(broker, props.naming, "testServiceImages", this.testServiceImages.valueAsString);
+    addPackedSetting(dispatcher, "testServiceImages", this.testServiceImages.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).

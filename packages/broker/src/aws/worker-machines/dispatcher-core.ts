@@ -39,6 +39,8 @@ import type { MoneyStop } from "../../core/task-flow/money-stop.js";
 import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
 import { companyEngineModelRoute } from "../../core-host/company-engine-model.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
+import { createTaskTestEnvironment } from "../../core/test-env/seam.js";
+import { hostedServiceCatalog } from "../hosted-test-services.js";
 import { createDispatcherLearned, type DispatcherLessonsOptions } from "./dispatcher-lessons.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
@@ -275,6 +277,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         stepModels: dispatcherStoredAgentModelChoice({ store: registry.require("storage"), companyId, now: () => now().getTime(), defaultRoute: async () => modelAccess?.route(), log: inputs.log }),
         ...(learned === null || learned === undefined ? {} : { learned }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
+        // DEC 254zm: a coding or verification step is told the plan of the test environment its task pinned (the company's own records; the owner starter list is the catalog while test services are switched on).
+        testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
       };
       return {
       callbackSigningKey,

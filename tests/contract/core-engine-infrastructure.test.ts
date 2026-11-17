@@ -501,3 +501,31 @@ describe("the test services setting (stack parameter TestServices)", () => {
     expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServices");
   });
 });
+
+// DEC 254zm: whether the install's starter copies are in place, so Code's workers run test services. Off (`none`) by default, kept across upgrades.
+describe("the test service images setting (stack parameter TestServiceImages)", () => {
+  const typed = json as unknown as { Parameters: Record<string, { Default?: string; AllowedValues?: string[] }> };
+  it("is declared none by default, with exactly the values none and mirrored, named environments only", () => {
+    expect(typed.Parameters.TestServiceImages).toMatchObject({ Default: "none", AllowedValues: ["none", "mirrored"] });
+    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServiceImages");
+  });
+
+  it("is packed for the broker and the dispatcher (ti), and given whole to the session steps beside the switch", () => {
+    expect(packedSettings(dispatcherVariables).get("ti")).toStrictEqual({ Ref: "TestServiceImages" });
+    expect(packedSettings(brokerVariables).get("ti")).toStrictEqual({ Ref: "TestServiceImages" });
+    expect(brokerVariables).not.toHaveProperty("ROVARA_TEST_SERVICES_HOSTED_IMAGES");
+    const steps = resources(named, "AWS::Lambda::Function").find(([id]) => /^SessionsSteps[0-9A-F]{8}$/u.test(id))!;
+    expect((steps[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.ROVARA_TEST_SERVICES_HOSTED_IMAGES).toStrictEqual({ Ref: "TestServiceImages" });
+    const users = Object.entries(json.Resources).filter(([, resource]) => /"Ref":"TestServiceImages"/u.test(JSON.stringify(resource))).map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""));
+    expect(users.sort()).toEqual(["Broker", "Dispatcher", "SessionsSteps"]);
+  });
+
+  it("is an operator setting an upgrade keeps, set with `agentx config set testServices.images`", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServiceImages");
+    const key = configKey("testServices.images");
+    expect(key.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "TestServiceImages" });
+    expect(key.parse("mirrored")).toBe("mirrored");
+    expect(key.parse("none")).toBe("none");
+    for (const bad of ["Mirrored", "yes", "1", ""]) expect(() => key.parse(bad), bad).toThrow();
+  });
+});

@@ -35,6 +35,7 @@ import { admit, releaseAdmission } from "./admission.js";
 import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
+import { testServicesMissingWords } from "../test-env/seam.js";
 import { RUN_START_ACTION, cancelInvocation, isSpendStopCode, queuedCancelOf, spendStopReason } from "./money-stop.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { readWorkspace } from "./stage-machine.js";
@@ -239,7 +240,8 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // With the per-run stop, a model run goes only to a worker that reports its usage while it runs (never dropped: the stop would not see the run's spend until it ended).
     const checkpoints = deps.moneyStop !== undefined && operation.dispatch.kind === "task";
     const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : []), ...(checkpoints ? [USAGE_CHECKPOINTS_FEATURE] : [])].filter((feature) => !health.features.includes(feature));
-    if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
+    // DEC 254zm: a worker that lacks only test-services features could not start them here (its boot stage or pulls failed): the fixed "not available here" words, not "too old".
+    if (missing.length > 0) return endAndAck("FAILED", testServicesMissingWords(missing) ?? "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
