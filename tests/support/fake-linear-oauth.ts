@@ -29,6 +29,9 @@ export function fakeLinear(now: () => number) {
   const revoked: string[] = [];
   const requests: Array<{ url: string; body: string; authorization: string }> = [];
   let refreshCalls = 0;
+  const apiKeys = new Map<string, FakeWorkspace>();
+  const issues = new Map<string, { id: string; identifier: string; title: string; description: string; labels: string[] }>();
+  const comments: Array<{ workspace: string; authorization: string; id: string; issueId: string; body: string }> = [];
   let refreshGate: Promise<void> | undefined;
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const issue = (grant: Grant) => {
@@ -76,18 +79,41 @@ export function fakeLinear(now: () => number) {
       return new Response("", { status: 200 });
     }
     if (url === "https://api.linear.app/graphql") {
+      // An OAuth access token is sent as `Bearer <token>`; a per-project API key (PR 20's golden path) as the bare key.
+      const keyWorkspace = apiKeys.get(authorization);
       const token = authorization.replace(/^Bearer /, "");
-      const grant = accessOf.get(token);
-      if (grant === undefined || grant.revoked) return json({ errors: [{ message: "Authentication required" }] }, 401);
-      const query = (JSON.parse(body) as { query: string }).query;
-      if (query.includes("viewer { organization")) return json({ data: { viewer: { organization: { id: grant.workspace.id, name: grant.workspace.name, urlKey: grant.workspace.urlKey } } } });
-      if (query.includes("teams(")) return json({ data: { teams: { nodes: grant.workspace.teams, pageInfo: { hasNextPage: false } } } });
+      const grant = authorization.startsWith("Bearer ") ? accessOf.get(token) : undefined;
+      if (keyWorkspace === undefined && (grant === undefined || grant.revoked)) return json({ errors: [{ message: "Authentication required" }] }, 401);
+      const workspace = keyWorkspace ?? grant!.workspace;
+      const { query, variables } = JSON.parse(body) as { query: string; variables: Record<string, unknown> };
+      // PR 20: the tracker's reads and comment writes, each only within the caller's own workspace.
+      if (query.includes("issue(id: $id)")) {
+        const found = issues.get(`${workspace.id}:${String(variables["id"])}`);
+        if (found === undefined) return json({ errors: [{ message: "Entity not found: Issue", extensions: { code: "NOT_FOUND" } }] });
+        return json({ data: { issue: { id: found.id, identifier: found.identifier, title: found.title, description: found.description, url: `https://linear.app/${workspace.urlKey}/issue/${found.identifier}/x`,
+          updatedAt: "2026-11-17T10:00:00.000Z", state: { type: "unstarted", name: "Todo" }, labels: { nodes: found.labels.map((name) => ({ name })) }, team: { states: { nodes: [] } } } } });
+      }
+      if (query.includes("commentCreate")) {
+        const input = variables["input"] as { id: string; issueId: string; body: string };
+        comments.push({ workspace: workspace.id, authorization, ...input });
+        return json({ data: { commentCreate: { success: true } } });
+      }
+      if (keyWorkspace !== undefined) return json({ errors: [{ message: "unknown query" }] });
+      if (query.includes("viewer { organization")) return json({ data: { viewer: { organization: { id: grant!.workspace.id, name: grant!.workspace.name, urlKey: grant!.workspace.urlKey } } } });
+      if (query.includes("teams(")) return json({ data: { teams: { nodes: grant!.workspace.teams, pageInfo: { hasNextPage: false } } } });
       return json({ errors: [{ message: "unknown query" }] });
     }
     return json({ error: "not linear" }, 404);
   });
   return {
-    fetch, requests, revoked, grants,
+    fetch, requests, revoked, grants, comments,
+    /** A per-project Linear API key for `workspace` (the path PR 20's goldens compare with). */
+    apiKeyFor(workspace: FakeWorkspace): string { const key = ["lin", "api", String(++counter), randomBytes(6).toString("hex")].join("_"); apiKeys.set(key, workspace); return key; },
+    /** An issue in `workspace`, readable by its key (`ENG-1`) or its id. */
+    addIssue(workspace: FakeWorkspace, issue: { id: string; identifier: string; title: string; description?: string; labels?: string[] }) {
+      const full = { description: "", labels: [], ...issue };
+      issues.set(`${workspace.id}:${issue.identifier}`, full); issues.set(`${workspace.id}:${issue.id}`, full);
+    },
     /** The person approves on Linear's consent page for `workspace`: the code Linear would send back, bound to the authorize address's PKCE challenge. */
     approve(authorizeUrl: string, workspace: FakeWorkspace): string {
       const challenge = new URL(authorizeUrl).searchParams.get("code_challenge") ?? "";
