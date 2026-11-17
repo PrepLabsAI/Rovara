@@ -22,7 +22,7 @@ import { TASK_PERSON_UNNAMED, isSlackTaskPerson, parseTaskPersonIdentity, taskPe
 
 export interface TaskPersonIdentity {
   developerId: string;
-  slackUserId?: string; // C1: present = a `slack` identity (slack, or oidc linked to Slack); absent = `web` (github, cloud, saml, unlinked oidc). See task-person-rows.ts.
+  slackUserId?: string; // C1: present = a `slack` identity (slack, or oidc/github linked to Slack); absent = `web` (cloud, saml, unlinked oidc or github). See task-person-rows.ts.
   name: string;
   method: DeveloperSignInMethod;
   issuer: string;
@@ -84,6 +84,9 @@ async function getItem(deps: TaskPersonIdentityDependencies, pk: string, sk: str
   const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk, sk }, ConsistentRead: true })) as { Item?: unknown };
   return isRecord(result.Item) ? result.Item : undefined;
 }
+
+/** DEC 254n (2): the record-backed methods. A GitHub person is checked exactly as an OIDC person is: their own sign-in record, its Slack link and the same Slack proof. */
+const recordMethod = (method: unknown): method is "oidc" | "github" => method === "oidc" || method === "github";
 
 /** C2 (plan 4.1, decisions D1, D3): the live reads of the web proof. Never asked for a `slack` identity. */
 export interface TaskPersonWebProofReaders {
@@ -375,14 +378,14 @@ async function storedIdentityStatus(deps: TaskPersonIdentityDependencies, identi
       || identity.developerId !== developerIdForSlackUser(identity.slackUserId)) return refuse();
     return "current";
   }
-  if (identity.issuer === SLACK_OIDC_ISSUER || identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
+  if (!recordMethod(identity.method) || identity.issuer === SLACK_OIDC_ISSUER || identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
   let record: DeveloperRecord | undefined;
   try {
     record = await deps.developerRecord(identity.developerId);
   } catch {
     return unavailable();
   }
-  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== "oidc" || record.developerId !== identity.developerId
+  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== identity.method || record.developerId !== identity.developerId
     || record.issuer !== identity.issuer || record.subject !== identity.subject || record.slackUserId !== identity.slackUserId
     || ownerKeyForSubject(record.issuer, record.subject) !== record.developerId) return refuse();
   return record.revoked ? "ineligible" : "current";
@@ -423,9 +426,10 @@ export async function checkTaskPersonIdentity(
       if (!SlackUserIdSchema.safeParse(stored.slackUserId).success || developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
       identity = nativeIdentity(stored.slackUserId!, safeName(stored.developerName, stored.slackUserId!));
     } else {
-      // An OIDC task creator: linked to Slack when the task stored a Slack user id (as before), else a `web` identity (C1, plan 3 item 3).
-      // C2: a GitHub, Cloud or SAML task creator is always a `web` identity of its own method (plan 4.1); a Slack id on such a task is not a link.
-      const linked = stored.provider === "oidc" && stored.slackUserId !== undefined;
+      // A record-backed task creator: oidc linked to Slack when the task stored a Slack user id (as before), else a `web` identity (C1, plan 3 item 3).
+      // DEC 254n (2): a GitHub creator is record-backed like an OIDC one, so a GitHub task that stored a Slack user id is a Slack-linked (`slack`) identity checked
+      // through Slack, exactly as on code/next. C2: a Cloud or SAML task creator is always a `web` identity of its own method; a Slack id on such a task is not a link.
+      const linked = recordMethod(stored.provider) && stored.slackUserId !== undefined;
       if (linked && !SlackUserIdSchema.safeParse(stored.slackUserId).success) return refuse();
       let record: DeveloperRecord | undefined;
       try {
@@ -439,7 +443,7 @@ export async function checkTaskPersonIdentity(
         if (!SlackUserIdSchema.safeParse(record.slackUserId).success) return refuse();
         identity = {
           developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
-          method: "oidc", issuer: record.issuer, subject: record.subject,
+          method: stored.provider, issuer: record.issuer, subject: record.subject,
         };
       } else {
         // C2: no Slack-id equality for a `web` identity (plan 4.1 rule 2); a later Slack link on the sign-in does not change the identity's kind.

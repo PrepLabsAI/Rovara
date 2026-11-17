@@ -215,11 +215,12 @@ it("classifies the M4a S3 compliance route as a company-scoped, full-access, rea
 
 it("pins S3 migration text and every catalog constructor caller, including all writers", () => {
   const inventory = readFileSync("docs/architecture/company-inventory.md", "utf8");
-  for (const text of ["PROJECT_CATALOG_INDEX", "canonical company-bound cursor v2", "no shared fallback", "Unflagged companies retain v1", "project_catalog.index_drift", "Future move contract"]) expect(inventory).toContain(text);
+  for (const text of ["PROJECT_CATALOG_INDEX", "canonical company-bound cursor v2", "no shared fallback and no flag", "the partition key proves the company", "unflagged it keeps the legacy v1/shared paging", "verify --mark refuses a named company", "project_catalog.index_drift", "Future move contract"]) expect(inventory).toContain(text);
   // Counts pin every constructor call, not just files. Adding a writer (including to a current reader) requires review here.
   const expected: Record<string, number[]> = {
     "packages/broker/src/aws/broker.ts": [5, 0], // registration + repair dual-write corePlan in the legacy transaction; other calls read/check
     "packages/broker/src/aws/core-project-backfill.ts": [0, 1], // fenced L4 planner, appended atomically by registration/repair
+    "packages/broker/src/aws/company-project-names.ts": [0, 3], // L2-1: own-company name check reads + one ConditionCheck in the registration transaction; no catalog write
     "packages/broker/src/aws/developer-tasks.ts": [1, 0], // legacy task ConditionCheck
     "packages/broker/src/aws/project-catalog-backfill.ts": [0, 3], // operator reads + fenced mark/undo
     "packages/broker/src/aws/project-settings.ts": [1, 2], // v1 read and v2 existence/start-key reads

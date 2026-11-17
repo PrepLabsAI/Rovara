@@ -293,10 +293,18 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     expect(h.slackCalls()).toBe(0);
   });
 
-  it("proves a GitHub task creator as web even if the task stored a Slack id (only OIDC links to Slack)", async () => {
-    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub", slackUserId: SAM });
+  it("proves a GitHub task creator with no Slack link as web, with no Slack call", async () => {
+    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub" });
+    delete (meta as { slackUserId?: string }).slackUserId;
     const h = harness({ tasks: [meta] });
     expect(await checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID)).toStrictEqual(ELIGIBLE);
+    expect(h.slackCalls()).toBe(0);
+  });
+
+  it("DEC 254n (2): a GitHub task creator that stored a Slack id is Slack-linked like an OIDC one, so a sign-in record with no Slack link is refused (never proven as web)", async () => {
+    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub", slackUserId: SAM });
+    const h = harness({ tasks: [meta] });
+    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
     expect(h.slackCalls()).toBe(0);
   });
 

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { type DeveloperSignInMethod, SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
 import { emailIndexKey } from "../developer/store.js";
+import { profileAvatarUrl, profileDisplayName } from "../developer/github-profile.js";
 import { ownerKeyForSubject } from "./lambda.js";
 import { recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 import { OrgIdSchema } from "@agentx/contracts";
@@ -34,7 +35,8 @@ export interface ResolvedDeveloper {
   developerId: string;
   via: "id" | "slack" | "email";
   slackUserId?: string;
-  profile?: { displayName: string; provider: DeveloperSignInMethod; slackUserId?: string; sessionsEndedAt?: string };
+  /** `avatarUrl`: a GitHub person's picture (DEC 254p (a)); built from their id, never taken from a stored or provided address. */
+  profile?: { displayName: string; provider: DeveloperSignInMethod; slackUserId?: string; sessionsEndedAt?: string; avatarUrl?: string };
 }
 
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -56,11 +58,14 @@ async function signInItem(deps: AdminActionDependencies, key: { pk: string; sk: 
 }
 
 function profileFrom(item: Record<string, unknown> | undefined): ResolvedDeveloper["profile"] {
-  if (item === undefined || typeof item.displayName !== "string" || (item.provider !== "slack" && item.provider !== "oidc")) return undefined;
+  if (item === undefined || typeof item.displayName !== "string" || (item.provider !== "slack" && item.provider !== "oidc" && item.provider !== "github")) return undefined;
+  // DEC 254p (a): a GitHub person is named and pictured like a Slack person; the name is untrusted text (github-profile.ts), a Slack or company sign-in name is as stored.
+  const avatarUrl = profileAvatarUrl(item);
   return {
-    displayName: item.displayName, provider: item.provider,
+    displayName: profileDisplayName(item) ?? item.displayName, provider: item.provider,
     ...(typeof item.slackUserId === "string" ? { slackUserId: item.slackUserId } : {}),
     ...(typeof item.sessionsEndedAt === "string" ? { sessionsEndedAt: item.sessionsEndedAt } : {}),
+    ...(avatarUrl === undefined ? {} : { avatarUrl }),
   };
 }
 
