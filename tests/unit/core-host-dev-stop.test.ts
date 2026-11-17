@@ -9,7 +9,8 @@ import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
-import { STOP_NOT_YOURS, STOP_REQUEST_REUSED, stopTaskOnRequest } from "../../packages/broker/src/core/task-flow/stop-request.js";
+import { hashJson } from "../../packages/broker/src/core/task-flow/support.js";
+import { LEGACY_CLOSED_TASK, STOP_NOT_YOURS, STOP_REQUEST_REUSED, stopTaskOnRequest } from "../../packages/broker/src/core/task-flow/stop-request.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -98,7 +99,7 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     expect(answer?.statusCode).toBe(200);
     expect(parsed(answer).task?.taskId).toBe(task.taskId);
     expect(await operationStatus()).toBe("CANCELLED");
-    expect(world.audit.filter((event) => event.action === "task.stopped").map((event) => event.details)).toEqual([{ project: "payments", by: "owner" }]);
+    expect(world.audit.filter((event) => event.action === "task.stop_requested").map((event) => event.details)).toEqual([{ project: "payments", by: "owner" }]);
   });
 
   it("stops the task for a People owner (a co-owner by the company's owner rule), with the People revision fenced into the claim", async () => {
@@ -130,7 +131,7 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     const admin = person("person-admin-0000000001", FAKE_COMPANY, role);
     expect((await cancel(admin))?.statusCode).toBe(200);
     expect(await operationStatus()).toBe("CANCELLED");
-    expect(world.audit.filter((event) => event.action === "task.stopped").map((event) => event.details)).toEqual([{ project: "payments", by: "company-admin" }]);
+    expect(world.audit.filter((event) => event.action === "task.stop_requested").map((event) => event.details)).toEqual([{ project: "payments", by: "company-admin" }]);
   });
 
   it("two companies: an admin (and an owner) of company B cannot stop company A's core task, and is answered exactly like a task id that does not exist", async () => {
@@ -212,7 +213,7 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     await world.store.put({ item: { ...location.operationRequestKey(record["ownerKey"] as string, reused), entityType: "IDEMPOTENCY", payloadHash: "f".repeat(64) } });
     expect(parsed(await cancel(owner, { requestId: reused })).error).toEqual({ code: "IDEMPOTENCY_CONFLICT", message: STOP_REQUEST_REUSED });
     await world.store.put({ item: { ...record, closedAt: "2026-11-15T10:00:00.000Z" } });
-    expect(parsed(await cancel(owner)).error?.code).toBe("CONFIG_INVALID");
+    expect(parsed(await cancel(owner)).error).toEqual({ code: "CONFIG_INVALID", message: LEGACY_CLOSED_TASK });
   });
 
   it("one request id is one stop: a repeat answers the task as it is now and stops nothing more (not even a step started after the first stop)", async () => {
@@ -232,7 +233,7 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     expect(parsed(again).task?.taskId).toBe(task.taskId);
     expect((await world.store.get(location.operationKey(next)))?.["status"]).toBe("RUNNING");
     expect(stopped).not.toHaveBeenCalled();
-    expect(world.audit.filter((event) => event.action === "task.stopped")).toHaveLength(1);
+    expect(world.audit.filter((event) => event.action === "task.stop_requested")).toHaveLength(1);
   });
 
   it("is served only with the company's owner rule: on Code's laptop rule it is not the core's here (the engine boundary then says so), and only POST is the core's", async () => {
@@ -266,5 +267,38 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     // No role read (undefined) is no admin authority.
     await expect(stopTaskOnRequest(deps, { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "person-colleague-000001" }) }, task.taskId, body)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     expect(await operationStatus()).not.toBe("CANCELLED");
+  });
+
+  it("a race of two with the same request id: one claim wins, the other is answered as a repeat; one stop and one audit line", async () => {
+    const { cancel, owner, world, task, operationStatus } = await running();
+    const body = { requestId: randomUUID() };
+    const record = (await world.store.get(taskKey(task.taskId)))!;
+    const location = await workspaceKeys({ store: world.store, companyId: FAKE_COMPANY }, task.workspaceId);
+    const workspace = (await world.store.get(location.workspaceKey))!;
+    const transact = world.store.transact.bind(world.store);
+    // The other request's claim commits just before this one's (it names no step, as a finished stop's would be read after).
+    vi.spyOn(world.store, "transact").mockImplementationOnce(async (items) => {
+      await world.store.put({ item: { ...location.operationRequestKey((workspace["ownerKey"] ?? record["ownerKey"]) as string, body.requestId), entityType: "IDEMPOTENCY", action: "cancel", payloadHash: hashJson({ action: "cancel" }), operationId: null } });
+      return await transact(items);
+    });
+    const stopped = vi.spyOn(world.machines, "stop");
+    const answer = await cancel(owner, body);
+    expect(answer?.statusCode).toBe(200);
+    expect(stopped).not.toHaveBeenCalled();
+    // The winner's claim is the one stop: this request ran none of its own.
+    expect(await operationStatus()).not.toBe("CANCELLED");
+  });
+
+  it("a stop that failed after its claim is finished by a repeat of the same request id (the claimed step is still the active one)", async () => {
+    const { cancel, owner, world, operationStatus } = await running();
+    const body = { requestId: randomUUID() };
+    const update = world.store.update.bind(world.store);
+    vi.spyOn(world.store, "update").mockImplementationOnce(async () => { throw new Error("store unavailable"); }).mockImplementation(update);
+    await expect(cancel(owner, body)).rejects.toThrow("store unavailable");
+    expect(await operationStatus()).not.toBe("CANCELLED");
+    const again = await cancel(owner, body);
+    expect(again?.statusCode).toBe(200);
+    expect(await operationStatus()).toBe("CANCELLED");
+    expect(world.audit.filter((event) => event.action === "task.stop_requested")).toHaveLength(1);
   });
 });
