@@ -172,17 +172,24 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
   return uri;
 }
 
+/** L4-IAM: the one sentence every refusal of an off-prefix worker image uses (fixed words, no echo). */
+export const WORKER_IMAGE_OFF_PREFIX = "the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix";
+
 /**
  * L4-IAM: the worker role reads images only under the environment's ECR pull-through prefix (`agentx-<env>/`) and its test-service copies, so a worker image anywhere else
- * would deploy cleanly and then fail every instance boot ("could not download the worker image"). Refused here, before anything is deployed. Fixed words, no echo.
+ * would deploy cleanly and then fail every instance boot ("could not download the worker image"). Returns the fixed refusal, or undefined when the image is inside.
+ * `init` and `upgrade` call this when they read `--worker-image` (before anything is deployed); `stackParameters` repeats it as a backstop.
  */
+export function workerImageProblem(uri: string, scope: Pick<InstallAnswers, "env" | "account" | "region" | "partition">): string | undefined {
+  const suffix = ECR_HOST_SUFFIX[scope.partition ?? "aws"];
+  if (suffix === undefined) throw new Error(`unknown AWS partition ${scope.partition}`);
+  return uri.startsWith(`${scope.account}.dkr.ecr.${scope.region}.${suffix}/${environmentPullThroughPrefix(scope.env)}/`) ? undefined : WORKER_IMAGE_OFF_PREFIX;
+}
+
 function checkedWorkerOverride(uri: string, answers: Pick<InstallAnswers, "env" | "account" | "region" | "partition">): string {
   checkedImageOverride(uri, "worker");
-  const suffix = ECR_HOST_SUFFIX[answers.partition ?? "aws"];
-  if (suffix === undefined) throw new Error(`unknown AWS partition ${answers.partition}`);
-  if (!uri.startsWith(`${answers.account}.dkr.ecr.${answers.region}.${suffix}/${environmentPullThroughPrefix(answers.env)}/`)) {
-    throw new Error("the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix");
-  }
+  const problem = workerImageProblem(uri, answers);
+  if (problem !== undefined) throw new Error(problem);
   return uri;
 }
 

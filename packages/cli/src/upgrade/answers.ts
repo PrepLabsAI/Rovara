@@ -5,6 +5,7 @@
 // callback signing key comes from Secrets Manager.
 import { writeFile } from "node:fs/promises";
 import { agentXError } from "@agentx/contracts";
+import { workerImageProblem } from "../deploy/parameters.js";
 import { UpgradeDeployAnswersSchema } from "../deploy/commands.js";
 import type { DeployAnswers } from "../deploy/deploy-environment.js";
 import type { StackReader } from "../environments/adopt.js";
@@ -51,6 +52,9 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
     ...(input.images.worker === undefined ? {} : { worker: input.images.worker }),
     ...(input.images.slack === undefined ? {} : { slack: input.images.slack }),
   };
+  // L4-IAM: refused before any stack is touched (stackParameters repeats the check as a backstop).
+  const workerProblem = images?.worker === undefined ? undefined : workerImageProblem(images.worker, { env: settings.env, account: settings.account, region: settings.region });
+  if (workerProblem !== undefined) throw agentXError("CONFIG_INVALID", `--worker-image: ${workerProblem}`);
   return {
     env: settings.env,
     region: settings.region,
