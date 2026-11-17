@@ -203,6 +203,16 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
   // Lead 4 J1: the smart Just answer (core-host/answer-routes.ts): full access only, then any live role on the project. It spends on the company's own key through the gateway's answers purpose.
   { method: "POST", path: "/v1/app/projects/{project}/answers", requires: "full" },
+  // Lead 4 C1: the wiki's corrections (core-host/wiki-corrections-routes.ts): full access only, then the caller's role on the project is read live (any role reads what it may do; a contributor adds notes and
+  // marks; a maintainer approves, resolves and reads the disputed list). Additive: no existing row changed.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/corrections", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/approve", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/delete", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/suggest-lesson", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/flags", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/flags/resolve", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/disputed", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
