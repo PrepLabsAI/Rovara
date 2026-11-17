@@ -43,7 +43,7 @@ export interface DeveloperRecord { developerId: string; provider: DeveloperSignI
   factorEmailSetBy?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
 
 /**
  * What a code carries into its session. `stepUpAt` (epoch seconds) and `stepUpMethod` (lane ID part 2): when and how the person last proved it was them with a factor Code owns.
@@ -51,8 +51,9 @@ export interface SessionRecord { sessionId: string; developerId: string; amr: De
  * DEC 254b (a): `installMethod` marks a session bound to a company other than the built-in one that was signed in through the install's own OIDC
  * (the shared sign-in method), because that company has no sign-in of its own. Written only by the sign-in server; every mint, refresh and broker
  * check refuses it once the company has its own issuer, and refuses an unmarked session for a company that has none.
+ * DEC 254b (f): `joinedByInvite` is set only by the sign-in server, when this sign-in's own join consumed a live pre-approval for the session's company.
  */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true }
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
 
 /**
  * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
@@ -462,6 +463,7 @@ export class DeveloperSignInStore {
       ...(record.stepUpAt === undefined || record.stepUpMethod === undefined ? {} : { stepUpAt: record.stepUpAt, stepUpMethod: record.stepUpMethod }),
       ...(record.companyId === undefined ? {} : { companyId: record.companyId }),
       ...(record.installMethod === true ? { installMethod: true as const } : {}),
+      ...(record.joinedByInvite === true ? { joinedByInvite: true as const } : {}),
     };
   }
 

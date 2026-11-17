@@ -987,6 +987,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   let companyId: string | undefined;
   let sessionFacts: AccessCheckContext["session"];
   let companyless = false;
+  let joinedByInvite = false;
   if (basic !== undefined) {
     const client = await signInClientOf(deps, basic.clientId);
     if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || parsed.data.developerId === undefined) throw refused();
@@ -1001,11 +1002,12 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     clientId = authenticated.client.clientId;
     companyId = authenticated.companyId;
     companyless = authenticated.companyless === true;
+    joinedByInvite = authenticated.joinedByInvite === true;
     sessionFacts = { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator };
   }
   const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
   let access: Awaited<ReturnType<typeof projectsAPersonUses>>;
-  let company: Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName"> = {};
+  let company: Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName" | "joinedByInvite"> = {};
   if (deps.companies === undefined) {
     // DEC 254: with Code's company layer off, the install's own company records (and a merged sign-in's survivor) decide; none: exactly the legacy read.
     const install = await installCompanyAccess(deps, developerId);
@@ -1022,6 +1024,8 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     // DEC 253z: the company, its role and its name, from live membership read on this call.
     if (companyId === undefined) throw refused();
     company = await codeCompanyOf(deps, scope!.client, developerId, companyId);
+    // DEC 254b (f): only the person's own token, only Code's company layer, only for the company this answer names.
+    if (joinedByInvite && company.companyId === companyId) company = { ...company, joinedByInvite: true };
   }
   scope?.check();
   if (access === undefined) throw refused();
@@ -1182,7 +1186,7 @@ async function companylessSession(deps: DeveloperRouteDependencies, client: Sign
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; stepUp?: CallerStepUp }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; stepUp?: CallerStepUp; joinedByInvite?: true }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -1228,6 +1232,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
       client, ...(companyId === undefined ? {} : { companyId }), ...(companyless ? { companyless: true as const } : {}), developerId: session.developerId, sessionId: claims.sid, amr,
       administrator: amr === "oidc" && session.administrator === true && !companyless, scopes, startedAt: session.startedAt,
       ...(stepUp === undefined ? {} : { stepUp }),
+      // DEC 254b (f): what the sign-in server recorded on THIS session at mint, for the company the session is bound to (checked against live membership above).
+      ...(session.joinedByInvite === true && !companyless && companyId !== undefined && (session.companyId ?? IMPLICIT_COMPANY_ID) === companyId ? { joinedByInvite: true as const } : {}),
     };
   } catch (error) {
     if (deps.companies !== undefined && amr === "oidc") throw refused();

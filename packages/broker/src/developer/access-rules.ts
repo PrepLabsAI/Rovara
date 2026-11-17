@@ -42,6 +42,8 @@ export async function applyAccessRules(rules: readonly AccessCheckRule[] | undef
     ...(original.companyId === undefined ? {} : { companyId: original.companyId }),
     ...(original.companyRole === undefined ? {} : { companyRole: original.companyRole }),
     ...(original.companyName === undefined ? {} : { companyName: original.companyName }),
+    // DEC 254b (f): Code's own record of this sign-in; a rule can neither set nor clear it.
+    ...(original.joinedByInvite === undefined ? {} : { joinedByInvite: original.joinedByInvite }),
   });
   for (const rule of rules ?? []) {
     try {

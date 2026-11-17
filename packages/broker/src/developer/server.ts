@@ -573,6 +573,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     let companyId: string | undefined;
     let companyless = false;
     let installMethod = false;
+    let joinedByInvite = false;
     if (deps.company !== undefined) {
       const registered = request.clientId === undefined ? undefined : await registeredClient(request.clientId);
       // DEC 254b (a): an install-level client (the CLI, the browser review page, a registered install-level client) that names no company signs the
@@ -608,6 +609,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       }
       if (joined.ok) companyId = joined.membership.companyId;
       installMethod = installMethod && joined.ok && companyId === candidate;
+      // DEC 254b (f): this sign-in's own join spent a live pre-approval for exactly the company the session is bound to.
+      joinedByInvite = joined.ok && joined.viaPreapproval === true && companyId === candidate;
     }
     let slackUserId = identity.slackUserId;
     // ProviderIdentity.email is set only for a verified email (providers.ts), so only a verified
@@ -641,6 +644,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
       ...(installMethod ? { installMethod: true as const } : {}),
+      ...(joinedByInvite ? { joinedByInvite: true as const } : {}),
       // FR-005: only a company sign-in can make an administrator; only the install issuer can make an install-wide administrator (T3).
       // DEC 254b (a): and only into the built-in company, as before; a member of another company signed in through the shared method never is one.
       ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) ? { administrator: true as const } : {}),
