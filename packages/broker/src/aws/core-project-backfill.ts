@@ -156,7 +156,7 @@ function grantKey(personId: string, projectName: string) { return { pk: `MEMBER#
 function personKey(personId: string) { return { pk: `DEVELOPER#${personId}`, sk: "META" }; }
 async function person(deps: CoreBackfillDependencies, personId: string) {
   const row = await get(deps, personKey(personId), deps.signInTableName);
-  const valid = z.object({ entityType: z.literal("DEVELOPER"), provider: z.enum(["oidc", "slack"]), issuer: z.string().min(1).max(2048), subject: z.string().min(1).max(1024), firstSignInAt: z.iso.datetime(), revoked: z.literal(false), developerId: personSchema.optional() }).safeParse(row);
+  const valid = z.object({ entityType: z.literal("DEVELOPER"), provider: z.enum(["oidc", "slack", "github"]), issuer: z.string().min(1).max(2048), subject: z.string().min(1).max(1024), firstSignInAt: z.iso.datetime(), revoked: z.literal(false), developerId: personSchema.optional() }).safeParse(row);
   if (!valid.success || row === undefined || (valid.data.developerId !== undefined && valid.data.developerId !== personId)) throw conflict();
   return row;
 }

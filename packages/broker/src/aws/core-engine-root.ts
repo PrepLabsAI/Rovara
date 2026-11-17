@@ -40,6 +40,9 @@ import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
+import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
+import { lifecycleAccess } from "./project-lifecycle-routes.js";
+import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
@@ -74,7 +77,8 @@ import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
-import { CORE_AGENT_MODEL_CHOICE_VARIABLE, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
+import { CORE_AGENT_MODEL_CHOICE_VARIABLE, adminOfferedModelsFromEnvironment, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
+import { companyEngineModelRoute, companyEngineModelStartCheck, type EngineModelOfferedReader } from "../core-host/company-engine-model.js";
 import { evalReservationModules } from "../core-host/eval-authority-http.js";
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
@@ -165,6 +169,11 @@ export interface BrokerCoreRoot {
    */
   readonly lessons: LessonsApi | undefined;
   readonly policyHook?: ProjectSettingsHook;
+  /**
+   * Guided onboarding PR 16: whether archiving a project of this company takes effect, i.e. the switch sends the company's new tasks to the core engine (the only engine that reads the
+   * archived state). Absent while the switch is off: the archive route then refuses an archive.
+   */
+  readonly projectArchiveTakesEffect?: (companyId: string) => boolean;
   /**
    * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` while the
    * switch is off or for any other path. The broker's HTTP API reaches it through `coreApp` (lane L12).
@@ -273,7 +282,25 @@ export const NO_PROJECT_GRANT = "You do not have access to this project.";
  * and project grant, with a revision fence on acts. A company role grants no reach into another person's task. A step the system starts on its own needs its person to be a
  * member still, with the grant.
  */
-export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies }): TaskAccess {
+/**
+ * Guided onboarding L2-3: a person's standing on a project's setup run in this company, read live: PR 16's rule (`lifecycleAccess`) over the person's membership and project grant.
+ * A person who is not a live member of THIS company is `none`, whatever grant they hold.
+ */
+export function setupRunStandingFrom(people: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrantRole: (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> }): (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding> {
+  return async (personId, companyId, project) => {
+    const membership = await people.membershipOf(personId);
+    if (membership === undefined || membership.companyId !== companyId) return { access: "none" };
+    const access = lifecycleAccess(membership.role, await people.projectGrantRole(personId, project));
+    if (access !== "manage") return { access };
+    return { access, basis: membership.role === "owner" ? "company-owner" : membership.role === "admin" ? "company-admin" : "project-admin" };
+  };
+}
+
+export function hostedTaskAccess(inputs: {
+  membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
+  /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
+  setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
+}): TaskAccess {
   const liveMember = async (personId: string) => {
     const membership = await inputs.membershipOf(personId);
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
@@ -313,6 +340,14 @@ export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => P
     },
     async checkStep(task) {
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
+      // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
+      if (inputs.setupRunStanding !== undefined && inputs.storage !== undefined) {
+        const stored = await (await inputs.storage()).get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
+        if (stored?.["purpose"] === "setup_agent") {
+          if (stored["companyId"] !== inputs.companyId) return { allowed: false, message: NOT_A_MEMBER_HERE };
+          return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: SETUP_RUN_NOT_ALLOWED };
+        }
+      }
       return (await inputs.projectGrant(task.developerId, task.project)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };
     },
   };
@@ -383,6 +418,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     : membershipWithRoleFromDynamo(inputs.documentClient, inputs.signInTableName);
   const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
+  // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
+  const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
   const displayNameOf = async (personId: string): Promise<string | undefined> => {
     if (inputs.signInTableName === undefined || inputs.signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
     const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
@@ -397,7 +434,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
   // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
   const modelChoices = createCompanyModelChoices({ reader: coreActive && env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
-  const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => modelChoices.flowOptionsFor(registry, companyId, modelGateway()!.flowOptions);
+  // DEC 254n (1): the company's own engine model (when it set one) replaces the install's for its tasks; its start is refused unless the gateway offers it THAT company now. The list is read
+  // through the same reader as the model choice where the root was given one, else the gateway's own route signed with the task key (only the gateway's origin is needed).
+  const engineOffered: EngineModelOfferedReader | undefined = !coreActive ? undefined
+    : inputs.offeredModels !== undefined ? (companyId) => inputs.offeredModels!.offered(companyId) : adminOfferedModelsFromEnvironment(env, inputs.taskTokens ?? (() => undefined));
+  const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => {
+    const gateway = modelGateway()!.flowOptions;
+    const store = registry.require("storage");
+    const modelAccess = companyEngineModelRoute({ store, companyId, install: gateway.modelAccess });
+    return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), startModelCheck: companyEngineModelStartCheck({ store, companyId, offered: engineOffered }) };
+  };
   // Switch off (and not draining): the core settings are never read, so an install without the core reads exactly what it read before (CORE_ENGINE_BROKER_WIRED).
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = coreActive ? readCoreLessonsSwitch(env) : { value: { mode: "off" } };
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
@@ -427,7 +473,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), people: {
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
       } }),
@@ -519,6 +565,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             return { limitUsd: admissionSettings.taskCapMicros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(runtime.companyId, task.taskId)) };
           } },
           canReadProject: (personId, project) => projectGrant(personId, project),
+          // Guided onboarding L2-3: the hosted setup run. Its model use is the gateway's (configured: the run is metered); citations are re-read from the company's own code host.
+          setupRun: {
+            standing: setupRunStanding,
+            modelAccessConfigured: () => { try { return modelGateway() !== undefined; } catch { return false; } },
+            readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+              .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
+            displayName: displayNameOf,
+          },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
         };
@@ -608,6 +662,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           bookUsage: money.bookUsage,
           // DEC 253c/253j(1): the trusted eval plan, approval and baseline cache for this company's CHECKS runs, with the approver's live role from the hosted members reader.
           evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),
+          // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
+          // the laptop page's only), so nothing is ever handed over.
+          setupAgent: { mayStillRun: async () => false },
         });
       })();
       found.catch(() => callbackHandlers.delete(companyId));
@@ -646,6 +703,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreTasks,
     coreApp,
     lessons,
+    ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
     ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {
       get settings() {
         if (hookSettings === undefined) throw new Error("the policy hook settings are not readable");
@@ -704,9 +762,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
  * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): while the switch serves, the task routes' core entry and the /v1/app/* routes; off (neither is
  * built), the configuration exactly as given, so the developer API is byte-identical.
  */
-export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry }) {
+export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook" | "projectArchiveTakesEffect">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry; projectArchiveTakesEffect?: (companyId: string) => boolean }) {
   if (root.coreTasks === undefined) return config;
-  return { ...config, ...(root.policyHook === undefined ? {} : { policyHook: root.policyHook }), coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }) };
+  return { ...config, ...(root.policyHook === undefined ? {} : { policyHook: root.policyHook }), coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }),
+    ...(root.projectArchiveTakesEffect === undefined ? {} : { projectArchiveTakesEffect: root.projectArchiveTakesEffect }) };
 }
 
 /** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */

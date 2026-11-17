@@ -24,10 +24,24 @@ export const CompanyPreapproval = z.object({
   entityType: z.literal("COMPANY_PREAPPROVAL"), role: z.enum(["admin", "member"]), status: z.enum(["live", "used", "withdrawn"]),
   expiresAt: z.number().int().positive(), createdAt: z.iso.datetime(), createdBy: z.union([z.literal("operator"), CompanyPersonId]),
   usedBy: CompanyPersonId.optional(), usedAt: z.iso.datetime().optional(),
+  /** DEC 254h: the SHA-256 of the one invite link secret made with this pre-approval. Replacing the pre-approval replaces it, ending the old secret. */
+  inviteHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 export const companyKey = (companyId: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "COMPANY"), sk: "META" });
 export const preapprovalKey = (companyId: string, email: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "PREAPPROVAL"), sk: emailIndexKey(CompanyEmail.parse(email)).pk });
 export const preapprovalHashKey = (companyId: string, hash: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "PREAPPROVAL"), sk: `EMAIL#${z.string().regex(/^[a-f0-9]{64}$/).parse(hash)}` });
+/**
+ * DEC 254h: an invite link's single-use secret, kept only as its SHA-256 in the company's own partition (a secret for A is never even looked up
+ * under B), bound to one pre-approval (by its email hash, and the pre-approval naming this secret's hash): withdrawing, spending or replacing
+ * that pre-approval ends the secret too.
+ */
+export const inviteLinkKey = (companyId: string, hash: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "INVITE_LINK"), sk: `SECRET#${z.string().regex(/^[a-f0-9]{64}$/).parse(hash)}` });
+export const CompanyInviteLink = z.object({
+  entityType: z.literal("COMPANY_INVITE_LINK"), companyId: OrgIdSchema, status: z.enum(["live", "used", "withdrawn"]),
+  expiresAt: z.number().int().positive(), createdAt: z.iso.datetime(), createdBy: z.union([z.literal("operator"), CompanyPersonId]),
+  emailHash: z.string().regex(/^[a-f0-9]{64}$/),
+  usedBy: CompanyPersonId.optional(), usedAt: z.iso.datetime().optional(),
+}).strict();
 type Member = z.infer<typeof CompanyMember>;
 export const companyMemberKey = (companyId: string, personId: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "MEMBERS"), sk: `MEMBER#${CompanyPersonId.parse(personId)}` });
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
@@ -108,6 +122,52 @@ export class CompanySignInStore {
       return { ok: true, membership: member, ...(legacy ? {} : { viaPreapproval: true as const }) };
     } catch { return refused(); }
   }
+  /**
+   * DEC 254h: join by an invite link's secret, whatever the sign-in method and whether or not the identity has an email. The secret must be live,
+   * unexpired and stored under exactly this company, and its pre-approval still live and the very one it was made with. One transaction writes
+   * the membership and spends both, so exactly one person ever joins by one secret. Every failure is the one "not invited" answer; a person who
+   * is already a member anywhere spends nothing. A live member of this very company is signed in as before whatever `invite=` says (the secret is
+   * then neither checked nor spent, and the sign-in is not "joined by invite"): an admitted sign-in never means a secret was valid.
+   */
+  async joinByInvite(input: { personId: string; companyId: string; inviteHash: string }): Promise<CompanyJoin> {
+    if (!CompanyPersonId.safeParse(input.personId).success || !OrgIdSchema.safeParse(input.companyId).success || !/^[a-f0-9]{64}$/.test(input.inviteHash)) return refused();
+    try {
+      const existing = await this.membership(input.personId);
+      if (existing !== undefined) return this.memberResult(existing, input.companyId);
+      if (!await this.companyExists(input.companyId)) return refused();
+      const linkKey = inviteLinkKey(input.companyId, input.inviteHash);
+      const stored = await this.read(linkKey) as Record<string, unknown> | undefined;
+      const { pk: storedPk, sk: storedSk, ...fields } = stored ?? {};
+      const link = storedPk === linkKey.pk && storedSk === linkKey.sk ? CompanyInviteLink.safeParse(fields) : undefined;
+      if (link === undefined) return refused();
+      if (!link.success || link.data.companyId !== input.companyId || link.data.status !== "live" || link.data.expiresAt <= this.seconds()) return refused();
+      const approvalKey = preapprovalHashKey(input.companyId, link.data.emailHash);
+      const approval = CompanyPreapproval.safeParse(await this.read(approvalKey));
+      if (!approval.success || approval.data.status !== "live" || approval.data.expiresAt <= this.seconds() || approval.data.inviteHash !== input.inviteHash) return refused();
+      const at = this.iso();
+      const member: Member = { entityType: "COMPANY_MEMBERSHIP", personId: input.personId, companyId: input.companyId, role: approval.data.role, joinedAt: at, joinedVia: "preapproval" };
+      const writes: Write[] = [
+        { Put: { TableName: this.input.tableName, Item: { ...membershipKey(input.personId), ...member }, ConditionExpression: "attribute_not_exists(pk)" } },
+        this.memberMirror(member),
+        { Update: { TableName: this.input.tableName, Key: linkKey, UpdateExpression: "SET #status = :used, usedBy = :person, usedAt = :at",
+          ConditionExpression: "#status = :live AND expiresAt > :now AND companyId = :company AND createdAt = :created",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: { ":used": "used", ":person": input.personId, ":at": at, ":live": "live", ":now": this.seconds(), ":company": input.companyId, ":created": link.data.createdAt } } },
+        { Update: { TableName: this.input.tableName, Key: approvalKey, UpdateExpression: "SET #status = :used, usedBy = :person, usedAt = :at",
+          ConditionExpression: "#status = :live AND expiresAt > :now AND expiresAt = :expires AND #role = :role AND createdAt = :created AND inviteHash = :hash",
+          ExpressionAttributeNames: { "#status": "status", "#role": "role" },
+          ExpressionAttributeValues: { ":used": "used", ":person": input.personId, ":at": at, ":live": "live", ":now": this.seconds(), ":expires": approval.data.expiresAt, ":role": approval.data.role, ":created": approval.data.createdAt, ":hash": input.inviteHash } } },
+      ];
+      try { await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
+      catch (error) {
+        if (!conditional(error)) return refused();
+        // A lost race spends nothing of this sign-in's: whoever won, only an existing membership can admit (and it never counts as this invite).
+        const won = await this.membership(input.personId);
+        return won === undefined ? refused() : this.memberResult(won, input.companyId);
+      }
+      return { ok: true, membership: member, viaPreapproval: true };
+    } catch { return refused(); }
+  }
   /** Every mutation and its durable log commit together. Logs contain only fixed events and opaque ids. */
   async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string, memberAudit?: { createdBy: string; createdAt: string; fromRole: Member["role"]; toRole: Member["role"]; ownerOverride?: true }): Promise<void> {
     if (!OrgIdSchema.safeParse(companyId).success || !/^company-[a-z-]+$/.test(event) || writes.length > 4) throw unavailable();
@@ -126,28 +186,39 @@ export class CompanySignInStore {
   private approval(role: "admin" | "member", hours: number, createdBy: string) {
     return CompanyPreapproval.parse({ entityType: "COMPANY_PREAPPROVAL", role, status: "live", expiresAt: this.seconds() + CompanyExpiryHours.parse(hours) * 3600, createdAt: this.iso(), createdBy });
   }
-  async preapprove(companyId: string, email: string, role: "admin" | "member", hours: number, createdBy = "operator"): Promise<void> {
+  /**
+   * A new pre-approval; its expiry (epoch seconds) is the answer. DEC 254h: with `inviteHash`, the SHA-256 of an invite link's secret is stored with
+   * it in the same transaction, bound to this pre-approval (same expiry; ended with it). A hash already stored is refused, never overwritten.
+   */
+  async preapprove(companyId: string, email: string, role: "admin" | "member", hours: number, createdBy = "operator", inviteHash?: string): Promise<number> {
     if (!await this.companyExists(companyId)) throw unavailable();
     const key = preapprovalKey(companyId, email);
     const raw = await this.read(key);
     const previous = raw === undefined ? undefined : CompanyPreapproval.parse(raw);
     if (previous?.status === "live" && previous.expiresAt > this.seconds()) throw unavailable();
-    await this.operatorWrite(companyId, "company-preapprove", [{ Put: { TableName: this.input.tableName, Item: { ...key, ...this.approval(role, hours, createdBy) },
+    const approval = CompanyPreapproval.parse({ ...this.approval(role, hours, createdBy), ...(inviteHash === undefined ? {} : { inviteHash }) });
+    const link: Write[] = inviteHash === undefined ? [] : [{ Put: { TableName: this.input.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: { ...inviteLinkKey(companyId, inviteHash),
+      ...CompanyInviteLink.parse({ entityType: "COMPANY_INVITE_LINK", companyId, status: "live", expiresAt: approval.expiresAt, createdAt: approval.createdAt, createdBy: approval.createdBy, emailHash: key.sk.slice(6) }) } } }];
+    await this.operatorWrite(companyId, "company-preapprove", [...link, { Put: { TableName: this.input.tableName, Item: { ...key, ...approval },
       ...(previous === undefined ? { ConditionExpression: "attribute_not_exists(pk)" } : {
         ConditionExpression: "createdAt = :created AND expiresAt = :expires AND #status = :status AND #role = :role",
         ExpressionAttributeNames: { "#status": "status", "#role": "role" },
         ExpressionAttributeValues: { ":created": previous.createdAt, ":expires": previous.expiresAt, ":status": previous.status, ":role": previous.role },
       }),
     } }]);
+    return approval.expiresAt;
   }
   async withdraw(companyId: string, hash: string, createdBy?: string): Promise<boolean> {
     const key = preapprovalHashKey(companyId, hash);
     const row = CompanyPreapproval.safeParse(await this.read(key));
     if (!row.success) return false;
+    // DEC 254h: its invite link's row is marked too, in the same transaction (the join checks the pre-approval anyway; expired rows age out by TTL).
+    const link: Write[] = row.data.inviteHash === undefined ? [] : [{ Update: { TableName: this.input.tableName, Key: inviteLinkKey(companyId, row.data.inviteHash),
+      UpdateExpression: "SET #status = :withdrawn", ConditionExpression: "attribute_exists(pk) AND #status = :live", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":withdrawn": "withdrawn", ":live": "live" } } }];
     await this.operatorWrite(companyId, "company-preapproval-withdraw", [{ Update: {
       TableName: this.input.tableName, Key: key, UpdateExpression: "SET #status = :withdrawn", ConditionExpression: "attribute_exists(pk) AND createdAt = :at",
       ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":withdrawn": "withdrawn", ":at": row.data.createdAt },
-    } }], createdBy);
+    } }, ...(row.data.status === "live" && row.data.expiresAt > this.seconds() ? link : [])], createdBy);
     return true;
   }
   async list(companyId: string): Promise<{ preapprovals: Array<z.infer<typeof CompanyPreapproval> & { emailHash: string }>; more: boolean }> {
@@ -158,7 +229,10 @@ export class CompanySignInStore {
     const preapprovals = answer.Items.map((item) => {
       const row = CompanyPreapproval.extend({ pk: z.literal(pk), sk: z.string().regex(/^EMAIL#[a-f0-9]{64}$/) }).safeParse(item);
       if (!row.success) throw unavailable();
-      return { ...CompanyPreapproval.parse(row.data), emailHash: row.data.sk.slice(6) };
+      // The invite link's hash stays in the table: a list shows none of it.
+      const shown: Partial<z.infer<typeof CompanyPreapproval>> & Omit<z.infer<typeof CompanyPreapproval>, "inviteHash"> = CompanyPreapproval.parse(row.data);
+      delete shown.inviteHash;
+      return { ...shown, emailHash: row.data.sk.slice(6) };
     });
     return { preapprovals, more: answer.LastEvaluatedKey !== undefined };
   }

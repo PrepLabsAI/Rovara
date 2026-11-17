@@ -7,6 +7,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
+  COMPANY_INVITE_LINK_MAX,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
   ChannelInfoRequestSchema,
@@ -85,7 +86,9 @@ import { companyImportOperator, type CompanyImportEventInput, type CompanyImport
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
-export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string; since?: number }; oidc?: { displayName: string; since?: number }; confirmElicitation?: boolean }
+export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string; since?: number }; oidc?: { displayName: string; since?: number };
+  /** DEC 254h: GitHub sign-in is on (offered only with Code's company layer, `company`). */
+  github?: { since?: number }; confirmElicitation?: boolean }
 export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
@@ -107,7 +110,11 @@ export interface DeveloperIdentityDependencies {
   companyIssuer?: (companyId: string) => Promise<SelectedCompanyIssuer | undefined>;
   companyDirectory?: (companyId: string) => SlackDirectory | undefined;
   slackTeamCompany?: (teamId: string) => string | undefined | Promise<string | undefined>;
+  /** Guided onboarding PR 4: the broker's "slack-install" invokes (aws/slack-install-identity.ts). Absent: refused as not set up. */
+  slackInstall?: (event: unknown) => Promise<Record<string, unknown>>;
 }
+/** Guided onboarding PR 4: a "slack-install" invoke (its schema is aws/slack-install-identity.ts SlackInstallRequestSchema). */
+export interface SlackInstallInvoke { kind: "slack-install"; op: string }
 export interface HttpResult { statusCode: number; headers: Record<string, string>; body: string; cookies?: string[] }
 /** The invoke's answer: the broker's contract, plus a refusal for a request that is not one. */
 export type ChannelMembersResult = ChannelMembersResponse | { ok: false; error: "invalid_request" };
@@ -135,12 +142,18 @@ const RETRYABLE_AWS_ERRORS = new Set([
   "ProvisionedThroughputExceededException", "RequestLimitExceeded", "InternalServerError", "ServiceUnavailable", "TimeoutError",
 ]);
 
-export function enabledMethods(deps: Pick<DeveloperIdentityDependencies, "config" | "providers">): DeveloperSignInMethod[] {
+export function enabledMethods(deps: Pick<DeveloperIdentityDependencies, "config" | "providers" | "company">): DeveloperSignInMethod[] {
   const methods: DeveloperSignInMethod[] = [];
   if (deps.config.slack.enabled && deps.config.slack.teamId !== undefined && deps.providers.slack !== undefined) methods.push("slack");
   if (deps.config.oidc !== undefined && deps.providers.oidc !== undefined) methods.push("oidc");
+  // DEC 254h: GitHub only with Code's company layer, where the company comes only from membership (or an invite). Without it, any GitHub user
+  // would be admitted, so it is never offered there.
+  if (deps.config.github !== undefined && deps.providers.github !== undefined && deps.company !== undefined) methods.push("github");
   return methods;
 }
+/** FR-045: when a method was last turned on (a session started before it stays ended). */
+const methodSince = (config: DeveloperIdentityConfig, method: DeveloperSignInMethod): number | undefined =>
+  method === "slack" ? config.slack.since : method === "github" ? config.github?.since : config.oidc?.since;
 
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const escape = (text: string) => text.replace(/[&<>"']/g, (c) => ENTITIES[c] ?? c);
@@ -216,7 +229,7 @@ const COMPANY_OWN_SIGNIN = "your company signs in with its own sign-in method";
 export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependencies) {
   const { config, store } = deps;
   const endpoint = (path: string) => `${config.issuer}${path}`;
-  const methodLabel = (method: DeveloperSignInMethod) => (method === "slack" ? "Slack" : config.oidc?.displayName ?? "company sign-in");
+  const methodLabel = (method: DeveloperSignInMethod) => (method === "slack" ? "Slack" : method === "github" ? "GitHub" : config.oidc?.displayName ?? "company sign-in");
   const provider = (method: DeveloperSignInMethod): SignInProvider => {
     const found = deps.providers[method];
     if (found === undefined) throw new ProviderNotConfiguredError(`${methodLabel(method)} sign-in is not set up in this environment`);
@@ -231,7 +244,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
    * self-serve company) uses the install's methods, the shared sign-in method; a company with its own issuer only ever uses that issuer.
    */
   const providerChoice = async (method: DeveloperSignInMethod, companyId?: string): Promise<{ provider: SignInProvider; install: boolean }> => {
-    if (deps.company === undefined || companyId === undefined || method === "slack") return { provider: provider(method), install: true };
+    // Slack and (DEC 254h) GitHub are only ever the install's: a company with its own issuer refuses them at the callback and at each mint.
+    if (deps.company === undefined || companyId === undefined || method === "slack" || method === "github") return { provider: provider(method), install: true };
     if (companyId === IMPLICIT_COMPANY_ID) throw new ProviderNotConfiguredError("sign-in is not finished");
     if (!await deps.company.hasOwnIssuer(companyId)) return { provider: provider(method), install: true };
     const selected = await deps.companyIssuer?.(companyId);
@@ -265,6 +279,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (deps.company === undefined) return true;
     try {
       if (installMethod === true && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID)) return false;
+      // DEC 254h: GitHub is only ever the shared method: outside the built-in company its session must carry that mark.
+      if (amr === "github" && installMethod !== true && companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) return false;
       if (companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) {
         if (await deps.company.hasOwnIssuer(companyId)) {
           // A company with its own sign-in: never the shared method; its Slack only while the install workspace is bound to it (as before).
@@ -293,7 +309,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
    */
   async function companylessMayMint(personId: string, amr: DeveloperSignInMethod, registered: SignInClientRecord | undefined): Promise<boolean> {
     // DEC 254e: Slack (any workspace) as well as the install's OIDC.
-    if (deps.company === undefined || deps.companyInvites === undefined || (amr !== "oidc" && amr !== "slack")) return false;
+    if (deps.company === undefined || deps.companyInvites === undefined || (amr !== "oidc" && amr !== "slack" && amr !== "github")) return false;
     if (registered === undefined || registered.installLevel !== true || registered.fullAccess !== true || registered.webApp !== true) return false;
     return deps.companyInvites.companylessEligible(personId);
   }
@@ -310,7 +326,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const factorAdmin = createFactorAdmin({
     env: config.env, store, email: deps.stepUp?.email, companyAdmin: deps.stepUp?.companyAdmin, now: deps.now, log: deps.log,
     // As a refresh checks: the session's method is still on, and was on when it started.
-    methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, session.amr === "slack" ? config.slack.since : config.oidc?.since),
+    methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, methodSince(config, session.amr)),
   });
   const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
@@ -353,7 +369,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const requestId = query.get("request");
     if (requestId !== null) {
       const method = query.get("method");
-      if (deps.company !== undefined && (method === "slack" || method === "oidc")) {
+      if (deps.company !== undefined && (method === "slack" || method === "oidc" || method === "github")) {
         try {
           const pending = await store.getAuthRequest(requestId);
           if (pending === undefined) return expired();
@@ -362,7 +378,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           methods = selected;
         } catch { return methodUnavailable(); }
       }
-      if ((method !== "slack" && method !== "oidc") || !methods.includes(method)) return page(400, "Sign-in method not available", ["Run agentx login again."]);
+      if ((method !== "slack" && method !== "oidc" && method !== "github") || !methods.includes(method)) return page(400, "Sign-in method not available", ["Run agentx login again."]);
       const request = await store.chooseMethod(requestId, method);
       if (request === undefined) return expired();
       try {
@@ -402,6 +418,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         methods = selected;
       } catch { return methodUnavailable(); }
     }
+    // DEC 254h: an invite link's secret, read only with the company layer on, with a company named, from an install-level client (the CLI or a
+    // registered install-level client such as the web app). Only its SHA-256 is kept; whether it is any good is decided at the callback, with the
+    // one "not invited" answer for every failure.
+    const invite = deps.company === undefined ? null : query.get("invite");
+    if (invite !== null && (invite.length < 1 || invite.length > COMPANY_INVITE_LINK_MAX || selectedCompany === undefined || (client !== undefined && client.installLevel !== true))) return methodUnavailable();
     const challenge = query.get("code_challenge") ?? "";
     const invalid = (description: string) => toClient(redirectUri, { error: "invalid_request", error_description: description, ...(clientState === "" ? {} : { state: clientState }) });
     if (query.get("response_type") !== "code") return invalid("response_type must be code; update the AgentX CLI and run agentx login again");
@@ -413,6 +434,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
     const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
     // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
+    // A step-up re-proves who someone is; it never joins anyone.
+    if (stepUp && invite !== null) return methodUnavailable();
     if (stepUp && deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
     let request: AuthRequestRecord;
     try {
@@ -423,6 +446,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         // Spec 065 FR-002: a scope the registration does not allow is dropped, not refused.
         ...(client === undefined ? {} : grantedScopes(query.get("scope"), client)),
         ...(selectedCompany === undefined ? {} : { companyId: selectedCompany }),
+        ...(invite === null ? {} : { inviteHash: createHash("sha256").update(invite, "utf8").digest("hex") }),
       });
       if (methods.length === 1) {
         const method = methods[0]!;
@@ -441,7 +465,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   async function authorizeBrowser(query: URLSearchParams): Promise<HttpResult> {
     const returnTo = query.get("return_to") ?? "";
     if (!REVIEW_RETURN_TO.test(returnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
-    const methods = enabledMethods(deps);
+    // DEC 254h: the browser review page's session check reads Slack and company sign-in only, so GitHub is not offered there.
+    const methods = enabledMethods(deps).filter((method) => method !== "github");
     if (methods.length === 0) return page(503, "Sign-in is unavailable", ["Ask an AgentX administrator to enable a sign-in method."]);
     const verifier = randomBytes(32).toString("base64url");
     const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -633,14 +658,19 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
       }
+      // DEC 254h: a sign-in carrying an invite link's secret joins by that secret alone (any method, with or without an email), never by email.
+      const byInvite = request.inviteHash !== undefined;
       const joined = candidate === undefined || !OrgIdSchema.safeParse(candidate).success || (request.companyId !== undefined && request.companyId !== candidate) || !clientAllowed
+        || (byInvite && request.companyId === undefined)
         ? { ok: false as const, reason: "not_invited" as const }
-        : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
+        : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash! })
+          : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
       // DEC 253z: not invited anywhere, no company asked for, signing in to the web app: a session with no company (it can only create one).
       companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined && request.stepUp !== true
         && await companylessMayMint(developerId, method, registered);
       if (!joined.ok && !companyless) {
-        const text = { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
+        // DEC 254h: with an invite secret, every failure (unknown, used, expired, withdrawn, wrong company, a member elsewhere, a removed member) is the one answer.
+        const text = byInvite ? "not invited" : { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
         deps.log({ event: "signin.refused", reason: joined.reason, developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: text }) : browserReturn(request.browserReturnTo, false);
       }
@@ -654,7 +684,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // email is ever looked up in Slack. A person with no company is looked up in no company's Slack, and so is a person from another Slack
     // workspace (DEC 254e: no install or company directory speaks for their workspace).
     const foreignSlack = method === "slack" && identity.slackTeam !== undefined && identity.slackUserId === undefined;
-    const directory = companyless || foreignSlack ? undefined : companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
+    // DEC 254h: a GitHub email is never used to link a Slack user (GitHub verified it once; the Slack link grants task access by channel).
+    const directory = companyless || foreignSlack || method === "github" ? undefined : companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
     if (slackUserId === undefined && identity.email !== undefined && directory !== undefined) {
       const link = await directory.lookupByEmail(identity.email);
       slackUserId = link === "unavailable" ? (companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? existing?.slackUserId : undefined) : link === "none" ? undefined : link.userId;
@@ -770,7 +801,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       await revoke(session.sessionId, "method_disabled");
       return oauthError(400, "invalid_grant", `${methodLabel(session.amr)} sign-in was turned off in this environment; sign in another way with agentx login`);
     }
-    if (startedBeforeMethodOn(session.startedAt, session.amr === "slack" ? config.slack.since : companySince ?? config.oidc?.since)) {
+    if (startedBeforeMethodOn(session.startedAt, session.amr === "oidc" ? companySince ?? config.oidc?.since : methodSince(config, session.amr))) {
       await revoke(session.sessionId, "method_disabled");
       return oauthError(400, "invalid_grant", `your sign-in ended when ${methodLabel(session.amr)} was turned off; sign in again with agentx login`);
     }
@@ -908,6 +939,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           return callback("slack", url.searchParams, headers);
         case "/v1/auth/callback/oidc":
           return callback("oidc", url.searchParams, headers);
+        // DEC 254h: GitHub's callback; with GitHub off (or the company layer off) the sign-in request never chose it, so this answers "expired".
+        case "/v1/auth/callback/github":
+          return callback("github", url.searchParams, headers);
         case "/v1/auth/step-up":
           return stepUpPages.show(headers);
       }
@@ -928,11 +962,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
       | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
-      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput,
+      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput | SlackInstallInvoke,
   ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
-    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue> => {
+    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue | Record<string, unknown>> => {
     if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
+      if (event.kind === "slack-install") return deps.slackInstall === undefined ? { ok: false, error: "not_set_up" } : deps.slackInstall(event);
       if (deps.companyImport !== undefined && (event.kind === "company-import" || event.kind === "company-import-undo")) return companyImportOperator({ store: deps.companyImport, log: deps.log }, event);
       if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, ...(deps.companyInvites === undefined ? {} : { invites: deps.companyInvites }), clients: store, now: deps.now, log: deps.log }, event);
       // ID-STEPUP-FOLLOWUPS: the factor email and passkeys. Each checks the caller's own live session (and, for a change, its fresh step-up) in this table.
