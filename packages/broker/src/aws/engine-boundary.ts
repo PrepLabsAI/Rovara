@@ -154,7 +154,8 @@ export interface CoreTaskEntry {
   route(request: BrokerRequest, caller: CoreEntryCaller): Promise<BrokerResponse | undefined>;
   /**
    * S2: the install administrator's cancel of a core task's workspace. The company is the workspace's own (its discovery pointer and scoped record), the task the one that workspace holds;
-   * `authorize` is the admin route's own project check, asked with the task's project. Throws the missing workspace's words for a workspace that is no core task's of a company on the core.
+   * `authorize` is the admin route's own project check, asked with the task's project, and counts only for an administrator whose live membership is the task's company (Q2: a grant names a
+   * project by name only). Throws the missing workspace's words for a workspace that is no core task's of a company on the core.
    * Absent: the deployment does not serve it (the admin route keeps its answer for a core workspace).
    */
   stopWorkspaceForAdmin?(workspaceId: string, administrator: { id: string }, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }>;
