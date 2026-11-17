@@ -65,6 +65,7 @@ import { isWikiPath, routeHostedWiki, type HostedWikiWiring } from "./wiki-route
 import { isWikiCorrectionPath, routeHostedWikiCorrections, type HostedWikiCorrectionsWiring } from "./wiki-corrections-routes.js";
 import type { HostedTestEnvironmentDecider } from "./hosted-test-environment-decision.js";
 import { z } from "zod";
+import { isReportPath, routeHostedReport, type HostedReportWiring } from "./report-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -177,6 +178,8 @@ export interface CoreDevWiring {
   wiki?: HostedWikiWiring;
   /** Lead 4 C1: the project wiki's corrections (`.../wiki/pages/<p>/notes|flags|corrections`, `.../wiki/disputed`, wiki-corrections-routes.ts). Absent: those paths say "not on the core yet". */
   wikiCorrections?: HostedWikiCorrectionsWiring;
+  /** Lead 4 A1/A2: the cost and time report (`/v1/app/org/report/...` and `POST /v1/app/tasks/<id>/feature`, report-routes.ts). Absent: those paths say "not on the core yet". */
+  report?: HostedReportWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -205,7 +208,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
-  if (isSetupRunPath(path, method) || isWikiMapPath(path, method)) return true;
+  if (isSetupRunPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
   if (isWikiPath(path, method) || isWikiCorrectionPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
@@ -456,6 +459,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           // Lead 4 C1: the same member company's own store; the caller's role on the project is read live inside (never from the request).
           if (target.wiring.wikiCorrections === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedWikiCorrections({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wikiCorrections, now: () => nowOf(target) });
+        }
+        if (isReportPath(path, request.method)) {
+          // Lead 4 A1/A2: the company's own runtime, the caller's live role from membership, the request's audit sink naming the caller.
+          if (target.wiring.report === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedReport({
+            request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.report,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+          });
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {

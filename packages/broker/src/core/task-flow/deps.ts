@@ -155,6 +155,10 @@ export interface StartExtrasInput {
   receivedAt: string;
   /** The ticket the task starts from (intake only): the session is bound to it in the same transaction, so the task and its ticket follow each other or the start does not commit. */
   ticket?: { system: string; id: string; url: string } | undefined;
+  /** Where the task started (the surface that asked for it). */
+  origin?: WorkOrigin | undefined;
+  /** What the task is for when it is not ordinary work (a setup run); absent for ordinary work. */
+  purpose?: "setup_agent" | undefined;
 }
 
 /** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */

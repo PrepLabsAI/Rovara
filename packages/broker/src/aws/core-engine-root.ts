@@ -697,6 +697,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             // The company's lessons are built with its runtime (lessonsByCompany); absent where the lessons switch does not cover the company.
             ...(companyLessons === undefined ? {} : { suggestLesson: async (note: WikiNoteLessonInput): Promise<WikiNoteLessonResult> => (note.companyId !== runtime.companyId ? { state: "refused" as const } : await proposeLessonFromNote({ store: companyLessons.runtime.store, settings: companyLessons.runtime.settings, audit: companyLessons.runtime.audit, now: () => now().getTime() }, note)) }),
           },
+          // Lead 4 A1/A2: the cost and time report. A task is filed or moved by its starter or a project maintainer: the standing is the setup run's own live read.
+          report: { standing: setupRunStanding },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
         };

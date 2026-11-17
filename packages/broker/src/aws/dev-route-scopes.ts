@@ -258,6 +258,14 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/flags", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/flags/resolve", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/disputed", requires: "full" },
+  // Lead 4 A1/A2: the admin portal's cost and time report. Full access only, then a live company owner or admin (reads and feature changes), or the task's starter or a project maintainer (filing a task under a feature).
+  { method: "GET", path: "/v1/app/org/report/tasks", requires: "full" },
+  { method: "GET", path: "/v1/app/org/report/features", requires: "full" },
+  { method: "POST", path: "/v1/app/org/report/features", requires: "full" },
+  { method: "POST", path: "/v1/app/org/report/features/{featureId}/rename", requires: "full" },
+  { method: "POST", path: "/v1/app/org/report/features/{featureId}/merge", requires: "full" },
+  { method: "POST", path: "/v1/app/org/report/features/{featureId}/state", requires: "full" },
+  { method: "POST", path: "/v1/app/tasks/{taskId}/feature", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

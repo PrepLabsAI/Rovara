@@ -82,6 +82,10 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/delete", "full"],
     ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/suggest-lesson", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags", "full"],
     ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags/resolve", "full"], ["GET", "/v1/app/projects/payments/wiki/disputed", "full"],
+    // Lead 4 A1/A2: the cost and time report (full access only; a live company owner or admin, or the task's starter or a maintainer for a task's feature).
+    ["GET", "/v1/app/org/report/tasks", "full"], ["GET", "/v1/app/org/report/features", "full"], ["POST", "/v1/app/org/report/features", "full"],
+    ["POST", "/v1/app/org/report/features/ft_00000000000000000001/rename", "full"], ["POST", "/v1/app/org/report/features/ft_00000000000000000001/merge", "full"], ["POST", "/v1/app/org/report/features/ft_00000000000000000001/state", "full"],
+    ["POST", "/v1/app/tasks/t1/feature", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -104,6 +108,9 @@ describe("the /v1/app route table", () => {
       // Corrections: only the methods and paths that exist (a note is deleted by POST .../delete; there is no DELETE, PUT or PATCH row, and no read of the notes list).
       ["DELETE", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview/notes"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes"],
       ["GET", "/v1/app/projects/payments/wiki/pages/overview/flags"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/corrections"], ["POST", "/v1/app/projects/payments/wiki/disputed"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve"],
+      // The report: no write on the rows, no delete, no people route (a later slice), no other method on a feature.
+      ["POST", "/v1/app/org/report/tasks"], ["PUT", "/v1/app/org/report/features"], ["DELETE", "/v1/app/org/report/features/ft_1"], ["GET", "/v1/app/org/report/features/ft_1/rename"], ["POST", "/v1/app/org/report/features/ft_1/delete"],
+      ["GET", "/v1/app/org/report/people"], ["GET", "/v1/app/tasks/t1/feature"], ["POST", "/v1/app/tasks/t1/feature/extra"], ["POST", "/v1/app/tasks/feature"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
