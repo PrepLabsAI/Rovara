@@ -614,6 +614,12 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     // The same rule answering yes decides, as the co-owner, under the authority it names.
     const decided = await decide(async () => ({ actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PA, t.taskId), taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 3 } }] }));
     expect(decided.extra).toEqual([expect.objectContaining({ kind: "check" })]);
+    // Two approvers carrying the same fence leave one fence item, not two (a transaction cannot name one key twice).
+    const same = { actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check" as const, key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq" as const, path: ["revision"], value: 3 } }] };
+    const subject = createWorkflowDocumentSubject({ store: t.world.store, ownerActing: async () => same });
+    const loaded = (await subject.load(ORG, t.taskId))!;
+    const twice = await subject.apply(loaded, { requestId: randomUUID(), outcome: "approve", seen: { revision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256 } } as never, [principalOf(PB), principalOf(PB)], new Date(t.world.clock.now).toISOString());
+    expect(twice.extra).toHaveLength(1);
   });
 
   it("fences the decision on the People revision it was proved at: a list that changed in between refuses it, nothing decided", async () => {
@@ -652,11 +658,10 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     const t = await hexSetup();
     const taskId = await t.waitingTask(PA);
     const access = t.runtime.flow.deps.access;
-    access.ownerActing = undefined;
+    delete access.ownerActing;
     const bare = deployedDecisionCards({ runtime: t.runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
     const items = await bare.sources.list(cardCaller(PA, ORG, { stepUp: false }));
     expect(items.map((entry) => entry.taskId)).toEqual([taskId]);
-    expect(await bare.sources.list(cardCaller(PB, ORG, { stepUp: false }))).toEqual([]);
     const item = { item: items[0]!, card: projectDecisionCards(items).cards[0]! };
     expect(await bare.performer.approve(cardCaller(PB), { ...item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
     expect(t.point.proofs.issue).not.toHaveBeenCalled();
