@@ -380,6 +380,8 @@ export * from "./lesson-keys.js";
 export * from "./wiki-store.js";
 // Lead 4 A1: what a task's agents are given of the project wiki, and the worker's report.
 export * from "./wiki-agents.js";
+// Lead 4 C1: the wiki corrections (notes, Mark wrong, approvals) routes contract.
+export * from "./wiki-corrections.js";
 export * from "./spec-target.js";
 
 // Wiki W0: the free file map and forecast.

@@ -74,6 +74,7 @@ import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
+import { proposeLessonFromNote, type WikiNoteLessonInput, type WikiNoteLessonResult } from "../core/wiki/note-lesson.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
@@ -311,6 +312,19 @@ export function setupRunStandingFrom(people: { membershipOf: (personId: string) 
   };
 }
 
+/**
+ * Lead 4 C1: a person's role on a project for the wiki's corrections, read live. Only a live member of THIS company has one: a company owner or admin is a `maintainer` of every project (as
+ * `app-projects.ts` says); otherwise the project grant gives `maintainer` or `contributor`; no grant, no role. (A role the install knows only as `viewer` would read but not correct.)
+ */
+export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrantRole: (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> }): (personId: string, companyId: OrgId, project: string) => Promise<ProjectRole | undefined> {
+  return async (personId, companyId, project) => {
+    const membership = await people.membershipOf(personId);
+    if (membership === undefined || membership.companyId !== companyId) return undefined;
+    if (membership.role === "owner" || membership.role === "admin") return "maintainer";
+    return projectRoleOf(await people.projectGrantRole(personId, project));
+  };
+}
+
 export function hostedTaskAccess(inputs: {
   membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
   /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
@@ -475,6 +489,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
+  const wikiProjectRole = wikiProjectRoleFrom({ membershipOf, projectGrantRole });
   const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
@@ -613,6 +628,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const routes = createCoreDevRoutes({
       app, companyOf, log,
       wiring: async (runtime) => {
+        const companyLessons = lessonsByCompany.get(runtime.companyId);
         // Lane L11: the session levels, the decision cards and how we work, from the company's own records (membership and the broker's project grants).
         const registry = await app.registry();
         return {
@@ -647,6 +663,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             standing: setupRunStanding,
             projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
+          },
+          // Lead 4 C1: the wiki's corrections. The role is read live from membership; "Suggest as a lesson" exists only where lessons are on for the company (it writes one PENDING lesson, never approves).
+          wikiCorrections: {
+            projectRole: wikiProjectRole,
+            projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
+            displayName: displayNameOf,
+            // The company's lessons are built with its runtime (lessonsByCompany); absent where the lessons switch does not cover the company.
+            ...(companyLessons === undefined ? {} : { suggestLesson: async (note: WikiNoteLessonInput): Promise<WikiNoteLessonResult> => (note.companyId !== runtime.companyId ? { state: "refused" as const } : await proposeLessonFromNote({ store: companyLessons.runtime.store, settings: companyLessons.runtime.settings, audit: companyLessons.runtime.audit, now: () => now().getTime() }, note)) }),
           },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),

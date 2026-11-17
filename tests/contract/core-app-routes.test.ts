@@ -75,6 +75,11 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
     // L4-D: confirm, discard and decide a setup candidate.
     ["POST", "/v1/app/projects/payments/setup-agent/confirm", "full"], ["POST", "/v1/app/projects/payments/setup-agent/discard", "full"], ["POST", "/v1/app/projects/payments/setup-agent/decide", "full"],
+    // Lead 4 C1: the wiki's corrections (additive: no existing row changed).
+    ["GET", "/v1/app/projects/payments/wiki/pages/overview/corrections", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes", "full"],
+    ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/delete", "full"],
+    ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/suggest-lesson", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags", "full"],
+    ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags/resolve", "full"], ["GET", "/v1/app/projects/payments/wiki/disputed", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -94,6 +99,9 @@ describe("the /v1/app route table", () => {
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
       // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.
       ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
+      // Corrections: only the methods and paths that exist (a note is deleted by POST .../delete; there is no DELETE, PUT or PATCH row, and no read of the notes list).
+      ["DELETE", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview/notes"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes"],
+      ["GET", "/v1/app/projects/payments/wiki/pages/overview/flags"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/corrections"], ["POST", "/v1/app/projects/payments/wiki/disputed"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
