@@ -1,4 +1,5 @@
 // The deployed core identity names a person from their sign-in record through the one display helper (DEC 254p (a), #846's follow-up): a GitHub person's name is clean text, anyone else's is as stored.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId } from "@agentx/contracts";
@@ -73,5 +74,19 @@ describe("the deployed identity's display name", () => {
     const principal = await identity.getPrincipal(ORG, PERSON);
     expect(principal?.displayName).toBeDefined();
     expect(principal?.displayName).not.toMatch(/[<>*]/u);
+  });
+
+  it("is the one reader the root wires, and the root keeps no raw name read of its own", () => {
+    const root = readFileSync("packages/broker/src/aws/core-engine-root.ts", "utf8");
+    expect(root).toContain("const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);");
+    expect(root).toContain("const identity: HostedIdentityOptions = { membershipOf, displayNameOf };");
+    expect(root.match(/row\["displayName"\]/gu) ?? []).toHaveLength(0);
+  });
+
+  it("reads the person's own sign-in record, strongly consistent, from the given table", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const client = { async send(command: unknown) { seen.push(command instanceof GetCommand ? { ...command.input } : {}); return { Item: github("Dana") }; } };
+    expect(await hostedDisplayNameOf(client, "table-x")(PERSON)).toBe("Dana");
+    expect(seen).toEqual([{ TableName: "table-x", Key: { pk: `DEVELOPER#${PERSON}`, sk: "META" }, ConsistentRead: true }]);
   });
 });
