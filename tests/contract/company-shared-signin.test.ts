@@ -28,7 +28,7 @@ function world(options: { administrator?: boolean } = {}) {
   const company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
   const invites = new CompanyInviteStore({ documentClient: h.db, tableName: "signin", now: h.now, company, newCompanyId: () => X });
   h.deps.company = company; h.deps.companyInvites = invites;
-  // B's own issuer: the same IdP as the install's, with B's own client (its secret is read by name).
+  // B's own issuer: the same IdP URL and client as the install's (the hardest no-downgrade case); its secret is read by B's own name.
   h.deps.companyIssuer = companyIssuerProvider({ store: company, env: h.deps.config.env, readSecret: async () => OIDC_CLIENT_SECRET, fetch: h.fetch, jwksFor: () => h.oidc.jwks, now: h.now });
   const before = new Date(h.now() - 86_400_000).toISOString();
   h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Rovara", audience: "web-app", redirectUris: [WEB], loopback: false,
@@ -168,6 +168,47 @@ describe("sign-in by live membership (DEC 254b a)", () => {
     expect(w.db.find((row) => row.entityType === "AUTH_CODE")).toHaveLength(codesBefore);
     expect(w.sessionOf(person("bob"))).toHaveLength(1);
     expect(JSON.stringify(w.logs.filter((entry) => entry.event === "signin.refused"))).not.toContain(B);
+  });
+
+  it("a removed member of a company with its own issuer is told their access ended, through either sign-in", async () => {
+    const w = world();
+    await w.setup();
+    await w.signIn("bob", { company: B });
+    await w.company.setRevoked(B, person("bob"), true);
+    expect((await w.signIn("bob")).refused).toBe("access ended by a company admin");
+    expect((await w.signIn("bob", { company: B })).refused).toBe("access ended by a company admin");
+  });
+
+  it("an issuer added after the callback but before the code is redeemed: the code is refused", async () => {
+    const w = world();
+    await w.setup();
+    const back = await w.oidcSignIn("owner", { client_id: "web-app", redirect_uri: WEB });
+    w.db.set({ ...w.issuerRow, pk: companyScoped(X, "SIGNIN_ISSUER") });
+    const tokens = await w.exchange(back.searchParams.get("code")!, { client_id: "web-app", client_secret: SECRET, redirect_uri: WEB });
+    expect(tokens.status).toBe(400);
+    expect(w.sessionOf(person("owner"))).toEqual([]);
+  });
+
+  it("an unreadable issuer row fails closed at the callback and at refresh", async () => {
+    const w = world();
+    await w.setup();
+    const signed = await w.signIn("owner");
+    const read = w.company.read.bind(w.company);
+    w.company.read = async (key) => { if (key.pk === companyScoped(X, "SIGNIN_ISSUER")) throw new Error("read-canary"); return read(key); };
+    expect((await w.refresh(signed.refresh!)).status).toBe(400);
+    expect((await w.signIn("owner")).refused).toBe("not invited");
+    expect(JSON.stringify(w.logs)).not.toContain("read-canary");
+  });
+
+  it("the install's Slack admits a member of a self-serve company only when its team is bound to that company", async () => {
+    const w = world();
+    await w.setup();
+    w.deps.slackTeamCompany = () => X;
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "dana@example.test", role: "member", expiresInHours: 24 });
+    const page = await w.http(httpEvent("GET", `/v1/auth/authorize?${new URLSearchParams({ response_type: "code", client_id: "web-app", redirect_uri: WEB, state: "s", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", company: X }).toString()}`));
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain("method=slack");
+    expect(page.body).toContain("method=oidc");
   });
 
   it("each person gets only their own company and cannot use the other's method or name the other company", async () => {

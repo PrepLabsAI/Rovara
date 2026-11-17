@@ -579,15 +579,18 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       // person in to their LIVE membership's company, read now; no membership row: the built-in company (legacy join, preapproval) as before.
       const installLevel = request.clientId === undefined || registered?.installLevel === true;
       let candidate: string | undefined;
+      let revokedMember = false;
       try {
-        candidate = method === "slack" ? await slackCompany()
-          : request.companyId ?? (installLevel ? (await deps.company.membership(developerId))?.companyId ?? IMPLICIT_COMPANY_ID : IMPLICIT_COMPANY_ID);
+        const member = method !== "slack" && request.companyId === undefined && installLevel ? await deps.company.membership(developerId) : undefined;
+        revokedMember = member?.revokedAt !== undefined;
+        candidate = method === "slack" ? await slackCompany() : request.companyId ?? member?.companyId ?? IMPLICIT_COMPANY_ID;
       } catch { candidate = undefined; }
       const clientAllowed = request.clientId === undefined || (registered !== undefined && (registered.installLevel === true || (registered.companyId ?? IMPLICIT_COMPANY_ID) === candidate));
       // The install's OIDC admits into a company other than the built-in one only when that company has no issuer of its own (no downgrade).
       installMethod = method === "oidc" && installProvider && candidate !== undefined && candidate !== IMPLICIT_COMPANY_ID;
       let ownIssuer = false;
-      if (installMethod) { try { ownIssuer = await deps.company.hasOwnIssuer(candidate!); } catch { candidate = undefined; } }
+      // A removed member is told so by the join below, whatever their company's sign-in.
+      if (installMethod && !revokedMember) { try { ownIssuer = await deps.company.hasOwnIssuer(candidate!); } catch { candidate = undefined; } }
       if (ownIssuer) {
         deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
