@@ -10,7 +10,7 @@ import { z } from "zod";
 /** The window the activity ranking looks at, in days. */
 export const WIKI_MAP_ACTIVITY_DAYS = 90;
 /** Bounds (all shown in the map's `limits`): repositories mapped, areas listed per repository, commit-count request budget per project, module pages per repository and pages per project. */
-export const WIKI_MAP_LIMITS = { repositories: 20, areasPerRepository: 20, activityRequests: 120, modulePagesPerRepository: 40, pagesPerProject: 300, directoryWalkRequests: 80, directoryWalkDepth: 6, treeEntries: 200_000 } as const;
+export const WIKI_MAP_LIMITS = { repositories: 20, areasPerRepository: 40, activityRequests: 160, modulePagesPerRepository: 40, pagesPerProject: 300, directoryWalkRequests: 80, directoryWalkDepth: 6, treeEntries: 200_000 } as const;
 
 const line = (max: number) => z.string().min(1).max(max).regex(/^[^\p{Cc}\p{Cf}]*$/u, "one plain line");
 const count = z.number().int().min(0).max(10_000_000);
@@ -48,9 +48,10 @@ export const WikiMapRepoSchema = z.object({
   commit: z.string().regex(/^[a-f0-9]{40}$/u).optional(),
   /** Files counted: everything not skipped. */
   files: count,
-  skipped: z.object({ generated: count, vendored: count, lockfiles: count, secret: count }).strict(),
+  /** Files not counted, by why. `assets`: images, fonts, archives and other binary files. `secret`: a count only, never a name. */
+  skipped: z.object({ generated: count, vendored: count, lockfiles: count, assets: count, secret: count }).strict(),
   languages: z.array(WikiMapLanguageSchema).max(9),
-  /** The biggest areas (folders), at most `limits.areasPerRepository`. */
+  /** The biggest areas (folders) by file count, at most `limits.areasPerRepository`. Module pages are made for the source ones, in this order of activity. */
   areas: z.array(WikiMapAreaSchema).max(WIKI_MAP_LIMITS.areasPerRepository),
   testFolders: z.array(line(300)).max(10),
   /** Generated and vendored folders that were skipped (paths only, never secret-shaped ones). */

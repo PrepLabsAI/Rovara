@@ -56,6 +56,8 @@ export class FakeHostModel {
   readonly webBase: string;
   /** Fixtures can model a host that cut a tree listing short. */
   readonly incompleteTrees = new Set<string>();
+  /** Wiki W0: when each revision was committed (an ISO time). A revision with none reads as the epoch, so the model's own clock is untouched. */
+  readonly commitTimes = new Map<string, string>();
   readonly revisions = new Map<string, FakeRevision>();
   readonly branches = new Map<string, string>();
   readonly accounts = new Map<string, FakeAccount>();
