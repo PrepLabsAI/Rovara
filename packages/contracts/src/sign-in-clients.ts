@@ -125,7 +125,16 @@ export const AccessCheckResponseSchema = z.object({
   companyId: OrgIdSchema.optional(),
   companyRole: OrgRoleSchema.optional(),
   companyName: z.string().min(1).max(80).optional(),
-}).strict().refine((answer) => (answer.companyId === undefined) === (answer.companyRole === undefined) && (answer.companyName === undefined || answer.companyId !== undefined), "a company comes with its role, and a name only with a company");
+  /**
+   * DEC 254b (f): true only when THIS session's own sign-in joined the company by consuming a live pre-approval (an invite) for the session's company.
+   * Recorded by Code's sign-in server on the session when it was minted; never from a claim, a request or an access rule. Absent otherwise (already a
+   * member, a legacy join, a session with no company, a check by developer id, a Code with no company layer). Sent only with the company.
+   * It describes the whole session (every check on it, also after refreshes), not "just joined". Absent does NOT mean "not the invited person": a
+   * sign-in that spent the invite but then failed (an expired code, a refused step-up) leaves the person a member, and later sign-ins never carry it.
+   */
+  joinedByInvite: z.boolean().optional(),
+}).strict().refine((answer) => (answer.companyId === undefined) === (answer.companyRole === undefined) && (answer.companyName === undefined || answer.companyId !== undefined)
+  && (answer.joinedByInvite === undefined || answer.companyId !== undefined), "a company comes with its role, and a name or an invite join only with a company");
 export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;
 
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----

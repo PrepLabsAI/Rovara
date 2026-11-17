@@ -29,7 +29,8 @@ export const preapprovalHashKey = (companyId: string, hash: string) => ({ pk: co
 type Member = z.infer<typeof CompanyMember>;
 export const companyMemberKey = (companyId: string, personId: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "MEMBERS"), sk: `MEMBER#${CompanyPersonId.parse(personId)}` });
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
-export type CompanyJoin = { ok: true; membership: Member } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" };
+/** `viaPreapproval`: DEC 254b (f), this very call wrote the membership by consuming a live pre-approval (never an existing member, a legacy join or a lost race). */
+export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
 const unavailable = () => new Error("company sign-in unavailable");
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
@@ -102,7 +103,7 @@ export class CompanySignInStore {
         const won = await this.membership(input.personId);
         return won === undefined ? refused() : this.memberResult(won, input.companyId);
       }
-      return { ok: true, membership: member };
+      return { ok: true, membership: member, ...(legacy ? {} : { viaPreapproval: true as const }) };
     } catch { return refused(); }
   }
   /** Every mutation and its durable log commit together. Logs contain only fixed events and opaque ids. */
