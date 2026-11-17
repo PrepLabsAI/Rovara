@@ -1,6 +1,6 @@
 // Wiki W0 (DEC 254zh): the free file map on `rovara up`. The owner of the install only (no script token); a missing project is PROJECT_NOT_FOUND; the answer is the hosted route's.
 import { describe, expect, it } from "vitest";
-import { WikiFileMapViewSchema, type PluginKind } from "@agentx/contracts";
+import { WikiFileMapViewSchema } from "@agentx/contracts";
 import { createLocalWikiMap } from "../../packages/broker/src/local/app/wiki-map.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
@@ -8,7 +8,7 @@ import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 const url = "https://github.com/acme/app.git";
 const model = new FakeHostModel({ url, id: "1", fullName: "acme/app", initialFiles: { "src/a/one.ts": "x", "src/a/two.ts": "x", "src/a/three.ts": "x", ".env": "TOKEN=1" } });
 const fake = new FakeCodeHost(model);
-const github = Object.assign(Object.create(fake) as FakeCodeHost, { kind: "github" as PluginKind });
+const github = Object.assign(Object.create(fake), { kind: "github" }) as FakeCodeHost;
 const registry = { names: () => ["github"], get: () => github } as never;
 const flow = { projects: { latest: async (name: string) => (name === "app" ? { definition: { name: "app", repositories: [{ name: "app", url, defaultBranch: "main" }] } } : undefined) } } as never;
 const owner = { principal: { roles: ["owner"] } } as never;
@@ -31,7 +31,7 @@ describe("local file map route", () => {
     for (const caller of [{ principal: { roles: ["owner"] }, scriptToken: { id: "t" } }, { principal: { roles: ["developer"] } }] as never[]) {
       const answer = await routes.routes(request("POST"), caller);
       expect(answer?.statusCode).toBe(403);
-      expect(JSON.parse(answer!.body).error.message).toBe("only the owner of this install can map a project's files");
+      expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe("only the owner of this install can map a project's files");
     }
   });
 

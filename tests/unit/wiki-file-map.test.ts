@@ -209,7 +209,7 @@ describe("wiki file map: one repository", () => {
     for (const cut of [false, true]) {
       if (cut) w.model.incompleteTrees.add(w.model.headOf("main"));
       const dirs: string[] = [];
-      const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries!(...args); } };
+      const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries(...args); } };
       const map = await computeWikiFileMap({ project: "p", repositories: [w.repo({ host })] }, deps);
       const text = JSON.stringify(map).toLowerCase();
       for (const name of names) expect(text, `${name} cut=${String(cut)}`).not.toContain(name.toLowerCase());
@@ -222,7 +222,7 @@ describe("wiki file map: one repository", () => {
     const w = world({ "src/a.ts": "x", "node_modules/p/i.js": "x", "vendor/x/y.php": "x", "dist/main.js": "x" });
     w.model.incompleteTrees.add(w.model.headOf("main"));
     const dirs: string[] = [];
-    const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries!(...args); } };
+    const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries(...args); } };
     const map = await mapRepository(w.repo({ host }), deps, NOW + 60_000, 100);
     expect(dirs.sort()).toEqual(["", "src"]);
     expect(map.skippedFolders).toEqual(["dist", "node_modules", "vendor"]);

@@ -1,7 +1,7 @@
 // Wiki W0 (DEC 254zh): the free file map on the deployed API. Who may make a map (a live company owner or admin, or the project's administrator), who may only read a kept one (a project user), who sees nothing
 // (anyone else, another project of the same company, another company, a missing or malformed project: one uniform 404); the cache is keyed by company AND project; no AI key is involved.
 import { describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, WIKI_MAP_NOT_ALLOWED, WikiFileMapViewSchema, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { orgProjectCatalogKey, projectRevisionKey, WIKI_MAP_NOT_ALLOWED, WikiFileMapViewSchema, type JsonValue, type ProjectDefinition, type WikiFileMap } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -39,6 +39,9 @@ async function register(world: FakeWorld, company: string, name: string, extra: 
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
 const post = (path: string) => ({ method: "POST", path, headers: {}, body: "{}" });
 const MAP = (name: string) => `/v1/app/projects/${name}/wiki-map`;
+
+/** What the route answers: a view (`status`, `canManage`, `map`) or an error. */
+interface MapBody { status: string; canManage: boolean; map: WikiFileMap; error: { code: string; message: string } }
 
 interface Person { caller: DeployedCaller; membership: CompanyMembership; grants: Map<string, "developer" | "administrator"> }
 
@@ -91,7 +94,7 @@ async function mapWorld(options: { standing?: HostedWikiMapWiring["standing"] } 
   const call = async (request: { method: string; path: string; headers: Record<string, string>; body: string }, caller: DeployedCaller) => {
     const answer = await routes.route(request, caller);
     if (answer === undefined) throw new Error("not served");
-    return { status: answer.statusCode, body: JSON.parse(answer.body) as Record<string, any>, raw: answer.body };
+    return { status: answer.statusCode, body: JSON.parse(answer.body) as MapBody, raw: answer.body };
   };
   return { world, person, standing, call, routes, wiring, listings, hostOfUrl };
 }
@@ -106,7 +109,7 @@ describe("hosted file map: who may do what", () => {
       const made = await call(post(MAP("payments")), caller);
       expect(made.status, role).toBe(200);
       expect(WikiFileMapViewSchema.parse(made.body)).toMatchObject({ status: "ready", canManage: true });
-      expect(made.body["map"].repositories[0]).toMatchObject({ name: "payments", status: "ok", files: 3 });
+      expect(made.body.map.repositories[0]).toMatchObject({ name: "payments", status: "ok", files: 3 });
       const read = await call(get(MAP("payments")), caller);
       expect(read.body).toEqual(made.body);
     }
@@ -124,7 +127,7 @@ describe("hosted file map: who may do what", () => {
     await call(post(MAP("payments")), admin);
     const read = await call(get(MAP("payments")), reader);
     expect(read.body).toMatchObject({ status: "ready", canManage: false });
-    expect(read.body["map"].repositories[0].files).toBe(3);
+    expect(read.body.map.repositories[0].files).toBe(3);
   });
 
   it("answers a member with no grant, another company's person and a missing or malformed project with one identical 404", async () => {
@@ -156,12 +159,12 @@ describe("hosted file map: who may do what", () => {
     }
     // The reader of B sees B's map, never A's.
     const b = await call(get(MAP("ledger")), readerOfB);
-    expect(b.body["map"].repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["ledger-core"]);
+    expect(b.body.map.repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["ledger-core"]);
     expect(b.raw).not.toContain("payments-core");
     expect((await call(get(MAP("payments")), readerOfB)).status).toBe(404);
     // Each project's own kept map is its own.
     const a = await call(get(MAP("payments")), adminOfA);
-    expect(a.body["map"].repositories[0].areas.map((x: { path: string }) => x.path)).toEqual(["payments-core"]);
+    expect(a.body.map.repositories[0].areas.map((x: { path: string }) => x.path)).toEqual(["payments-core"]);
   });
 
   it("keeps two companies apart: the same project name in another company has its own map and its own cache", async () => {
@@ -172,10 +175,10 @@ describe("hosted file map: who may do what", () => {
     // The other company has made nothing yet: it never sees ours.
     expect((await call(get(MAP("payments")), theirs)).body).toEqual({ status: "none", canManage: true });
     const made = await call(post(MAP("payments")), theirs);
-    expect(made.body["map"].repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["rival-core"]);
+    expect(made.body.map.repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["rival-core"]);
     expect(made.raw).not.toContain("payments-core");
     const back = await call(get(MAP("payments")), ours);
-    expect(back.body["map"].repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["payments-core"]);
+    expect(back.body.map.repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["payments-core"]);
     expect(back.raw).not.toContain("rival-core");
   });
 
@@ -183,7 +186,7 @@ describe("hosted file map: who may do what", () => {
     const { world, person, call } = await mapWorld();
     const admin = person("p-admin", FAKE_COMPANY, "admin");
     await call(post(MAP("payments")), admin);
-    expect((await call(get(MAP("payments")), admin)).body["status"]).toBe("ready");
+    expect((await call(get(MAP("payments")), admin)).body.status).toBe("ready");
     // A second revision adds a repository: the kept map no longer describes the project.
     await world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 2), entityType: "PROJECT", definition: JSON.parse(JSON.stringify({ ...project(FAKE_COMPANY, "payments", ["ledger"]), revision: 2 })) as JsonValue } });
     await world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 2 } });
@@ -202,7 +205,7 @@ describe("hosted file map: who may do what", () => {
     // The branch the project now names does not exist at the host: the repository is unavailable in the map, the request still answers 200.
     const made = await call(post(MAP("payments")), admin);
     expect(made.status).toBe(200);
-    expect(made.body["map"].repositories[0].status).toBe("unavailable");
+    expect(made.body.map.repositories[0].status).toBe("unavailable");
   });
 
   it("answers 200 with an unavailable repository when the company has no code host registered for it", async () => {
@@ -210,7 +213,7 @@ describe("hosted file map: who may do what", () => {
     (wiring.wikiMap as { hostFor: unknown }).hostFor = () => { throw new Error("no host for kind"); };
     const made = await call(post(MAP("payments")), person("p-admin", FAKE_COMPANY, "admin"));
     expect(made.status).toBe(200);
-    expect(made.body["map"].repositories[0]).toMatchObject({ status: "unavailable", unavailable: "Rovara could not read this repository's files just now." });
+    expect(made.body.map.repositories[0]).toMatchObject({ status: "unavailable", unavailable: "Rovara could not read this repository's files just now." });
     expect(made.raw).not.toContain("no host for kind");
   });
 
@@ -250,7 +253,7 @@ describe("hosted file map: who may do what", () => {
     const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: FAKE_COMPANY, role: "owner" }), wiring: () => ({ origin: () => "https://api.example" }) });
     const answer = await routes.route(get(MAP("payments")), caller);
     expect(answer?.statusCode).toBe(404);
-    expect(JSON.parse(answer!.body).error.message).toBe(NOT_ON_THE_CORE_YET);
+    expect((JSON.parse(answer!.body) as MapBody).error.message).toBe(NOT_ON_THE_CORE_YET);
     expect(await routes.route({ method: "DELETE", path: MAP("payments"), headers: {}, body: "" }, caller)).toBeUndefined();
     expect(await routes.route({ method: "PUT", path: MAP("payments"), headers: {}, body: "{}" }, caller)).toBeUndefined();
   });

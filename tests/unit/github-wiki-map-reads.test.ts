@@ -131,6 +131,6 @@ describe("GitHub adapter: the file map's reads", () => {
     await expect(w.host.commitActivity!(repository, head, scope, { since: "2026-08-01T00:00:00Z", cap: 5 })).rejects.toBeDefined();
     const limited = await world();
     limited.state.rate = true; limited.state.status = 403;
-    await expect(limited.host.commitActivity!(repository, head, scope, { since: "2026-08-01T00:00:00Z", cap: 5 })).rejects.toMatchObject({ retryAt: expect.any(Number) });
+    await expect(limited.host.commitActivity!(repository, head, scope, { since: "2026-08-01T00:00:00Z", cap: 5 })).rejects.toMatchObject({ retryAt: expect.any(Number) as number });
   });
 });
