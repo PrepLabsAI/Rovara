@@ -88,7 +88,7 @@ import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
 import { handleCoreContextTools } from "../core-host/context-tools.js";
-import { createWikiOnEvents } from "../core/wiki/agent-context.js";
+import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
@@ -606,6 +606,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           isErased: (companyId, personId) => lessonsPeople(companyId).isErased(companyId, personId),
         },
         projectRole: async (companyId, project, personId) => ((await membershipOf(personId))?.companyId !== companyId ? undefined : projectRoleOf(await projectGrantRole(personId, project))),
+        wikiTaskUse: async (companyId, project, taskId) => {
+          try {
+            const registry = await app.registry();
+            return await readWikiTaskUse({ store: registry.require("storage"), companyId, now: () => now().getTime() }, { project, taskId });
+          } catch { return undefined; }
+        },
         now: () => now().getTime(),
         log,
       });

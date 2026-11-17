@@ -131,6 +131,8 @@ export interface LessonsApiOptions {
   people: Pick<HostedLessonPeople, "onProjectRoster" | "displayName" | "isErased">;
   /** The person's role on the project now (a project admin is a `maintainer`); undefined: none. */
   projectRole(companyId: OrgId, project: string, personId: string): Promise<ProjectRole | undefined>;
+  /** The task's own project's wiki use report; the caller never chooses the company or project. */
+  wikiTaskUse?(companyId: OrgId, project: string, taskId: string): Promise<{ given: string[]; read: string[] } | undefined>;
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -245,7 +247,10 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       // A person off the roster learns nothing about the project from a task id (the same "No such project." as a project that does not exist), unless the task is their own.
       if (!onRoster && (task === undefined || task.developerId !== personId)) throw notFound(NO_SUCH_PROJECT);
       if (task === undefined || task.companyId !== companyId || task.project !== project) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
-      if (route === "task") return { project, taskId, ...(await buildLoadedLessons(deps, who, project, taskId)) };
+      if (route === "task") {
+        const wikiUse = onRoster ? await options.wikiTaskUse?.(companyId, project, taskId) : undefined;
+        return { project, taskId, ...(await buildLoadedLessons(deps, who, project, taskId)), ...(wikiUse === undefined ? {} : { wikiUse }) };
+      }
       // Not helpful: the one-tap thumbs-down of a person on the project, for a lesson this task was given (the library checks it was, and that they can read it). One mark per person per lesson;
       // a lesson live on trial is retired by it, any other lesson gets a "wrong here" mark that asks a person to decide.
       bodyOf(EmptyBody, request.body, "not helpful takes no fields");
