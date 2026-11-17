@@ -240,7 +240,7 @@ describe("the install's largest size (ROVARA_MACHINE_SIZE_MAX_VCPU, DEC 254zv)",
     expect(offeredMachineRows(withMax(""))).toHaveLength(10);
     expect(machineSizeMaxVcpu(withMax(undefined))).toBe(Number.POSITIVE_INFINITY);
   });
-  it.each([["32", 10], ["16", 8], ["8", 6], ["4", 4], ["2", 2], ["1", 2], ["9999", 10]])("a maximum of %s vCPU offers %i sizes, the standard size always among them", (value, count) => {
+  it.each([["32", 10], ["16", 8], ["8", 6], ["4", 4], ["2", 2], ["1", 2], ["9999", 10], ["008", 6], ["0016", 8]])("a maximum of %s vCPU offers %i sizes, the standard size always among them", (value, count) => {
     const rows = offeredMachineRows(withMax(value));
     expect(rows).toHaveLength(count);
     expect(rows.map(row => row.id)).toContain("arm64-2-8");
