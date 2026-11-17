@@ -149,6 +149,23 @@ describe("ending a sign-in (E9, Q3)", () => {
   });
 });
 
+describe("a GitHub person in a change plan (DEC 254p (a))", () => {
+  it("is named by their GitHub name and sign-in method, with hostile text made plain, and a Slack person's text is untouched", async () => {
+    const { deps, identity, db } = await harness();
+    const developerId = "b".repeat(64);
+    db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "github", issuer: "https://github.com", subject: "2001", displayName: "Octo Named" });
+    const grant = await planChange(deps, identity, { kind: "grant_project_access", project: "payments", developer: developerId });
+    expect(grant.effect).toBe("Grant Octo Named (signs in with GitHub) access to project payments. They have no grant today. They can then hand tasks to payments from their AI tool.");
+    expect(JSON.stringify(grant.snapshot)).toContain("Octo Named");
+    db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "github", issuer: "https://github.com", subject: "2001", displayName: `<img src=x onerror=alert(1)>[a](https://evil.example)${"q".repeat(400)}` });
+    const hostile = await planChange(deps, identity, { kind: "grant_project_access", project: "payments", developer: developerId });
+    expect(hostile.effect).not.toMatch(/[<>[\]`]/u);
+    expect(hostile.effect.length).toBeLessThan(400);
+    const signin = await planChange(deps, identity, { kind: "revoke_signin", developer: developerId });
+    expect(signin.effect).toContain("(signs in with GitHub)");
+  });
+});
+
 describe("a developer named by email (Q4, FR-051)", () => {
   it("never shows the email in an effect, details, snapshot or error", async () => {
     const { deps, identity, db } = await harness();

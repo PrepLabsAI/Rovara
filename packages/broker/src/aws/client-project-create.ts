@@ -12,7 +12,7 @@
 import { AgentXError, errorStatus, orgProjectCatalogPk, type AgentXErrorCode, OrgIdSchema, PROJECT_CATALOG_PK, REPOSITORY_CHOICES_PAGE_DEFAULT, type BulkCreateClientProjectsResponse,
   type BulkProjectRefusal, type ClientRepositoriesResponse, type ClientRepositoryChoicesResponse } from "@agentx/contracts";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { recordInCompany, type boundedCompanyReads } from "./company-check.js";
+import { recordInCompany, type boundedCompanyReads, type CompanyMembershipReader } from "./company-check.js";
 import type { GithubInstallationBindings } from "./github-credentials.js";
 
 /** The one answer for a repository the caller's company may not use (multi-repository create). Names no repository and no cause. */
@@ -196,4 +196,17 @@ export function repositoryChoices(installations: ClientRepositoriesResponse["ins
     ...(chosen.length > limit ? { next: page.at(-1)!.fullName } : {}),
     incomplete: installations.some((installation) => installation.status === "active" && installation.repositories.length >= 100),
   };
+}
+
+/**
+ * Guided onboarding PR 19 (design section 4, DEC 254l): a live company owner or admin creates projects too, but only where every repository is checked
+ * against the company's GitHub bindings (`bindingsOn`). The role and company come from `companies`, the reader the create's isolation
+ * (githubCallerCompany) reads, never from the request; anyone else, a removed membership or a missing reader gives undefined.
+ */
+export function companyProjectCreatorOf(bindingsOn: boolean, companies: CompanyMembershipReader | undefined): { companyProjectCreator?: (developerId: string) => Promise<string | undefined> } {
+  if (!bindingsOn) return {};
+  return { async companyProjectCreator(developerId) {
+    const membership = await companies?.membershipOf?.(developerId);
+    return membership !== undefined && (membership.role === "owner" || membership.role === "admin") ? membership.companyId : undefined;
+  } };
 }
