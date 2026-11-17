@@ -29,6 +29,7 @@ import { taskKey } from "../../developer/task-records.js";
 import { rowInCompany } from "../../developer/company-rows.js";
 import { prefsKey } from "../notify/prefs.js";
 import { notifySentKey } from "../notify/attention.js";
+import { eraseInboxRows } from "../notify/inbox-rows.js";
 
 /** A person id as a key part: letters, digits, `_`, `.` and `-`, never `#`, `|`, a space or a newline. */
 const PERSON_ID = /^[A-Za-z0-9_.-]{1,100}$/u;
@@ -163,6 +164,8 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
     // Their notification settings (contact targets, time zone, unsubscribe) and what was last sent to them, in this company.
     await deps.store.delete({ key: prefsKey(companyId, personId) });
     await deps.store.delete({ key: notifySentKey(companyId, personId) });
+    // Their in-app inbox rows in this company (web task channel C7).
+    await eraseInboxRows(deps.store, companyId, personId);
   } catch (error) {
     log({ event: "person_erase.links_failed", level: "error", error: errorName(error) });
     throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their chat links or notification settings could not be removed just now. Send the same request again.");

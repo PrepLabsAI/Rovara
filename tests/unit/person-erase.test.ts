@@ -16,6 +16,7 @@ import {
 import { VersionedBucket } from "../support/versioned-bucket.js";
 import { prefsKey } from "../../packages/broker/src/core/notify/prefs.js";
 import { notifySentKey } from "../../packages/broker/src/core/notify/attention.js";
+import { inboxKey, inboxPartition, inboxRow } from "../../packages/broker/src/core/notify/inbox-rows.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -151,6 +152,17 @@ describe("person erase: what it removes", () => {
     expect(await w.store.get(notifySentKey(A, MALLORY))).toBeUndefined();
     expect(await w.store.get(prefsKey(B, MALLORY))).toBeDefined();
     expect(await w.store.get(notifySentKey(B, MALLORY))).toBeDefined();
+  });
+
+  it("removes the person's in-app inbox rows in this company only, and nobody else's", async () => {
+    const w = world();
+    const session = `ses_${"a".repeat(20)}`;
+    for (const company of [A, B]) for (const person of [MALLORY, "someone-else"]) await w.store.put({ item: inboxRow({ orgId: company, developerId: person, sessionId: session, kind: "needs_you", at: "2026-11-09T10:00:00.000Z", nowMs: Date.parse("2026-11-09T10:00:00.000Z") }) });
+    await w.store.put({ item: inboxRow({ orgId: A, developerId: MALLORY, sessionId: `ses_${"b".repeat(20)}`, kind: "done", at: "2026-11-09T10:00:00.000Z", nowMs: Date.parse("2026-11-09T10:00:00.000Z") }) });
+    await erase(w);
+    expect((await w.store.query({ pk: inboxPartition(A, MALLORY) })).items).toEqual([]);
+    expect(await w.store.get(inboxKey(B, MALLORY, session, "needs_you"))).toBeDefined();
+    expect(await w.store.get(inboxKey(A, "someone-else", session, "needs_you"))).toBeDefined();
   });
 
   it("removes the person's chat links in this company, but not an actor row a re-link gave someone else, nor their links in another company", async () => {

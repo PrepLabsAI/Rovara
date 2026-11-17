@@ -39,6 +39,7 @@ import type { PlaybookService } from "../core/playbook/service.js";
 import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js";
+import { INBOX_PATH, createInboxRoutes } from "./inbox-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
 import { developerTaskView } from "../local/app/task-view.js";
 import type { CoreHostApp } from "./app.js";
@@ -149,6 +150,7 @@ function owns(path: string, method: string): boolean {
   if (path === TASK_START) return method === "POST";
   if (TASK_READ.test(path) || PLAYBOOK.test(path)) return method === "GET";
   if (TASK_ACTION.test(path)) return method === "POST";
+  if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
@@ -206,6 +208,7 @@ interface Mounted {
   blobs: ObjectStorage;
   wiring: CoreDevWiring;
   sessions?: ReturnType<typeof createSessionRoutes>;
+  inbox?: ReturnType<typeof createInboxRoutes>;
   playbook?: ReturnType<typeof createLocalPlaybook>;
   actions?: TaskActions;
 }
@@ -220,6 +223,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         const blobs = (await options.app.registry()).require("object-storage");
         return {
           runtime, wiring, blobs,
+          ...(wiring.members === undefined ? {} : { inbox: createInboxRoutes({ store: runtime.flow.deps.store, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }) }),
           ...(wiring.members === undefined ? {} : { sessions: createSessionRoutes({ flow: runtime.flow, blobs, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }) }),
           ...(wiring.playbook === undefined ? {} : { playbook: createLocalPlaybook({ playbook: wiring.playbook, store: runtime.flow.deps.store, companyId: runtime.companyId }) }),
           // The owner's moves need both the money cap and the company's owner rule; with either missing they are not served (never Code's laptop owner rule on a hosted company).
@@ -270,6 +274,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       }
       const taskCaller: TaskCaller = { principal: caller.principal, ...(caller.client === undefined ? {} : { client: caller.client }) };
       try {
+        if (INBOX_PATH.test(path)) {
+          if (target.inbox === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return (await target.inbox(request, taskCaller)) ?? errorAnswer(agentXError("NOT_FOUND", "route not found"));
+        }
         if (SESSIONS.test(path)) {
           if (target.sessions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return (await target.sessions(request, taskCaller)) ?? errorAnswer(agentXError("NOT_FOUND", "route not found"));
