@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { TaskPeopleProposalSchema, TaskPersonInviteClaimRequestSchema, TaskPersonInviteOutcomeSchema, agentXError, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPersonInviteClaimRequest, type TaskPersonInviteOutcome } from "@agentx/contracts";
+import { TASK_PEOPLE_CANDIDATES_MAX, TaskPeopleCandidatesSchema, TaskPeopleProposalSchema, TaskPersonInviteClaimRequestSchema, TaskPersonInviteOutcomeSchema, agentXError, type TaskPeopleAddRequest, type TaskPeopleCandidates, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPersonInviteClaimRequest, type TaskPersonInviteOutcome } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
-import { changeTaskPeople, getTaskPeopleCapabilities, getTaskPeopleEffectAdmission, getTaskPeopleRequestOutcome, resolveTaskPeopleTarget, taskAccessFence, takeTaskOwnership, type TaskPeopleDependencies } from "./task-people.js";
+import { changeTaskPeople, getTaskPeopleCapabilities, getTaskPeopleEffectAdmission, getTaskPeopleRequestOutcome, loadTaskPeopleTask, resolveTaskPeopleTarget, taskAccessFence, takeTaskOwnership, type TaskPeopleDependencies } from "./task-people.js";
+import type { DeveloperTaskRecord } from "./task-records.js";
 
 const TTL_MS = 10 * 60 * 1000;
 const taskPk = (taskId: string) => `DEVTASK#${taskId}`;
@@ -26,6 +27,10 @@ export interface TaskPeopleEffectsDependencies extends TaskPeopleDependencies {
   resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
   taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
   inviteTaskPerson?(input: TaskPersonInviteClaimRequest): Promise<TaskPersonInviteOutcome>;
+  /** C4: registers a web candidate who passes the web proof now (task-person-identity.ts registerTaskWebPerson). */
+  registerTaskWebPerson?(task: DeveloperTaskRecord, developerId: string): Promise<{ personId: string }>;
+  /** C4: the web candidates of the task's company with a grant on its project, proved live (task-person-identity.ts listTaskWebCandidates). */
+  listTaskWebCandidates?(task: DeveloperTaskRecord, limit: number): Promise<{ candidates: Array<{ developerId: string; name: string }>; complete: boolean }>;
 }
 
 export interface TaskPersonInviteClaimFields {
@@ -323,4 +328,46 @@ export async function submitSlackTaskOwnership(
   const proposed = await proposeTaskOwnership(deps, caller, taskId, input);
   if (proposed.status !== "PENDING") return proposed;
   return confirmTaskPeopleProposal(deps, caller, taskId, input.requestId);
+}
+
+const peopleUnavailable = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", "Task People is unavailable in this deployment"); };
+const addRefused = (): never => { throw agentXError("TASK_ACCESS_DENIED", "That person can't be added to this task"); };
+
+/**
+ * C4 (plan 4.2 "Add a person from the web"; decision D3): `GET /v1/dev/tasks/{taskId}/people/candidates`, for a task owner who may manage People only.
+ * Names and opaque ids of live members of the task's company with a developer or administrator grant on its project, at most 200.
+ */
+export async function getTaskPeopleCandidates(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleCandidates> {
+  if (deps.listTaskWebCandidates === undefined) return peopleUnavailable();
+  const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (!capabilities.canManagePeople) return denied();
+  const task = await loadTaskPeopleTask(deps, taskId);
+  let listed: unknown;
+  try {
+    listed = await deps.listTaskWebCandidates(task, TASK_PEOPLE_CANDIDATES_MAX);
+  } catch {
+    return peopleUnavailable();
+  }
+  const parsed = TaskPeopleCandidatesSchema.safeParse(listed);
+  return parsed.success ? parsed.data : peopleUnavailable();
+}
+
+/**
+ * C4: `POST /v1/dev/tasks/{taskId}/people/add`. Only an owner who may manage People. The person must pass the web proof now (a live member of the
+ * task's company with a grant); they are registered (PERSON / PERSON_SUBJECT, which grants nothing), then the role goes through the same
+ * propose -> confirm step as every People change. A web person gets no Slack invitation.
+ */
+export async function addTaskWebPerson(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, input: TaskPeopleAddRequest): Promise<TaskPeopleChangeResult> {
+  if (deps.registerTaskWebPerson === undefined) return peopleUnavailable();
+  const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (!capabilities.canManagePeople) return denied();
+  const task = await loadTaskPeopleTask(deps, taskId);
+  let registered: { personId: string };
+  try {
+    registered = await deps.registerTaskWebPerson(task, input.developerId);
+  } catch (error) {
+    if (error instanceof Error && (error as Error & { code?: string }).code === "SLACK_UNAVAILABLE") return peopleUnavailable();
+    return addRefused();
+  }
+  return proposeTaskPeopleRole(deps, caller, taskId, { requestId: input.requestId, expectedPeopleRevision: input.expectedPeopleRevision, personId: registered.personId, role: input.role });
 }

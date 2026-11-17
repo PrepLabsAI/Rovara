@@ -161,7 +161,7 @@ import {
   type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
-  TaskPeopleRoleRequestSchema,
+  TaskPeopleAddRequestSchema, TaskPeopleRoleRequestSchema,
   TaskPeopleTakeOwnershipRequestSchema,
   type TaskPersonInviteClaimRequest,
   type TaskPersonInviteOutcome,
@@ -230,7 +230,7 @@ import { createPlanComment, listPlanComments, listTaskMessages, readTaskDiff, se
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { getTaskPeoplePresentation, resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities, type TaskPersonCheck } from "../developer/task-people.js";
-import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole,
+import { addTaskWebPerson, confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleCandidates, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole, type TaskPeopleEffectsDependencies,
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
@@ -248,7 +248,7 @@ import type { TaskPeopleDisplayAdmission } from "../developer/task-people-displa
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
 import { TASK_ENTRY_AREAS, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 
-export interface DeveloperTaskRouteDependencies {
+export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDependencies, "registerTaskWebPerson" | "listTaskWebCandidates"> {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   slackTeamId?: string;
@@ -6392,7 +6392,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
   if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -6406,6 +6406,12 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
     const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
     return { change: await proposeTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
+  }
+  // C4 (plan 4.2 "Add a person from the web"): owner only; the candidates are proved live, and an add goes through the same propose -> confirm step.
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people/candidates") return { candidates: await getTaskPeopleCandidates(taskPeopleEffectsDependencies(deps), caller, taskId) };
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/add") {
+    const input = parse(TaskPeopleAddRequestSchema, body(request), deps, "people/add");
+    return { change: await addTaskWebPerson(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
   }
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/take-ownership") {
     const input = parse(TaskPeopleTakeOwnershipRequestSchema, body(request), deps, "people/take-ownership");
@@ -6433,3 +6439,9 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   throw agentXError("NOT_FOUND", "route not found");
 }
+
+/** C4: the task page's candidates read and web addition, through the same owner-only People effects as the developer routes. */
+export const getTaskPeopleCandidatesForPage = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) =>
+  getTaskPeopleCandidates(taskPeopleEffectsDependencies(deps), caller, taskId);
+export const addTaskWebPersonForPage = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: z.infer<typeof TaskPeopleAddRequestSchema>) =>
+  addTaskWebPerson(taskPeopleEffectsDependencies(deps), caller, taskId, input);

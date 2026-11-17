@@ -102,6 +102,11 @@ export interface TaskPersonWebProofReaders {
    * check then throws exactly this error, as it did before C2, and only a `web` identity can still be proven (D2).
    */
   slackUnavailable?: Error;
+  /**
+   * C4 (plan 4.2 "Add a person from the web"): the developer ids holding a grant on the project (its PROJECT_MEMBERS# rows), at most `limit` of them
+   * (`complete` false when there are more). Each id is only a lead: every one is proved live before it is offered or registered. A throw: unreadable.
+   */
+  projectMemberIds?(project: string, limit: number): Promise<{ ids: readonly string[]; complete: boolean }>;
 }
 
 async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string): Promise<DeveloperTaskRecord> {
@@ -487,4 +492,88 @@ export async function resolveTaskPersonId(
   await verifyStoredIdentity(deps, identity);
   await qualify(deps, task, { developerId: identity.developerId, slackUserId: identity.slackUserId });
   return identity;
+}
+
+/** C4: the `web` identity a developer's own sign-in record names now, or undefined when the record cannot make one (Slack, revoked, malformed). */
+async function webIdentityFromRecord(deps: TaskPersonIdentityDependencies, developerId: string): Promise<TaskPersonIdentity | undefined> {
+  let record: DeveloperRecord | undefined;
+  try {
+    record = await deps.developerRecord(developerId);
+  } catch {
+    return unavailable();
+  }
+  if (record === undefined || record.revoked !== false || record.developerId !== developerId || typeof record.issuer !== "string" || typeof record.subject !== "string"
+    || record.provider === "slack" || !DeveloperSignInMethodSchema.safeParse(record.provider).success || record.issuer === SLACK_OIDC_ISSUER
+    || record.subject.length === 0 || record.subject.length > 512 || record.issuer.length === 0 || record.issuer.length > 2048
+    || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return undefined;
+  const identity: TaskPersonIdentity = {
+    developerId, name: typeof record.displayName === "string" ? safeName(record.displayName, TASK_PERSON_UNNAMED) : TASK_PERSON_UNNAMED,
+    method: record.provider, issuer: record.issuer, subject: record.subject,
+  };
+  return taskPersonKindOf(identity) === "web" ? identity : undefined;
+}
+
+/**
+ * C4 (plan 4.2, decision D3): registers a `web` person on a task (PERSON / PERSON_SUBJECT) once they pass the web proof now: a live member of the
+ * task's company with a live developer or administrator grant on its project and a current sign-in. Registration grants nothing: a registered web
+ * person holds only a role a confirmed People change gives them. A Slack sign-in is never registered here (it is added through Slack).
+ */
+export async function registerTaskWebPerson(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  developerId: string,
+): Promise<{ personId: string; identity: TaskPersonIdentity }> {
+  if (!HEX64.test(developerId)) return refuse();
+  const stored = await currentTask(deps, task.taskId);
+  if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
+  const fresh = stored as unknown as { companyId?: unknown; orgId?: unknown };
+  const given = task as unknown as { companyId?: unknown; orgId?: unknown };
+  if (fresh.companyId !== given.companyId || fresh.orgId !== given.orgId) return refuse();
+  const identity = await webIdentityFromRecord(deps, developerId);
+  if (identity === undefined) return refuse();
+  const web = await qualifyWeb(deps, stored, identity);
+  if (!web.eligible || !web.present) return refuse();
+  const persisted = await persistIdentity(deps, stored.taskId, identity);
+  if (taskPersonKindOf(persisted) !== "web") return refuse();
+  const reverse = await getItem(deps, taskPk(stored.taskId), subjectSk(developerId));
+  if (reverse === undefined || reverse.pk !== taskPk(stored.taskId) || reverse.sk !== subjectSk(developerId)
+    || reverse.schemaVersion !== 1 || reverse.developerId !== developerId || typeof reverse.personId !== "string" || !UUID.test(reverse.personId)) return refuse();
+  return { personId: reverse.personId, identity: persisted };
+}
+
+/**
+ * C4 (plan 4.2, decision D3): the people a task owner may add from the web, at most `limit` (200), names and opaque ids only. Each is a lead from
+ * the project's grant rows, proved live with the web proof (a member of the TASK'S company now, a developer or administrator grant, a current
+ * non-Slack sign-in); anyone who fails or cannot be read is left out, so another company's people are never listed. The caller is not listed.
+ */
+export async function listTaskWebCandidates(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  callerDeveloperId: string,
+  limit: number,
+): Promise<{ candidates: Array<{ developerId: string; name: string }>; complete: boolean }> {
+  if (typeof deps.projectMemberIds !== "function" || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) return unavailable();
+  const stored = await currentTask(deps, task.taskId);
+  if (stored.project !== task.project || stored.developerId !== task.developerId) return refuse();
+  let leads: { ids: readonly string[]; complete: boolean };
+  try {
+    leads = await deps.projectMemberIds(stored.project, limit);
+  } catch {
+    return unavailable();
+  }
+  if (!Array.isArray(leads.ids) || leads.ids.length > limit || typeof leads.complete !== "boolean") return unavailable();
+  const candidates: Array<{ developerId: string; name: string }> = [];
+  for (const developerId of new Set(leads.ids)) {
+    if (typeof developerId !== "string" || !HEX64.test(developerId) || developerId === callerDeveloperId) continue;
+    try {
+      const identity = await webIdentityFromRecord(deps, developerId);
+      if (identity === undefined) continue;
+      const web = await qualifyWeb(deps, stored, identity);
+      if (web.eligible && web.present) candidates.push({ developerId, name: identity.name });
+    } catch {
+      continue;
+    }
+  }
+  candidates.sort((left, right) => left.name.localeCompare(right.name) || left.developerId.localeCompare(right.developerId));
+  return { candidates, complete: leads.complete };
 }

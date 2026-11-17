@@ -298,6 +298,7 @@ export const TASK_PAGE_DECIDING_COPY = {
   peopleSending: "Sending…",
   peoplePending: "Open the confirmation page to finish this change.",
   peopleDone: "People updated.",
+  peopleNoCandidates: "Nobody else in this company can be added to this task yet.",
 } as const;
 
 /**
@@ -432,12 +433,12 @@ function canPost(path,body){
   if(path==="retry")return canRetry;
   if(path==="suggestions")return canSuggest;
   if(path==="comments"||path.indexOf("comments/")===0)return canComment&&!(body&&body.ask===true&&!canAsk);
-  if(path==="people/role")return canManagePeople;
+  if(path==="people/role"||path==="people/add")return canManagePeople;
   if(path==="people/take-ownership")return canTakeOwnership;
   if(/^people\/requests\/[0-9a-f-]{36}\/confirm$/i.test(path))return canManagePeople||canTakeOwnership;
   return false;
 }
-function peoplePath(path){return path==="people/role"||path==="people/take-ownership"||path.indexOf("people/requests/")===0;}
+function peoplePath(path){return path==="people/role"||path==="people/add"||path==="people/candidates"||path==="people/take-ownership"||path.indexOf("people/requests/")===0;}
 
 /* ---------- talking to the API ---------- */
 function call(method,path,body,retried){
@@ -1258,6 +1259,24 @@ for(var pf=0;pf<peopleRoleForms.length;pf++)(function(form){
   if(!select||!button||!UUID.test(str(person))||!Number.isSafeInteger(rev))return;
   button.addEventListener("click",function(){peopleReply(form,button,"people/role",{requestId:uuid(),expectedPeopleRevision:rev,personId:person,role:select.value});});
 })(peopleRoleForms[pf]);
+var peopleAddForm=document.querySelector("[data-people-add-form]");
+if(peopleAddForm)(function(form){
+  var find=form.querySelector("[data-people-find]"),person=form.querySelector("select[name=person]"),role=form.querySelector("select[name=role]"),add=form.querySelector("[data-people-add]"),status=form.querySelector(".task-people-status"),rev=Number(form.getAttribute("data-people-revision"));
+  if(!find||!person||!role||!add||!Number.isSafeInteger(rev))return;
+  find.addEventListener("click",function(){
+    find.disabled=true;var generation=accessGeneration;
+    call("GET","people/candidates").then(function(answer){
+      if(generation!==accessGeneration)return;
+      var list=answer.status===200&&answer.body&&Array.isArray(answer.body.candidates)?answer.body.candidates:null;
+      if(list===null){find.disabled=false;if(status)status.textContent=said(answer);return;}
+      while(person.firstChild)person.removeChild(person.firstChild);
+      for(var c=0;c<list.length;c++){var id=str(list[c]&&list[c].developerId),name=str(list[c]&&list[c].name);if(!/^[a-f0-9]{64}$/.test(id)||name==="")continue;var option=document.createElement("option");option.value=id;option.textContent=name;person.appendChild(option);}
+      var any=person.options.length>0;person.disabled=!any;role.disabled=!any;add.disabled=!any;find.disabled=false;
+      if(status)status.textContent=any?"":COPY.peopleNoCandidates;
+    },function(){if(generation!==accessGeneration)return;find.disabled=false;if(status)status.textContent=COPY.unavailable;});
+  });
+  add.addEventListener("click",function(){if(!/^[a-f0-9]{64}$/.test(str(person.value)))return;peopleReply(form,add,"people/add",{requestId:uuid(),expectedPeopleRevision:rev,developerId:person.value,role:role.value});});
+})(peopleAddForm);
 var peopleTakeForms=document.querySelectorAll("[data-people-take-ownership-form]");
 for(var pt=0;pt<peopleTakeForms.length;pt++)(function(form){
   var button=form.querySelector("button"),rev=Number(form.getAttribute("data-people-revision"));if(!button||!Number.isSafeInteger(rev))return;

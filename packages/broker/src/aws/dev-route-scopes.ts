@@ -72,6 +72,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/pull-requests", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/people/role", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/people/take-ownership", requires: "tasks:act" },
+  // Web task channel C4: owner-only People additions from the web (the candidates list names people, so it needs `tasks:act` too).
+  { method: "GET", path: "/v1/dev/tasks/{taskId}/people/candidates", requires: "tasks:act" },
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/people/add", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/retry", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/review", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/publish-retry", requires: "tasks:act" },

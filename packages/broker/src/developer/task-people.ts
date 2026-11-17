@@ -766,3 +766,6 @@ export async function takeTaskOwnership(
   const next: TaskPeople = { schemaVersion: 1, revision: people.revision + 1, orphaned: false, people: nextEntries };
   return commitMutation(deps, task, caller, people, next, input.requestId, "takeOwnership", payload, beforeRole, "owner", caller.developerId);
 }
+
+/** C4: the task People reads and writes are about, read strongly (the add and candidates routes load it after the owner check). */
+export const loadTaskPeopleTask = (deps: TaskPeopleDependencies, taskId: string): Promise<DeveloperTaskRecord> => loadTask(deps, taskId);
