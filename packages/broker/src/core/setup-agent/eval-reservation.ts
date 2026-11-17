@@ -20,3 +20,13 @@ export function createBoundEvalSpendCapabilities(registry: Pick<AdapterRegistry,
   const adapter = boundEvalReservation(registry);
   return createEvalSpendCapabilities({ ...rest, ...(adapter === undefined ? {} : { adapter }) });
 }
+
+/**
+ * DEC 253q(c): the eval monthly cap source of the install: the bound adapter's `monthlyCapMicros`, or undefined when no adapter is bound or it has none (a laptop). The answer is checked again by
+ * the confirm (a whole, non-negative number); a fault is passed on as undefined there.
+ */
+export function boundEvalMonthlyCap(registry: Pick<AdapterRegistry, "names" | "get">): ((scope: { company: string; project: string }) => Promise<number | undefined>) | undefined {
+  const adapter = boundEvalReservation(registry);
+  if (adapter === undefined || typeof adapter.monthlyCapMicros !== "function") return undefined;
+  return (scope) => adapter.monthlyCapMicros!(scope);
+}
