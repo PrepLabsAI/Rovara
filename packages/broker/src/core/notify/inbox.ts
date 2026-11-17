@@ -4,7 +4,7 @@
 // still exists and is a task, it still stands in the state the row was written for, and the person may still READ it (`access`, the session level read live). A person who lost access, a task that moved on, or a
 // session that went reads as nothing: no title, no count, no hint that a row exists. What is shown is what a message would hold: the task's title, its status sentence (fixed words) and its link. No task
 // content beyond that. The read marks only the caller's own rows (the key is built from the caller's company and person, never from the request).
-import { INDEX_EXPIRY_ATTRIBUTE, SessionIdSchema, agentXError, change, hideEmailAddresses, sessionTaskStatus, taskStatusText, when, type AgentSessionRecord, type DocumentStore, type StoredDocument } from "@agentx/contracts";
+import { SessionIdSchema, agentXError, change, hideEmailAddresses, sessionTaskStatus, taskStatusText, when, type AgentSessionRecord, type DocumentStore, type StoredDocument } from "@agentx/contracts";
 import { SessionStore } from "../sessions/store.js";
 import { attentionKindOf, oneLine } from "./attention.js";
 import { inboxIdOf, inboxKey, inboxPartition, isInboxKind, parseInboxId, type InboxKind } from "./inbox-rows.js";
@@ -13,8 +13,8 @@ export const INBOX_PAGE_DEFAULT = 20;
 export const INBOX_PAGE_MAX = 50;
 /** The most ids one read mark takes. */
 export const INBOX_READ_IDS_MAX = 50;
-/** The most rows read for one person in one request (a person's rows are one per session and kind, kept for 14 days). */
-export const INBOX_ROWS_MAX = 300;
+/** The most raw rows read for one person in one request (a person's rows are one per session and kind, kept for 14 days). Past it the newest rows could be missed, so it is far above what a person has. */
+export const INBOX_ROWS_MAX = 1000;
 /** The most rows checked against their sessions in one request. */
 export const INBOX_CHECK_MAX = 100;
 const TITLE_MAX = 100;
@@ -54,25 +54,27 @@ export interface InboxDeps {
 /** The caller: their company is the live membership's, their id the verified person's. */
 export interface InboxPerson { companyId: string; developerId: string }
 
-interface Row { sessionId: string; kind: InboxKind; at: string; atMs: number; read: boolean; sk: string }
+interface Row { sessionId: string; kind: InboxKind; at: string; atMs: number; read: boolean; order: string }
 
 function rowOf(item: StoredDocument, who: InboxPerson, nowSeconds: number): Row | undefined {
-  const { orgId, developerId, sessionId, kind, at, atMs, sk } = item;
+  const { orgId, developerId, sessionId, kind, at, atMs } = item;
+  const order = item.sk;
   if (orgId !== who.companyId || developerId !== who.developerId || typeof sessionId !== "string" || !isInboxKind(kind) || typeof at !== "string" || typeof atMs !== "number" || !Number.isSafeInteger(atMs)) return undefined;
-  if (!SessionIdSchema.safeParse(sessionId).success || sk !== `${sessionId}#${kind}`) return undefined;
-  const expires = item[INDEX_EXPIRY_ATTRIBUTE];
-  if (typeof expires === "number" && expires <= nowSeconds) return undefined;
-  return { sessionId, kind, at, atMs, read: typeof item["readAt"] === "number", sk };
+  if (!SessionIdSchema.safeParse(sessionId).success || order !== `${sessionId}#${kind}`) return undefined;
+  const expires = item["expiresAtSec"];
+  // Every row carries its expiry; one without it is not one this code wrote.
+  if (typeof expires !== "number" || expires <= nowSeconds) return undefined;
+  return { sessionId, kind, at, atMs, read: typeof item["readAt"] === "number", order };
 }
 
 /** Newest first; rows of one time by their sort key, newest-named first. */
-const NEWER_FIRST = (a: Pick<Row, "atMs" | "sk">, b: Pick<Row, "atMs" | "sk">): number => (a.atMs !== b.atMs ? b.atMs - a.atMs : a.sk < b.sk ? 1 : a.sk > b.sk ? -1 : 0);
+const NEWER_FIRST = (a: Pick<Row, "atMs" | "order">, b: Pick<Row, "atMs" | "order">): number => (a.atMs !== b.atMs ? b.atMs - a.atMs : a.order < b.order ? 1 : a.order > b.order ? -1 : 0);
 
-const encodeCursor = (row: Row): string => Buffer.from(JSON.stringify([row.atMs, row.sk]), "utf8").toString("base64url");
-function decodeCursor(cursor: string): { atMs: number; sk: string } {
+const encodeCursor = (row: Row): string => Buffer.from(JSON.stringify([row.atMs, row.order]), "utf8").toString("base64url");
+function decodeCursor(cursor: string): { atMs: number; order: string } {
   try {
     const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (Array.isArray(value) && value.length === 2 && typeof value[0] === "number" && Number.isSafeInteger(value[0]) && typeof value[1] === "string" && value[1].length <= 100) return { atMs: value[0], sk: value[1] };
+    if (Array.isArray(value) && value.length === 2 && typeof value[0] === "number" && Number.isSafeInteger(value[0]) && typeof value[1] === "string" && value[1].length <= 100) return { atMs: value[0], order: value[1] };
   } catch { /* not a cursor */ }
   throw agentXError("CONFIG_INVALID", INBOX_BAD_CURSOR);
 }
@@ -80,16 +82,18 @@ function decodeCursor(cursor: string): { atMs: number; sk: string } {
 async function rowsOf(deps: InboxDeps, who: InboxPerson): Promise<Row[]> {
   const rows: Row[] = [];
   let cursor: string | undefined;
+  let read = 0;
   const nowSeconds = Math.floor(deps.now() / 1000);
   do {
     const page = await deps.store.query({ pk: inboxPartition(who.companyId, who.developerId), limit: ROWS_PAGE, ...(cursor === undefined ? {} : { cursor }) });
     for (const item of page.items) {
+      read += 1;
       const row = rowOf(item, who, nowSeconds);
       if (row !== undefined) rows.push(row);
     }
     cursor = page.cursor;
-  } while (cursor !== undefined && rows.length < INBOX_ROWS_MAX);
-  return rows.sort(NEWER_FIRST).slice(0, INBOX_ROWS_MAX);
+  } while (cursor !== undefined && read < INBOX_ROWS_MAX);
+  return rows.sort(NEWER_FIRST);
 }
 
 /** The item for a row if it still holds against its session now; otherwise undefined (shown as nothing). */
@@ -131,7 +135,8 @@ export async function listInbox(deps: InboxDeps, who: InboxPerson, input: { limi
   }
   const page = found.slice(0, limit);
   const more = found.length > limit;
-  const cursorRow = more ? page[page.length - 1]!.row : index < all.length ? last : undefined;
+  // A page with nothing to show never carries a cursor, so a person who can read none of their rows (lost access) sees exactly what a person with no rows sees.
+  const cursorRow = more ? page[page.length - 1]!.row : index < all.length && found.length > 0 ? last : undefined;
   return {
     items: page.map((entry) => entry.item),
     ...(cursorRow === undefined ? {} : { nextCursor: encodeCursor(cursorRow) }),

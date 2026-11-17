@@ -58,3 +58,9 @@ export function createInboxRoutes(deps: InboxRoutesDeps): (request: BrokerReques
     return json(200, page);
   };
 }
+
+/** The host's one line for an inbox path: not wired (no session members) is the fixed "not on the core yet"; a method this route does not own is the old broker's answer ("route not found"). */
+export async function inboxAnswer(routes: ReturnType<typeof createInboxRoutes> | undefined, request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse> {
+  if (routes === undefined) throw agentXError("NOT_FOUND", "That is not on the core engine on this install yet.");
+  return (await routes(request, caller)) ?? json(404, { error: { code: "NOT_FOUND", message: "route not found" } });
+}

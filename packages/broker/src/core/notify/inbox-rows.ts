@@ -1,14 +1,14 @@
 // The in-app inbox's rows (web task channel C7): one row per person, session and kind, written beside the attention queue's pending row (`queueAttention`) and kept for `INBOX_KEEP_SECONDS`. Unlike the
 // pending row, which goes once the person was messaged (or has nowhere to be messaged), an inbox row stays until it expires, so a person with no chat and no email still finds what waits for them.
 // The partition is the company's AND the person's, built only from the company the caller was checked into; a later change of the same kind for the same session replaces the row (it is unread again).
-import { INDEX_EXPIRY_ATTRIBUTE, SessionIdSchema, type DocumentStore, type StoredDocument } from "@agentx/contracts";
+import { SessionIdSchema, type DocumentStore, type StoredDocument } from "@agentx/contracts";
 
 export const INBOX_KINDS = ["needs_you", "paused", "ready", "failed", "done"] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 const KINDS: ReadonlySet<string> = new Set(INBOX_KINDS);
 export const isInboxKind = (value: unknown): value is InboxKind => typeof value === "string" && KINDS.has(value);
 
-/** How long a row is kept (the store deletes it after this; a reader tests the time itself). */
+/** How long a row is kept: `expiresAtSec` is the reader's own test of it; the store's background delete is set by the writer (`putInboxRow`) from the queue's own TTL attribute. */
 export const INBOX_KEEP_SECONDS = 14 * 86_400;
 
 export const inboxPartition = (orgId: string, developerId: string): string => `NOTIFY_INBOX#${orgId}#${developerId}`;
@@ -19,8 +19,25 @@ export function inboxRow(input: { orgId: string; developerId: string; sessionId:
   const parsed = Date.parse(input.at);
   return {
     ...inboxKey(input.orgId, input.developerId, input.sessionId, input.kind), entityType: "NOTIFY_INBOX", orgId: input.orgId, developerId: input.developerId, sessionId: input.sessionId, kind: input.kind,
-    at: input.at, atMs: Number.isFinite(parsed) ? parsed : input.nowMs, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.nowMs / 1000) + INBOX_KEEP_SECONDS,
+    at: input.at, atMs: Number.isFinite(parsed) ? parsed : input.nowMs, expiresAtSec: Math.floor(input.nowMs / 1000) + INBOX_KEEP_SECONDS,
   };
+}
+
+/**
+ * Keeps the person's inbox row for a notice (called by `queueAttention`, beside the pending row). `ttlAttribute` is the attention queue's own expiry attribute, given by the caller, so the store deletes the row
+ * after `INBOX_KEEP_SECONDS` like the pending rows. A failed write is logged in fixed words (when the caller gave a log) and never throws: the inbox is never a reason for the queue to fail.
+ */
+export async function putInboxRow(
+  store: Pick<DocumentStore, "put">, log: ((entry: Record<string, unknown>) => void) | undefined,
+  input: { orgId: string; developerId: string; sessionId: string; kind: InboxKind; at: string; nowMs: number }, ttlAttribute: string,
+): Promise<void> {
+  try {
+    const item = inboxRow(input);
+    item[ttlAttribute] = item["expiresAtSec"] as number;
+    await store.put({ item });
+  } catch (error) {
+    log?.({ event: "attention.inbox_failed", sessionId: input.sessionId, error: error instanceof Error ? error.name : "unknown" });
+  }
 }
 
 /** The id a client names a row by: `<session>.<kind>.<atMs>`. It names no person, and `atMs` keeps a read mark off a row that changed since it was shown. */
@@ -44,7 +61,9 @@ export async function eraseInboxRows(store: Pick<DocumentStore, "query" | "delet
   do {
     const page = await store.query({ pk: inboxPartition(orgId, developerId), limit: 100, ...(cursor === undefined ? {} : { cursor }) });
     for (const item of page.items) {
-      await store.delete({ key: { pk: item.pk, sk: item.sk } });
+      // The row's key is rebuilt from its own session and kind (never forwarded), so only a row this code wrote is deleted by its key.
+      const hash = item.sk.indexOf("#");
+      if (hash > 0) await store.delete({ key: inboxKey(orgId, developerId, item.sk.slice(0, hash), item.sk.slice(hash + 1)) });
       removed += 1;
     }
     cursor = page.cursor;

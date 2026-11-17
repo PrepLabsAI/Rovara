@@ -2,7 +2,7 @@
 // them newest first, one bounded page with a cursor, each row checked again against the person's session access now; POST /v1/app/inbox/read marks only the caller's own rows.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError, IMPLICIT_COMPANY_ID, agentSessionKey, type AgentSessionRecord, type OrgId, type Principal } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, agentSessionKey, type OrgId, type Principal } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -33,11 +33,12 @@ const taskIdOf = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12
 function membersOf() {
   const roles = new Map<string, SessionCompanyRole>();
   const grants = new Map<string, SessionProjectRole>();
+  const throwing = { value: false };
   const members: SessionMembers = {
-    companyRole: (who) => roles.get(`${who.companyId}|${who.developerId}`),
+    companyRole: (who) => { if (throwing.value) throw new Error("members down"); return roles.get(`${who.companyId}|${who.developerId}`); },
     projectGrant: (who, project) => grants.get(`${who.developerId}|${project}`),
   };
-  return { members, roles, grants, join: (companyId: string, developerId: string, role: SessionCompanyRole = "member") => roles.set(`${companyId}|${developerId}`, role), grant: (developerId: string, project: string, role: SessionProjectRole = "contributor") => grants.set(`${developerId}|${project}`, role) };
+  return { members, roles, grants, throwing, join: (companyId: string, developerId: string, role: SessionCompanyRole = "member") => roles.set(`${companyId}|${developerId}`, role), grant: (developerId: string, project: string, role: SessionProjectRole = "contributor") => grants.set(`${developerId}|${project}`, role) };
 }
 
 /** A task session in a state, written the way the task flow does it: created, then its summary refreshed (twice, so the move is a real change). */
@@ -47,10 +48,10 @@ async function addSession(store: MemoryDocumentStore, n: number, options: { titl
   const sessionId = taskSessionId(taskId);
   const owner = options.owner ?? OWNER;
   await store.transact(createTaskSessionItems({ orgId, sessionId, taskId, project: "web", agent: AGENT, title: options.title ?? `Task ${String(n)}`, owner, origin: "app", payer: { kind: "member", developerId: developerIdOf(owner) } as never, now: T0 }));
-  const facts: { value: SessionTaskFacts } = { value: { companyId: orgId, taskId, project: "web", ownerDeveloperId: developerIdOf(owner), runStatus: "RUNNING", workflow: { stage: "IMPLEMENT", state: "RUNNING" }, step: "Coding", updatedAt: T0 } as SessionTaskFacts };
+  const facts: { value: SessionTaskFacts } = { value: { companyId: orgId, taskId, project: "web", ownerDeveloperId: developerIdOf(owner), runStatus: "RUNNING", workflow: { stage: "IMPLEMENT", state: "RUNNING" }, step: "Coding", updatedAt: T0 } };
   let ms = NOW - 3_600_000;
   const deps: SummaryDependencies = { store, facts: { read: async () => facts.value }, cost: { costUsd: async () => 0 }, now: () => new Date(ms), log: () => undefined, ...(options.onChange === undefined ? {} : { onChange: options.onChange }) };
-  const move = async (stage: string, state: string, extra: Partial<SessionTaskFacts> = {}) => { facts.value = { ...facts.value, workflow: { stage, state } as never, ...extra }; ms += 1_000; await refreshSessionSummary(deps, orgId, sessionId); };
+  const move = async (stage: string, state: string, extra: Partial<SessionTaskFacts> = {}) => { facts.value = { ...facts.value, workflow: { stage, state }, ...extra }; ms += 1_000; await refreshSessionSummary(deps, orgId, sessionId); };
   await move("IMPLEMENT", "RUNNING");
   await move(options.stage ?? "PLAN_REVIEW", options.state ?? "WAITING");
   return { sessionId, taskId, move };
@@ -64,14 +65,15 @@ async function world() {
   m.join(ORG, ERIN_ID);
   const clock = { ms: NOW };
   const routeFor = (companyId: OrgId = ORG) => createInboxRoutes({ store, companyId, origin: () => "https://app.example", members: m.members, now: () => clock.ms });
-  type Answer = { status: number; body: any };
+  interface InboxBody { items: Array<{ id: string; sessionId: string; kind: string; title: string; status: string; link: string; at: string; read: boolean }>; unread?: number; nextCursor?: string; marked?: number; error: { code: string; message: string } }
+  type Answer = { status: number; body: InboxBody };
   const call = async (caller: Principal, method: string, path: string, body?: unknown, companyId: OrgId = ORG): Promise<Answer> => {
     try {
       const answer = await routeFor(companyId)({ method, path, headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, { principal: caller });
-      if (answer === undefined) return { status: 0, body: undefined };
-      return { status: answer.statusCode, body: JSON.parse(answer.body) as unknown };
+      if (answer === undefined) return { status: 0, body: undefined as never };
+      return { status: answer.statusCode, body: JSON.parse(answer.body) as InboxBody };
     } catch (error) {
-      if (error instanceof AgentXError) return { status: error.statusCode, body: { error: { code: error.code, message: error.message.slice(error.code.length + 2) } } };
+      if (error instanceof AgentXError) return { status: error.statusCode, body: { error: { code: error.code, message: error.message.slice(error.code.length + 2) } } as InboxBody };
       throw error;
     }
   };
@@ -92,6 +94,7 @@ describe("what the queue keeps for the inbox", () => {
     await move("PLAN_REVIEW", "WAITING");
     const row = await store.get(inboxKey(ORG, OWNER_ID, sessionId, "needs_you"));
     expect(row).toMatchObject({ entityType: "NOTIFY_INBOX", orgId: ORG, developerId: OWNER_ID, sessionId, kind: "needs_you" });
+    expect(row!["expiresAtSec"]).toBe(Math.floor(NOW / 1000) + 14 * 86_400);
     expect(row!["indexExpiresAt"]).toBe(Math.floor(NOW / 1000) + 14 * 86_400);
     // A read mark, then a later change of the same kind: the row is replaced and is unread again.
     await store.update({ key: inboxKey(ORG, OWNER_ID, sessionId, "needs_you"), ops: [{ op: "set", path: ["readAt"], value: 1 }] });
@@ -122,7 +125,7 @@ describe("what the queue keeps for the inbox", () => {
     expect((await store.query({ pk: "NOTIFY_PENDING" })).items).toHaveLength(0);
     const shown = await w.list(OWNER);
     expect(shown.status).toBe(200);
-    expect(shown.body.items.map((item: { sessionId: string }) => item.sessionId)).toEqual([sessionId]);
+    expect(shown.body.items.map((item) => item.sessionId)).toEqual([sessionId]);
   });
 });
 
@@ -135,13 +138,13 @@ describe("GET /v1/app/inbox", () => {
     expect(shown.status).toBe(200);
     expect(shown.body.items).toHaveLength(1);
     const item = shown.body.items[0];
-    expect(Object.keys(item).sort()).toEqual(["at", "id", "kind", "link", "read", "sessionId", "status", "title"]);
+    expect(Object.keys(item ?? {}).sort()).toEqual(["at", "id", "kind", "link", "read", "sessionId", "status", "title"]);
     expect(item).toMatchObject({ sessionId, kind: "needs_you", title: "Add retry", read: false, link: `https://app.example/app/sessions/${sessionId}`, id: inboxIdOf({ sessionId, kind: "needs_you", atMs: NOW - 1000 }) });
-    expect(typeof item.status).toBe("string");
+    expect(typeof item?.status).toBe("string");
     expect(Object.keys(shown.body).sort()).toEqual(["items", "unread"]);
     expect(shown.body.unread).toBe(1);
     expect(JSON.stringify(shown.body)).not.toContain(OWNER_ID);
-    expect(shown.body.items[0].id).toMatch(/^ses_[0-9a-z]{20}\.needs_you\.[0-9]+$/u);
+    expect(shown.body.items[0]?.id).toMatch(/^ses_[0-9a-z]{20}\.needs_you\.[0-9]+$/u);
   });
 
   it("lists newest first in bounded pages with a cursor, every row once", async () => {
@@ -159,7 +162,7 @@ describe("GET /v1/app/inbox", () => {
       const page = await w.list(OWNER, `?limit=3${cursor === undefined ? "" : `&cursor=${cursor}`}`);
       expect(page.status).toBe(200);
       expect(page.body.items.length).toBeLessThanOrEqual(3);
-      seen.push(...page.body.items.map((item: { sessionId: string }) => item.sessionId));
+      seen.push(...page.body.items.map((item) => item.sessionId));
       if (cursor === undefined) expect(page.body.unread).toBe(7); else expect(page.body.unread).toBeUndefined();
       cursor = page.body.nextCursor;
       pages += 1;
@@ -212,10 +215,10 @@ describe("GET /v1/app/inbox", () => {
     await w.rowFor(OWNER_ID, `ses_${"z".repeat(20)}`, "needs_you", NOW - 500);
     expect((await w.list(OWNER)).body.items).toHaveLength(3);
     await a.move("IMPLEMENT", "RUNNING");
-    expect((await w.list(OWNER)).body.items.map((item: { sessionId: string }) => item.sessionId)).toEqual([c.sessionId, b.sessionId]);
+    expect((await w.list(OWNER)).body.items.map((item) => item.sessionId)).toEqual([c.sessionId, b.sessionId]);
     const doc = await w.store.get(agentSessionKey(ORG, b.sessionId, "META"));
     await w.store.put({ item: { ...doc!, endedAt: "2026-11-09T11:00:00.000Z" } });
-    expect((await w.list(OWNER)).body.items.map((item: { sessionId: string }) => item.sessionId)).toEqual([c.sessionId]);
+    expect((await w.list(OWNER)).body.items.map((item) => item.sessionId)).toEqual([c.sessionId]);
   });
 
   it("hides an email address in the title from a reader who is not the owner", async () => {
@@ -223,10 +226,10 @@ describe("GET /v1/app/inbox", () => {
     const { sessionId } = await addSession(w.store, 1, { title: "Fix login for dana@example.com" });
     await w.rowFor(DANA_ID, sessionId, "needs_you", NOW - 1000);
     w.m.grant(DANA_ID, "web");
-    const title = (await w.list(DANA)).body.items[0].title as string;
+    const title = (await w.list(DANA)).body.items[0]?.title;
     expect(title).not.toContain("dana@example.com");
     await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 1000);
-    expect((await w.list(OWNER)).body.items[0].title).toContain("dana@example.com");
+    expect((await w.list(OWNER)).body.items[0]?.title).toContain("dana@example.com");
   });
 
   it("is two-company safe: the company is the caller's membership, rows of another company are never read or shown", async () => {
@@ -254,15 +257,69 @@ describe("GET /v1/app/inbox", () => {
     // B's own session, and its own rows for B's person.
     const theirs = await addSession(w.store, 2, { orgId: OTHER_ORG, title: "Company B task", owner: person("dana", OTHER_ORG) });
     await w.rowFor(DANA_ID, theirs.sessionId, "needs_you", NOW - 500, OTHER_ORG);
-    expect((await w.list(person("dana", OTHER_ORG), "", OTHER_ORG)).body.items.map((item: { title: string }) => item.title)).toEqual(["Company B task"]);
-    expect((await w.list(DANA)).body.items.map((item: { title: string }) => item.title)).toEqual(["Company A task"]);
+    expect((await w.list(person("dana", OTHER_ORG), "", OTHER_ORG)).body.items.map((item) => item.title)).toEqual(["Company B task"]);
+    expect((await w.list(DANA)).body.items.map((item) => item.title)).toEqual(["Company A task"]);
     expect(inboxPartition(ORG, DANA_ID)).not.toBe(inboxPartition(OTHER_ORG, DANA_ID));
+  });
+
+  it("reads every row before choosing the newest: more than 300 rows never push the newest one out", async () => {
+    const w = await world();
+    const { sessionId } = await addSession(w.store, 1, { title: "Newest" });
+    // Rows whose sort keys come first (ses_00000000...), all older; the real session's id sorts after them.
+    for (let n = 0; n < 350; n += 1) await w.rowFor(OWNER_ID, `ses_00000000${String(n).padStart(12, "0")}`, "needs_you", NOW - 10_000 - n);
+    await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 1);
+    const page = await w.list(OWNER);
+    expect(page.body.items.map((item) => item.title)).toEqual(["Newest"]);
+    expect(page.body.unread).toBe(1);
+  });
+
+  it("answers a person who can read none of their rows exactly like a person with no rows, even with more rows than one request checks (no cursor, no count, no hint)", async () => {
+    const w = await world();
+    for (let n = 0; n < 130; n += 1) await w.rowFor(DANA_ID, `ses_11111111${String(n).padStart(12, "0")}`, "needs_you", NOW - n);
+    const hidden = await w.list(DANA);
+    const empty = await w.list(ERIN);
+    expect(hidden).toEqual(empty);
+    expect(hidden.body).toEqual({ items: [], unread: 0 });
+    const later = await w.list(DANA, `?cursor=${Buffer.from(JSON.stringify([NOW - 60, `ses_11111111${"0".repeat(12)}#needs_you`]), "utf8").toString("base64url")}`);
+    expect(later.body).toEqual({ items: [] });
+  });
+
+  it("keeps checking a long run of hidden rows only up to the budget, then shows what it found (a visible row inside the budget is shown past hidden ones)", async () => {
+    const w = await world();
+    const { sessionId } = await addSession(w.store, 1, { title: "Visible" });
+    for (let n = 0; n < 40; n += 1) await w.rowFor(OWNER_ID, `ses_22222222${String(n).padStart(12, "0")}`, "needs_you", NOW - 1000 - n);
+    await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 100_000);
+    const page = await w.list(OWNER);
+    expect(page.body.items.map((item) => item.title)).toEqual(["Visible"]);
+    expect(page.body.nextCursor).toBeUndefined();
+  });
+
+  it("reads a chain-session row, a throwing members seam and a throwing store as nothing", async () => {
+    const w = await world();
+    const { sessionId } = await addSession(w.store, 1);
+    await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 1000);
+    const doc = await w.store.get(agentSessionKey(ORG, sessionId, "META"));
+    await w.store.put({ item: { ...doc!, kind: "chain", subject: { kind: "chain", chainRunId: "crn_aaaaaaaaaaaaaaaaaaaa" } } });
+    expect((await w.list(OWNER)).body).toEqual({ items: [], unread: 0 });
+    const other = await addSession(w.store, 2);
+    await w.rowFor(OWNER_ID, other.sessionId, "needs_you", NOW - 500);
+    const roles = new Map(w.m.roles);
+    w.m.roles.clear();
+    w.m.throwing.value = true;
+    expect((await w.list(OWNER)).body).toEqual({ items: [], unread: 0 });
+    w.m.throwing.value = false;
+    for (const [key, role] of roles) w.m.roles.set(key, role);
+    expect((await w.list(OWNER)).body.items).toHaveLength(1);
   });
 
   it("expired rows are not shown, and a method other than GET is not this route's", async () => {
     const w = await world();
     const { sessionId } = await addSession(w.store, 1);
     await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 1000);
+    const noExpiry = inboxRow({ orgId: ORG, developerId: OWNER_ID, sessionId: (await addSession(w.store, 2)).sessionId, kind: "needs_you", at: new Date(NOW).toISOString(), nowMs: NOW }) as Record<string, unknown>;
+    delete noExpiry["expiresAtSec"];
+    await w.store.put({ item: noExpiry as never });
+    expect((await w.list(OWNER)).body.items).toHaveLength(1);
     w.clock.ms = NOW + 15 * 86_400_000;
     expect((await w.list(OWNER)).body.items).toEqual([]);
     expect((await w.call(OWNER, "DELETE", "/v1/app/inbox")).status).toBe(0);
@@ -280,11 +337,11 @@ describe("POST /v1/app/inbox/read", () => {
     await w.rowFor(OWNER_ID, b.sessionId, "needs_you", NOW - 1000);
     const before = await w.list(OWNER);
     expect(before.body.unread).toBe(2);
-    const id = before.body.items[0].id as string;
+    const id = before.body.items[0]?.id;
     const marked = await w.mark(OWNER, [id, id]);
     expect(marked).toEqual({ status: 200, body: { marked: 1 } });
     const after = await w.list(OWNER);
-    expect(after.body.items.map((item: { read: boolean }) => item.read)).toEqual([true, false]);
+    expect(after.body.items.map((item) => item.read)).toEqual([true, false]);
     expect(after.body.unread).toBe(1);
   });
 
@@ -295,23 +352,23 @@ describe("POST /v1/app/inbox/read", () => {
     const id = inboxIdOf({ sessionId: a.sessionId, kind: "needs_you", atMs: NOW - 1000 });
     expect(await w.mark(DANA, [id])).toEqual({ status: 200, body: { marked: 0 } });
     expect(await w.mark(ERIN, [id])).toEqual({ status: 200, body: { marked: 0 } });
-    expect((await w.list(OWNER)).body.items[0].read).toBe(false);
+    expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
     // No row is created for the person who marked nothing.
     expect((await w.store.query({ pk: inboxPartition(ORG, DANA_ID) })).items).toEqual([]);
     // Another company's route marks nothing either (the partition is the company's).
     w.m.join(OTHER_ORG, OWNER_ID, "owner");
     expect((await w.call(person(OWNER.personId, OTHER_ORG), "POST", "/v1/app/inbox/read", { requestId: randomUUID(), ids: [id] }, OTHER_ORG)).body).toEqual({ marked: 0 });
-    expect((await w.list(OWNER)).body.items[0].read).toBe(false);
+    expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
   });
 
   it("does not mark a row that changed since it was shown (the id names the time)", async () => {
     const w = await world();
     const a = await addSession(w.store, 1);
     await w.rowFor(OWNER_ID, a.sessionId, "needs_you", NOW - 5000);
-    const shown = (await w.list(OWNER)).body.items[0].id as string;
+    const shown = (await w.list(OWNER)).body.items[0]?.id;
     await w.rowFor(OWNER_ID, a.sessionId, "needs_you", NOW - 1000);
     expect((await w.mark(OWNER, [shown])).body).toEqual({ marked: 0 });
-    expect((await w.list(OWNER)).body.items[0].read).toBe(false);
+    expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
   });
 
   it("refuses a body that is not exactly { requestId, ids } with fixed words that echo nothing, and marks nothing of a batch with a bad id", async () => {
@@ -333,7 +390,7 @@ describe("POST /v1/app/inbox/read", () => {
     }
     const notJson = await w.routeFor()({ method: "POST", path: "/v1/app/inbox/read", headers: {}, body: "{nope" }, { principal: OWNER }).catch((error: unknown) => error);
     expect(notJson).toBeInstanceOf(AgentXError);
-    expect((await w.list(OWNER)).body.items[0].read).toBe(false);
+    expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
   });
 
   it("parses ids strictly", () => {
@@ -351,7 +408,7 @@ describe("on the core host", () => {
     const app = createCoreHostApp({
       env, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined, services: SERVICES, ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
-    } as never);
+    });
     const member = new Map<string, CompanyMembership>();
     const callerOf = (companyId: string, personId?: string): DeployedCaller => {
       const principal = { ...localOwnerPrincipal({ companyId }), ...(personId === undefined ? {} : { personId }) };
@@ -370,7 +427,7 @@ describe("on the core host", () => {
     const owner = developerIdOf(caller.principal);
     m.join(FAKE_COMPANY, owner, "owner");
     const routes = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: () => wired(m.members) });
-    const { sessionId } = await addSession(h.fake.store as never, 1, { orgId: FAKE_COMPANY as OrgId, owner: caller.principal });
+    const { sessionId } = await addSession(h.fake.store as never, 1, { orgId: FAKE_COMPANY, owner: caller.principal });
     await h.fake.store.put({ item: inboxRow({ orgId: FAKE_COMPANY, developerId: owner, sessionId, kind: "needs_you", at: new Date(Date.now()).toISOString(), nowMs: Date.now() }) });
     const listed = await routes.route(get("/v1/app/inbox"), caller);
     expect(listed?.statusCode).toBe(200);

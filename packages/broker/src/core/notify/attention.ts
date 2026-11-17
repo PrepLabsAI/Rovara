@@ -24,8 +24,7 @@ import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
 import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
 import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
-import { digestSlotDay, holdOf } from "./schedule.js";
-import { inboxRow } from "./inbox-rows.js";
+import { digestSlotDay, holdOf } from "./schedule.js"; import { putInboxRow } from "./inbox-rows.js";
 import { tenantIsCompanys, type ChannelCompanyOf } from "../channel/company.js";
 
 type Log = (entry: Record<string, unknown>) => void;
@@ -123,13 +122,7 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
     for (const developerId of people) {
       await deps.store.put({
         item: { ...pendingKey(change.orgId, developerId, change.sessionId, kind), entityType: "NOTIFY_PENDING", orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
-      });
-      // The in-app inbox keeps its own row (web task channel C7): a person with no chat and no email is still told there. A failed write is logged and never holds back the rest of the queue.
-      try {
-        await deps.store.put({ item: inboxRow({ orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }) });
-      } catch (error) {
-        (deps.log ?? ((entry) => console.log(JSON.stringify({ component: "broker", ...entry }))))({ event: "attention.inbox_failed", sessionId: change.sessionId, error: error instanceof Error ? error.name : "unknown" });
-      }
+      }); await putInboxRow(deps.store, deps.log, { orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }, INDEX_EXPIRY_ATTRIBUTE);
     }
     await publishAttentionChanged(deps.realtime, change.orgId, people, change.sessionId, kind);
     return people.length;
