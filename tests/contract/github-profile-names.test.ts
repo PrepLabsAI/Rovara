@@ -12,7 +12,7 @@ const HOSTILE = [
   `<script>alert(1)</script>Octo`,
   `<img src=x onerror=alert(1)>`,
   `[click here](https://evil.example/phish) **bold** _it_ \`code\` ~~x~~ | a | b |`,
-  `Octo‮evil\u0000​ name`,
+  `Octo\u202Eevil\u0000\u200B name`,
   `Octo ${"x".repeat(5_000)}`,
   `${"é".repeat(200)}`,
   `a@b.example.test Octo`,
@@ -37,7 +37,7 @@ describe("the GitHub name (untrusted text)", () => {
     expect(Array.from(clean).length).toBeLessThanOrEqual(80);
     expect(clean).not.toMatch(MARKUP);
     // eslint-disable-next-line no-control-regex
-    expect(clean).not.toMatch(/[\u0000-\u001f\u007f​‪-‮]/u);
+    expect(clean).not.toMatch(/[\u0000-\u001f\u007f\u200B\u202A-\u202E]/u);
     expect(clean).not.toContain("@");
     expect(clean.length).toBeGreaterThan(0);
   });
@@ -62,7 +62,7 @@ describe("the GitHub name (untrusted text)", () => {
   it("reads a huge name in bounded time", () => {
     const start = Date.now();
     githubDisplayName("<a>".repeat(2_000_000), "octo");
-    githubDisplayName("​".repeat(5_000_000) + "x", "octo");
+    githubDisplayName("\u200B".repeat(5_000_000) + "x", "octo");
     expect(Date.now() - start).toBeLessThan(2_000);
   });
 });
@@ -128,7 +128,7 @@ describe("the name stored at GitHub sign-in", () => {
 });
 
 function deps(db: FakeDynamoDb): AdminActionDependencies {
-  return { documentClient: db, tableName: "state", signInTableName: "signin", slackTeamId: "T0BSHLLUGBD", limitDefaults: { member: 3, organization: 20 }, now: () => 0 } as unknown as AdminActionDependencies;
+  return { documentClient: db, tableName: "state", signInTableName: "signin", slackTeamId: "T0BSHLLUGBD", limitDefaults: { member: 3, organization: 20 }, now: () => 0 };
 }
 const GH = "a".repeat(64), SL = developerIdForSlackUser("U0ADA00001");
 
