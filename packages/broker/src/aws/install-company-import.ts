@@ -180,7 +180,14 @@ export async function planCompanyImport(deps: CompanyImportReads, companyId: str
     const verdicts = await mapLimited(records, (record) => judge(deps, company, record, mirrored));
     const write = byPerson(verdicts.flatMap((v) => v.kind === "write" ? [{ personId: v.personId, role: v.role, ...(v.joinedAt === undefined ? {} : { joinedAt: v.joinedAt }) }] : []));
     const skipped = byPerson(verdicts.flatMap((v) => v.kind === "skip" ? [{ personId: v.personId, reason: v.reason, ...(v.survivorId === undefined ? {} : { survivorId: v.survivorId }) }] : []));
-    const refused = byPerson(verdicts.flatMap((v) => v.kind === "refuse" ? [{ personId: v.personId, reason: v.reason }] : []));
+    // The install's removal deletes the member record: an imported (or otherwise live) member of this company in Code's records with no install member
+    // record left is no longer a member there, and refuses the run like any other drift.
+    const listed = new Set(records.map((record) => (record.sk as string).slice("MEMBER#".length)));
+    const gone = mirror.flatMap((row) => {
+      const personId = (row.sk as string).slice("MEMBER#".length);
+      return listed.has(personId) || row.revokedAt !== undefined || !PersonId.safeParse(personId).success ? [] : [{ personId, reason: "no_longer_member" as const }];
+    });
+    const refused = byPerson([...verdicts.flatMap((v) => v.kind === "refuse" ? [{ personId: v.personId, reason: v.reason }] : []), ...gone]);
     const hasOwner = write.some((member) => member.role === "owner") || verdicts.some((v) => v.kind === "skip" && v.liveOwner === true);
     const refusal = refused.length === 0 && !hasOwner ? "no_owner" as const : undefined;
     const ready = refused.length === 0 && refusal === undefined;

@@ -7,6 +7,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXError, CompanyImportPreviewSchema, companyScoped, type AdminChangeInput } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
@@ -197,6 +198,13 @@ describe("preview", () => {
     expect((await unbanned.importPlan()).preview.skipped).toContainEqual({ personId: MEMBER, reason: "removed_in_code" });
   });
 
+  it("refuses when a live member in Code's records has no install member record any more", async () => {
+    const w = world();
+    await w.apply();
+    await w.db.send(new DeleteCommand({ TableName: "State", Key: { pk: `ORG#${A}`, sk: `MEMBER#${NEVER}` } }));
+    expect((await w.importPlan()).preview).toMatchObject({ ready: false, refused: [{ personId: NEVER, reason: "no_longer_member" }] });
+  });
+
   it("refuses more members than one import copies, rather than copying some", async () => {
     const w = world();
     for (let i = 0; i < 193; i++) w.db.set({ pk: `ORG#${A}`, sk: `MEMBER#${i.toString(16).padStart(4, "0").padEnd(64, "b")}`, role: "member" });
@@ -273,6 +281,11 @@ describe("apply", () => {
     await expect(w.registry.importCompany(plan.write, OPERATOR)).rejects.toMatchObject({ code: "CHANGE_STALE" });
     expect(w.db.get(`COMPANY_MEMBER#${MEMBER}`, "COMPANY")).toEqual(racer);
     expect(w.imported()).toEqual([]);
+  });
+
+  it("a run stopped after some people is not reported as stale", async () => {
+    const registry = companyImportThroughLambda(async () => ({ Payload: new TextEncoder().encode(JSON.stringify({ ok: false, error: "conflict", rows: 3 })) }));
+    await expect(registry.importCompany({ companyId: A, name: "Founders Co", writeCompany: false, members: [] }, OPERATOR)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("after 3 people") as unknown });
   });
 
   it("writes in bounded transactions, one log row each, and every row conditional", async () => {
