@@ -242,6 +242,8 @@ export interface TestEnvironmentPageView {
   extra?: string[];
   /** The machine size card (switch `ROVARA_MACHINE_SIZE`, see `core/test-env/machine-size.ts`), one plain line each. Absent while the switch is off. */
   machine?: string[];
+  machineChoices?: readonly { id: string; label: string }[];
+  machineChoice?: string;
   /** Test services on a laptop (Code): the images that may run, and the ones this project asks for. Absent when the install uses a signed catalog or test services are off. */
   serviceImages?: ServiceImagesPageView;
 }
@@ -581,6 +583,8 @@ export interface LocalPageActions {
   approveServiceImage?(input: { project: string; requested: string }): Promise<LocalActionResult>;
   /** Forgets an approved service image. */
   removeServiceImage?(input: { project: string; reference: string }): Promise<LocalActionResult>;
+  /** Records a test machine size from the project's fresh local page session. */
+  setTestEnvironmentMachine?(input: { project: string; rowId: string }): Promise<LocalActionResult>;
   /** The owner's acts on the automation page: turn a trigger on (with their proof), off, decide a chain's gate (with their proof), stop a run. */
   automation?(input: AutomationPageAction): Promise<LocalActionResult>;
   /** A change of the per-step model setting. Refused (with its fixed words) when the owner may not, the page was not opened lately, or the setting moved. */

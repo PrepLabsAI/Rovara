@@ -29,9 +29,10 @@ async function world(env: NodeJS.ProcessEnv = ON) {
 }
 
 describe("the switch", () => {
-  it("is off unless exactly 1, and does nothing without the test environment", () => {
-    expect(machineSizeEnabled({})).toBe(false);
-    for (const value of ["true", "", " 1", "1 ", "on", "0"]) expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: value }), value).toBe(false);
+  it("is on by default, can be switched off, and does nothing without the test environment", () => {
+    expect(machineSizeEnabled({})).toBe(true);
+    for (const value of ["true", "", " 1", "1 ", "on"]) expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: value }), value).toBe(true);
+    expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: "0" })).toBe(false);
     expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: "1" })).toBe(true);
     expect(machineSizeEnabled({ [MACHINE_SIZE_VARIABLE]: "1", ROVARA_TEST_ENVIRONMENT: "0" })).toBe(false);
   });
@@ -56,7 +57,7 @@ describe("recording a measurement", () => {
     expect(await readMachineFacts(w.deps, BENCH_ORG, w.project, w.digest)).toMatchObject({ armVerdict: "arm_incompatible", patternId: "exec_format" });
   });
   it("switch off: nothing is read or written", async () => {
-    const w = await world({ ROVARA_TEST_ENVIRONMENT: "1" });
+    const w = await world({ ROVARA_TEST_ENVIRONMENT: "1", [MACHINE_SIZE_VARIABLE]: "0" });
     await expect(recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest)) })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
     expect(await w.store.get(testEnvMachineKey(BENCH_ORG, w.project, w.digest))).toBeUndefined();
     expect(await readMachineFacts(w.deps, BENCH_ORG, w.project, w.digest)).toBeUndefined();
@@ -141,7 +142,7 @@ describe("the person's choice", () => {
   it("switch off: refused and nothing stored; a stored row reads as none", async () => {
     const on = await world();
     await setMachineChoice(on.deps, { orgId: BENCH_ORG, project: on.project, rowId: "arm64-2-8" });
-    const off = { ...on.deps, env: { ROVARA_TEST_ENVIRONMENT: "1" } };
+    const off = { ...on.deps, env: { ROVARA_TEST_ENVIRONMENT: "1", [MACHINE_SIZE_VARIABLE]: "0" } };
     await expect(setMachineChoice(off, { orgId: BENCH_ORG, project: on.project, rowId: "arm64-4-16" })).rejects.toMatchObject({ code: "NOT_AVAILABLE_HERE" });
     expect(await readMachineChoice(off, BENCH_ORG, on.project)).toBeUndefined();
   });

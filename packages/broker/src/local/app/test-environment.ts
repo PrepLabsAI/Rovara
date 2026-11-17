@@ -16,7 +16,7 @@ import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { TEST_ENVIRONMENT_KIND, createTestEnvironmentSubject, proposeTestEnvironment, testEnvironmentSubjectId } from "../../core/test-env/environment.js";
 import { testEnvironmentView, type TestEnvironmentView } from "../../core/test-env/local-view.js";
 import { createTaskTestEnvironment, type TaskTestEnvironment } from "../../core/test-env/seam.js";
-import { machineCard, machineSizeEnabled } from "../../core/test-env/machine-size.js";
+import { machineCard, machineSizeEnabled, setMachineChoice } from "../../core/test-env/machine-size.js";
 import { testEnvironmentEnabled } from "../../core/test-env/switch.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { listProjects } from "./projects.js";
@@ -72,6 +72,7 @@ export interface LocalTestEnvironment {
   /** The owner's approval of one image, called only by the page's form (a fresh page session, a single-use form). */
   approveServiceImage(input: { project: string; requested: string }): Promise<LocalActionResult>;
   removeServiceImage(input: { project: string; reference: string }): Promise<LocalActionResult>;
+  setMachineSize(input: { project: string; rowId: string }): Promise<LocalActionResult>;
 }
 
 export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions): LocalTestEnvironment {
@@ -112,6 +113,7 @@ export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions)
     return {
       project,
       ...(machine === undefined ? {} : { machine: machine.lines }),
+      ...(machine === undefined ? {} : { machineChoices: machine.choices, ...(machine.chosenRowId === undefined ? {} : { machineChoice: machine.chosenRowId }) }),
       ...(serviceImages === undefined ? {} : { serviceImages }),
       ...(view.approved === undefined ? {} : { approved: { revision: view.approved.revision, approvedAt: view.approved.approvedAt, ...(view.approved.approvedBy === undefined ? {} : { approvedBy: view.approved.approvedBy }), lines: view.approved.lines, checks: view.approved.checks } }),
       ...(view.proposal === undefined ? {} : { proposal: { digest: view.proposal.digest, proposedAt: view.proposal.proposedAt, risk: view.proposal.risk, lessSafe: view.proposal.lessSafe, changes: view.proposal.changes, proved: view.proposal.proved, ...(view.proposal.expiresAt === undefined ? {} : { expiresAt: view.proposal.expiresAt }) } }),
@@ -165,6 +167,15 @@ export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions)
       const service = options.serviceImages;
       if (!enabled() || service === undefined || !(await knownProject(input.project))) return { ok: false, reason: "not_found", message: "That is no longer there." };
       return (await service.remove(input.reference)) ? { ok: true } : { ok: false, reason: "not_found", message: "That is no longer there." };
+    },
+    async setMachineSize(input) {
+      if (!machineSizeEnabled(env) || !enabled() || !(await knownProject(input.project))) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      try {
+        await setMachineChoice(deps, { orgId: options.companyId, project: input.project, rowId: input.rowId });
+        return { ok: true, message: "Saved. Today's runs do not use this size yet." };
+      } catch {
+        return { ok: false, reason: "invalid", message: "Choose one of the listed machine sizes." };
+      }
     },
     async routes(request, caller) {
       const url = new URL(request.path, "http://local");
