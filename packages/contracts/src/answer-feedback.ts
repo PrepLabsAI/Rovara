@@ -13,7 +13,7 @@ import { WikiIdSchema } from "./wiki-store.js";
 
 export const ANSWER_FEEDBACK_LIMITS = {
   /** The most answer records one gap list reads (when a project has more, the list covers part of them and `more` says so). */
-  recordsScanned: 500,
+  recordsScanned: 1_000,
   /** The most topics one list holds. */
   gaps: 50,
   /** The most words of a question that make its topic, and the longest topic shown, in characters. */
@@ -36,6 +36,7 @@ export const AnswerGapSchema = z.object({
   /** How many different people asked it (never who). */
   people: z.number().int().min(1),
   questions: z.number().int().min(1),
+  /** The day it was last asked (YYYY-MM-DD): a day, not a moment, so a topic one person asked cannot be matched to a message by its time. */
   lastAskedAt: z.string(),
 }).strict();
 export type AnswerGap = z.infer<typeof AnswerGapSchema>;
@@ -55,6 +56,5 @@ export type NotRightResponse = z.infer<typeof NotRightResponseSchema>;
 
 export const ANSWER_FEEDBACK_WORDS = {
   notYours: "That answer is not there.",
-  needsMaintainer: "Only a project maintainer, or an owner or admin of the company, can see that list.",
   unavailable: "That could not be saved. Try again.",
 } as const;

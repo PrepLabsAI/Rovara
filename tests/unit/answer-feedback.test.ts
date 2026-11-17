@@ -68,6 +68,8 @@ describe("the gap list", () => {
     expect(list.items.map((item) => [item.kind, item.people, item.questions])).toEqual([["not_found", 2, 3], ["wiki_empty", 1, 1]]);
     expect(list.more).toBe(false);
     expect(JSON.stringify(list)).not.toMatch(/ada|bob|askedBy/iu);
+    // A day, not a moment: a topic one person asked cannot be matched to a message by its time.
+    expect(list.items.every((item) => /^\d{4}-\d{2}-\d{2}$/u.test(item.lastAskedAt))).toBe(true);
   });
 
   it("is bounded: at most 50 topics (the worst and widest first), and a project with more than the scan limit says so", async () => {
@@ -76,11 +78,17 @@ describe("the gap list", () => {
     const names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango"];
     for (let i = 0; i < 60; i += 1) await wiki.writeAnswer("alpha", record({ answerId: `a${String(i).padStart(4, "0")}`, question: `Where is ${names[i % 20]!} ${names[Math.floor(i / 20) + 3]!}x${String(i)}`, outcome: "partly", askedBy: `p${String(i)}` }));
     const list = await listGaps(wiki, "alpha");
-    expect(list.items.length).toBeLessThanOrEqual(ANSWER_FEEDBACK_LIMITS.gaps);
+    expect(list.items).toHaveLength(ANSWER_FEEDBACK_LIMITS.gaps);
     expect(list.more).toBe(true);
+    // A project with more records than the scan holds says so, and an expired row not yet swept does not use up the scan.
+    const few = await listGaps(wiki, "alpha", 20);
+    expect(few.more).toBe(true);
+    expect(few.items.length).toBeLessThanOrEqual(20);
     const capped = await wiki.listAnswers("alpha", 10);
     expect(capped.records).toHaveLength(10);
     expect(capped.more).toBe(true);
+    m.clock.now += (WIKI_ANSWER_RETENTION_DAYS * 86_400 + 1) * 1000;
+    expect(await listGaps(wiki, "alpha", 20)).toMatchObject({ items: [], more: false });
   });
 
   it("two projects and two companies never meet", async () => {
@@ -164,6 +172,16 @@ describe("Not right", () => {
     expect(await wiki.markAnswerNotRight("alpha", "a9999", ADA)).toBeUndefined();
     expect(await wiki.markAnswerNotRight("alpha", "a0001", ADA)).toBe("marked");
     expect(await wiki.markAnswerNotRight("alpha", "a0001", ADA)).toBe("already");
+  });
+
+  it("a claim written or re-checked after the answer was given is not queued (an already refreshed page is left alone)", async () => {
+    const { m, wiki } = await withAnswer();
+    m.clock.now += 60_000;
+    await wiki.writePage("alpha", page("A-alpha", { repos: [{ repo: "web", commit: HEAD }], claims: [
+      { claimId: "c0001", text: "Refund limit lives in refund.ts", citations: [{ repo: "web", path: "src/refund.ts", commit: HEAD, line: 3, quote: "export const MAX_REFUND_DAYS = 30;" }], source: "found", checkedAt: new Date(m.clock.now).toISOString() },
+    ], blocks: [{ kind: "heading", blockId: "h0001", level: 2, text: "Refunds" }] }));
+    expect(await pressNotRight(wiki, { project: "alpha", answerId: "a0001", personId: ADA })).toEqual({ answerId: "a0001", state: "noted", claims: 0 });
+    expect((await wiki.readPage("alpha", "billing", "person"))!.page.claims[0]!.source).toBe("found");
   });
 
   it("queues at most 12 claims per press and only claims that are 'found' (a changed or not-found claim is left as it is)", async () => {

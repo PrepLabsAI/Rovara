@@ -367,10 +367,11 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     do {
       const page = await store.query({ pk: wikiPartition(companyId, name), sk: { op: "beginsWith", prefix: WIKI_SK.answer }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
       for (const item of page.items) {
+        const row = readRow(AnswerRow, item, name)!;
+        // An expired row (not yet swept) is gone and does not count toward the bound.
+        if (row.expiresAt * 1000 <= now()) continue;
         if (seen >= most) { more = true; break; }
         seen += 1;
-        const row = readRow(AnswerRow, item, name)!;
-        if (row.expiresAt * 1000 <= now()) continue;
         records.push({ ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt, ...(row.notRight === true ? { notRight: true } : {}) });
       }
       cursor = more ? undefined : page.cursor;

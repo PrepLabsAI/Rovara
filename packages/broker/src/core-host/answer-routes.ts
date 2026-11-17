@@ -101,7 +101,7 @@ async function routeNotRight(input: HostedAnswersInput, rawProject: string, rawA
     try { standing = await input.wiring.standing(input.personId, input.companyId, project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", ANSWER_FEEDBACK_WORDS.unavailable); }
     if (standing?.access !== "manage" && standing?.access !== "view") throw agentXError("NOT_FOUND", ANSWER_WORDS.projectNotFound);
     let body: unknown;
-    try { body = input.request.body === undefined || input.request.body === "" ? {} : JSON.parse(input.request.body) as unknown; } catch { body = undefined; }
+    try { body = input.request.body === undefined || input.request.body === "" ? {} : input.request.body.length > 1_024 ? undefined : JSON.parse(input.request.body) as unknown; } catch { body = undefined; }
     if (!NotRightBodySchema.safeParse(body).success) throw agentXError("CONFIG_INVALID", ANSWER_WORDS.badRequest);
     if (!WikiIdSchema.safeParse(answerId).success) throw agentXError("NOT_FOUND", ANSWER_FEEDBACK_WORDS.notYours);
     const wiki = createWikiStore({ store: input.store, companyId: input.companyId, now: input.now });

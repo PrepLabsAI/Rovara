@@ -48,8 +48,8 @@ export function gapKindOf(record: WikiAnswerRecord): AnswerGapKind | undefined {
   return undefined;
 }
 
-export async function listGaps(wiki: Pick<WikiStore, "listAnswers">, project: string): Promise<AnswerGapsResponse> {
-  const { records, more: moreRecords } = await wiki.listAnswers(project, ANSWER_FEEDBACK_LIMITS.recordsScanned);
+export async function listGaps(wiki: Pick<WikiStore, "listAnswers">, project: string, scanMax: number = ANSWER_FEEDBACK_LIMITS.recordsScanned): Promise<AnswerGapsResponse> {
+  const { records, more: moreRecords } = await wiki.listAnswers(project, Math.min(scanMax, ANSWER_FEEDBACK_LIMITS.recordsScanned));
   const groups = new Map<string, { kind: AnswerGapKind; askers: Set<string>; questions: number; last: WikiAnswerRecord }>();
   for (const record of records) {
     const kind = gapKindOf(record);
@@ -65,7 +65,7 @@ export async function listGaps(wiki: Pick<WikiStore, "listAnswers">, project: st
     if (record.createdAt > group.last.createdAt) group.last = record;
   }
   const items: AnswerGap[] = [...groups.values()].map((group) => ({
-    topic: plainLine(group.last.question, ANSWER_FEEDBACK_LIMITS.topicChars) || "A question", kind: group.kind, people: group.askers.size, questions: group.questions, lastAskedAt: group.last.createdAt,
+    topic: plainLine(group.last.question, ANSWER_FEEDBACK_LIMITS.topicChars) || "A question", kind: group.kind, people: group.askers.size, questions: group.questions, lastAskedAt: group.last.createdAt.slice(0, 10),
   }));
   items.sort((a, b) => RANK[a.kind] - RANK[b.kind] || b.people - a.people || b.lastAskedAt.localeCompare(a.lastAskedAt) || a.topic.localeCompare(b.topic));
   return { project, items: items.slice(0, ANSWER_FEEDBACK_LIMITS.gaps), more: moreRecords || items.length > ANSWER_FEEDBACK_LIMITS.gaps };
@@ -87,7 +87,8 @@ export async function pressNotRight(wiki: Pick<WikiStore, "readAnswer" | "readPa
     const read = await wiki.readPage(input.project, pageId, "person");
     if (read === undefined) continue;
     const changes = read.page.claims
-      .filter((claim) => claim.source === "found" && claim.citations.some((citation) => record.sources.some((source) => source.repo === citation.repo && source.path === citation.path
+      // A claim written (or re-checked) after the answer was given is not what the answer rested on: a page that was already refreshed is not queued again.
+      .filter((claim) => claim.source === "found" && claim.checkedAt <= record.createdAt && claim.citations.some((citation) => record.sources.some((source) => source.repo === citation.repo && source.path === citation.path
         && source.line >= citation.line - ANSWER_FEEDBACK_LIMITS.lineSlack && source.line <= (citation.lineEnd ?? citation.line) + ANSWER_FEEDBACK_LIMITS.lineSlack)))
       .slice(0, ANSWER_FEEDBACK_LIMITS.claimsPerPress - queued)
       .map((claim) => ({ claimId: claim.claimId, source: "changed" as const }));
