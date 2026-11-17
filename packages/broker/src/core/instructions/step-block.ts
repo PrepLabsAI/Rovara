@@ -15,7 +15,7 @@ import { buildStandingInstructions } from "./standing-block.js";
  * The modes whose operations do not carry the block: verification (`CHECKS` runs the project's checks in the harness; a check step takes no instructions), the setup run that runs commands, and the
  * spec write (a rendering of the approved plan, not a judgement). A deep diagnosis carries none either.
  */
-const WITHOUT_BLOCK: ReadonlySet<PlaybookMode> = new Set<PlaybookMode>(["CHECKS", "SETUP_AGENT", "SPEC_WRITE"]);
+const WITHOUT_BLOCK: ReadonlySet<PlaybookMode> = new Set<PlaybookMode>(["CHECKS", "SETUP_AGENT", "WIKI_BUILD", "SPEC_WRITE"]);
 
 export interface StandingOperation {
   project: string;

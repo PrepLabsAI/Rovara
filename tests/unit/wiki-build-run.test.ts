@@ -294,7 +294,8 @@ describe("stop and continue", () => {
     await continueWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
     const next = await readWikiBuildPointer(w.store, COMPANY_A, "beacon");
     const job = await nextWikiPage(w.loop, scopeOf(w, next!.taskId), { spentCents: 0 });
-    expect(job).toMatchObject({ kind: "page", spendCeilingCents: 1_050 });
+    // The ceiling: what is left of the cap (2000 - 950 = 1050) or what the broker knows was spent in this run (0) plus one page's reserve (100), whichever is less.
+    expect(job).toMatchObject({ kind: "page", spendCeilingCents: 100 });
     // The new run's own spend counts on top of what was spent before: 950 + 950 + 100 > 2000.
     await submitWikiPage(w.loop, scopeOf(w, next!.taskId), { pageId: pageOf(job).id, spentCents: 951, draft: goodDraft(pageOf(job).id) });
     expect(await nextWikiPage(w.loop, scopeOf(w, next!.taskId), { spentCents: 951 })).toEqual({ kind: "end", word: "budget_used" });
@@ -373,5 +374,43 @@ describe("person erase", () => {
     expect(await eraseWikiBuildNotes(w.store, { orgId: COMPANY_A, project: "beacon" }, ADMIN)).toBe(1);
     const rows = (await w.store.query({ pk: `ORG#${COMPANY_A}#WIKI_BUILD#beacon` })).items;
     expect(JSON.stringify(rows)).not.toContain("billing first");
+  });
+});
+
+describe("the job's ceiling: one page's reserve above what the broker knows (review M2)", () => {
+  // MUTANT: the ceiling is the whole remaining cap, so a page that dies unreported (Stop, crash, lost machine) can cost far more than the reserve a continue charges for it.
+  it("is the cap that is left, or the known spend plus one reserve, whichever is less; it follows the spend the worker reported", async () => {
+    const w = world();
+    const { taskId } = await started(w);
+    const scope = scopeOf(w, taskId);
+    expect(await nextWikiPage(w.loop, scope, { spentCents: 0 })).toMatchObject({ kind: "page", spendCeilingCents: 100 });
+    await submitWikiPage(w.loop, scope, { pageId: "overview", spentCents: 80, draft: goodDraft("overview") });
+    expect(await nextWikiPage(w.loop, scope, { spentCents: 80 })).toMatchObject({ kind: "page", spendCeilingCents: 180 });
+    // A page asked for again while it is out keeps the same ceiling (no more spend was reported).
+    expect(await nextWikiPage(w.loop, scope, { spentCents: 80 })).toMatchObject({ spendCeilingCents: 180 });
+    await submitWikiPage(w.loop, scope, { pageId: "repo-api", spentCents: 850, draft: goodDraft("repo-api") });
+    // Near the cap the cap is what limits it: 1000 - 850 = 150 is less than 850 + 100.
+    expect(await nextWikiPage(w.loop, scope, { spentCents: 850 })).toMatchObject({ kind: "page", spendCeilingCents: 950 });
+  });
+
+  it("stop and continue, over and over, with every page dying unreported at its ceiling: what was really spent never passes the cap", async () => {
+    const w = world();
+    let real = 0;
+    for (let round = 0; round < 40; round += 1) {
+      const pointer = round === 0 ? undefined : await readWikiBuildPointer(w.store, COMPANY_A, "beacon");
+      if (round === 0) await startWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
+      else {
+        try { await continueWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() }); } catch (error) { expect(error).toMatchObject({ code: "BUDGET_EXCEEDED" }); break; }
+      }
+      void pointer;
+      const now = (await readWikiBuildPointer(w.store, COMPANY_A, "beacon"))!;
+      const job = await nextWikiPage(w.loop, scopeOf(w, now.taskId), { spentCents: 0 });
+      if (job.kind !== "page") break;
+      // The page spends right up to its ceiling and the machine dies: nothing of that spend is ever reported.
+      real += job.spendCeilingCents;
+      await stopWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
+    }
+    expect(real).toBeLessThanOrEqual(1_000);
+    expect(real).toBeGreaterThan(0);
   });
 });

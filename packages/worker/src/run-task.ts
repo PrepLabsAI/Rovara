@@ -38,6 +38,7 @@ import type { FileOpsTarget } from "./file-ops-exec.js";
 import { sweepFileOps } from "./sandbox-file-tools.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { runSetupAgentInvocation } from "./setup-agent-invocation.js";
+import { runWikiBuildInvocation } from "./wiki-build-invocation.js";
 import { runNightlyInvocation } from "./nightly-invocation.js";
 import { EventBatcher, redactCredentials, type EventAppendOptions, type EventBatchSink, type WorkerEvent } from "./events.js";
 import {
@@ -121,7 +122,7 @@ export interface TaskInvocationResult {
   reopened: boolean;
   /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
   checks?: CheckReport;
-  workflowMode?: "PLAN" | "PLAN_CRITIQUE" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | "UNDERSTAND" | "SETUP_DRAFT" | "SETUP_AGENT" | "SPEC_WRITE";
+  workflowMode?: "PLAN" | "PLAN_CRITIQUE" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | "UNDERSTAND" | "SETUP_DRAFT" | "SETUP_AGENT" | "WIKI_BUILD" | "SPEC_WRITE";
   /** Rovara Code Task 10: the draft a setup-draft run read, already bounded and redacted (the broker reads it again). */
   setupProposal?: SetupProposal;
   /** SH14: how a setup run that ran commands ended (the broker reads it again). */
@@ -189,6 +190,8 @@ export interface TaskInvocationDependencies {
   cancellationController?: WorkerCancellationController;
   /** SH14: the broker's setup callback with this invocation's own capability (callback-client.ts `setupAgent`). A setup run does not run without it. */
   setupAgent?: (body: unknown) => Promise<unknown>;
+  /** W3b: the broker's wiki build callback with this invocation's own capability (callback-client.ts `wikiBuild`). A wiki build does not run without it. */
+  wikiBuild?: (body: unknown) => Promise<unknown>;
   /** NH-1: the broker's nightly action with this invocation's own capability (callback-client.ts `nightlyResult`). A nightly run does not run without it. */
   nightlyResult?: (body: NightlyResultCallbackBody) => Promise<unknown>;
   devcontainerCli?: DevcontainerCli;
@@ -340,6 +343,10 @@ async function runTask(
   // SH14 (the broker sends this mode only while `su` is on, and only to a worker that lists "task.setupAgent.v1"): the setup run that runs commands has its own module; nothing below applies to it.
   if (invocation.payload.workflowMode === "SETUP_AGENT") {
     return runSetupAgentInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, setupAgent: dependencies.setupAgent, docker: dependencies.docker, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
+  }
+  // W3b (the broker sends this mode only to a worker that lists "task.wikiBuild.v1"): the wiki build run reads the pinned commits with read-only tools; nothing below applies to it.
+  if (invocation.payload.workflowMode === "WIKI_BUILD") {
+    return runWikiBuildInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, wikiBuild: dependencies.wikiBuild, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
   }
   // A run that looks at a pull request: the workspace must hold the head commit the step was told about, or the step does not run, and nothing is started
   // for it (Task 22 review, M5).

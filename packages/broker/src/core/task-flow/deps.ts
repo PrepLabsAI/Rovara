@@ -387,6 +387,11 @@ export interface TaskFlowDeps {
    */
   lessonsSentBack?: (taskId: string) => Promise<void>;
   /**
+   * Wiki build (W3b): told after a wiki build run's task ended and its end word was written (by the worker's own last answer, a Stop, or the operation's end), so the wiki store's build record can say how it ended.
+   * Best effort: it never throws into the flow. Absent: the build record keeps what the last page report wrote.
+   */
+  wikiBuildEnded?: (scope: { orgId: string; project: string; taskId: string }) => Promise<void>;
+  /**
    * The lighter flow, install-wide: a change whose plan is estimated exactly small skips its planning steps (plan check, design review, the requirements, design and plan approvals) and gets, after each push, the
    * reviewer's fixed questions and the quick checks of what it touched; one that grows after the build stops and gets the grown tier's reviews on its current head before it can merge. Off or absent: today's flow.
    * Switching it on needs `tierReviewCall` (construction refuses it without one), and there is no way to switch the reviewer's questions off.
