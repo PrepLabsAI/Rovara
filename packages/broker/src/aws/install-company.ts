@@ -11,8 +11,8 @@
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  OrgIdSchema, OrgRoleSchema, MEMBER_GRANT_SK_PREFIX, PROJECT_REVISION_SK_PREFIX, SLACK_BINDING_SK_PREFIX, memberGrantsPk, orgPk, orgProjectCatalogPk, orgScoped, projectPk, slackBindingPk,
-  type OrgId, type OrgRole, type SlackChannelBinding,
+  OrgIdSchema, OrgRoleSchema, MEMBER_GRANT_SK_PREFIX, PROJECT_REVISION_SK_PREFIX, memberGrantsPk, orgPk, orgProjectCatalogPk, orgScoped, projectPk,
+  type OrgId, type OrgRole,
 } from "@agentx/contracts";
 
 /** The longest merge chain followed (the same bound the install that wrote the merges used for its own readers). */
@@ -98,7 +98,7 @@ export async function installCompanyOf(client: Client, tableName: string, person
 }
 
 /** Every item under `pk` with the sort-key prefix, each page consistent; the shared budget bounds the total. */
-async function queryAll(client: Client, tableName: string, pk: string, prefix: string): Promise<Item[]> {
+export async function installCompanyQuery(client: Client, tableName: string, pk: string, prefix: string): Promise<Item[]> {
   const items: Item[] = [];
   let start: Item | undefined;
   do {
@@ -119,25 +119,18 @@ async function queryAll(client: Client, tableName: string, pk: string, prefix: s
 
 /** The names a person's grants in one company give task use of (`developer` or `administrator` rows, as Code's own grants read). */
 export async function installCompanyGrants(client: Client, tableName: string, companyId: OrgId, personId: string, mayUse: (role: unknown) => boolean): Promise<string[]> {
-  const rows = await queryAll(client, tableName, memberGrantsPk(companyId, PersonId.parse(personId)), MEMBER_GRANT_SK_PREFIX);
+  const rows = await installCompanyQuery(client, tableName, memberGrantsPk(companyId, PersonId.parse(personId)), MEMBER_GRANT_SK_PREFIX);
   return rows.flatMap((row) => typeof row.projectName === "string" && row.sk === `${MEMBER_GRANT_SK_PREFIX}${row.projectName}` && mayUse(row.role) ? [row.projectName] : []);
 }
 
 /** Every project in the company's catalog (a company owner or admin reaches each one). */
 export async function installCompanyCatalog(client: Client, tableName: string, companyId: OrgId): Promise<string[]> {
-  const rows = await queryAll(client, tableName, orgProjectCatalogPk(companyId), "PROJECT#");
+  const rows = await installCompanyQuery(client, tableName, orgProjectCatalogPk(companyId), "PROJECT#");
   const names = rows.flatMap((row) => {
     const name = typeof row.name === "string" ? row.name : (row.sk as string).slice("PROJECT#".length);
     return name.length > 0 && row.sk === `PROJECT#${name}` ? [name] : [];
   });
   return names;
-}
-
-/** The install's Slack team's channel bindings inside one company. */
-export async function installCompanyBindings(client: Client, tableName: string, companyId: OrgId, teamId: string): Promise<SlackChannelBinding[]> {
-  const rows = await queryAll(client, tableName, slackBindingPk(companyId, teamId), SLACK_BINDING_SK_PREFIX);
-  return rows.flatMap((row) => typeof row.projectName === "string" && typeof row.channelId === "string" && row.sk === `${SLACK_BINDING_SK_PREFIX}${row.channelId}`
-    ? [{ ...(row as unknown as SlackChannelBinding), teamId: typeof row.teamId === "string" ? row.teamId : teamId }] : []);
 }
 
 /** A project's latest revision in one company: its number and task policy. Undefined when it has none. */
