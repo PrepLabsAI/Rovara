@@ -43,7 +43,7 @@ it("only the member helper constructs member payloads and derives company/actor 
         z.object({ kind: z.literal("company-member-role-set"), companyId: OrgIdSchema, personId: MemberPersonId, role: OrgRoleSchema }).strict(),
         MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
     ])",
-      " | VariableDeclaration: Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional(), authTime: z.number().int().positive().optional() }).strict()",
+      " | VariableDeclaration: Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack", "github"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional(), authTime: z.number().int().positive().optional() }).strict()",
       "function:companyMembersThroughLambda(deps) | Parameter: deps: {
         documentClient: {
             send(command: unknown): Promise<unknown>;

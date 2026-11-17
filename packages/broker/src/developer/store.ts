@@ -29,7 +29,9 @@ import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 /** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
 export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[]; companyId?: string;
   /** Lane ID part 2: the client asked for a step-up (`acr_values=step-up`). The sign-in at the provider then only says who it is; Code's own factor follows. */
-  stepUp?: true }
+  stepUp?: true;
+  /** DEC 254h: the SHA-256 of the invite link secret this sign-in carries (`invite=`, with `company=`). The secret itself is never stored. */
+  inviteHash?: string }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;

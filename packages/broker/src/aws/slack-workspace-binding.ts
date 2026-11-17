@@ -15,21 +15,23 @@ export function slackWorkspaceTeam(value: unknown): value is string {
 
 // Labels are identifiers, not free text. In particular the grammar admits no token separators ('-').
 const operator = z.string().max(64).regex(/^[a-z][a-z0-9]*(?:[._][a-z0-9]+)*$/);
+/** Guided onboarding PR 4 (slack-company-install.ts): a company owner or admin who added Rovara to Slack is recorded by their person id. */
+const person = z.string().regex(/^[a-f0-9]{64}$/);
 const bindingRow = z.object({
   pk: z.string().max(43), sk: z.literal("BINDING"), entityType: z.literal("SLACK_WORKSPACE_BINDING"),
-  teamId: SlackTeamIdSchema, companyId: OrgIdSchema, boundAt: z.iso.datetime(), boundBy: operator,
+  teamId: SlackTeamIdSchema, companyId: OrgIdSchema, boundAt: z.iso.datetime(), boundBy: z.union([operator, person]),
 }).strict();
-const markerKey = { pk: "SLACK_WORKSPACE_BINDING", sk: "BACKFILL" };
+export const markerKey = { pk: "SLACK_WORKSPACE_BINDING", sk: "BACKFILL" };
 const markerRow = z.object({ pk: z.literal("SLACK_WORKSPACE_BINDING"), sk: z.literal("BACKFILL") }).strict();
-const teamKey = (teamId: string) => ({ pk: `SLACK_TEAM#${teamId}`, sk: "BINDING" });
-const companyWorkspaceKey = (companyId: string, teamId: string) => ({ pk: `ORG#${companyId}#SLACK_WORKSPACES`, sk: `TEAM#${teamId}` });
-type BindingRow = z.infer<typeof bindingRow>;
-function parseBinding(value: unknown): BindingRow {
+export const teamKey = (teamId: string) => ({ pk: `SLACK_TEAM#${teamId}`, sk: "BINDING" });
+export const companyWorkspaceKey = (companyId: string, teamId: string) => ({ pk: `ORG#${companyId}#SLACK_WORKSPACES`, sk: `TEAM#${teamId}` });
+export type BindingRow = z.infer<typeof bindingRow>;
+export function parseBinding(value: unknown): BindingRow {
   const row = bindingRow.parse(value);
   if (!slackWorkspaceTeam(row.teamId) || row.pk !== teamKey(row.teamId).pk) throw new SlackWorkspaceRefused();
   return row;
 }
-function companyWorkspaceView(row: BindingRow) {
+export function companyWorkspaceView(row: BindingRow) {
   return { ...companyWorkspaceKey(row.companyId, row.teamId), entityType: "COMPANY_SLACK_WORKSPACE_VIEW",
     teamId: row.teamId, companyId: row.companyId, boundAt: row.boundAt, boundBy: row.boundBy };
 }
