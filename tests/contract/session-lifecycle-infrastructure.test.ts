@@ -96,7 +96,7 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect(Object.keys(launch.Condition!).sort()).toEqual(["ArnEquals", "StringEquals"]);
     expect(launch.Condition!.StringEquals).toEqual({ "ec2:InstanceType": ["m6g.large", "m6g.xlarge", "m6g.2xlarge", "m6g.4xlarge", "m6g.8xlarge", "m6i.large", "m6i.xlarge", "m6i.2xlarge", "m6i.4xlarge", "m6i.8xlarge"] });
     // DEC 254zr: exactly the ten types, no wildcard, no duplicate, nothing outside the m6g and m6i families up to 8xlarge.
-    const types = launch.Condition!.StringEquals["ec2:InstanceType"] as string[];
+    const types = (launch.Condition!.StringEquals as Record<string, unknown>)["ec2:InstanceType"] as string[];
     expect(types).toHaveLength(10);
     expect(new Set(types).size).toBe(10);
     for (const type of types) expect(type).toMatch(/^m6[gi]\.(large|xlarge|2xlarge|4xlarge|8xlarge)$/u);
