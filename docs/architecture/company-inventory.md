@@ -1,4 +1,4 @@
-430 record kinds: 63 company-scoped, 21 install-wide, 346 needs-company. 211 routes: 38 company-scoped, 9 install-wide, 164 needs-company.
+436 record kinds: 71 company-scoped, 19 install-wide, 346 needs-company. 216 routes: 47 company-scoped, 5 install-wide, 164 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -91,6 +91,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:LEARN | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:MEMBER; entity:MEMBERSHIP | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:MESSAGE_KEY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | builder:packages/broker/src/core/notify/inbox-rows.ts:inboxPartition; entity:NOTIFY_INBOX | company-scoped | State table | no | - | Web task channel C7 (core/notify/inbox-rows.ts): inboxKey is NOTIFY_INBOX#<companyId>#<developerId> / <session>#<kind>, written by queueAttention beside the pending row; the row also names its company and person. The reader (core/notify/inbox.ts) builds the partition only from the live membership company and the verified person, ignores a row naming another company or person, and re-checks every row against the session and the person's current access before showing it; a read mark builds the same key, never from a body. Expires after 14 days; person erase deletes the partition (eraseInboxRows). |
 | record | pk:NOTIFY_PENDING; entity:NOTIFY_PENDING | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:NOTIFY_PREFS | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:NOTIFY_SENT; entity:NOTIFY_SENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
