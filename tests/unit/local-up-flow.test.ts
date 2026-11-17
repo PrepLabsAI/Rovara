@@ -7,10 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@agentx/contracts";
 import {
-  DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
+  DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, wikiUsePartition, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
   ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, flakyOnChangeHoldInput, projectPk, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
+import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
+import { createWikiForStep, setWikiAgentSwitch } from "../../packages/broker/src/core/wiki/agent-context.js";
 import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
 import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
@@ -294,6 +296,45 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(understand).toMatchObject({ kind: "task", payload: { workflowMode: "UNDERSTAND" } });
     expect((understand.payload as Record<string, unknown>)["learnedContext"]).toBeUndefined();
     expect(asked).toBeGreaterThan(0);
+  });
+
+  it("lead 4 A1: a step is given its OWN project's wiki only when the project's switch is on, and only a worker that lists the feature is sent it", async () => {
+    const WIKI_PAGE = (tag: string) => ({
+      pageId: "overview", kind: "overview" as const, title: `Overview ${tag}`, summary: `Summary ${tag}`, order: 0, repos: [{ repo: "demo", commit: BASE_COMMIT }], buildId: "build-0001",
+      blocks: [{ kind: "heading" as const, blockId: "h0001", level: 2 as const, text: "Heading" }, { kind: "paragraph" as const, blockId: "p0001", text: `Paragraph ${tag}`, claimIds: ["c0001"] }],
+      claims: [{ claimId: "c0001", text: `Claim ${tag}`, citations: [{ repo: "demo", path: "src/a.ts", commit: BASE_COMMIT, line: 3, quote: `export const a = "${tag}-quote-text";` }], source: "found" as const, checkedAt: "2026-11-17T09:00:00.000Z" }],
+    });
+    for (const [features, expectedPresent] of [[undefined, true], [[...WORKER_INVOCATION_FEATURES].filter((feature) => feature !== "task.wikiContext.v1"), false]] as const) {
+      const h = await launch(features === undefined ? {} : { features });
+      expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
+      expect((await h.api("/v1/admin/projects", { method: "POST", body: { ...PROJECT, name: "other" } })).status).toBe(201);
+      const store = h.runtime.registry.require("storage");
+      const options = { store, companyId: IMPLICIT_COMPANY_ID, now: () => Date.now() };
+      const wiki = createWikiStore(options);
+      await wiki.writePage("payments", WIKI_PAGE("PAYMENTS-WIKI"));
+      await wiki.writePage("other", WIKI_PAGE("OTHER-WIKI"));
+      await setWikiAgentSwitch(options, "payments", true);
+      const flow = h.runtime.app.flow.deps;
+      flow.wiki = createWikiForStep(options);
+      const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "33333333-3333-4333-8333-333333333333", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+      const workspaceId = (await store.get({ pk: `DEVTASK#${started.body.task.taskId}`, sk: "META" }))!["workspaceId"] as string;
+      const seen = new Set<string>();
+      const prepare = await h.nextJob(workspaceId, seen);
+      expect((await h.callback(prepare, "result", { status: "SUCCEEDED", result: {} })).status).toBe(200);
+      const understand = await h.nextJob(workspaceId, seen);
+      const sent = (understand.payload as Record<string, unknown>)["wikiContext"] as { project: string; pages: Array<{ pageId: string }> } | undefined;
+      expect(sent !== undefined).toBe(expectedPresent);
+      if (expectedPresent) {
+        expect(sent).toMatchObject({ project: "payments", pages: [{ pageId: "overview" }] });
+        expect(JSON.stringify(understand.payload)).toContain("PAYMENTS-WIKI");
+        expect(JSON.stringify(understand.payload)).not.toContain("OTHER-WIKI");
+        // The delivery is noted under this operation, company and project, for the worker's report.
+        expect((await store.query({ pk: wikiUsePartition(IMPLICIT_COMPANY_ID, "payments") })).items.some((item) => String(item.sk).startsWith("OP#"))).toBe(true);
+      }
+      // The switch off: the next step carries none.
+      await setWikiAgentSwitch(options, "payments", false);
+      expect(await createWikiForStep(options)({ companyId: IMPLICIT_COMPANY_ID, project: "payments", taskId: started.body.task.taskId, operationId: "aaaaaaaa-1111-4111-8111-111111111111", workflowMode: "PLAN", repositories: ["demo"] })).toEqual({});
+    }
   });
 
   it("runs a task from the request to an approved plan", async () => {
@@ -2410,7 +2451,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
     const publish = await h.nextJob(workspaceId, seen);
     const body = (publish.payload as { body?: string }).body ?? "";
-    expect(body).toContain("## Browser evidence");
+    expect(body).toContain("<summary>Screenshots: 1 page on the task page</summary>");
     expect(body).toContain("Browser evidence: Run by Rovara in its sandbox. Visual evidence only: it does not count as change proof.");
     expect(body).toContain("`/checkout`: before and after screenshots (on the task page, behind sign-in)");
     expect(body).not.toContain(shot("a").sha256);
@@ -2837,17 +2878,19 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     // The worker reports one harmless file; the commit also changes a CI workflow.
     const { taskId, cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n", ".github/workflows/ci.yml": "name: ci\n" }, diffOf("src/health.ts"));
     // At opening nothing is verified: the description cannot list the files, and the risk is HIGH and says why (the worker's list is not believed).
-    expect(openingBody).toContain("couldn't list the changed files");
-    expect(openingBody).toContain("## Risk: High");
+    expect(openingBody).toContain("The changed files have not been read yet.");
+    expect(openingBody).toContain("Risk not judged yet (treated as high)");
     expect(openingBody).toContain("Rovara has not yet checked which files changed against the code host.");
-    expect(openingBody).toContain("## Lessons used");
+    // Silent when fine (design 2.1 rule 5): no "None" section about lessons.
+    expect(openingBody).not.toContain("Lessons used");
     expect(((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level).toBe("high");
     // The next tracking pass reads the files from the code host: the description now lists BOTH files and the risk names the CI workflow.
     await h.runtime.tick();
-    expect(cr.body).toContain("2 files changed");
+    expect(cr.body).toContain("**Changed** 2 files, +");
     expect(cr.body).toContain(".github/workflows/ci.yml");
-    expect(cr.body).toContain("- src/health.ts");
-    expect(cr.body).toContain("## Risk: High");
+    // The per-file list is GitHub's own "Files changed" tab (design decision 4); only the count and the flagged files are said.
+    expect(cr.body).not.toContain("- src/health.ts");
+    expect(cr.body).toContain("High risk");
     expect(cr.body).toContain("Changes sensitive paths: .github/workflows/ci.yml");
     // The proof page shows the worker's list only as unchecked.
     const link = await h.browse(`/proof/${taskId}`);
@@ -2946,12 +2989,15 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     const fresh = await launch({ host: true, now: clock.now });
     const on = await published(fresh, { "src/health.ts": "export const health = 200;\n" }, undefined);
     await fresh.runtime.tick();
-    expect(on.cr.body).toContain("None used yet. Lessons are on:");
+    // The description is silent about lessons when none were used: no "None" section.
+    expect(on.cr.body).not.toContain("None used yet");
+    expect(on.cr.body).not.toContain("Lessons used");
     const off = await launch({ host: true, now: clock.now, environment: { ROVARA_LESSONS: "0" } });
     const stopped = await published(off, { "src/health.ts": "export const health = 200;\n" }, undefined);
     await off.runtime.tick();
-    expect(stopped.cr.body).toContain("None. Lessons are switched off on this install.");
+    expect(stopped.cr.body).not.toContain("Lessons are switched off");
     expect(stopped.cr.body).not.toContain("None used yet");
+    expect(stopped.cr.body).not.toContain("Lessons used");
   });
 
   it("N2: a description a person edited is left as they left it, though the files are verified and the risk is judged", async () => {
@@ -2976,7 +3022,7 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });
     const { taskId, cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
-    expect(openingBody).toContain("## Risk: High");
+    expect(openingBody).toContain("Risk not judged yet (treated as high)");
     // A host that cannot list the files now leaves the risk high; the next pass tries again.
     const original = h.host.changedFiles.bind(h.host);
     h.host.changedFiles = async () => { throw new Error("the host is down"); };
@@ -2987,11 +3033,10 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     await h.runtime.tick();
     const risk = ((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level;
     expect(risk).not.toBe("high");
-    expect(cr.body).toContain("1 file changed");
-    expect(cr.body).toContain("- src/health.ts (+2 -0)");
-    expect(cr.body).not.toContain("## Risk: High");
-    // A description a person edited is left as they left it.
-    expect(cr.body).toContain("None used yet. Lessons are on:");
+    expect(cr.body).toContain("**Changed** 1 file, +2 -0");
+    expect(cr.body).not.toContain("- src/health.ts");
+    expect(cr.body).not.toContain("High risk");
+    expect(cr.body).not.toContain("treated as high");
   });
 
   it("backs off when the code host says slow down, pauses every row until the time it names, and goes on after", async () => {
@@ -3320,7 +3365,8 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: Number(cr.id), url: h.model.crUrl(cr.id), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
     expect((await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workflow"]).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(cr.draft).toBe(true);
-    expect(String(payload["body"])).toContain("## Lessons used");
+    expect(String(payload["body"])).toContain("<!-- rovara:checks-and-reviews -->");
+    expect(String(payload["body"])).not.toContain("Lessons used");
 
     // The timer: checks pass, the draft is taken out of draft; then CI goes red and Rovara fixes it by itself.
     h.model.setChecks(commit, [passingCheck()]);
@@ -3354,6 +3400,10 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     expect(events).toContain("Rovara marked demo pull request " + cr.id + " ready for review.");
     expect(events.some((line) => line.startsWith("CI is failing on unit-tests, so Rovara is fixing it"))).toBe(true);
     expect(events.some((line) => line.startsWith("Approved by dana. Ready to merge"))).toBe(true);
+    // L4-C B5: the pull request was out of draft when CI went red, so the fix round is told on it once (a reviewer's earlier read may be stale); nothing else is: the passing checks and the approval are silent.
+    const posted = cr.comments.map((comment) => comment.body);
+    expect(posted.filter((body) => body.startsWith("Rovara is fixing failing CI (round 1 of 3): unit-tests"))).toHaveLength(1);
+    expect(posted.filter((body) => /passed|ready to merge/iu.test(body))).toEqual([]);
     expect(cr.state).toBe("open");
     const listed = await listSessions(store, IMPLICIT_COMPANY_ID, developerIdOf(localOwnerPrincipal()));
     expect(listed.sessions[0]).toMatchObject({ summary: { step: "Ready to merge", display: { state: "ready_to_merge" } } });
@@ -4240,7 +4290,7 @@ describe("rovara up: the second review on the pull request", () => {
     expect(openingBody).toContain("Second review did not run");
     await h.runtime.tick();
     // The description was rewritten with the files read from the host, and still says so.
-    expect(cr.body).toContain("1 file changed");
+    expect(cr.body).toContain("**Changed** 1 file, +");
     expect(cr.body).toContain("Second review did not run");
   });
 
@@ -4254,7 +4304,7 @@ describe("rovara up: the second review on the pull request", () => {
     expect(openingBody).toContain("Fixes ENG-142");
     await h.runtime.tick();
     // The rewrite from the host's own list of changed files keeps the line (a rewrite that forgot it would stop Linear closing the issue).
-    expect(cr.body).toContain("1 file changed");
+    expect(cr.body).toContain("**Changed** 1 file, +");
     expect(cr.body).toContain("Fixes ENG-142");
   });
 

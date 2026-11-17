@@ -24,7 +24,7 @@
 // fixed sentence; Docker's own words are never repeated. Everything started is removed.
 import { createHash, randomBytes } from "node:crypto";
 import {
-  AWS_PLAN_SERVICES_MAX, CATALOG_FIXED_ARGS, CatalogEntrySchema, FIXTURE_SET_MAX_BYTES, TEST_ENV_RESERVED_ALIASES, TestEnvDependencyIdSchema, agentXError, catalogFixedArgv, catalogIdName, normaliseAwsServiceKey,
+  AWS_PLAN_SERVICES_MAX, CATALOG_FIXED_ARGS, TEST_SERVICES_CEILING_MARKER, TEST_SERVICES_OVER_LIMIT_SENTENCE, CatalogEntrySchema, FIXTURE_SET_MAX_BYTES, TEST_ENV_RESERVED_ALIASES, TestEnvDependencyIdSchema, agentXError, catalogFixedArgv, catalogIdName, normaliseAwsServiceKey,
   type CatalogEntry,
 } from "@agentx/contracts";
 import { DOCKER_CALL_TIMEOUT_MS } from "./setup-network.js";
@@ -36,6 +36,8 @@ export const HELPER_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u;
 /** Names an alias may not take: the ones Rovara's helpers have, and the app's own name in the end-to-end checker's hosts files. */
 export const HELPER_RESERVED_ALIASES: readonly string[] = [...TEST_ENV_RESERVED_ALIASES, "app", MODEL_HELPER_ALIAS];
 export const MAX_HELPERS_PER_RUN = 12;
+/** The containers of a run that stay up besides its helpers: the name server and the sealed check sandbox. They count toward the guard's ceiling on service containers. */
+export const RUN_FIXED_CONTAINERS = 2;
 /** The most a whole start may wait for health, over all helpers (4.0.6). */
 export const RUN_HEALTH_LIMIT_S = 120;
 const HEALTH_POLL_MS = 500;
@@ -180,6 +182,11 @@ export interface StartHelpersInput {
   imageReferences?: ReadonlyMap<string, string>;
   /** The most memory the run's helpers may add up to (company setting `services.maxMemMiB`, default 3072). */
   maxMemMiB: number;
+  /**
+   * DEC 254zm 2, what the broker told the worker the guard allows on this computer: the most service containers at once and the most memory for one helper. A run that cannot fit is refused here, before anything
+   * starts, with the one fixed sentence (the guard still enforces them, and says the same when a start is stopped by it). Absent: no check here, the guard decides.
+   */
+  limits?: { containers: number; helperMemMiB: number };
   helpers: readonly HelperRequest[];
   files: HelperFiles;
   signal?: AbortSignal;
@@ -375,6 +382,7 @@ function planHelpers(net: ServicesNetwork, input: StartHelpersInput): Plan[] {
   }
   const totalMemMiB = plans.reduce((sum, plan) => sum + plan.entry.resources.memMiB, 0);
   if (totalMemMiB > input.maxMemMiB) throw new HelperStartError("over_limit", `The test services need ${String(totalMemMiB)} MiB; this run may use ${String(input.maxMemMiB)} MiB`);
+  if (input.limits !== undefined && (plans.length + RUN_FIXED_CONTAINERS > input.limits.containers || plans.some((plan) => plan.entry.resources.memMiB > input.limits!.helperMemMiB))) throw new HelperStartError("over_limit", TEST_SERVICES_OVER_LIMIT_SENTENCE);
   return plans;
 }
 
@@ -582,6 +590,8 @@ export async function startHelpers(docker: DockerCli, net: ServicesNetwork, inpu
       attempted.push(container);
       const args = runArgs(net, plan, container, { ...(envPath === undefined ? {} : { env: envPath }), ...(configPath === undefined ? {} : { config: configPath }), files });
       const result = await call(args);
+      // The guard's own words when a ceiling stopped the start: say so (the fixed sentence, never the daemon's text) instead of "could not be started".
+      if (result.exitCode !== 0 && result.stderr.includes(TEST_SERVICES_CEILING_MARKER)) return await fail("over_limit", plan, TEST_SERVICES_OVER_LIMIT_SENTENCE);
       if (result.exitCode !== 0) return await fail("start_failed", plan, `${plan.name} could not be started`);
     } catch (error) {
       if (error instanceof HelperStartError) throw error;

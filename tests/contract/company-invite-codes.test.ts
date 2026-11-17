@@ -19,7 +19,7 @@ const ADMIN = "a".repeat(64);
 function world() {
   const h = identityHarness({ oidc: {} });
   const company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
-  const invites = new CompanyInviteStore({ documentClient: h.db, tableName: "signin", now: h.now, company });
+  const invites = new CompanyInviteStore({ documentClient: h.db, tableName: "signin", now: h.now, company, selfServeAllowed: true });
   h.deps.company = company; h.deps.companyInvites = invites;
   const call = (event: unknown) => companyOperator({ store: company, invites, now: h.now, log: h.deps.log }, event);
   const codes = () => h.db.find((row) => row.pk === INVITE_CODES_PK);

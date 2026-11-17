@@ -102,7 +102,7 @@ export async function materializeMetaKnowledge(destination: string, commit: stri
 }
 
 /** Every regular file under `directory` (not Git's own folder) becomes 0444. Nothing is followed through a symbolic link. */
-async function makeReadOnly(directory: string): Promise<void> {
+export async function makeReadOnly(directory: string): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     if (entry.name === ".git") continue;
     const path = resolve(directory, entry.name);

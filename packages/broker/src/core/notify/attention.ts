@@ -106,7 +106,7 @@ async function publishAttentionChanged(realtime: Pick<RealtimePublisher, "publis
  * After a refresh committed: when the session moved into a state someone is told about, one pending row per person. Only task sessions. Never throws: a notification is never a reason for a refresh to fail.
  * Use it as a session change hook.
  */
-export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined }, change: SessionChange): Promise<number> {
+export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; /** `false`: write only the in-app inbox rows (a host that can message nobody keeps no queue). */ pending?: boolean }, change: SessionChange): Promise<number> {
   try {
     if (change.session.subject.kind !== "task") return 0;
     const kind = attentionKindOf(change.summary);
@@ -120,7 +120,7 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
     const people = await attentionRecipients(deps.store, change.session, change.summary, kind);
     const nowMs = (deps.now ?? (() => new Date()))().getTime();
     for (const developerId of people) {
-      await deps.store.put({
+      if (deps.pending !== false) await deps.store.put({
         item: { ...pendingKey(change.orgId, developerId, change.sessionId, kind), entityType: "NOTIFY_PENDING", orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
       }); await putInboxRow(deps.store, deps.log, { orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }, INDEX_EXPIRY_ATTRIBUTE);
     }

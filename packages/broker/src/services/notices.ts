@@ -14,6 +14,8 @@ type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets"
 
 export interface NoticeServiceOptions extends DeliveryOptions {
   store: DocumentStore;
+  /** The hosted core: when nothing can message anyone, still keep each person's in-app inbox rows (and nothing else). Absent: a host that can tell nobody queues nothing, as before. */
+  inbox?: boolean;
   /** Where the adapters are: the `channel` points, the `email` point and, for the open pages' hint, the `realtime` point. */
   registry: Pick<RegistryView, "get" | "names">;
   now?: () => Date;
@@ -37,8 +39,9 @@ export function createNoticeService(options: NoticeServiceOptions): NoticeServic
   return {
     canNotify,
     async queue(change) {
-      if (!canNotify()) return;
-      await queueAttention({ store, now: clock, ...(options.log === undefined ? {} : { log: options.log }), realtime: realtime() }, change);
+      // Nothing can message anyone: the hosted core still keeps the inbox rows (no pending rows, which nothing would deliver); every other host queues nothing.
+      if (!canNotify() && options.inbox !== true) return;
+      await queueAttention({ store, now: clock, ...(options.log === undefined ? {} : { log: options.log }), realtime: realtime(), ...(canNotify() ? {} : { pending: false }) }, change);
     },
     async deliver(budget = {}) {
       if (!canNotify()) return undefined;

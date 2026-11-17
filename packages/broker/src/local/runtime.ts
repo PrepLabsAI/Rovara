@@ -48,7 +48,7 @@ import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { AutomationSwitch } from "../core/automation/switch.js";
 import type { BrowserOpener } from "./open-browser.js";
-import { createLocalApp, type LocalApp } from "./app/app.js";
+import { createLocalApp, type LocalApp, type LocalAppOptions } from "./app/app.js";
 import { localAllowedDomains } from "./isolation/allow-list.js";
 import { laptopSandboxDenyList, sandboxModelHostsAllowed } from "./isolation/sandbox-model-deny.js";
 import { browserEvidenceRecipeOf, compactJsonText, executorImageOf } from "./isolation/browser-evidence-setting.js";
@@ -90,7 +90,7 @@ import {
   writeOwnerFile,
 } from "./state-directory.js";
 import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-machine-worker-machines.js";
-import { prepareLocalTestServices } from "./test-services-install.js";
+import { applyTestServicesMarker, prepareLocalTestServices } from "./test-services-install.js";
 import { createOwnerImageService, createOwnerImageStore } from "./test-services-owner-list.js";
 import { createDockerImageRegistry } from "./docker-image-registry.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
@@ -220,6 +220,8 @@ export interface LocalRuntimeOptions {
   machines?: WorkerMachines;
   /** Called with the registry after Code's defaults and before the config's adapters, to register more (an embedding product, tests). */
   registerAdapters?: (registry: AdapterRegistry) => void;
+  /** W3b: the wiki build run's callback seams (see `LocalAppOptions.wikiBuild`). Absent: the action is not served. */
+  wikiBuild?: LocalAppOptions["wikiBuild"];
   /** Opens a review page in the owner's browser (default: the system browser). A test gives a recorder, which stands for the browser. */
   openBrowser?: BrowserOpener;
   /** How `gh` is run to find the owner's GitHub token (tests give a stub, so a real login on the machine is never used). */
@@ -483,7 +485,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     audit: { stage: (event) => registry.require("audit-sink").stage(event), record: (event) => registry.require("audit-sink").record(event) },
     log: (entry) => console.log(JSON.stringify(entry)),
   });
-  const testServices = await prepareLocalTestServices({ environment: options.environment, stateDirectory, docker: runner, ownerImages, log: (entry) => console.log(JSON.stringify(entry)) });
+  const testServicesLogLine = (entry: Record<string, unknown>): void => console.log(JSON.stringify(entry));
+  const testServices = await prepareLocalTestServices({ environment: options.environment, stateDirectory, docker: runner, ownerImages, log: testServicesLogLine });
+  // DEC 254z-amend3: the host's marker. Set (or cleared) once here, on the environment every reader of this process takes (the core's test environment reads it, some with `process.env` as their default, which is
+  // what `rovara up` passes), so a task whose environment needs dependencies runs without them and says why. Never the owner's switch: `ROVARA_TEST_SERVICES=0` stays the only opt-out.
+  applyTestServicesMarker(options.environment, testServices.unavailableReason);
   // Worker machines. The callback listener's port is not known until the handler exists, so it is read when a machine starts.
   const callbackServer: { current?: CallbackServer } = {};
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
@@ -516,7 +522,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     buildSystems: () => collectBuildSystemProfiles(registry),
     signer: await loadInvokeSigner(stateDirectory),
     docker: runner,
-    ...(testServices.services === undefined ? {} : { testServices: testServices.services }),
+    ...(testServices.services === undefined ? {} : { testServices: testServices.services, testServicesLog: testServicesLogLine }),
     ...(options.workerFetch === undefined ? {} : { fetch: options.workerFetch }),
   });
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);
@@ -667,6 +673,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     diagnosis: options.environment["ROVARA_DIAGNOSIS"] !== "0",
     // The setup agent (`ROVARA_SETUP_AGENT=0` turns it off): a run that sets a project up by running its commands in a sandbox.
     setupAgent: options.environment["ROVARA_SETUP_AGENT"] !== "0",
+    ...(options.wikiBuild === undefined ? {} : { wikiBuild: options.wikiBuild }),
     installDomains: () => localAllowedDomains(options.allowedDomains),
     sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
     sandboxModelHostsOf: (machineId) => docker.sandboxModelHostsOf(machineId),

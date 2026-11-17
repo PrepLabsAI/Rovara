@@ -22,11 +22,12 @@
 // What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices)
 // refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use. The admission's hold sweep is the root's own (lane L8),
 // and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
+import { profileDisplayName } from "../developer/github-profile.js";
 import { projectTaskCapReader, type ProjectSettingsHook } from "./project-settings.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, WIKI_BUILD_WORDS, isContextSourceStage,
   when, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -41,6 +42,7 @@ import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceNam
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
+import { createHostedSetupApproval } from "../core-host/setup-approval.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
@@ -67,8 +69,11 @@ import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js";
+import { hostedServiceCatalog } from "./hosted-test-services.js";
+import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
+import { hostedEraseWiki } from "../core-host/wiki-routes.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
@@ -90,6 +95,7 @@ import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-hos
 import { handleCoreContextTools } from "../core-host/context-tools.js";
 import { createHostedIntake, hostedTicketUpdatesHandler, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
 import type { LinearConnections } from "./linear-connections.js";
+import { createWikiOnEvents } from "../core/wiki/agent-context.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
@@ -352,9 +358,11 @@ export function hostedTaskAccess(inputs: {
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
       if (inputs.setupRunStanding !== undefined && inputs.storage !== undefined) {
         const stored = await (await inputs.storage()).get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
-        if (stored?.["purpose"] === "setup_agent") {
+        if (stored?.["purpose"] === "setup_agent" || stored?.["purpose"] === "wiki_build") {
           if (stored["companyId"] !== inputs.companyId) return { allowed: false, message: NOT_A_MEMBER_HERE };
-          return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: SETUP_RUN_NOT_ALLOWED };
+          // A wiki build (W3b) runs on the same rule: the person it runs for must still manage the project (company owner or admin, or the project's administrator), read now.
+          const denied = stored["purpose"] === "wiki_build" ? WIKI_BUILD_WORDS.notAllowed : SETUP_RUN_NOT_ALLOWED;
+          return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: denied };
         }
       }
       return (await inputs.projectGrant(task.developerId, task.project)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };
@@ -426,6 +434,19 @@ export function enginePolicyHook(settings: HostedPolicyHookSettings | undefined,
   return { settings, install: signer };
 }
 
+/**
+ * The deployed identity's display name for a person: read live from their sign-in record, never for a revoked or unknown person. The name goes through the one display helper
+ * (`profileDisplayName`, DEC 254p (a)): a GitHub person's is clean, cut text with no markup, address or placeholder shape; any other person's is exactly as stored.
+ */
+export function hostedDisplayNameOf(documentClient: DynamoSender, signInTableName: string | undefined): (personId: string) => Promise<string | undefined> {
+  return async (personId) => {
+    if (signInTableName === undefined || signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
+    const response = await documentClient.send(new GetCommand({ TableName: signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    const row = response?.Item;
+    return row === undefined || row["revoked"] === true ? undefined : profileDisplayName(row);
+  };
+}
+
 // ---- the root
 
 export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRoot {
@@ -454,12 +475,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
-  const displayNameOf = async (personId: string): Promise<string | undefined> => {
-    if (inputs.signInTableName === undefined || inputs.signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
-    const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
-    const row = response?.Item;
-    return row === undefined || row["revoked"] === true || typeof row["displayName"] !== "string" ? undefined : row["displayName"];
-  };
+  const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
   const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true;
@@ -509,7 +525,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)),
       // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
       ...(inputs.linearIntake === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId) }),
-      moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
+      moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
+      // DEC 254zm: a starting task pins the project's newest usable approved test environment (the company's own records), as on a laptop.
+      testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }) },
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
@@ -602,12 +620,30 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
           canReadProject: (personId, project) => projectGrant(personId, project),
+          // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
+          testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },
           // Guided onboarding L2-3: the hosted setup run. Its model use is the gateway's (configured: the run is metered); citations are re-read from the company's own code host.
           setupRun: {
             standing: setupRunStanding,
             modelAccessConfigured: () => { try { return modelGateway() !== undefined; } catch { return false; } },
             readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
               .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
+            displayName: displayNameOf,
+            // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
+            approval: createHostedSetupApproval({
+              flow: runtime.flow.deps, store: runtime.flow.deps.store, approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
+              people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
+            }),
+          },
+          // Wiki W0: the free file map reads the company's own code host (company-bound, listings only) and uses the setup run's live standing; no model key is involved.
+          wikiMap: {
+            standing: setupRunStanding,
+            hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }),
+          },
+          // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
+          wiki: {
+            standing: setupRunStanding,
+            projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
           },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
@@ -701,6 +737,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
         const money = coreMoneyWiring(registry, companyId, now, admissionSettings, projectTaskCap);
+        const wikiOnEvents = createWikiOnEvents({ store: registry.require("storage"), companyId, now: () => now().getTime() });
         // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
         const wiring = modelGateway();
         const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps));
@@ -710,7 +747,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
           grants: new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential),
-          ...(lessons === undefined ? {} : { onEvents: (operation, events) => lessons.host.onEvents(operation, events) }),
+          // A step's events go to the lessons (when the company has them) and to the wiki's report filing (lead 4 A1: "Wiki pages this task read"); each is information only and never throws.
+          onEvents: async (operation, events) => { await Promise.all([lessons?.host.onEvents(operation, events), wikiOnEvents(operation, events)]); },
           bookUsage: money.bookUsage,
           // DEC 253c/253j(1): the trusted eval plan, approval and baseline cache for this company's CHECKS runs, with the approver's live role from the hosted members reader.
           evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),
@@ -732,7 +770,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const objects = registry.require("object-storage") as unknown as Partial<PersonEraseObjects>;
     if (typeof objects.deleteEveryVersion !== "function") throw new Error("the object storage cannot delete every version");
     void companyId;
-    return { store, audit, objects: objects as PersonEraseObjects, eraseLearning: hostedEraseLearning({ store, audit, now: () => now().getTime(), log }), now: () => now().getTime(), log };
+    return { store, audit, objects: objects as PersonEraseObjects, eraseLearning: hostedEraseLearning({ store, audit, now: () => now().getTime(), log }), eraseWiki: hostedEraseWiki({ store, now: () => now().getTime() }), now: () => now().getTime(), log };
   };
   const resumeErases = async (companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }> => {
     const registry = await app.registry();

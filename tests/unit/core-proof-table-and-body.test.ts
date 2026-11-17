@@ -398,19 +398,25 @@ const END = "<!-- /rovara:checks-and-reviews -->";
 const files = { files: [{ repository: "payments", path: "src/retry.ts", added: 10, removed: 2 }, { repository: "payments", path: "src/retry.test.ts", added: 30, removed: 0 }], complete: true };
 const bodyOf = (proof: unknown, workflow = workflowWith(), extra: Record<string, unknown> = {}) =>
   workflowPullRequestBody(task, workflow, "# Plan\n\n1. Add the retry flag.\n", SESSION, { changedFiles: files, ...(proof === undefined ? {} : { proof }), ...extra } as never);
+/** L4-C: the "Requirements and proof" drawer of the redesigned description ("" when there is none). */
 const proofPart = (body: string) => {
-  const from = body.indexOf("### Proof");
-  return from === -1 ? "" : body.slice(from, body.indexOf("## Reviews", from));
+  const from = body.indexOf("<summary>Requirements and proof");
+  return from === -1 ? "" : body.slice(from, body.indexOf("</details>", from));
+};
+const drawerOf = (body: string, summaryStart: string) => {
+  const from = body.indexOf(`<summary>${summaryStart}`);
+  return from === -1 ? "" : body.slice(from, body.indexOf("</details>", from));
 };
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
 describe("the Proof section of the version 2 pull request description", () => {
-  it("shows a requirement whose check has a proves_change test proof as proven, after Tests and before Reviews", () => {
+  it("shows a requirement whose check has a proves_change test proof as proven, in the first drawer, before Checks and Reviews", () => {
     const body = bodyOf({ plan: plan(), testProof: proofFor(CODE.digest) });
-    expect(body.indexOf("### Proof")).toBeGreaterThan(body.indexOf("## Tests"));
-    expect(body.indexOf("### Proof")).toBeLessThan(body.indexOf("## Reviews"));
-    expect(body.indexOf("### Proof")).toBeGreaterThan(body.indexOf(START));
-    expect(body.indexOf("### Proof")).toBeLessThan(body.indexOf(END));
+    const at = body.indexOf("<summary>Requirements and proof");
+    expect(at).toBeLessThan(body.indexOf("<summary>Checks: "));
+    expect(at).toBeLessThan(body.indexOf("<summary>Reviews: "));
+    expect(at).toBeGreaterThan(body.indexOf(START));
+    expect(at).toBeLessThan(body.indexOf(END));
     const section = proofPart(body);
     expect(section).toContain("| Requirement | Evidence | Result |");
     expect(section).toMatch(/\| 1\.1: The retry waits longer each time\. \|[^|\n]*Unit tests[^|\n]*\| ✅ proven \|/);
@@ -418,7 +424,7 @@ describe("the Proof section of the version 2 pull request description", () => {
     // One home for the test-proof lines: the Tests section carries them, the Proof section only marks the row "proven".
     expect(section).not.toContain("Test proof:");
     expect(body.match(/Test proof:/gu)).toHaveLength(1);
-    expect(body.slice(body.indexOf("## Tests"), body.indexOf("### Proof"))).toContain("Test proof: 1 check fails on the original code and passes now");
+    expect(drawerOf(body, "Checks: ")).toContain("Test proof: 1 check fails on the original code and passes now");
   });
 
   it("lists the test-proof lines once in Tests when the publication passed them and the Proof inputs carry the same proof", () => {
@@ -436,11 +442,21 @@ describe("the Proof section of the version 2 pull request description", () => {
     expect(after).toMatch(/- .*\b3\b.*retry count is shown/);
   });
 
+  // T1 (design 4.2): a check the plan proposed that has no result for this code is not tested, and that is said above the fold, not only under "What wasn't tested" in a closed drawer.
+  it("says a planned check that could not run above the fold", () => {
+    const noResults = workflowWith({ stage: "REVIEW", state: "WAITING", verification: undefined });
+    const body = bodyOf({ plan: plan() }, noResults);
+    const above = body.slice(0, body.indexOf("<details>"));
+    expect(above).toMatch(/\*\*\d+ things were not tested\.\*\*|\*\*Something was not tested\.\*\*/u);
+    expect(above).toContain("Check: Unit tests (it could not run)");
+    expect(proofPart(body)).toContain("What wasn't tested");
+  });
+
   it("ignores a test proof bound to a different candidate digest", () => {
     const ignored = bodyOf({ plan: plan(), testProof: proofFor(OTHER.digest) });
     const absent = bodyOf({ plan: plan() });
     expect(ignored).toBe(absent);
-    expect(proofPart(ignored)).not.toContain("proven");
+    expect(proofPart(ignored)).not.toContain("✅ proven");
     expect(ignored).not.toContain("Test proof:");
   });
 
@@ -498,7 +514,7 @@ describe("the Proof section of the version 2 pull request description", () => {
     // The markers, the risk and the closing line stay.
     expect(body).toContain(START);
     expect(body).toContain(END);
-    expect(body).toContain("## Risk:");
+    expect(body).toContain("**Risk** ");
     expect(body.trimEnd().endsWith("A person must approve it and a person merges it.")).toBe(true);
   });
 
@@ -546,24 +562,26 @@ describe("the Proof section of the version 2 pull request description", () => {
 
   it("has no Proof section without an approved plan with claims, and the rest of the body is byte-identical to today's", () => {
     const today = bodyOf(undefined);
-    expect(today).not.toContain("### Proof");
+    expect(today).not.toContain("Requirements and proof");
+    expect(today).toContain("No approved requirements to prove.");
     expect(bodyOf({ plan: undefined })).toBe(today);
     expect(bodyOf({ plan: plan({ claims: [] }) })).toBe(today);
-    // A test proof without a plan with claims adds only its Tests line (as the publication's own hook does); there is still no Proof section.
+    // A test proof without a plan with claims adds only its Checks line (as the publication's own hook does) and the could-not-compare item; there is still no requirements drawer.
     const withProofOnly = bodyOf({ plan: undefined, testProof: proofFor(CODE.digest) });
-    expect(withProofOnly).not.toContain("### Proof");
-    // (TE-B3: a test proof from before the weakening facts could not compare the untouched tests, and the description says so in its own block.)
-    expect(withProofOnly.replace("\n- Test proof: 1 check fails on the original code and passes now", "").replace("## Flags for the reviewer\n- Test weakening: could not compare (no test report to compare)\n\n", "")).toBe(today);
+    expect(withProofOnly).not.toContain("Requirements and proof");
+    expect(drawerOf(withProofOnly, "Checks: ")).toContain("- Test proof: 1 check fails on the original code and passes now");
+    // (TE-B3: a test proof from before the weakening facts could not compare the untouched tests, and the description says so above the fold.)
+    expect(withProofOnly.indexOf("Test weakening: could not compare (no test report to compare)")).toBeLessThan(withProofOnly.indexOf("<details>"));
     expect(workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { plan: undefined } })).toEqual(workflowPullRequestStatusLines(workflowWith(), { changedFiles: files }));
   });
 
   it("a rewrite of the status lines after a pushed fix keeps the Proof section", () => {
     const lines = workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { plan: plan(), testProof: proofFor(CODE.digest) } }).join("\n");
-    expect(lines).toContain("### Proof");
+    expect(lines).toContain("<summary>Requirements and proof");
     expect(lines).toContain("✅ proven");
-    // The rewrite brings the Tests lines back too (once), from the proof it just read; the Proof section has none.
+    // The rewrite brings the test-proof line back too (once), from the proof it just read, in the Checks drawer; the requirements drawer has none.
     expect(lines.match(/Test proof:/gu)).toHaveLength(1);
-    expect(lines.slice(lines.indexOf("## Tests"), lines.indexOf("### Proof"))).toContain("Test proof: 1 check fails");
+    expect(drawerOf(lines, "Checks: ")).toContain("Test proof: 1 check fails");
   });
 });
 
@@ -663,7 +681,7 @@ describe("a test proof is read against the checks recorded with its results (P5)
 
 // Playbook P2: reviewer models have one source, Trust fix A2's Reviews lines. The Proof section is about requirements and evidence and names no reviewer model.
 describe("the reviewer model in a description that has a Proof section", () => {
-  const reviewsPart = (body: string) => body.slice(body.indexOf("## Reviews"), body.indexOf("## Risk:"));
+  const reviewsPart = (body: string) => drawerOf(body, "Reviews: ");
   const sameModelTask = { title: "Add a retry flag", reviewSameModel: { candidateDigest: CODE.digest } } as never;
 
   it("names the reviewer model once, in the Reviews section (A2's lines), and the Proof section has no model line", () => {
@@ -671,7 +689,7 @@ describe("the reviewer model in a description that has a Proof section", () => {
     expect(proofPart(body)).toContain("| Requirement | Evidence | Result |");
     expect(body.match(/Reviewed by test\/1/gu)).toHaveLength(1);
     expect(reviewsPart(body)).toContain("Reviewed by test/1");
-    expect(body.indexOf("### Proof")).toBeLessThan(body.indexOf("## Reviews"));
+    expect(body.indexOf("<summary>Requirements and proof")).toBeLessThan(body.indexOf("<summary>Reviews: "));
     expect(proofPart(body)).not.toMatch(/Reviewed by|test\/1|same model/iu);
   });
 
@@ -686,15 +704,15 @@ describe("the reviewer model in a description that has a Proof section", () => {
     const lines = workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { plan: plan(), testProof: proofFor(CODE.digest) }, reviewSameModel: true }).join("\n");
     expect(lines.match(/Reviewed by test\/1/gu)).toHaveLength(1);
     expect(lines.match(/Review used the same model as Build/gu)).toHaveLength(1);
-    expect(lines.indexOf("### Proof")).toBeLessThan(lines.indexOf("## Reviews"));
-    expect(lines.slice(lines.indexOf("### Proof"), lines.indexOf("## Reviews"))).not.toMatch(/Reviewed by|same model/iu);
+    expect(lines.indexOf("<summary>Requirements and proof")).toBeLessThan(lines.indexOf("<summary>Reviews: "));
+    expect(proofPart(lines)).not.toMatch(/Reviewed by|same model/iu);
   });
 
   it("a Proof section with the kept or stale marker still leaves A2's lines in Reviews", () => {
     const lines = workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { stale: true }, reviewSameModel: true }).join("\n");
     expect(lines).toContain("Proof is being updated for the latest change.");
-    expect(lines.slice(lines.indexOf("## Reviews"))).toContain("Reviewed by test/1");
-    expect(lines.slice(lines.indexOf("## Reviews"))).toContain("Review used the same model as Build");
+    expect(drawerOf(lines, "Reviews: ")).toContain("Reviewed by test/1");
+    expect(drawerOf(lines, "Reviews: ")).toContain("Review used the same model as Build");
   });
 });
 
@@ -862,15 +880,16 @@ it("keeps all three reasons and the Warning within four page lines, dropping onl
   expect(body.indexOf("Test proof:")).toBeLessThan(body.indexOf("Warning:"));
 });
 
-it("pins legacy table, PR body and page bytes for ordinary, missing and malformed proofs", () => {
+// L4-C: the body is no longer pinned by a hash (tests/fixtures/pr-body/*.md pin the whole description, in the open); the table and the page, which this redesign did not touch, keep their pin.
+it("pins legacy table and page bytes for ordinary, missing and malformed proofs", () => {
   const hashes = [proofFor(CODE.digest), undefined, { invalid: true }].map((testProof) => {
     const context = { plan: plan(), testProof: testProof as TestProof | undefined };
     const table = buildProofTable({ ...context, checkResults: passing("unit", "lint"), scenarioRows: [], candidateDigest: CODE.digest, recordedCheckIds: SELECTED });
-    return createHash("sha256").update(JSON.stringify({ table, body: bodyOf(context), page: proofTableView(workflowWith(), context) })).digest("hex");
+    return createHash("sha256").update(JSON.stringify({ table, page: proofTableView(workflowWith(), context) })).digest("hex");
   });
   expect(hashes).toEqual([
-    "b8b353f5e2bb947fdce313b2791caf7f25ea6f35f049432b10c020817e59629c",
-    "1fc846f57ff447087a27664b34d667a381127ad97a87d804034642f1deeed3ba",
-    "1fc846f57ff447087a27664b34d667a381127ad97a87d804034642f1deeed3ba",
+    "2426c6b2875026b7980624aabc1cc3278cad1581a05634513010770fe0b63966",
+    "578c0e48d0182fa5c7ca2598989da6093837aa79f91fc542aa79a05a1ed7f7f6",
+    "578c0e48d0182fa5c7ca2598989da6093837aa79f91fc542aa79a05a1ed7f7f6",
   ]);
 });

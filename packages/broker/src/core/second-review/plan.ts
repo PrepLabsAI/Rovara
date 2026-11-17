@@ -10,7 +10,7 @@ import { isBatchVariant } from "./model-variants.js";
 import {
   SECOND_REVIEW_CANDIDATES_MAX, SecondOpinionSchema, secondReviewDidNotRunLine, blockingFindings, modelCompany, narrowedSecondReviewModels, secondReviewModelKey, secondReviewVerdictHolds,
   type AcceptedFindingRef, type ModelCompany, type ModelIdentifier, type ModelSelection, type SecondOpinion, type SecondOpinionUnavailableReason, type SecondReviewChoice, type SecondReviewMode, type SecondReviewModelRef,
-  type SecondReviewReplayRun, type SecondReviewSkipReason, type SecondReviewVerdict, type WorkflowReviewReport,
+  type SecondReviewReplayRun, type SecondReviewSkipReason, type SecondReviewVerdict, type VerdictSecondReview, type WorkflowReviewReport,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import { ROUTE_PROVIDER } from "@agentx/model-runtime/catalog";
@@ -297,6 +297,20 @@ export function secondOpinionPrLines(opinion: SecondOpinion, accepted?: readonly
     `Second review (${inertLine(`${opinion.report.provider}/${opinion.report.version}`, 80)}): ${String(blocking.length)} blocking ${blocking.length === 1 ? "finding" : "findings"}`,
     ...blocking.slice(0, SECOND_OPINION_PR_FINDINGS_MAX).map((finding) => `- ${inertLine(finding.text, SECOND_OPINION_PR_LINE_MAX)}${finding.file === undefined ? "" : ` (${inertLine(finding.file, 120)}${finding.line === undefined ? "" : `:${String(finding.line)}`})`}`),
   ];
+}
+
+/**
+ * L4-C: the second review as the pull request's verdict object reads it: only for an `on` opinion (a shadow one is never shown, so it is `undefined`, and the description says nothing about a second review). `agreed` is said
+ * only for an `on` review that ran and has no blocking finding (the same list the opinion blocked on): it is "no blocking finding", a model's pass shown as a fact, never an approval and never a clearing of the first review's
+ * findings. A blocking one carries its findings (raw text; the verdict object makes them inert), one that did not run its fixed line.
+ */
+export function secondOpinionPrStatus(opinion: SecondOpinion, accepted?: readonly AcceptedFindingRef[]): VerdictSecondReview | undefined {
+  if (opinion.mode !== "on") return undefined;
+  if (opinion.unavailable) return opinion.unavailableReason === undefined ? undefined : { state: "did_not_run", reasonLine: secondReviewDidNotRunLine(opinion.unavailableReason) };
+  if (opinion.report === undefined) return undefined;
+  const blocking = blockingFindings(opinion.report, accepted);
+  if (blocking.length === 0) return { state: "agreed" };
+  return { state: "blocking", count: blocking.length, model: `${opinion.report.provider}/${opinion.report.version}`, findings: blocking.slice(0, SECOND_OPINION_PR_FINDINGS_MAX).map((finding) => ({ text: finding.text, ...(finding.file === undefined ? {} : { file: finding.file }), ...(finding.line === undefined ? {} : { line: finding.line }) })) };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------

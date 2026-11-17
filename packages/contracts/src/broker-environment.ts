@@ -26,6 +26,11 @@ import {
   environmentSettingsPrefix,
 } from "./environments.js";
 
+/** DEC 254z-amend3: the variable the core reads the test services switch from, on a laptop and on AWS alike. */
+export const TEST_SERVICES_SETTING_VARIABLE = "ROVARA_TEST_SERVICES";
+/** DEC 254zm: the variable the hosted functions read the TestServiceImages setting from (aws/hosted-test-services.ts). */
+export const TEST_SERVICE_IMAGES_SETTING_VARIABLE = "ROVARA_TEST_SERVICES_HOSTED_IMAGES";
+
 /** The names the broker is given, as one variable. */
 export const BROKER_NAMES_VARIABLE = "AGENTX_NAMES";
 /** The constrained settings the broker is given, as one variable. */
@@ -155,7 +160,15 @@ export interface BrokerSettingSpec {
   readonly variable: string;
   /** The value is a host (with an optional port) and the variable gets its https origin, `https://<value>`; an empty value stays empty. A slash cannot be packed, so the scheme is added here. */
   readonly httpsOrigin?: true;
+  /**
+   * DEC 254zg (a), 254zk (room in the broker's 4 KB): an on/off switch packed as one character, "1" or "0", which the variable gets as "enabled" or "disabled". Any other packed
+   * value stops the broker (a flag read wrongly would turn a feature on or off without a word).
+   */
+  readonly switchFlag?: true;
 }
+
+/** A switch flag's packed value and the variable's value (BrokerSettingSpec.switchFlag). */
+export const BROKER_SWITCH_FLAG_VALUES: Readonly<Record<string, "enabled" | "disabled">> = { "1": "enabled", "0": "disabled" };
 
 /**
  * The broker's settings that are stack parameters already constrained to plain text (a Number, an AllowedValues list or an AllowedPattern without separators): the infrastructure
@@ -184,12 +197,26 @@ export const BROKER_SETTINGS = {
   // to make room for the gateway settings in the broker's 4 KB.
   coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
   /** DEC 254o (b), L2-2: Slack company mode for workspaces other than SLACK_TEAM_ID (stack parameter SlackCompanyWorkspaces; the broker also needs COMPANY_SIGNIN=enabled). */
-  slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES" },
+  slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES", switchFlag: true },
   coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
   coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
+  // DEC 254z-amend3: test services, ON unless exactly "0" (the stack parameter TestServices, TEST_SERVICES_PARAMETER_VALUES). The broker's core reads it as ROVARA_TEST_SERVICES (the laptop's own switch).
+  // Not `tx`: Cloud's own table gives that code to its own test services switch, which is off by default; a code means one thing in both.
+  testServices: { code: "td", variable: TEST_SERVICES_SETTING_VARIABLE },
+  // DEC 254zm: whether the install's copies of the starter images are in place (the stack parameter TestServiceImages, TEST_SERVICE_IMAGES_PARAMETER_VALUES). Only exactly "mirrored" lets Code's workers run test services.
+  testServiceImages: { code: "ti", variable: TEST_SERVICE_IMAGES_SETTING_VARIABLE },
   // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
   channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
+  // DEC 254zg (a): Code's company layer (the CompanySignIn parameter, through its condition: enabled or disabled), packed.
+  companySignIn: { code: "si", variable: "COMPANY_SIGNIN", switchFlag: true },
 } as const satisfies Record<string, BrokerSettingSpec>;
+
+/** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */
+export const TEST_SERVICES_PARAMETER_VALUES = ["1", "0"] as const;
+export const TEST_SERVICES_PARAMETER_DEFAULT = "1";
+/** DEC 254zm: the values of the TestServiceImages stack parameter. `none` (the default): Code's workers do not run test services. `mirrored`: the operator copied and checked the five starter images (scripts/test-services-mirror.ts). */
+export const TEST_SERVICE_IMAGES_PARAMETER_VALUES = ["none", "mirrored"] as const;
+export const TEST_SERVICE_IMAGES_PARAMETER_DEFAULT = "none";
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;
 

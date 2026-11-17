@@ -348,3 +348,20 @@ describe("the Check Run request body", () => {
     expect(() => rovaraCheckBody(input as never, 0)).toThrow(/^CONFIG_INVALID: the check run/u);
   });
 });
+
+describe("the verdict source (L4-C B4)", () => {
+  const verdictOf = { resultKind: "verified", heading: "Verified · Low risk · nothing extra to check", body: ["**Changed** 1 file, +1 -0."] };
+  it("a source that gives a verdict makes the Ready Check say the description's words; the conclusion is unchanged", async () => {
+    const { tracking, latest } = await world({ check: source({ verdict: async () => verdictOf }) });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "success", title: verdictOf.heading });
+    expect(latest()?.payload.text).toContain("**Changed** 1 file, +1 -0.");
+  });
+  it("a source that throws, or gives nothing, leaves the Check as it was (never a problem of its own)", async () => {
+    for (const verdict of [async () => { throw new Error("boom"); }, async () => undefined]) {
+      const { tracking, latest } = await world({ check: source({ verdict }) });
+      await trackPullRequest(tracking, TASK_ID);
+      expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "success", title: "Ready" });
+    }
+  });
+});

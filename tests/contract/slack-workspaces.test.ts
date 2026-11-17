@@ -180,6 +180,16 @@ describe("Slack workspace operator events", () => {
       expect(log).not.toHaveBeenCalled();
     } finally { log.mockRestore(); }
   });
+  it("acknowledges a verified app_uninstalled / tokens_revoked with 200 and touches no storage while the install is not wired; a malformed one is still refused", async () => {
+    for (const reason of ["app_uninstalled", "tokens_revoked"] as const) {
+      const { handler, db } = createBroker();
+      const event = { source: "agentx.slack-workspace-removed", teamId: TEAM, reason, eventTime: 1_800_000_000 };
+      expect(await handler(event)).toMatchObject({ statusCode: 200, body: JSON.stringify({ outcome: "ignored", requestId: "slack-workspace" }) });
+      expect(db.commandNames()).toHaveLength(0);
+      expect(await handler({ ...event, extra: "x" })).toMatchObject({ statusCode: 404, body: JSON.stringify({ outcome: "refused", requestId: "slack-workspace" }) });
+      expect(await handler({ ...event, teamId: null })).toMatchObject({ statusCode: 404 });
+    }
+  });
   it("uses the configured legacy team for operator backfill", async () => {
     const { handler, db } = createBroker({ extra: { slackWorkspaceLegacyTeamId: TEAM } });
     expect(await handler({ source: "agentx.slack-workspace-backfill" })).toMatchObject({ statusCode: 200, body: JSON.stringify({ outcome: "backfilled", teamsRead: 1, requestId: "slack-workspace" }) });

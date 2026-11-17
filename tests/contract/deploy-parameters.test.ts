@@ -346,9 +346,11 @@ describe("deploy parameters", () => {
 });
 
 describe("L2-2 18d: Slack company mode's slack-stack parameters", () => {
-  it("are always sent, off unless the control plane's switch outputs are present", () => {
-    expect(stackParameters("slack", answers(), outputs, { packages: true })).toMatchObject({ SlackCompanyWorkspacesState: "disabled", SlackCompanyStateTableName: "", SlackCompanyTeamId: "" });
+  it("always send the table and team (empty when the outputs are absent), and never the switch, which the operator sets and an upgrade keeps (DEC 254zk)", () => {
+    expect(stackParameters("slack", answers(), outputs, { packages: true })).toMatchObject({ SlackCompanyStateTableName: "", SlackCompanyTeamId: "" });
     const on = { ...outputs, "control-plane": { ...outputs["control-plane"], SlackCompanyWorkspacesState: "enabled", SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" } };
-    expect(stackParameters("slack", answers(), on, { packages: true })).toMatchObject({ SlackCompanyWorkspacesState: "enabled", SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" });
+    expect(stackParameters("slack", answers(), on, { packages: true })).toMatchObject({ SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" });
+    for (const given of [outputs, on]) expect(stackParameters("slack", answers(), given, { packages: true })).not.toHaveProperty("SlackCompanyWorkspacesState");
+    expect(OPERATOR_PARAMETERS.slack).toEqual(expect.arrayContaining(["CompanySignIn", "SlackCompanyWorkspacesState"]));
   });
 });

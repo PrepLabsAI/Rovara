@@ -478,3 +478,54 @@ it("exposes only the exact core model-access GET without an authorizer on named 
   expect(routes.some((route) => route.RouteKey === "GET /v1/internal/{proxy+}")).toBe(false);
   expect(resources(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "GET /v1/internal/model-access")).toBe(false);
 });
+
+// DEC 254z-amend3: test services, on by default with the owner's opt-out, kept across upgrades.
+describe("the test services setting (stack parameter TestServices)", () => {
+  const typed = json as unknown as { Parameters: Record<string, { Default?: string; AllowedValues?: string[] }> };
+  it("is declared on (\"1\") by default, with exactly the values 1 and 0, named environments only (the legacy template has none)", () => {
+    expect(typed.Parameters.TestServices).toMatchObject({ Default: "1", AllowedValues: ["1", "0"] });
+    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServices");
+  });
+
+  it("is packed for the broker and the dispatcher (td), never as a variable of their own, and given whole to the session steps", () => {
+    expect(packedSettings(dispatcherVariables).get("td")).toStrictEqual({ Ref: "TestServices" });
+    expect(packedSettings(brokerVariables).get("td")).toStrictEqual({ Ref: "TestServices" });
+    expect(brokerVariables).not.toHaveProperty("ROVARA_TEST_SERVICES");
+    const steps = resources(named, "AWS::Lambda::Function").find(([id]) => /^SessionsSteps[0-9A-F]{8}$/u.test(id))!;
+    expect((steps[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.ROVARA_TEST_SERVICES).toStrictEqual({ Ref: "TestServices" });
+    const users = Object.entries(json.Resources).filter(([, resource]) => /"Ref":"TestServices"/u.test(JSON.stringify(resource))).map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""));
+    expect(users.sort()).toEqual(["Broker", "Dispatcher", "SessionsSteps"]);
+  });
+
+  it("is an operator setting an upgrade keeps", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServices");
+  });
+});
+
+// DEC 254zm: whether the install's starter copies are in place, so Code's workers run test services. Off (`none`) by default, kept across upgrades.
+describe("the test service images setting (stack parameter TestServiceImages)", () => {
+  const typed = json as unknown as { Parameters: Record<string, { Default?: string; AllowedValues?: string[] }> };
+  it("is declared none by default, with exactly the values none and mirrored, named environments only", () => {
+    expect(typed.Parameters.TestServiceImages).toMatchObject({ Default: "none", AllowedValues: ["none", "mirrored"] });
+    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServiceImages");
+  });
+
+  it("is packed for the broker and the dispatcher (ti), and given whole to the session steps beside the switch", () => {
+    expect(packedSettings(dispatcherVariables).get("ti")).toStrictEqual({ Ref: "TestServiceImages" });
+    expect(packedSettings(brokerVariables).get("ti")).toStrictEqual({ Ref: "TestServiceImages" });
+    expect(brokerVariables).not.toHaveProperty("ROVARA_TEST_SERVICES_HOSTED_IMAGES");
+    const steps = resources(named, "AWS::Lambda::Function").find(([id]) => /^SessionsSteps[0-9A-F]{8}$/u.test(id))!;
+    expect((steps[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.ROVARA_TEST_SERVICES_HOSTED_IMAGES).toStrictEqual({ Ref: "TestServiceImages" });
+    const users = Object.entries(json.Resources).filter(([, resource]) => /"Ref":"TestServiceImages"/u.test(JSON.stringify(resource))).map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""));
+    expect(users.sort()).toEqual(["Broker", "Dispatcher", "SessionsSteps"]);
+  });
+
+  it("is an operator setting an upgrade keeps, set with `agentx config set testServices.images`", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServiceImages");
+    const key = configKey("testServices.images");
+    expect(key.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "TestServiceImages" });
+    expect(key.parse("mirrored")).toBe("mirrored");
+    expect(key.parse("none")).toBe("none");
+    for (const bad of ["Mirrored", "yes", "1", ""]) expect(() => key.parse(bad), bad).toThrow();
+  });
+});

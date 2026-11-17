@@ -32,15 +32,16 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE } from "@agentx/contracts";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
-import { CoreEngine } from "./core-engine.js";
+import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
+import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { REQUALIFY_CONTEXT_KEY, REQUALIFY_DEFAULT_HOUR_UTC, RuntimeRequalify } from "./runtime-requalify.js";
@@ -967,9 +968,13 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
     // Spec 025 phase 25a: developer sign-in and tasks, in every deployment; the legacy one is named production.
     const taskParameters = signInParameters.tasks;
+    // DEC 254zg (a): the company layer's switch (CompanySignIn), named environments only; every function that reads COMPANY_SIGNIN gets it from here, and every company-only
+    // grant is a policy under its condition (company-signin.ts).
+    const companySignIn = naming.env === undefined || signInParameters.company === undefined ? undefined : new CompanySignInSwitch(this, "CompanySignInSwitch", signInParameters.company);
     // DEC 254o (b), L2-2 PR 18a: Slack company mode's switch (stack parameter SlackCompanyWorkspaces, default disabled). Named environments only; every grant it adds is a
-    // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts).
-    const slackCompany = naming.env === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming });
+    // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts). DEC 254zg (a), 254zk: its condition also requires company
+    // sign-in, so its grants and its "enabled" exist only with both switches on.
+    const slackCompany = companySignIn === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
     if (slackCompany !== undefined) {
       // The Slack Lambda and the channel API's Slack router: the team's binding and company, the linked person (company-scoped link row, sign-in membership below), the
       // project's revisions (company check) and the company's token. Reads only: link notices and codes are written by the broker (#126 holds).
@@ -987,11 +992,15 @@ export class ControlPlaneStack extends Stack {
       // L2-2 PR 18c: the Slack Lambda's company factory needs the environment's name (the token path) and the install's team (always the legacy path); "" while off.
       slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
       slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
-      addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.parameter.valueAsString);
+      // DEC 254zk: the switch's conditioned value (enabled only with company sign-in on too), as every other consumer gets it.
+      addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.flag);
+      // DEC 254zk: the channel API's company factory needs the environment's name too (it already has STATE_TABLE_NAME and SLACK_ADAPTER_TEAM_ID); "" while off.
+      channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
     }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
+        ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
       // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
       // The same resources CDK's grantInvoke gives each: the function and its versions and aliases.
@@ -1000,6 +1009,8 @@ export class ControlPlaneStack extends Stack {
         const invoked = [planEvidenceFunction, developerSignIn.function];
         broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: invoked.flatMap((fn) => [fn.functionArn, `${fn.functionArn}:*`]) }));
       }
+      // The Slack Lambda and the channel API Lambda (Slack company mode reads it: lead 2, #873).
+      if (companySignIn !== undefined) for (const fn of [slackIngress, channelAdapters.ingress]) companySignIn.addTo(fn);
       // Spec 063 FR-005: the admin client's own rule for who is an administrator, read at company sign-in.
       developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
@@ -1012,10 +1023,14 @@ export class ControlPlaneStack extends Stack {
           slackSecret,
           developerSignInTable: developerSignIn.table,
           dispatcher,
+          // DEC 254zc (6): the proof's switch variables come with the infrastructure switch (they change the version the dispatcher pins).
+          ...(companySignIn === undefined || slackCompany === undefined ? {} : { companySwitches: {
+            COMPANY_SIGNIN: companySignIn.value, SLACK_COMPANY_WORKSPACES: slackCompany.value,
+            STATE_TABLE_NAME: Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")),
+          } }),
         });
         if (slackCompany !== undefined) {
           slackCompany.grant("TaskPersonProof", proof.role, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)], proof.install);
-          // No variable on the proof function: its published version is pinned by the dispatcher, and the proof stays on the legacy path until its own reviewed switch (18c note).
         }
       }
       addBrokerSetting(broker, naming, "taskPeopleChanges", taskParameters.taskPeopleChangesEnabled.valueAsString);
@@ -1042,6 +1057,7 @@ export class ControlPlaneStack extends Stack {
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      if (companySignIn !== undefined) companySignIn.addTo(notifier.function);
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
       if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
@@ -1202,6 +1218,12 @@ export class ControlPlaneStack extends Stack {
     // Spec 065b: a project a sign-in client creates runs on the foundation's workers: the broker builds its binding from
     // the zone=subnet pairs and the launch template, with no AWS call.
     const foundationParameter = (name: string) => (this.node.findChild(name) as CfnParameter).valueAsString;
+    // DEC 254z-amend3: the session steps read the test services switch whole (named environments, where CoreEngine declares it): on, a launch's boot configuration carries `testServices`.
+    // DEC 254zm: and whether the starter copies are in place; only with both does a launch carry `testServices` (aws/hosted-test-services.ts).
+    if (naming.env !== undefined) {
+      sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
+      sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
+    }
     broker.addEnvironment("EC2_WORKER_SUBNETS", foundationParameter("Ec2WorkerSubnets"));
     broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
@@ -1221,11 +1243,11 @@ export class ControlPlaneStack extends Stack {
       sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
       // The hosted Slack service (ECS): the team's binding and the company's token for its posts. Its container gets the switch from the slack stack.
       slackCompany.grant("SlackOrchestrator", slackOrchestratorRole, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
-      // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs); only while the switch is on.
-      for (const [id, value] of [["SlackCompanyWorkspacesState", "enabled"], ["SlackCompanyStateTableName", state.tableName], ["SlackCompanyTeamId", signInParameters.slackTeamId.valueAsString]] as const) {
-        new CfnOutput(this, id, { value, condition: slackCompany.isOn });
-      }
+      // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs). DEC 254zk: always there, so that agentx config set
+      // slack.companyWorkspaces, which sets the slack stack's own switch (SlackCompanyWorkspacesState), finds them in place from the last deploy.
+      for (const [id, value] of [["SlackCompanyStateTableName", state.tableName], ["SlackCompanyTeamId", signInParameters.slackTeamId.valueAsString]] as const) new CfnOutput(this, id, { value });
     }
+    if (companySignIn !== undefined) companySignIn.addTo(sessions.reconciler);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);

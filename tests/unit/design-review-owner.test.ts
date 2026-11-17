@@ -280,11 +280,11 @@ describe("the design's approval carries the task on", () => {
     await finish(w, review.operation, { kind: "reviewed", result: { conversationId: "conversation", workflowCandidateRepositories: candidate, workflowReviews: [report("CRITIC"), report("SECURITY")] } });
     const done = await taskOf(w);
     expect(done.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
-    // The pull request's Proof section carries the design line, the same words as the proof page; the code with no design review has no such line.
+    // The pull request's Requirements and proof drawer carries the design line, the same words as the proof page; the code with no design review has no such line.
     const proofContext = await w.h.deps.designReview!.proofContext!(w.h.deps, done, done.workflow);
     expect(proofContext?.design?.line).toContain("Design review: coverage all");
     const body = workflowPullRequestBody(done, done.workflow, undefined, undefined, { lessonsUsed: NO_LESSONS_USED, ...(proofContext === undefined ? {} : { proof: proofContext }) });
-    expect(body).toContain("### Proof");
+    expect(body).toContain("<summary>Requirements and proof: ");
     expect(body).toContain(proofContext!.design!.line);
     expect(workflowPullRequestBody(done, done.workflow, undefined, undefined, { lessonsUsed: NO_LESSONS_USED })).not.toContain("Design review: coverage");
     expect(sha("x")).toHaveLength(64);

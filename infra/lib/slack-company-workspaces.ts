@@ -14,6 +14,8 @@ export const SLACK_BINDING_READ_KEYS = ["SLACK_TEAM#*", "SLACK_WORKSPACE_BINDING
 
 export interface SlackCompanyWorkspacesProps {
   readonly naming: AgentXNaming;
+  /** DEC 254zg (a), 254zk: the company sign-in condition; the switch is on only while this holds too. */
+  readonly requires?: CfnCondition;
 }
 
 export class SlackCompanyWorkspaces extends Construct {
@@ -26,18 +28,25 @@ export class SlackCompanyWorkspaces extends Construct {
     if (props.naming.env === undefined) throw new Error("Slack company mode exists only in named environments");
     this.env = props.naming.env;
     const stack = Stack.of(this);
-    this.parameter = new CfnParameter(stack, SLACK_COMPANY_WORKSPACES_PARAMETER, {
+    // Written out (SLACK_COMPANY_WORKSPACES_PARAMETER): tests/contract/config-keys.test.ts reads the declaration for agentx config set slack.companyWorkspaces.
+    this.parameter = new CfnParameter(stack, "SlackCompanyWorkspaces", {
       type: "String",
       default: "disabled",
       allowedValues: ["enabled", "disabled"],
       description: "enabled: Slack workspaces other than SlackTeamId use their company's own bot token and company checks (needs company sign-in); disabled: only the install's workspace is served, as before",
     });
-    this.isOn = new CfnCondition(this, "On", { expression: Fn.conditionEquals(this.parameter.valueAsString, "enabled") });
+    const asked = Fn.conditionEquals(this.parameter.valueAsString, "enabled");
+    this.isOn = new CfnCondition(this, "On", { expression: props.requires === undefined ? asked : Fn.conditionAnd(asked, props.requires) });
   }
 
   /** The switch's value for a consumer's SLACK_COMPANY_WORKSPACES variable: "enabled" only while the condition holds. */
   get value(): string {
     return Token.asString(Fn.conditionIf(this.isOn.logicalId, "enabled", "disabled"));
+  }
+
+  /** The broker's packed switch flag (BrokerSettingSpec.switchFlag): "1" only while the condition holds. */
+  get flag(): string {
+    return Token.asString(Fn.conditionIf(this.isOn.logicalId, "1", "0"));
   }
 
   /** The family of per-company bot token secrets (DeveloperIdentity writes them: developer-signin.ts). */

@@ -92,7 +92,7 @@ describe("which dependencies are startable now", () => {
   it("is carried out with tx on and refused with tx off (an environment with dependencies is not used at all)", () => {
     const environment = asEnvironment(body([payments("a".repeat(64))]));
     expect(environmentUnusedReason(environment, ON)).toBeUndefined();
-    expect(environmentUnusedReason(environment, { ROVARA_TEST_ENVIRONMENT: "1" })).toBe("dependencies_not_connected");
+    expect(environmentUnusedReason(environment, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBe("dependencies_not_connected");
   });
 });
 
@@ -231,8 +231,8 @@ describe("the plan of a task with a fake (checks and coding)", () => {
     const store = storeOf();
     const digest = await approvedSet(store, makeSet());
     const h = await approvedWith(body([payments(digest)]), store);
-    expect(await testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, { ROVARA_TEST_ENVIRONMENT: "1" })).toBeUndefined();
-    expect(await testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, { ROVARA_TEST_ENVIRONMENT: "1" })).toBeUndefined();
+    expect(await testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
+    expect(await testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
   });
 });
 

@@ -11,6 +11,7 @@ import type { TestEnvDeps } from "./deps.js";
 import { fixtureDigestsOfPlan } from "./fixture-lookup.js";
 import { testEnvImplementPlanFor, testEnvPlanFor } from "./task-plan.js";
 import { testEnvironmentForStart } from "./usable.js";
+import { TEST_SERVICES_UNAVAILABLE_WORDS } from "./test-services-switch.js";
 
 /** The worker features a plan needs: the run is never sent to a worker that does not list them (it would run the checks with no database and say nothing), and the field is never dropped. */
 export function featuresForTestPlan(dependencies: readonly TaskDependencyPlan[] | undefined, plan?: TestEnvTaskPlan): string[] {
@@ -30,6 +31,18 @@ export function featuresForTestPlan(dependencies: readonly TaskDependencyPlan[] 
   if (planned.some((dependency) => dependency.seeds.some((seed) => "fixturePath" in seed))) features.add(TEST_SERVICES_FILE_SEED_FEATURE);
   if (planned.some((dependency) => dependency.seeds.some((seed) => "command" in seed && seed.lock !== undefined))) features.add(TEST_SERVICES_SEED_LOCK_FEATURE);
   return [...features];
+}
+
+/** Every worker feature a test-services plan can need starts with this (contracts test-environment-wire.ts). */
+const TEST_SERVICES_FEATURE_PREFIX = "task.testServices.";
+
+/**
+ * DEC 254zm: a worker that lacks the base test-services feature (`task.testServices.v1`) and nothing but test-services features offers no test services at all: it could not start them (on Code's AWS workers: the
+ * boot's test-services stage or its pulls failed), it is not old (a worker with a test-services configuration always lists the base feature). The step then ends with the fixed "not available here" words for the
+ * reason `workers`, never a value from the worker. A worker that lists the base feature but lacks a newer one (the AWS all-services feature, say) IS too old: undefined, and the caller keeps its own words.
+ */
+export function testServicesMissingWords(missing: readonly string[]): string | undefined {
+  return missing.includes(TEST_SERVICES_PLAN_FEATURE) && missing.every((feature) => feature.startsWith(TEST_SERVICES_FEATURE_PREFIX)) ? TEST_SERVICES_UNAVAILABLE_WORDS.workers : undefined;
 }
 
 export interface StepTestPlan {
