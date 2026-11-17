@@ -70,7 +70,7 @@ import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wi
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
-import { proposeLessonFromNote } from "../core/wiki/note-lesson.js";
+import { proposeLessonFromNote, type WikiNoteLessonInput, type WikiNoteLessonResult } from "../core/wiki/note-lesson.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
@@ -568,6 +568,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const routes = createCoreDevRoutes({
       app, companyOf, log,
       wiring: async (runtime) => {
+        const companyLessons = lessonsByCompany.get(runtime.companyId);
         // Lane L11: the session levels, the decision cards and how we work, from the company's own records (membership and the broker's project grants).
         const registry = await app.registry();
         return {
@@ -600,7 +601,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             projectRole: wikiProjectRole,
             projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
-            ...(lessons === undefined ? {} : { suggestLesson: async (note) => (note.companyId !== runtime.companyId ? { state: "refused" as const } : await proposeLessonFromNote({ store: lessons.runtime.store, settings: lessons.runtime.settings, audit: lessons.runtime.audit, now: () => now().getTime() }, note)) }),
+            // The company's lessons are built with its runtime (lessonsByCompany); absent where the lessons switch does not cover the company.
+            ...(companyLessons === undefined ? {} : { suggestLesson: async (note: WikiNoteLessonInput): Promise<WikiNoteLessonResult> => (note.companyId !== runtime.companyId ? { state: "refused" as const } : await proposeLessonFromNote({ store: companyLessons.runtime.store, settings: companyLessons.runtime.settings, audit: companyLessons.runtime.audit, now: () => now().getTime() }, note)) }),
           },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),

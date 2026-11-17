@@ -216,6 +216,7 @@ async function addNote(ctx: Ctx, pageId: string) {
 }
 
 async function approveNote(ctx: Ctx, pageId: string, noteId: string) {
+  bodyOf(ctx.input.request, WikiNoBodySchema);
   const approved = await guarded(async () => {
     try { return await ctx.store.approveNote(ctx.project, pageId, noteId, ctx.input.personId); } catch (error) { throw storeRefusal(error); }
   });
@@ -224,6 +225,7 @@ async function approveNote(ctx: Ctx, pageId: string, noteId: string) {
 }
 
 async function deleteNote(ctx: Ctx, pageId: string, noteId: string) {
+  bodyOf(ctx.input.request, WikiNoBodySchema);
   const note = noteOf(await readPerson(ctx, pageId), noteId);
   if (!mayHandleNote(ctx, note)) throw forbidden(WIKI_NOTE_NOT_YOURS);
   const gone = await guarded(async () => await ctx.store.deleteNote(ctx.project, pageId, noteId));
@@ -232,6 +234,7 @@ async function deleteNote(ctx: Ctx, pageId: string, noteId: string) {
 }
 
 async function suggestLesson(ctx: Ctx, pageId: string, noteId: string) {
+  bodyOf(ctx.input.request, WikiNoBodySchema);
   const note = noteOf(await readPerson(ctx, pageId), noteId);
   if (!mayHandleNote(ctx, note)) throw forbidden(WIKI_NOTE_NOT_YOURS);
   const suggest = ctx.input.wiring.suggestLesson;
@@ -242,6 +245,7 @@ async function suggestLesson(ctx: Ctx, pageId: string, noteId: string) {
   if (result.state === "off") throw agentXError("NOT_FOUND", WIKI_LESSONS_OFF);
   if (result.state === "too_long") throw agentXError("CONFIG_INVALID", WIKI_NOT_A_RULE);
   if (result.state === "refused") throw agentXError("CONFIG_INVALID", WIKI_LESSON_REFUSED);
+  if (result.state !== "proposed" && result.state !== "already_proposed") throw unavailable();
   return WikiSuggestedResponseSchema.parse({ state: result.state, lessonId: result.lessonId });
 }
 

@@ -3,7 +3,7 @@
 // approve route and its rules about who may decide) is the only way it goes live.
 //
 //  - The text is cleaned and screened exactly as an edit at approval is (`cleanForLearning`, `requestsCapabilityChange`); a note that asks for a change of tools, permissions, budgets or approvals is refused.
-//  - The lesson's id comes from the company, the project and the note, so suggesting the same note twice is the same lesson (`already_proposed`), never a second card.
+//  - The lesson's id comes from the company, the project and the note, and a "seen once" marker is set after the write, so suggesting the same note twice is the same lesson (`already_proposed`), never a second card.
 //  - The project's learning mode must allow lessons (not Off); the install's lessons switch is checked by the caller (`lessonsOf(company)` is undefined where it is off).
 //  - The company and the project come from the caller's live membership (the route), never from the note.
 import { createHash } from "node:crypto";
@@ -57,7 +57,9 @@ export async function proposeLessonFromNote(deps: WikiNoteLessonDeps, input: Wik
   const title = cleanForLearning(firstLine(input.text, 80), 80);
   if (body === "" || title === "" || requestsCapabilityChange(title, body)) return { state: "refused" };
   const id = lessonIdOfNote(input.companyId, input.project, input.noteId);
-  if ((await deps.store.getHead(key, id)) !== undefined) return { state: "already_proposed", lessonId: id };
+  // Suggested before? A marker the library keeps for exactly this ("seen once"), written after the lesson is: this seam reads no lesson (the access guard lists every file that does).
+  const marker = `wiki-note-lesson:${input.noteId}`;
+  if (await deps.store.seenOnce(key, marker)) return { state: "already_proposed", lessonId: id };
 
   const now = deps.now();
   const lesson: Lesson = LessonSchema.parse({
@@ -73,13 +75,11 @@ export async function proposeLessonFromNote(deps: WikiNoteLessonDeps, input: Wik
     tier: 1, tierReasons: ["wiki_note"], status: "pending", reviewRequired: true, pendingExpiresAt: pendingExpiry(now),
     counters: { loaded: 0, helpful: 0, harmful: 0, citationStale: 0 }, staleAt: [], expiresAt: firstExpiry("convention", now, resolved.expiryDays), approvals: [], createdAt: now, updatedAt: now,
   });
-  const setVersion = await deps.store.setVersion(key);
-  const written = await deps.store.commit(key, setVersion, [lesson], now);
-  if (!written.ok) {
-    // A lost race: if it was the same note suggested at the same moment, the lesson is there now.
-    if ((await deps.store.getHead(key, id)) !== undefined) return { state: "already_proposed", lessonId: id };
-    throw new Error("the lesson could not be written");
-  }
+  // A lost race with another write to the project's lessons is retried on a fresh set version; the lesson's id is the note's, so it can never be written twice.
+  let written = false;
+  for (let attempt = 0; attempt < 3 && !written; attempt += 1) written = (await deps.store.commit(key, await deps.store.setVersion(key), [lesson], now)).ok;
+  if (!written) throw new Error("the lesson could not be written");
+  await deps.store.markOnce(key, marker);
   await emitAudit(deps.audit, { action: "lesson.candidate_created", workspaceId: key.workspaceId, project: key.project, lessonId: id, actor: input.authorId, facts: { type: "convention" } });
   return { state: "proposed", lessonId: id };
 }

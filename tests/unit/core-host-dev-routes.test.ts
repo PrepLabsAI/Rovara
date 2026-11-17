@@ -256,6 +256,46 @@ describe("the project wiki's reads on the deployed API", () => {
   });
 });
 
+// Lead 4 C1: the wiki's corrections through the dev routes: the member company's own store, the role read live inside, the generic guards first.
+describe("the project wiki's corrections on the deployed API", () => {
+  const WIKI = "/v1/app/projects/payments/wiki";
+  const PAGE = `${WIKI}/pages/overview`;
+  const paths = [["GET", `${PAGE}/corrections`], ["POST", `${PAGE}/notes`], ["POST", `${PAGE}/notes/note0001/approve`], ["POST", `${PAGE}/notes/note0001/delete`], ["POST", `${PAGE}/notes/note0001/suggest-lesson`],
+    ["POST", `${PAGE}/flags`], ["POST", `${PAGE}/flags/resolve`], ["GET", `${WIKI}/disputed`]] as const;
+  const request = (method: string, path: string) => (method === "GET" ? get(path) : post(path, { text: "hello" }));
+
+  it("asks the role for the member company and the project of the path, and answers with that company's own wiki", async () => {
+    const { app, companyOf, remember } = await world2();
+    const seen: string[] = [];
+    const wikiCorrections = { projectRole: async (personId: string, companyId: string, project: string) => { seen.push(`${companyId}/${project}`); return "viewer" as const; }, projectRepositories: async () => ["web"] };
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, wikiCorrections }) });
+    const answer = await routes.route(get(`${WIKI}/disputed`), remember(OTHER));
+    expect(answer?.statusCode).toBe(403);
+    expect(seen).toEqual([`${OTHER}/payments`]);
+    expect((await routes.route(post(`${PAGE}/notes`, { text: "hello" }), remember(OTHER)))?.statusCode).toBe(403);
+  });
+
+  it("refuses a script token (403) and a caller with no member company (401) before any role is read; unwired is 'not on the core yet'", async () => {
+    const { app, companyOf, remember } = await world2();
+    const projectRole = vi.fn(async () => "maintainer" as const);
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, wikiCorrections: { projectRole, projectRepositories: async () => ["web"] } }) });
+    for (const [method, path] of paths) {
+      const token = await routes.route(request(method, path), { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+      expect(token?.statusCode, `${method} ${path}`).toBe(403);
+      expect((JSON.parse(token!.body) as { error: { message: string } }).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
+      const stranger = callerOf(FAKE_COMPANY);
+      expect((await routes.route(request(method, path), { ...stranger, principal: { ...stranger.principal, personId: "no-membership" } }))?.statusCode, `${method} ${path}`).toBe(401);
+    }
+    expect(projectRole).not.toHaveBeenCalled();
+    const unwired = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    for (const [method, path] of paths) {
+      const answer = await unwired.route(request(method, path), remember(FAKE_COMPANY));
+      expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message, `${method} ${path}`).toBe(NOT_ON_THE_CORE_YET);
+    }
+    expect(await routes.route({ method: "DELETE", path: `${PAGE}/notes/note0001`, headers: {}, body: "" }, remember(FAKE_COMPANY))).toBeUndefined();
+  });
+});
+
 // Lane ID part 2: a fresh step-up (a factor Code owns, checked on the route against the company's window) opens the two acts this API refused.
 describe("a fresh step-up opens making a script token and acting on a decision card", () => {
   const BODY = { requestId: "", name: "ci", projects: ["payments"], permissions: ["read"] };
