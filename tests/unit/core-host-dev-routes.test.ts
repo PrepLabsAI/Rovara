@@ -61,7 +61,7 @@ describe("the core's handlers on the deployed API", () => {
     const { world, companyOf } = await world2();
     const off = createCoreDevRoutes({ app: appOver(world, {}), companyOf, wiring: () => WIRED });
     const spy = vi.spyOn(world.store, "get");
-    for (const request of [get("/v1/app/sessions"), get(`/v1/dev/tasks/${randomUUID()}`), get("/v1/app/decisions"), get("/v1/app/projects/payments/how-we-work"), get("/v1/app/script-tokens"), post("/v1/app/script-tokens"), post("/v1/dev/tasks", { requestId: randomUUID() })]) {
+    for (const request of [get("/v1/app/sessions"), get(`/v1/dev/tasks/${randomUUID()}`), get("/v1/app/decisions"), get("/v1/app/projects/payments/how-we-work"), get("/v1/app/script-tokens"), post("/v1/app/script-tokens"), post("/v1/dev/tasks", { requestId: randomUUID() }), get("/v1/app/projects/payments/setup-agent"), post("/v1/app/projects/payments/setup-agent", { requestId: randomUUID() }), post("/v1/app/projects/payments/setup-agent/stop", { requestId: randomUUID() })]) {
       expect(await off.route(request, callerOf(FAKE_COMPANY)), request.path).toBeUndefined();
     }
     expect(companyOf).not.toHaveBeenCalled();
