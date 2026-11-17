@@ -24,6 +24,7 @@ import { taskKey } from "../task-flow/keys.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { iso, log } from "../task-flow/support.js";
 import { approvedCodingPlan } from "./plan-input.js";
+import { flagUnplannedMocks, mockFactsOf, mockPrLines } from "../setup-agent/plan-setup.js";
 import { pullRequestRecordKey, pullRequestRecordOf } from "./records.js";
 
 export const WORKSPACE_DIFF_ARTIFACT = "workspace.diff";
@@ -140,7 +141,9 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
     log(deps, { event: "build_step.changed_files_unavailable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     return "unavailable";
   }
-  const read: ChangedFilesRead = { files: all, complete };
+  // L4-SC (DEC 254z c): the coding agent never writes its own mock. A mock source the approved plan did not name is marked here, from the plan the broker read back by digest and the project's fakes, so the risk below is high.
+  const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
+  const read: ChangedFilesRead = { files: flagUnplannedMocks(all, mockFactsOf(project?.definition, plan?.setupChanges)), complete };
   const judged = riskFromFiles(workflow, read);
   // The tier of the code the host shows, bound to the head commits Rovara checked and the base they were built on. It only goes up, and the growth after the build is recorded.
   const at = iso(deps);
@@ -156,7 +159,6 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   if (!written.applied) return "unavailable";
   await deps.store.put({ item: { ...verifiedFilesKey(location.workspaceKey, candidate.digest), entityType: "VERIFIED_FILES", candidateDigest: candidate.digest, complete, verifiedAt: iso(deps), files: JSON.parse(JSON.stringify(all.slice(0, 200))) as never } });
   // The description says what changed, read from the host. A description a person edited is left as they left it.
-  const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? []; const secondStatus = deps.secondReview?.prStatus?.(task, candidate.digest, workflow.acceptedFindings);
   const linearIssueKey = await ticketIssueKeyOf(deps, task);
@@ -167,13 +169,15 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   });
   // TE-H1: what the browser evidence run showed for exactly this code, as fixed text lines (none on an install without it, or for a run that took none).
   const browserLines: readonly string[] = await deps.browserEvidence?.linesOf(task, candidate.digest).catch((): readonly string[] => []) ?? [];
+  // L4-SC: one line per mock the plan approved for this task (task-only, made by Rovara, not yet the project's setup).
+  const setupLines = mockPrLines(plan?.setupChanges);
   for (const entry of hosts) {
     try {
       // Each repository's description names the lessons that repository's readers may read.
       const lessonsUsed = await lessonsUsedOf(deps, task, entry.repositoryId);
       // MR3b and MR4: the order lines are about the whole task; each description adds the words about its own repository's CI.
       const mergeOrderLines = await deps.mergeOrderLines?.(task, entry.repositoryId).catch(() => []) ?? [];
-      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }), ...(proof === undefined ? {} : { proof }), ...(browserLines.length === 0 ? {} : { browserEvidenceLines: browserLines }) });
+      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(setupLines.length === 0 ? {} : { setupLines }), ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }), ...(proof === undefined ? {} : { proof }), ...(browserLines.length === 0 ? {} : { browserEvidenceLines: browserLines }) });
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);
       const ref = changeRequestRef(entry.url, entry.number);
       beforeRequest?.();

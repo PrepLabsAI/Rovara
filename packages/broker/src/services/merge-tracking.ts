@@ -25,6 +25,7 @@ import type { RepositoryResolver } from "../core/merge/host-port.js";
 import { changeRequestRef } from "../core/merge/host-port.js";
 import { storeLinkedChangeRequests } from "../core/merge/linked.js";
 import { mergedMilestoneItems, mergedStateItems } from "../core/merge/merged.js";
+import { setupUpdateOfferItems } from "../core/setup-agent/plan-update.js";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
 import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
 import type { MergePeople } from "../core/merge/people.js";
@@ -245,6 +246,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       const items: TransactItem[] = [
         workflowUpdateItem(taskId, next, workflow.revision, workflow),
         ...await mergedMilestoneItems({ milestones, bindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) } }, task, workflow, next, at),
+        // L4-SC (DEC 254z c): a merged plan's setup change leaves ONE "Update setup" offer, in the merge's own transaction. Never blocks the merge: a plan that cannot be read adds nothing.
+        ...await setupUpdateOfferItems(flow, task, workflow, next, at).catch((): TransactItem[] => []),
         ...await mergedStateItems({ store, timeline, audit: flow.audit, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
       ];

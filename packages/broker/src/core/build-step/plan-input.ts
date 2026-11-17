@@ -1,6 +1,6 @@
 // Lane L10, the build step: the approved coding plan, read back and checked against the digest the approval recorded (Cloud's `approvedCodingPlan`). The structured plan reader is the
 // public `loadWorkflowDocument` (it takes a read function, so it needs no object store of its own): a structured plan is given as its Markdown copy, a Markdown plan as it was saved.
-import { WORKFLOW_PLAN_MAX_BYTES, agentXError, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_PLAN_MAX_BYTES, agentXError, type PlanSetupChanges, type WorkflowSnapshot } from "@agentx/contracts";
 import { loadWorkflowDocument, shortenMarkdown } from "../../developer/plan-document-reader.js";
 import { planOwnerAnswers } from "../../developer/owner-answers-text.js";
 import type { ArtifactReader } from "../task-flow/deps.js";
@@ -10,6 +10,11 @@ export interface ApprovedPlan {
   sha256: string;
   /** The plan's "Not changing" list (a structured plan only). */
   notChanging?: string[];
+  /**
+   * L4-SC (DEC 254z c): the setup changes the plan proposes, present only when a person's APPROVE decision (the gate's, not a send-back or an automatic one) is recorded for exactly this plan's digest. Without that
+   * record the list is left out, so a mock is never served from a plan nobody approved.
+   */
+  setupChanges?: PlanSetupChanges;
 }
 
 /** Reads a document by object key as text, at most `maxBytes` of it; undefined when it cannot be read. */
@@ -30,7 +35,10 @@ export async function approvedCodingPlan(artifacts: ArtifactReader | undefined, 
   const answers = approval?.answerOverrides === undefined ? "recommended" as const : planOwnerAnswers(approval.answerOverrides, []);
   const loaded = await loadWorkflowDocument(textReaderOf(artifacts), plan, { answers });
   if (loaded === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan failed its digest check");
-  return { text: loaded.markdown, sha256: plan.sha256, ...(loaded.format === "structured" ? { notChanging: loaded.plan.notChanging } : {}) };
+  return {
+    text: loaded.markdown, sha256: plan.sha256, ...(loaded.format === "structured" ? { notChanging: loaded.plan.notChanging } : {}),
+    ...(loaded.format === "structured" && approval !== undefined && loaded.plan.setupChanges !== undefined && loaded.plan.setupChanges.length > 0 ? { setupChanges: loaded.plan.setupChanges } : {}),
+  };
 }
 
 /**

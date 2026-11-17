@@ -8,6 +8,9 @@
 //
 //   POST /v1/app/projects/{project}/setup-agent/confirm    "Use this setup": a candidate revision from the run's verified commands, and its check on a fresh workspace (L4-D)
 //   POST /v1/app/projects/{project}/setup-agent/discard    drop the waiting candidate ({ requestId })
+//   GET  /v1/app/projects/{project}/setup-agent/updates    L4-SC (DEC 254z c): the "Update setup" offers a merged plan's setup changes left (managers only; a reader sees none)
+//   POST /v1/app/projects/{project}/setup-agent/updates/prepare   "Update setup": a candidate from the offer's items and its check (the same flow as confirm; approves nothing)
+//   POST /v1/app/projects/{project}/setup-agent/updates/dismiss   "Not now" ({ requestId, taskId })
 //   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): a fresh step-up, then the risk-based
 //                                                         approver rule (DEC 254z b), through the approval gate, bound to the candidate's digest and revision
 //
@@ -33,6 +36,7 @@ import { SetupAgentStartBodySchema, SetupAgentStopBodySchema, getSetupAgent, rea
 import type { SetupApplyDeps } from "../core/setup-agent/apply.js";
 import { SETUP_APPLY_KIND, SetupConfirmBodySchema, confirmSetupAgent, discardSetupApply, readSetupApply, setupCandidateRisk, waitingSetupApply } from "../core/setup-agent/apply.js";
 import { SETUP_RISK_APPROVER, setupApproverAllows, type SetupRisk } from "../core/setup-agent/setup-risk.js";
+import { dismissSetupUpdate, markSetupUpdateApplied, prepareSetupUpdate, readSetupUpdates } from "../core/setup-agent/plan-update.js";
 import type { GateResult } from "../core/decisions/approval-gate.js";
 import { setupApproverRefusal, setupCardOf, setupDecisionRequestId, type HostedSetupApproval } from "./setup-approval.js";
 import { z } from "zod";
@@ -100,8 +104,10 @@ const DecideBodySchema = z.object({
   reason: z.string().max(500).optional(),
 }).strict();
 const DiscardBodySchema = z.object({ requestId: z.string().uuid() }).strict();
+/** L4-SC: the task whose offer the person pressed (a task id, as every key names one). */
+const UpdateBodySchema = z.object({ requestId: z.string().uuid(), taskId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/u) }).strict();
 
-const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide))?$/u;
+const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|updates|updates\/prepare|updates\/dismiss))?$/u;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 
 /** Whether this method and path is the hosted setup run's. */
@@ -109,8 +115,8 @@ export function isSetupRunPath(path: string, method: string): boolean {
   const match = SETUP_PATH.exec(path);
   if (match === null) return false;
   const tail = match[2];
-  if (method === "GET") return tail === undefined || tail === "journal";
-  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide";
+  if (method === "GET") return tail === undefined || tail === "journal" || tail === "updates";
+  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide" || tail === "updates/prepare" || tail === "updates/dismiss";
   return false;
 }
 
@@ -162,6 +168,8 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
   const ready = apply.checkState.status === "ready";
   return {
     candidateRevision: apply.candidateRevision, baseRevision: apply.baseRevision, setup: apply.setup, readiness: apply.readiness,
+    // L4-SC: the fakes the candidate sets (the approver sees which variable is redirected and from which spec), bound into the digest the approval names.
+    ...(apply.fakes === undefined ? {} : { fakes: apply.fakes }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
     canApprove: ready && setupApproverAllows(who, risk, "approve"), canReject: ready && setupApproverAllows(who, risk, "reject"),
@@ -206,6 +214,8 @@ async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval,
     credentials: [{ method: credential.method, token: credential.token }], card, ...(body.reason === undefined ? {} : { reason: body.reason }),
   });
   if (result.status === "refused") throw gateRefusal(result);
+  // L4-SC: a candidate that came from a merged plan's "Update setup" retires its offer once approved (best effort; a rejected one leaves the offer to try again).
+  if (body.outcome === "approve" && result.status !== "replayed") await markSetupUpdateApplied({ store: flow.store, companyId, now: input.now }, project, waiting.reply, personId);
   const decision = body.outcome === "approve" ? "approved" : "rejected";
   return json(200, { project, decision, risk: result.record.risk, revision: result.record.revision, replayed: result.status === "replayed" });
 }
@@ -273,6 +283,11 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
       return json(200, { ...(await getSetupAgent(deps, project)), canManage: standing.access === "manage", ...(apply === undefined ? {} : { apply }) });
     }
+    if (input.request.method === "GET" && tail === "updates") {
+      // The offers are for the people who manage the project's setup (and only where a candidate can be approved); a reader sees none, and no other company's or project's.
+      const offers = standing.access === "manage" && input.wiring.approval !== undefined ? await readSetupUpdates(deps, project) : [];
+      return json(200, { offers, canManage: standing.access === "manage" });
+    }
     if (input.request.method === "GET" && tail === "journal") {
       const after = Number(new URL(input.request.path, "http://core").searchParams.get("after") ?? "0");
       if (!Number.isInteger(after) || after < 0 || after > 400) throw agentXError("CONFIG_INVALID", "after: a journal position");
@@ -294,9 +309,19 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       const answer = await startSetupAgent(deps, project, body);
       return json(answer.status, { ...answer.view, canManage: true });
     }
-    if (tail === "confirm" || tail === "discard" || tail === "decide") {
+    if (tail === "confirm" || tail === "discard" || tail === "decide" || tail === "updates/prepare" || tail === "updates/dismiss") {
       const approval = input.wiring.approval;
       if (approval === undefined) throw agentXError("NOT_FOUND", SETUP_APPROVAL_UNAVAILABLE);
+      if (tail === "updates/prepare") {
+        const body = parsed(UpdateBodySchema, raw);
+        await recorded(input, auditEvent(input, "setup_run.update_requested", `setup_run.update:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId, taskId: body.taskId }));
+        return json(200, await prepareSetupUpdate(deps, project, body, personId));
+      }
+      if (tail === "updates/dismiss") {
+        const body = parsed(UpdateBodySchema, raw);
+        await recorded(input, auditEvent(input, "setup_run.update_dismissed", `setup_run.update_dismissed:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId, taskId: body.taskId }));
+        return json(200, { dismissed: await dismissSetupUpdate(deps, project, body, personId) });
+      }
       if (tail === "confirm") {
         const body = parsed(SetupConfirmBodySchema, raw);
         await recorded(input, auditEvent(input, "setup_run.confirm_requested", `setup_run.confirm:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));

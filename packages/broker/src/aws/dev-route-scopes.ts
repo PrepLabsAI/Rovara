@@ -275,6 +275,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/wiki-build/refresh", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/wiki-build/agents", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/wiki-build/delete", requires: "full" },
+  // L4-SC (DEC 254z c): "Update setup" after a merged plan's setup change: the offers (managers only), making a candidate from one (the same flow as confirm: check, then the risk-based decision above), and "Not now".
+  { method: "GET", path: "/v1/app/projects/{project}/setup-agent/updates", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/updates/prepare", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/updates/dismiss", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

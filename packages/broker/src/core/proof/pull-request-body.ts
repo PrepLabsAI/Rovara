@@ -94,6 +94,8 @@ export interface PullRequestBodyContext {
    * Text only: no image, no address of one and no digest ever reaches GitHub, because an image a PR reader's browser can fetch would be public. Absent or empty: the description is exactly what it was.
    */
   browserEvidenceLines?: readonly string[] | undefined;
+  /** L4-SC (DEC 254z c): one line per mock the approved plan made for this task (`mockPrLines`). Absent or empty: the description is exactly what it was. */
+  setupLines?: readonly string[] | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -227,6 +229,12 @@ function checksExtraLines(workflow: WorkflowSnapshot, context: PullRequestBodyCo
  * The lines between the markers: What changed, Tests, Reviews and Risk, about the code now on the pull request. `reviewLines(listed)` gives the Reviews section's lines (at most `listed` accepted
  * findings named). The lists shrink until the block fits `budgetBytes`.
  */
+/** The "Setup change" section: the one line per task-only mock, each made inert and cut, so a service name from the plan can add no heading, link or mention. Nothing when there is none. */
+export function setupChangeSection(lines: readonly string[] | undefined): string[] {
+  const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line)).map((line) => inertLine(line, ITEM_MAX));
+  return kept.length === 0 ? [] : ["## Setup change", ...kept, ""];
+}
+
 /** The "Browser evidence" section: its fixed lines under a heading and a blank line after; nothing for none. Each line is one line (a line with a break in it is dropped, so a section never carries other markup). */
 export function browserEvidenceSection(lines: readonly string[] | undefined): string[] {
   const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line));
@@ -246,6 +254,8 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     const extra = checksExtraLines(workflow, context, level >= 3 ? 3 : 10);
     const built = layoutBlockLines({
       workflow, context, risk, parts, reviewLines, checksExtra: extra.lines, testsAdded: extra.testsAdded, reviewExtra, linearCloseLine: closeLine, asOf: context.asOf ?? workflow.updatedAt,
+      // L4-SC (#916, merged over the PR redesign in batch 14): the plan's "Setup change" lines, after the verdict list and before the drawers.
+      setupChange: setupChangeSection(context.setupLines),
     }, level);
     // The last guard: whatever a path let through, no line has a Linear magic word before a key but Rovara's own Fixes line. No email address on GitHub; hidden before the size is checked.
     lines = sealLinearText(built.lines, linearKey).map((line) => hideEmailAddresses(line));
