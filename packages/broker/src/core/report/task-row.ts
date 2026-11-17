@@ -12,6 +12,7 @@ import {
   type OrgId, type ReportOrigin, type ReportState, type StoredDocument, type TransactItem, type WorkOrigin,
 } from "@agentx/contracts";
 import { rowBelongsToCompany } from "../company-read-rows.js";
+import { timesOfStored, type TaskTimes } from "./times.js";
 
 /** A closed task settles this long after it closed (a retry may open it again before then). */
 export const CLOSED_SETTLE_MS = 24 * 3_600_000;
@@ -60,10 +61,15 @@ export interface ReportStartInput {
   receivedAt: string;
 }
 
+/** Whether a start is feature work the report counts: not a setup run (a purpose), not a replay of a test, and a start time that is an instant. The work events of a start (slice A4) follow the same rule. */
+export function startIsReported(input: Pick<ReportStartInput, "origin" | "purpose" | "receivedAt">): boolean {
+  return input.purpose === undefined && !(input.origin !== undefined && NOT_REPORTED.has(input.origin)) && REPORT_INSTANT.test(input.receivedAt);
+}
+
 /** The step that adds a task's report row to its start transaction. Never throws (a start must not fail for the report): an input it cannot key, or a task that is not feature work, gives no step. */
 export function reportStartItems(input: ReportStartInput): TransactItem[] {
   try {
-    if (input.purpose !== undefined || (input.origin !== undefined && NOT_REPORTED.has(input.origin)) || !REPORT_INSTANT.test(input.receivedAt)) return [];
+    if (!startIsReported(input)) return [];
     const key = reportTaskKey(input.companyId, input.receivedAt, input.taskId);
     const row: StoredDocument = {
       ...key, entityType: "REPORT_TASK", companyId: input.companyId, taskId: input.taskId, project: input.project, title: reportTitleOf(input.title), origin: reportOriginOf(input.origin),
@@ -90,6 +96,8 @@ export interface StoredReportRow {
   prsMerged: number;
   prLinks: string[];
   settledAt?: string | undefined;
+  /** Slice A4: the time split and send-backs, kept when the task settled and its events covered it. Absent: not known. */
+  times?: TaskTimes | undefined;
   version: number;
   key: { pk: string; sk: string };
 }
@@ -109,8 +117,10 @@ export function storedRowOf(row: StoredDocument, companyId: OrgId): StoredReport
   if (row.sk !== `${REPORT_SK.task}${row["startedAt"]}#${row["taskId"]}`) return undefined;
   if (!natural(row["prsOpened"]) || !natural(row["prsMerged"]) || !Array.isArray(links) || links.length > REPORT_PR_LINKS_MAX || !links.every((link) => typeof link === "string")) return undefined;
   if ((row["firstPrAt"] !== undefined && !instant(row["firstPrAt"])) || (row["endedAt"] !== undefined && !instant(row["endedAt"])) || (row["settledAt"] !== undefined && !instant(row["settledAt"]))) return undefined;
+  // A `times` that is not six whole numbers is "not known" (the row stays readable), never a guess.
+  const times = row["times"] === undefined ? undefined : timesOfStored(row["times"]);
   return {
-    taskId: row["taskId"], project: row["project"], title: row["title"], origin: origin.data, startedAt: row["startedAt"], state: state.data, ...(path === undefined ? {} : { path: path.data }),
+    taskId: row["taskId"], project: row["project"], title: row["title"], origin: origin.data, startedAt: row["startedAt"], state: state.data, ...(path === undefined ? {} : { path: path.data }), ...(times === undefined ? {} : { times }),
     ...(row["firstPrAt"] === undefined ? {} : { firstPrAt: row["firstPrAt"] }), ...(row["endedAt"] === undefined ? {} : { endedAt: row["endedAt"] }),
     prsOpened: row["prsOpened"], prsMerged: row["prsMerged"], prLinks: links, ...(row["settledAt"] === undefined ? {} : { settledAt: row["settledAt"] }), version: row["version"], key: reportTaskKey(companyId, row["startedAt"], row["taskId"]),
   };
@@ -125,6 +135,8 @@ export interface TaskFacts {
   prsOpened: number;
   prsMerged: number;
   prLinks: string[];
+  /** Slice A4: from the task's work events, when they cover it from its start. Absent: not known (never zero). */
+  times?: TaskTimes | undefined;
 }
 
 interface MilestoneFact { kind: string; at: string }

@@ -44,6 +44,8 @@ import { setupAgentPointerItem } from "../setup-agent/agent.js";
 import { developerIdOf } from "../sessions/create.js";
 import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
 import type { SetupAgentLimits } from "@agentx/contracts";
+import { reportOriginOf, startIsReported } from "../report/task-row.js";
+import { startWorkEventItems } from "../work-events/flow-events.js";
 
 export interface StartResult {
   task: TaskView;
@@ -241,6 +243,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     // A task that understands first starts by understanding the request, as a dispatch row like every automatic step; it runs once the preparation has ended.
     ...(understandFirst ? [dispatchRowItem(deps, taskId, 1, "UNDERSTAND", receivedAt)] : []),
     ...(extras?.items ?? []),
+    // Slice A4: the task's first work events (it started, and what it waits for first), next to its report row and under the same rule; only when the flow writes events.
+    ...(deps.workEvents === true && run?.setupAgent === undefined && startIsReported({ origin: origin.data, receivedAt }) ? startWorkEventItems({ companyId: deps.companyId, taskId, project: request.project, origin: reportOriginOf(origin.data), receivedAt, workflow: task.workflow }) : []),
     ...(testEnvironment?.pin === undefined ? [] : [testEnvironment.pin]),
     ...(run?.setupAgent === undefined ? [] : [setupAgentPointerItem({ orgId: deps.companyId, project: request.project, taskId, requestId: request.requestId, requestedBy: developerIdOf(principal), basedOnRevision: revision, startedAt: receivedAt, limits: run.setupAgent.limits, seenTaskId: run.setupAgent.seenTaskId })]),
   ];

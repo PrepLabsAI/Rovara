@@ -186,6 +186,8 @@ export interface MergeTrackingDependencies {
   log?(event: string, fields: Record<string, unknown>): void;
   /** The write of the task's next workflow snapshot, guarded by the revision read. The task-flow lane owns the record, so it can say how it is written; the default is `workflowUpdateItem`. */
   workflowWrite?(taskId: string, next: WorkflowSnapshot, expectedRevision: number): TransactItem;
+  /** Slice A4: the work events of a workflow change this pass makes (a fix started, the pull request closed), for the same transaction. Absent: none. Never throws into the pass (the service gives `flowWorkEventItems`, which never throws). */
+  workEvents?(task: { taskId: string; orgId: OrgId; project: string }, before: WorkflowSnapshot, after: WorkflowSnapshot, room: number): TransactItem[];
   /** Turns a decider's dispatch request into the row the task-flow core runs (default: its `dispatchRowItem`). */
   dispatchRow?(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem;
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
@@ -893,6 +895,7 @@ async function trackOne(
     }
     if (action !== undefined) {
       items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision, task.workflow), ...action.steps);
+      try { items.push(...(deps.workEvents?.(task, task.workflow, action.workflow, 100 - items.length) ?? [])); } catch { /* an event is never the reason a pass fails */ }
       // The dispatch the new workflow state is due for becomes a row through the task-flow core, and its milestones rows through the milestone hook: all in this one commit.
       if (action.dispatch !== undefined) items.push((deps.dispatchRow ?? defaultDispatchRow)({ companyId: task.orgId, taskId: task.taskId, ...action.dispatch }, stamp));
       for (const requested of action.milestones) items.push(...deps.milestones.items(requested.milestone, requested.n, { definitionVersion: action.workflow.definitionVersion }));

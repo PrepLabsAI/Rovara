@@ -354,6 +354,11 @@ export interface TaskFlowDeps {
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
   /**
+   * Lead 4, slice A4: write work events (`work-events/flow-events.ts`) in the transactions of the flow's own workflow changes, so the cost report can split a task's time into working and waiting and count send-backs.
+   * Only `true` writes them (the core host turns it on); absent or false: every transaction is exactly what it was. A failure to make an event never fails a step.
+   */
+  workEvents?: boolean;
+  /**
    * The project's approved test environment, as the flow uses it: a starting task pins the newest usable revision, and a coding or verification run is told the plan of the revision it pinned (its checks, selection,
    * budget and dependencies). Absent: no task uses an environment and every payload is what it was.
    */

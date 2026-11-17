@@ -11,8 +11,9 @@
 //                                                      company owner or admin moves it.
 //
 // Rules the numbers follow: a task belongs to the range it STARTED in and its whole cost goes there. Cost is whole millionths of the ledger's currency (never a float), read only from the cost
-// ledger; a call with no price is counted in `unpricedCalls` (the cost is then a floor, and is never shown as zero). A task with no feature is "No feature": its row has no `feature`. The wait
-// split and the send-back counts are not written in version 0: those fields are absent, never zero. No row names a person.
+// ledger; a call with no price is counted in `unpricedCalls` (the cost is then a floor, and is never shown as zero). A task with no feature is "No feature": its row has no `feature`. The time split
+// (`workingMs`, `waitingPeopleMs`, `waitingSystemMs`) and the send-back counts come from the task's work events (slice A4) and are present, all together with `timesComplete: true`, only for a task whose events cover
+// it from its start; a task from before the events, or whose events cannot all be read, has none of them: absent is "not known", never zero. No row names a person.
 import { z } from "zod";
 import { AgentXNameSchema } from "./names.js";
 
@@ -128,7 +129,9 @@ export const ReportTaskRowSchema = z.object({
   /** Absent when the ledger has recorded nothing for the task. */
   currency: z.string().min(1).max(10).optional(),
   unpricedCalls: CountSchema,
-  // Slice A4 writes these; version 0 leaves them out. Absent is "not known", never zero.
+  // Slice A4 (work events): present together, with `timesComplete`, for a task whose events cover it from its start; absent is "not known", never zero. `workingMs` is time a step ran, `waitingPeopleMs` is time the
+  // task waited for a person (`decisionsMs`: a plan to approve, a question, spend, something blocked; `prReviewMs`: pull request review up to the merge, shown apart), `waitingSystemMs` is time a step was queued.
+  // For an open task they run to now. The three never overlap. Send-backs: `sendBacksRovara` is Rovara sending its own code back (an automatic fix, a CI fix round), `sendBacksPeople` is a person asking for changes.
   workingMs: CountSchema.optional(),
   waitingPeopleMs: z.object({ decisionsMs: CountSchema, prReviewMs: CountSchema }).strict().optional(),
   waitingSystemMs: CountSchema.optional(),
@@ -136,6 +139,9 @@ export const ReportTaskRowSchema = z.object({
   sendBacksPeople: CountSchema.optional(),
   timesComplete: z.boolean().optional(),
 }).strict().superRefine((row, context) => {
+  // All of the A4 numbers or none of them (a row never carries half a time split).
+  const a4 = [row.workingMs, row.waitingPeopleMs, row.waitingSystemMs, row.sendBacksRovara, row.sendBacksPeople, row.timesComplete];
+  if (a4.some((value) => value !== undefined) && a4.some((value) => value === undefined)) context.addIssue({ code: "custom", path: ["timesComplete"], message: "the time split and the send-backs come together or not at all" });
   if (row.prsMerged > row.prsOpened) context.addIssue({ code: "custom", path: ["prsMerged"], message: "merged pull requests cannot exceed opened ones" });
   if (row.prLinks.some((link) => { try { const url = new URL(link); return url.protocol !== "https:" || url.username !== "" || url.password !== ""; } catch { return true; } })) context.addIssue({ code: "custom", path: ["prLinks"], message: "plain https addresses only" });
 });
