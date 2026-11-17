@@ -116,6 +116,15 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/members/{personId}/removal-preview", requires: "full" },
   { method: "POST", path: "/v1/dev/company/members/{personId}/removal", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/members/{personId}/role", requires: "full" },
+  // Guided onboarding PR 7: connect Linear by OAuth (live owner/admin), the connection's status (any member), disconnect (live owner, fresh step-up), and a project's Linear team
+  // (owner/admin or the project's admin).
+  { method: "POST", path: "/v1/dev/company/linear/connect", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/linear/complete", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },

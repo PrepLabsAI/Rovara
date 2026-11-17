@@ -114,6 +114,9 @@ export const AgentXErrorCodeSchema = z.enum([
   "LESSON_BUSY",
   // The feature is not on this install (Rovara on a laptop does not have it yet). A 404, so an older client that does not know the code treats it as an answer it has no words for. Appended: no code changes meaning.
   "NOT_AVAILABLE_HERE",
+  // Guided onboarding PR 7: the Linear workspace is already connected to another Rovara company (409), and the company's Linear connection is missing or needs reconnecting (409). Appended: no code changes meaning.
+  "LINEAR_WORKSPACE_TAKEN",
+  "LINEAR_NOT_CONNECTED",
 ]);
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";
