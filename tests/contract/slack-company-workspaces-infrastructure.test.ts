@@ -114,7 +114,7 @@ describe("Slack company mode's switch (18a)", () => {
   it("gives the notifier, DeveloperIdentity, the reconciler and the Slack service exactly their reads", () => {
     const state = tableArn(named, "State");
     expect(roleOf(policy(named, "DeveloperTaskNotifier"))).toEqual([roleOfFunction(named, "DeveloperTaskNotifierFunction")]);
-    expect(statementsOf(policy(named, "DeveloperTaskNotifier"))).toStrictEqual([TOKENS, reads("ReadSlackWorkspaceBindings", state, [...BINDINGS, "ORG#*#WORKSPACE#*"])]);
+    expect(statementsOf(policy(named, "DeveloperTaskNotifier"))).toStrictEqual([TOKENS, reads("ReadSlackWorkspaceBindings", state, [...BINDINGS, "ORG#org_????????????????????#WORKSPACE#*"])]);
     expect(roleOf(policy(named, "DeveloperIdentity"))).toEqual([roleOfFunction(named, "DeveloperSignInFunction")]);
     expect(statementsOf(policy(named, "DeveloperIdentity"))).toStrictEqual([reads("ReadSlackWorkspaceBindings", state, BINDINGS)]);
     expect(roleOf(policy(named, "SessionReconciler"))).toEqual([roleOfFunction(named, "SessionsReconciler")]);
@@ -141,6 +141,14 @@ describe("Slack company mode's switch (18a)", () => {
       expect(variablesOf(named, fn).SLACK_COMPANY_WORKSPACES, fn).toStrictEqual(off("enabled"));
     }
     expect(variablesOf(named, "DeveloperSignInFunction").STATE_TABLE_NAME).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] }, ""] });
+    // 18d: the environment's name for the channel API, notifier and reconciler factories, "" while off.
+    for (const fn of ["DeveloperTaskNotifierFunction", "SessionsReconciler"]) expect(variablesOf(named, fn).AGENTX_ENV, fn).toStrictEqual({ "Fn::If": [on, "staging", ""] });
+    expect(variablesOf(named, "ChannelApiIngress")).not.toHaveProperty("AGENTX_ENV");
+    // 18d: the Slack service's inputs exist as outputs only while the switch is on.
+    const outputs = (named as unknown as { Outputs: Record<string, { Value: unknown; Condition?: string }> }).Outputs;
+    expect(outputs.SlackCompanyWorkspacesState).toStrictEqual({ Value: "enabled", Condition: on });
+    expect(outputs.SlackCompanyStateTableName).toStrictEqual({ Value: { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] }, Condition: on });
+    expect(outputs.SlackCompanyTeamId).toStrictEqual({ Value: { Ref: "SlackTeamId" }, Condition: on });
     // 18c: the Slack Lambda's factory inputs, "" while off.
     expect(variablesOf(named, "SlackIngress").AGENTX_ENV).toStrictEqual({ "Fn::If": [on, "staging", ""] });
     expect(variablesOf(named, "SlackIngress").SLACK_TEAM_ID).toStrictEqual({ "Fn::If": [on, { Ref: "SlackTeamId" }, ""] });

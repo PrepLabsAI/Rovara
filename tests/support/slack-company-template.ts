@@ -12,9 +12,9 @@ export const SLACK_COMPANY_POLICIES = ["SlackIngress", "ChannelApi", "DeveloperT
 const VARIABLES: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
   [/^SlackIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME", "AGENTX_ENV", "SLACK_TEAM_ID"]],
   [/^ChannelApiIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME"]],
-  [/^DeveloperTaskNotifierFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES"]],
+  [/^DeveloperTaskNotifierFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "AGENTX_ENV"]],
   [/^DeveloperSignInFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME"]],
-  [/^SessionsReconciler[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES"]],
+  [/^SessionsReconciler[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "AGENTX_ENV"]],
 ];
 
 /** True when the condition's expression is `Fn::Equals [Ref SlackCompanyWorkspaces, enabled]` (optionally ANDed with another condition). */
@@ -43,6 +43,13 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
     delete template.Resources[id];
   }
   for (const id of conditions) delete template.Conditions![id];
+  // L2-2 PR 18d: the Slack service's inputs, as outputs under the switch's condition only.
+  const outputs = (template as { Outputs?: Record<string, { Value: unknown; Condition?: string }> }).Outputs ?? {};
+  for (const id of ["SlackCompanyWorkspacesState", "SlackCompanyStateTableName", "SlackCompanyTeamId"]) {
+    expect(outputs[id], id).toBeDefined();
+    expect(conditions, id).toContain(outputs[id]!.Condition);
+    delete outputs[id];
+  }
   for (const [pattern, names] of VARIABLES) {
     const found = Object.entries(template.Resources).filter(([id, resource]) => pattern.test(id) && resource.Type === "AWS::Lambda::Function");
     expect(found, String(pattern)).toHaveLength(1);
@@ -69,5 +76,24 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
   entries.splice(at + 1, 0, ["COMPANY_READS", "enabled"]);
   for (const name of Object.keys(brokerVariables)) delete brokerVariables[name];
   Object.assign(brokerVariables, Object.fromEntries(entries));
+  return template;
+}
+
+/** L2-2 PR 18d: the named slack stack's addition: three off-by-default parameters and four container variables (the switch, the table, the team, the environment's name). */
+export function withoutSlackCompanyService(input: unknown): unknown {
+  const template = input as { Parameters: Record<string, unknown>; Resources: Record<string, Resource> };
+  expect(template.Parameters.SlackCompanyWorkspacesState).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
+  expect(template.Parameters.SlackCompanyStateTableName).toMatchObject({ Type: "String", Default: "" });
+  expect(template.Parameters.SlackCompanyTeamId).toMatchObject({ Type: "String", Default: "", AllowedPattern: "^$|^T[A-Z0-9]{2,31}$" });
+  for (const id of ["SlackCompanyWorkspacesState", "SlackCompanyStateTableName", "SlackCompanyTeamId"]) delete template.Parameters[id];
+  const tasks = Object.values(template.Resources).filter((resource) => resource.Type === "AWS::ECS::TaskDefinition");
+  expect(tasks).toHaveLength(1);
+  const container = (tasks[0]!.Properties.ContainerDefinitions as Array<{ Environment: Array<{ Name: string; Value: unknown }> }>)[0]!;
+  const added = container.Environment.filter((entry) => ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME", "SLACK_TEAM_ID", "AGENTX_ENV"].includes(entry.Name));
+  expect(added.map((entry) => [entry.Name, entry.Value])).toEqual([
+    ["SLACK_COMPANY_WORKSPACES", { Ref: "SlackCompanyWorkspacesState" }], ["STATE_TABLE_NAME", { Ref: "SlackCompanyStateTableName" }], ["SLACK_TEAM_ID", { Ref: "SlackCompanyTeamId" }],
+    ["AGENTX_ENV", expect.any(String)],
+  ]);
+  container.Environment = container.Environment.filter((entry) => !added.includes(entry));
   return template;
 }

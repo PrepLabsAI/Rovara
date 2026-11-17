@@ -1030,9 +1030,11 @@ export class ControlPlaneStack extends Stack {
       channelAdapters.connectSlackPoster(notifier.function, signInParameters.slackTeamId.valueAsString);
       if (slackCompany !== undefined) {
         // The notifier: binding and token for each post; a ChatGPT fallback's workspace pointer row (ORG#<c>#WORKSPACE#<id>).
+        // L2-2 PR 18d: the pointer row's key narrowed to a company id's exact shape (org_ + 20 characters), so the pattern cannot match another key that merely contains #WORKSPACE#.
         slackCompany.grant("DeveloperTaskNotifier", notifier.function.role!, [slackCompany.tokenRead(),
-          slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", [...SLACK_BINDING_READ_KEYS, "ORG#*#WORKSPACE#*"])]);
+          slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", [...SLACK_BINDING_READ_KEYS, "ORG#org_????????????????????#WORKSPACE#*"])]);
         notifier.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+        notifier.function.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
         // DeveloperIdentity already reads the token family (Add to Slack); its directory needs the team's binding, on the State table it otherwise never reads.
         slackCompany.grant("DeveloperIdentity", developerSignIn.function.role!, [slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
         developerSignIn.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
@@ -1178,8 +1180,13 @@ export class ControlPlaneStack extends Stack {
       // The reconciler already reads and writes the State table; it needs only the company's token for its thread notes.
       slackCompany.grant("SessionReconciler", sessions.reconciler.role!, [slackCompany.tokenRead()]);
       sessions.reconciler.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+      sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
       // The hosted Slack service (ECS): the team's binding and the company's token for its posts. Its container gets the switch from the slack stack.
       slackCompany.grant("SlackOrchestrator", slackOrchestratorRole, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
+      // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs); only while the switch is on.
+      for (const [id, value] of [["SlackCompanyWorkspacesState", "enabled"], ["SlackCompanyStateTableName", state.tableName], ["SlackCompanyTeamId", signInParameters.slackTeamId.valueAsString]] as const) {
+        new CfnOutput(this, id, { value, condition: slackCompany.isOn });
+      }
     }
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.

@@ -31,6 +31,8 @@ import { WorkspaceInstanceSchema, workspaceRecordFields } from "@agentx/contract
 import { taskPointerKey } from "../developer/task-records.js";
 import { requestCancellation } from "./cancellation.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
+import { slackNoteIsInstalls } from "./slack-company-notices.js";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 
 /** Owner decision, 2026-10-01: a task idle this long with nobody waiting is stopped. */
 export const UNWAITED_TASK_IDLE_LIMIT_MS = 24 * 60 * 60_000;
@@ -65,6 +67,8 @@ export function lastActivityAt(
 
 export interface UnwaitedTaskSweepDependencies {
   workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">;
+  /** L2-2 PR 18d: the install's team; its own threads keep today's path in company mode. */
+  slackLegacyTeamId?: string;
   client: Client;
   tableName: string;
   /** The Slack threads table, read for the thread's activeTurn. */
@@ -190,8 +194,10 @@ export async function sweepUnwaitedTasks(
     result.cancelled.push(operationId);
     dependencies.log({ event: "unwaited_task.cancelled", ...fields, cancelOperationId: answer.operation.id });
     try {
-      const workspace = dependencies.workspaces === undefined ? undefined : slackRecordScope(found.workspace, thread.teamId);
-      if (workspace !== undefined && await dependencies.workspaces!.requireCompany(workspace.teamId) !== workspace.companyId) throw new Error("This Slack workspace is not available.");
+      // L2-2 PR 18d: the install's own thread keeps today's path while company mode is on (slack-company-notices.ts).
+      const installs = dependencies.workspaces !== undefined && slackNoteIsInstalls(dependencies.slackLegacyTeamId, found.workspace, thread.teamId);
+      const workspace = dependencies.workspaces === undefined ? undefined : installs ? { companyId: IMPLICIT_COMPANY_ID, teamId: thread.teamId } : slackRecordScope(found.workspace, thread.teamId);
+      if (workspace !== undefined && !installs && await dependencies.workspaces!.requireCompany(workspace.teamId) !== workspace.companyId) throw new Error("This Slack workspace is not available.");
       await dependencies.postNote({ channelId: thread.channelId, threadTs: thread.threadTs, ...(workspace === undefined ? {} : { workspace }) }, UNWAITED_TASK_NOTE);
     } catch (error) {
       result.noteFailures += 1;
