@@ -1443,7 +1443,7 @@ describe("ec2-ebs delivery", () => {
   describe("machine size note", () => {
     const taskRecord = (): Ec2OutboxRecord => {
       const record = recordFor();
-      return { ...record, invocation: { ...record.invocation, kind: "task", payload: { conversationId: randomUUID(), prompt: "test it" } } as WorkerInvocation };
+      return { ...record, invocation: { ...record.invocation, kind: "task", payload: { conversationId: randomUUID(), prompt: "test it" } } };
     };
     const ready = (machineFallback?: "size-unavailable" | "x86-unavailable") => ({ ensureSession: async () => ({ ready: true as const, generation: 3, privateIp: "10.42.128.10", ...(machineFallback === undefined ? {} : { machineFallback }) }) });
 

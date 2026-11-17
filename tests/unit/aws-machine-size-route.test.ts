@@ -96,7 +96,8 @@ describe("hosted machine-size dispatcher", () => {
     } finally { vi.unstubAllEnvs(); }
   });
   it("refuses a missing size", async () => { const w = world(); const before = w.stored(); const r = await w.read("/v1/dev/projects/pa/machine-size", { method: "POST", headers: { authorization: "Bearer e30.eyJhenAiOiJjbG91ZC1wYWdlIn0.sig" }, body: "{}" }); expect(r.statusCode).toBe(400); expect(r.body).toContain("Choose one of the listed machine sizes"); expect(w.stored()).toBe(before); });
-  it.each(["tasks:read", "profile:name"] as const)("refuses scoped client %s", async (scope) => { const w = world(); w.client("scoped", [scope]); await w.refused("FORBIDDEN", PAGE); });
+  // Batch 14 (rule F): a scoped client is refused by the shared scope check, whose words name what is missing (tests/contract/named-scopes.test.ts pins them for every route).
+  it.each(["tasks:read", "profile:name"] as const)("refuses scoped client %s", async (scope) => { const w = world(); w.client("scoped", [scope]); await w.refused("FORBIDDEN", "Cloud needs full access for POST /v1/dev/projects/{project}/machine-size, which is off for it; an administrator can turn it on"); });
   it.each(["tool", "cli"] as const)("refuses non-page client %s", async (kind) => { const w = world(); w.client(kind); await w.refused("FORBIDDEN", PAGE); });
   it.each(["absent", "old", "slack", "google"])("requires a fresh Code factor: %s", async (kind) => { const w = world(); if (kind === "absent") delete w.claims["step_up_at"]; else if (kind === "old") w.claims["step_up_at"] = NOW / 1000 - 660; else w.claims["step_up_amr"] = kind; await w.refused("REAUTH_REQUIRED", PAGE); });
   it("honours a shorter company window", async () => { const w = world(); w.claims["step_up_at"] = NOW / 1000 - 120; w.deps.developer.stepUpWindowSeconds = vi.fn(async (company) => { expect(company).toBe(A); return 60; }); await w.refused("REAUTH_REQUIRED", PAGE); });

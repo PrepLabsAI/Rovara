@@ -1310,7 +1310,6 @@ function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord
   if (route.requires === "full" ? caller.client.fullAccess === true : caller.scopes.includes(route.requires)) return;
   // No company in scope here (the caller is a sign-in client acting as a person), so this uses the file's one company-less logger, already in the log-site inventory, rather than a new console call.
   logDeveloperEvent({ event: "client.scope_refused", clientId: caller.client.clientId, method: route.method, route: route.path, requires: route.requires });
-  if (route.method === "POST" && route.path.endsWith("/machine-size")) throw agentXError("FORBIDDEN", MACHINE_SIZE_ON_THE_PAGE);
   throw agentXError("FORBIDDEN", route.requires === "full"
     ? `${caller.client.name} needs full access for ${route.method} ${route.path}, which is off for it; an administrator can turn it on`
     : `${caller.client.name} needs the ${route.requires} scope for ${route.method} ${route.path}; an administrator can allow it with that scope`);
