@@ -101,7 +101,8 @@ describe("the stack parameters' own patterns", () => {
   it.each(["", MODEL, "claude-opus-4-5-20251101", "claude-haiku-4-5"])("the model pattern admits %j", (value) => {
     expect(model.test(value)).toBe(true);
   });
-  it.each(["us.anthropic.claude-sonnet-4-6", "anthropic.claude-sonnet-4-6-v1:0", "gpt-5", "Claude-sonnet-4-6", "claude-", "claude-sonnet 4", "claude-a,b", `claude-${"a".repeat(33)}`])("the model pattern refuses %j", (value) => {
+  // The stack pattern is only the well-formed check; Claude's own rule (an engine name, never a Bedrock us.anthropic. id) is isCoreAgentModelId's, in the CLI and the broker (below).
+  it.each(["Claude-sonnet-4-6", "claude-sonnet 4", "claude-a,b", `claude-${"a".repeat(64)}`])("the model pattern refuses %j", (value) => {
     expect(model.test(value)).toBe(false);
   });
   it("admits any well-formed id (DEC 254g): no list in Code, the gateway decides what it offers", () => {
@@ -249,7 +250,8 @@ describe("agentx config set", () => {
       }) as typeof fetch;
       return { fetch: fetchImpl, asked, records: recorder.records };
     };
-    const offering = (names: readonly string[]) => () => Response.json(offeredAnswer(names));
+    // As the broker's admin read answers it: the contract, plus the broker's own requestId.
+    const offering = (names: readonly string[]) => () => Response.json({ ...offeredAnswer(names), requestId: "00000000-0000-4000-8000-000000000001" });
     const run = async (value: string, gateway: ReturnType<typeof withGateway>, overrides: Record<string, unknown> = {}) => {
       const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: MODEL } });
       const configured = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }), fetch: gateway.fetch, ...overrides });

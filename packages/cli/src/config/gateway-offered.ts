@@ -55,7 +55,9 @@ export async function requireGatewayOffers(input: GatewayOfferedInputs): Promise
     throw agentXError("CONFIG_INVALID", `${notChanged}: the model gateway is not set up on ${env} yet, so ${value} cannot be checked; set coreEngine.modelGatewayUrl first (agentx --env ${env} config set coreEngine.modelGatewayUrl <https origin>), then try again; nothing changed`);
   }
   if (status !== 200) throw unreadable();
-  const parsed = OfferedAgentModelsSchema.safeParse(body);
+  // The broker's answer is the contract plus its own requestId; only the contract's two fields are judged (the schema is strict).
+  const record = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+  const parsed = OfferedAgentModelsSchema.safeParse({ version: record.version, models: record.models });
   if (!parsed.success) throw unreadable();
   const names = parsed.data.models.map((entry) => entry.model);
   if (names.includes(value)) return;

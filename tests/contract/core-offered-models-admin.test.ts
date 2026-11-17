@@ -6,7 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, TASK_KEY_PURPOSE, type OfferedAgentModels } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../../packages/broker/src/core-host/offered-models-http.js";
-import { adminCall, createAdminBroker } from "../support/admin-broker.js";
+import { requireGatewayOffers } from "../../packages/cli/src/config/gateway-offered.js";
+import { adminCall, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { GATEWAY_OFFERED_MODELS, offeredAnswer } from "../support/offered-models-fake.js";
 
 const ORG_A = "org_adminoffered0000000a";
@@ -77,7 +78,7 @@ describe(`GET ${CORE_OFFERED_MODELS_ADMIN_PATH}`, () => {
       const { handler } = await createAdminBroker({ linking: people.linking as never, coreOfferedModels: gatewayReads.read });
       const answer = await adminCall(handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH });
       expect(answer.status, company).toBe(200);
-      expect(answer.body, company).toEqual(offeredAnswer(expected));
+      expect(answer.body, company).toEqual({ ...offeredAnswer(expected), requestId: expect.any(String) });
       expect(gatewayReads.asked, company).toEqual([company]);
       expect(people.asked.length, company).toBe(1);
     }
@@ -110,5 +111,43 @@ describe(`GET ${CORE_OFFERED_MODELS_ADMIN_PATH}`, () => {
     const { handler } = await createAdminBroker({ linking: companies(ORG_A).linking as never, coreOfferedModels: gatewayReads.read });
     expect((await adminCall(handler, { method: "POST", path: CORE_OFFERED_MODELS_ADMIN_PATH, body: {} })).status).not.toBe(200);
     expect(gatewayReads.asked).toEqual([]);
+  });
+});
+
+describe("config set's live check, end to end through the broker's admin read and the gateway's offered-models answer", () => {
+  const SESSION = { controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "admin-token-for-tests" };
+  /** The CLI's fetch, into the broker in process as the administrator. */
+  const brokerFetch = (handler: AdminHandler) => (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    const answer = await adminCall(handler, { method: init?.method ?? "GET", path: url.pathname });
+    return Response.json(answer.body, { status: answer.status });
+  }) as typeof fetch;
+  const broker = async (offered: readonly string[] | "down") => {
+    const g = gateway(() => (offered === "down" ? new Response("", { status: 502 }) : Response.json(offeredAnswer(offered))));
+    const read = adminOfferedModelsFromEnvironment({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY }, tokens, g.fetchImpl)!;
+    const { handler } = await createAdminBroker({ linking: { companies: { companyOf: async () => ORG_A } } as never, coreOfferedModels: read });
+    return { handler, urls: g.urls };
+  };
+  const check = (handler: AdminHandler, value: string) => requireGatewayOffers({ key: "coreEngine.agentModel", env: "staging", value, session: SESSION, fetch: brokerFetch(handler) });
+
+  it("accepts a GLM id the gateway offers this company, reading the company's own list", async () => {
+    const { handler, urls } = await broker(GATEWAY_OFFERED_MODELS);
+    await expect(check(handler, "zai.glm-5")).resolves.toBeUndefined();
+    expect(urls).toEqual([`${GATEWAY}/v1/service/companies/${ORG_A}/offered-models`]);
+  });
+
+  it("refuses an id the gateway does not offer", async () => {
+    const { handler } = await broker(["claude-sonnet-5-5", "zai.glm-4.7"]);
+    await expect(check(handler, "zai.glm-5")).rejects.toThrow("coreEngine.agentModel was not changed: the model gateway does not offer zai.glm-5 to this company; it offers zai.glm-4.7, claude-sonnet-5-5; nothing changed");
+  });
+
+  it("fails closed when the gateway does not answer", async () => {
+    const { handler } = await broker("down");
+    await expect(check(handler, "zai.glm-5")).rejects.toThrow("the models the model gateway offers could not be read just now, so zai.glm-5 could not be checked; nothing changed, try again");
+  });
+
+  it("says to set the gateway first where the broker has none", async () => {
+    const { handler } = await createAdminBroker({ linking: { companies: { companyOf: async () => ORG_A } } as never });
+    await expect(check(handler, "zai.glm-5")).rejects.toThrow("set coreEngine.modelGatewayUrl first");
   });
 });

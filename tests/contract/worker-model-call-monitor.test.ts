@@ -370,7 +370,7 @@ describe("a model the gateway does not offer (DEC 254g)", () => {
   });
 
   it("is matched whole: other text, or the words inside other text, is not it", () => {
-    for (const text of ["Model source request failed; the model gateway does not offer this model, secret", "the model gateway does not offer this model", "x Model source request failed; the model gateway does not offer this model"]) {
+    for (const text of ["Model source request failed; the model gateway does not offer this model, secret", "the model gateway does not offer this model", "Model source request failed; the model gateway does not offer this model.", "Model source request failed; check the API key; the model gateway does not offer this model"]) {
       expect(failed("anthropic", text)?.modelCall, text).not.toMatchObject({ signal: "ModelNotOffered" });
     }
   });
