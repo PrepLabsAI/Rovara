@@ -453,6 +453,26 @@ describe("wiki store: the answer expiry sweep", () => {
     expect(await left(B, "alpha")).toEqual(["ANSWER#old-0003"]);
   });
 
+  it("keeps a record until its time: one second before 30 days nothing is swept", async () => {
+    const w = world();
+    await w.a.writeAnswer("alpha", answer("old-0001"));
+    w.clock.now = T0 + 30 * 86_400_000 - 1_000;
+    expect(await w.a.expireAnswers("alpha")).toBe(0);
+    expect(await w.a.readAnswer("alpha", "old-0001")).toBeDefined();
+  });
+
+  it("reads at most ten times its bound in one sweep", async () => {
+    const w = world();
+    await w.a.writeAnswer("alpha", answer("zold-0001"));
+    w.clock.now = T0 + 10 * 86_400_000;
+    for (let i = 0; i < 25; i += 1) await w.a.writeAnswer("alpha", answer(`new-${String(i).padStart(4, "0")}`));
+    w.clock.now = T0 + 30 * 86_400_000 + 1_000;
+    // 25 current rows sort before the expired ones; with a bound of 2 the sweep reads 20 rows and stops before them.
+    expect(await w.a.expireAnswers("alpha", 2)).toBe(0);
+    // A sweep with room to read them all finds it.
+    expect(await w.a.expireAnswers("alpha", 3)).toBe(1);
+  });
+
   it("deletes at most its bound in one sweep", async () => {
     const w = world();
     for (let i = 0; i < 5; i += 1) await w.a.writeAnswer("alpha", answer(`old-000${String(i)}`));

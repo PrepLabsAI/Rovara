@@ -363,11 +363,13 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     const most = parsed(z.number().int().min(1).max(WIKI_ANSWER_SWEEP_MAX), limit);
     const nowSeconds = now() / 1000;
     let swept = 0;
+    let scanned = 0;
     let cursor: string | undefined;
     do {
       const page = await store.query({ pk: wikiPartition(companyId, name), sk: { op: "beginsWith", prefix: WIKI_SK.answer }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
       for (const item of page.items) {
-        if (swept >= most) return swept;
+        // One sweep reads at most ten times its delete bound, so an answer write never walks a whole large project.
+        if (swept >= most || ++scanned > most * 10) return swept;
         const row = readRow(AnswerRow, item, name)!;
         if (row.expiresAt > nowSeconds) continue;
         await store.delete({ key: keyOf(name, item), condition: when.eq("expiresAt", row.expiresAt) });
@@ -390,20 +392,20 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
           done.notes += 1;
         } else if (row.note.approval.state === "approved" && row.note.approval.by === person) {
           // Someone else's note they approved stays approved, but no longer names them.
-          await store.put({ item: { ...item, note: { ...row.note, approval: { ...row.note.approval, by: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument });
+          await store.put({ item: { ...item, note: { ...row.note, approval: { ...row.note.approval, by: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument, condition: when.present() });
         }
       }
       for (const item of await family(name, WIKI_SK.build)) {
         const row = readRow(BuildRow, item, name)!;
         if (row.build.startedBy !== person) continue;
-        await store.put({ item: { ...item, build: { ...row.build, startedBy: WIKI_FORMER_MEMBER } } as unknown as StoredDocument });
+        await store.put({ item: { ...item, build: { ...row.build, startedBy: WIKI_FORMER_MEMBER } } as unknown as StoredDocument, condition: when.present() });
       }
       for (const item of await family(name, WIKI_SK.flag)) {
         const row = readRow(FlagRow, item, name)!;
         if (row.flag.by.kind !== "person" || row.flag.by.personId !== person) continue;
         // The mark stays (it says the page was wrong), but it no longer names the person or keeps their words.
         const { reason, ...rest } = row.flag;
-        await store.put({ item: { ...item, flag: { ...rest, by: { kind: "person", personId: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument });
+        await store.put({ item: { ...item, flag: { ...rest, by: { kind: "person", personId: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument, condition: when.present() });
         if (reason !== undefined) done.reasons += 1;
       }
       for (const item of await family(name, WIKI_SK.answer)) {
