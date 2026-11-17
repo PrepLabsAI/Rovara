@@ -305,6 +305,13 @@ describe("review fixes (L2-1 Opus review)", () => {
     expect(await companyProjectIdByName(h.db, "state", A, "web")).toBe(a.name);
     h.db.set({ ...h.revision(a.name)!, companyId: B });
     expect(await companyProjectIdByName(h.db, "state", A, "web")).toBeUndefined();
+    // A claim in A's own partition that names another company, or whose project row is missing, resolves nothing.
+    h.db.set({ ...h.revision(a.name)!, companyId: A });
+    const claim = h.db.get(orgProjectNameClaimKey(A, "web").pk, orgProjectNameClaimKey(A, "web").sk)!;
+    h.db.set({ ...claim, companyId: B });
+    expect(await companyProjectIdByName(h.db, "state", A, "web")).toBeUndefined();
+    h.db.set({ ...claim, projectId: "web-nnnnnn" });
+    expect(await companyProjectIdByName(h.db, "state", A, "web")).toBeUndefined();
     h.db.set({ ...orgProjectCatalogKey(A, "old"), entityType: "PROJECT_CATALOG", companyId: A, name: "other", latestRevision: 1 });
     expect(await companyProjectIdByName(h.db, "state", A, "old")).toBeUndefined();
   });
