@@ -300,6 +300,27 @@ describe("one workspace per company, one company per workspace (DEC 254l item 4)
     expect(w.slack.revoked).toEqual([]);
     expect(refused.raw).not.toContain(tokenOf("acme-b"));
   });
+  it("DEC 254s: a workspace another company holds: the new token is discarded (no token-store write, in no log line or console output, not in the answer), exact text, no revoke", async () => {
+    const w = world();
+    expect((await w.connect("acme-code")).status).toBe(200);
+    const token = tokenOf("acme-b");
+    const callsBefore = w.sm.calls.length; const logsBefore = w.logs.length;
+    const printed: string[] = [];
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((level) => vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { printed.push(args.map((arg) => typeof arg === "string" ? arg : JSON.stringify(arg)).join(" ")); }));
+    let refused: Awaited<ReturnType<typeof w.connect>>;
+    try { refused = await w.connect("acme-b", w.b); } finally { for (const spy of spies) spy.mockRestore(); }
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toEqual({ code: "SLACK_WORKSPACE_TAKEN", message: "This Slack workspace is already connected to another company." });
+    expect(refused.raw).not.toContain(token);
+    // The token store is written only with CreateSecret / PutSecretValue: none at all during the refusal, and the token is in no stored secret.
+    expect(w.sm.calls.slice(callsBefore).filter((call) => /^(CreateSecret|PutSecretValue)Command /.test(call))).toEqual([]);
+    expect([...w.sm.store.values()].join("\n")).not.toContain(token);
+    expect(JSON.stringify([...w.db.items.values()])).not.toContain(token);
+    expect(w.logs.slice(logsBefore)).toEqual([{ companyId: B, event: "slack.install_refused", reason: "workspace_taken", teamId: "T0ACME", actor: PERSON_B }]);
+    expect(JSON.stringify(w.logs)).not.toContain(token);
+    expect(printed.join("\n")).not.toContain(token);
+    expect(w.slack.revoked).toEqual([]);
+  });
   it("a company that already has a workspace cannot add a second: the just-issued token is revoked and nothing is stored", async () => {
     const w = world();
     expect((await w.connect("acme-code")).status).toBe(200);

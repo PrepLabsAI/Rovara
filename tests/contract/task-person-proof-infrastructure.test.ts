@@ -218,18 +218,20 @@ describe("the named TEST proof-only installation gate", () => {
     // Switch-over incident 2026-11-16: named and foreign re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA); only ordering moves.
     // Core gateway settings (2026-11-17): named and foreign re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker; checked in
     // core-gateway-settings.test.ts and verified: with the variable passed as before, the old pins hold); legacy unchanged.
+    // Guided onboarding PR 4 (#836, DEC 254r item 2): named and foreign re-pinned for the sign-in Lambda's one Slack workspace token statement (secretsmanager CreateSecret,
+    // PutSecretValue, GetSecretValue on agentx/<env>/slack-workspaces/*; developer-signin-infrastructure.test.ts pins it exactly). Verified: with only that statement removed, the old pins hold; legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "681b18a55b6798f8e3b0794ca3911695e3250c76382b674c41c99bbfaa706332",
-        withoutRoute: "9d267d3c06acdfa8710119d40709b5f64cf91b0d597c043da42736ca32a0b283",
+        withRoute: "56585ffd2c1581b2920df568a77dfbcf6504d7fa41714a9baf824753185cc947",
+        withoutRoute: "f52329983db36a52bc1e2e90c98908fee2dc152a6891647adcdd9045e1ed29ac",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "8e78ff5888897e4471fa5ee6345ff3bd7478c2b24c41dcabbfccb80db7094f54",
-        withoutRoute: "3c17126d261aec2cf388250cddcafaa87ca00b684e0bff8bb85f53895a0bf766",
+        withRoute: "feb9693bf3da472c9a060e4c87221a9ae2b0a661ec4b0a9935f1b25663e76f8b",
+        withoutRoute: "524270619e97c8bd495ff0f6e56e52108dbed3a656829a0d32fd9de2b947c311",
       },
       {
         label: "legacy",

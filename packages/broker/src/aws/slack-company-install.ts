@@ -44,7 +44,7 @@ export const SLACK_NOT_SET_UP = "Adding Rovara to Slack isn't set up on this Rov
 export const SLACK_UNAVAILABLE = "Slack could not be connected just now. Start again from Rovara.";
 export const SLACK_READ_UNAVAILABLE = "The company's Slack connection could not be read just now; try again.";
 export const SLACK_DISCONNECT_UNAVAILABLE = "Slack could not be disconnected just now; try again.";
-export const SLACK_WORKSPACE_TAKEN = "This Slack workspace is already connected to a different Rovara company.";
+export const SLACK_WORKSPACE_TAKEN = "This Slack workspace is already connected to another company."; // DEC 254s: exactly this text.
 export const SLACK_COMPANY_HAS_WORKSPACE = "This company is already connected to a different Slack workspace. A company owner can disconnect it first.";
 export const SLACK_ENTERPRISE_REFUSED = "Rovara can be added to one Slack workspace, not to a whole Enterprise Grid organization. Add it to a single workspace.";
 export const SLACK_NOT_CONNECTED = "This company has no Slack workspace connected.";
@@ -296,7 +296,7 @@ async function complete(ctx: SlackInstallContext, member: z.infer<typeof Members
   try { outcome = await bindTeam(ctx, member.companyId, caller.developerId, grant); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", SLACK_UNAVAILABLE); }
   if (outcome === "team_taken") {
-    // The workspace's bot user is the other company's; revoking would deactivate it there. Dropped unstored.
+    // DEC 254s: no revoke (the workspace's bot user is the other company's; revoking would deactivate it there). The token is discarded: never stored, logged or answered.
     log({ event: "slack.install_refused", reason: "workspace_taken", teamId: grant.teamId, actor: caller.developerId });
     throw agentXError("SLACK_WORKSPACE_TAKEN", SLACK_WORKSPACE_TAKEN);
   }
