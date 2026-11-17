@@ -151,7 +151,7 @@ describe("the plan a candidate check carries", () => {
   });
 
   it("refuses the check, in fixed words, with tx off, with no catalog, or for a project with a dev container", async () => {
-    await expect(candidateDependencyPlan({ ...(await project(false)), serviceCatalog: catalogSource }, body([postgres]), scope, { ROVARA_TEST_ENVIRONMENT: "1" })).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.not_available_yet);
+    await expect(candidateDependencyPlan({ ...(await project(false)), serviceCatalog: catalogSource }, body([postgres]), scope, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.not_available_yet);
     await expect(candidateDependencyPlan(await project(false), body([postgres]), scope, ON)).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.no_catalog);
     await expect(candidateDependencyPlan({ ...(await project(true)), serviceCatalog: catalogSource }, body([postgres]), scope, ON)).rejects.toThrow(/dev container/u);
   });

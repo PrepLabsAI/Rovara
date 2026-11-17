@@ -256,6 +256,9 @@ export function stepUpFromEnvironment(env: NodeJS.ProcessEnv, issuer: string, se
 
 let built: ReturnType<typeof createDeveloperIdentityHandler> | undefined;
 
+/** DEC 254zg (a): self-serve company create is served only with BOTH switches on (CompanySignIn and CompanySelfServe); anything else, a missing variable included, is closed. */
+export const companySelfServeFromEnvironment = (env: NodeJS.ProcessEnv): boolean => env.COMPANY_SIGNIN === "enabled" && env.COMPANY_SELF_SERVE === "enabled";
+
 export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, workspaces?: SlackCallerWorkspaces, legacyTeamId?: string): ReturnType<typeof createDeveloperIdentityHandler> {
   const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
   const config = developerIdentityConfigFromEnvironment(env);
@@ -294,7 +297,8 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
     }),
     ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
       // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
-      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company }) }),
+      // DEC 254zg (a): self-serve create only while the CompanySelfServe switch is on as well (infra/lib/company-signin.ts gives "enabled" only with CompanySignIn on).
+      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: companySelfServeFromEnvironment(env) }) }),
     // DEC 254b (b): the operator's company import runs BEFORE the company layer is switched on, so it is there with the layer on or off.
     companyImport: new CompanyImportStore({ documentClient, tableName, now }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),

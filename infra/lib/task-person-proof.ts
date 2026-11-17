@@ -18,6 +18,8 @@ export interface TaskPersonProofProps {
   readonly slackSecret: secretsmanager.Secret;
   readonly developerSignInTable: dynamodb.Table;
   readonly dispatcher: lambdaNodejs.NodejsFunction;
+  /** DEC 254zc (6): COMPANY_SIGNIN, SLACK_COMPANY_WORKSPACES and STATE_TABLE_NAME from the switches (company-signin.ts, slack-company-workspaces.ts). */
+  readonly companySwitches?: { readonly COMPANY_SIGNIN: string; readonly SLACK_COMPANY_WORKSPACES: string; readonly STATE_TABLE_NAME: string };
 }
 
 /** Isolated read-only proof workload for the owner-approved named TEST environment. */
@@ -60,6 +62,7 @@ export class TaskPersonProof extends Construct {
         AGENTX_ENV: APPROVED_ENV,
         SLACK_TEAM_ID: props.slackTeamId.valueAsString,
         SLACK_SECRET_ARN: props.slackSecret.secretArn,
+        ...props.companySwitches,
       },
       bundling: {
         externalModules: [],

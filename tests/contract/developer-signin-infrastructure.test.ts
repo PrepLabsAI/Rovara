@@ -208,13 +208,10 @@ describe("developer sign-in infrastructure (named environments)", () => {
     const reads = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((s) => allows(s, "secretsmanager:GetSecretValue"));
     // DEC 254h: plus exactly the GitHub sign-in secret, by its one name (named environments only).
     // Batch 11 (#831 + #865 together): the GitHub sign-in secret (DEC 254h) and the per-company Slack token store's family (guided onboarding PR 4) are each one more statement: 3 + 1 + 1.
-    expect(reads).toHaveLength(5);
-    // Guided onboarding PR 4: one of them is the per-company Slack token store's family only (create, read, put; no delete).
-    const slackWorkspaces = reads.filter((s) => JSON.stringify(s.Resource).includes("slack-workspaces"));
-    expect(slackWorkspaces).toHaveLength(1);
-    expect(actionsOf(slackWorkspaces[0]!).sort()).toEqual(["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]);
-    expect(JSON.stringify(slackWorkspaces[0]!.Resource)).toContain(":secret:agentx/staging/slack-workspaces/*");
-    expect(slackWorkspaces[0]!.Condition).toBeUndefined();
+    // DEC 254zg (a): the per-company Slack token store's family (guided onboarding PR 4: create, read, put; no delete) is no longer one of them: it is its own policy under
+    // CompanySignIn's condition (tests/support/company-signin-template.ts asserts its exact shape before taking it out; company-signin-switch.test.ts evaluates it): 3 + 1.
+    expect(reads).toHaveLength(4);
+    expect(reads.filter((s) => JSON.stringify(s.Resource).includes("slack-workspaces"))).toEqual([]);
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain(":secret:agentx/staging/developer-oidc-??????");
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain(":secret:agentx/staging/developer-github-??????");
     // Spec 062 Phase 7c1b: its Slack directory reads go through the adapter's commands once SlackViaChannel is on.
@@ -617,7 +614,8 @@ describe("task-token key and membership IAM", () => {
       }
     }
     expect([reads, families]).toEqual([1, 1]);
-    // Guided onboarding PR 4: DeveloperIdentity's Slack token store statement (asserted in full above and in the tuples below), taken out so the digest pins everything else.
+    // Guided onboarding PR 4: DeveloperIdentity's Slack token store statement was taken out here so the digest pins everything else. DEC 254zg (a): it is now its own policy
+    // under CompanySignIn's condition, which withoutCompanySignIn (through withoutSlackCompanyMode, above) asserts and takes out, so none is left in any policy.
     let slackInstall = 0;
     for (const [, policy] of ofType(remainder, "AWS::IAM::Policy")) {
       const document = policy.Properties.PolicyDocument as { Statement: Statement[] };
@@ -628,7 +626,7 @@ describe("task-token key and membership IAM", () => {
         return false;
       });
     }
-    expect(slackInstall).toBe(1);
+    expect(slackInstall).toBe(0);
     // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts; its shape is asserted here, then it is taken out so the digest still pins everything else.
     withoutCoreEngine(remainder);
     // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
@@ -645,7 +643,10 @@ describe("task-token key and membership IAM", () => {
     // the remainder is otherwise identical (only the resource and DependsOn order move with the new ID).
     // Core gateway settings (2026-11-17): re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker's Variables; no IAM change).
     // DEC 254za: re-pinned for the callback signing key's secret (the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables, the dispatcher's conditional read; callback-signing-key-infrastructure.test.ts checks each).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("94b3524b26090e106cc015f249fe68ef7a9f4636cbbc63b250c37160d6d3c672");
+    // Batch 13 (rule D; #886 and #906, DEC 254z-amend3 / 254zm): re-pinned for test services' control plane additions only: the TestServices and TestServiceImages parameters,
+    // td/ti packed into the broker's AGENTX_SETTINGS, the dispatcher's new AGENTX_SETTINGS (td, ti) and the session steps' ROVARA_TEST_SERVICES / ROVARA_TEST_SERVICES_HOSTED_IMAGES.
+    // Verified on this tree: with exactly those taken out, the old pin 94b3524b... holds (and #891 alone leaves it unchanged).
+    expect(createHash("sha256").update(text).digest("hex")).toBe("37199a4de27b3e49c8023d381a6adb411fdf6bc722f4619a97a60dcc27898b9c");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1639,9 +1640,12 @@ const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).l
 const githubSignInTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/developer-github-??????","{}"],
 ];
-/** Guided onboarding PR 4 (Add to Slack): DeveloperIdentity writes, reads (to revoke) and overwrites each company's bot token in the token store's family; no delete, no tags. */
-const slackInstallTuples: AccessTuple[] = ["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"].map((action) =>
-  ["role:DeveloperSignInFunctionServiceRole", "Allow", action, "arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/slack-workspaces/*", "{}"] as AccessTuple);
+// Guided onboarding PR 4 (Add to Slack): DeveloperIdentity writes, reads (to revoke) and overwrites each company's bot token in the token store's family; no delete, no tags.
+// DEC 254zg (a), owner-approved re-pin: those three tuples (secretsmanager CreateSecret, GetSecretValue and PutSecretValue on
+// arn:...:secret:agentx/staging/slack-workspaces/*, role DeveloperSignInFunctionServiceRole, no condition) were pinned here as slackInstallTuples. With CompanySignIn off
+// (the default these tuples describe) the template no longer holds them: they exist only in the policy under CompanySignIn's condition, whose exact statement
+// tests/contract/company-signin-switch.test.ts pins and tests/support/company-signin-template.ts asserts. Before: [...beforeTuples, ...hostedWiringTuples,
+// ...githubSignInTuples, ...slackInstallTuples, notifier invoke]. After: the same without slackInstallTuples.
 /**
  * ENV-ROOM 2 (2026-11-17): the broker may read its names parameter (one exact ARN, by the action its other settings use), and no longer holds dynamodb:GetRecords and
  * dynamodb:GetShardIterator on the State table and its indexes: those actions act only on a stream ARN, so on these resources they granted nothing. The merged invoke and
@@ -1649,7 +1653,7 @@ const slackInstallTuples: AccessTuple[] = ["secretsmanager:CreateSecret", "secre
  */
 const envRoom2Added: AccessTuple[] = [["role:BrokerServiceRole", "Allow", "ssm:GetParameters", "arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/broker-names", "{}"]];
 const envRoom2Removed = new Set(["dynamodb:GetRecords", "dynamodb:GetShardIterator"].flatMap((action) => ["table:State", "table:State/index/*"].map((resource) => JSON.stringify(["role:BrokerServiceRole", "Allow", action, resource, "{}"]))));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...slackInstallTuples,
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,

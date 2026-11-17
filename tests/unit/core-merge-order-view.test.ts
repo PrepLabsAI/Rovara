@@ -157,27 +157,32 @@ describe("the pull request description and the task page", () => {
   it("is byte for byte today's description without lines", () => {
     expect(status([])).toEqual(status());
     expect(status().join("\n")).not.toContain("Merge order");
+    expect(status().join("\n")).not.toContain("order of merging");
   });
 
-  it("prints the lines under their own heading before What changed, once, as inert text", () => {
+  it("lists the lines as one thing to check, above the first drawer, once, as inert text", () => {
     const lines = status(["Merge order: payments-lib #12 first, then app #40."]);
-    expect(lines.indexOf("## Merge order")).toBeGreaterThanOrEqual(0);
-    expect(lines.indexOf("## Merge order")).toBeLessThan(lines.indexOf("## What changed"));
-    expect(lines.filter((line) => line === "## Merge order")).toHaveLength(1);
+    const text = lines.join("\n");
+    expect(lines.filter((line) => /^\d+\. \*\*The order of merging matters\.\*\*/u.test(line))).toHaveLength(1);
+    expect(text.indexOf("The order of merging matters.")).toBeLessThan(text.indexOf("<details>"));
     // A `#12` would link another repository's issue 12: it is broken up.
-    expect(lines.join("\n")).not.toContain("#12 ");
-    expect(lines.join("\n")).toContain("payments-lib #‍12");
-    // Whatever a caller passes cannot add a heading, a link or a second line.
+    expect(text).not.toContain("#12 ");
+    expect(text).toContain("payments-lib #‍12");
+    // Whatever a caller passes cannot add a heading, a link or a second line, and at most four lines are listed (the rest are counted).
     const hostile = status(["# Heading\n## Another [click](http://evil.example) @team <!-- x -->", "a", "b", "c", "d", "e"]).join("\n");
-    expect(hostile).not.toMatch(/\n# Heading/u);
+    expect(hostile).not.toMatch(/\n#+ Heading/u);
     expect(hostile).not.toContain("](http");
-    expect(hostile.match(/## Merge order/gu)).toHaveLength(1);
-    expect((hostile.split("## Merge order\n")[1] ?? "").split("\n\n")[0]!.split("\n")).toHaveLength(4);
+    expect(hostile).not.toContain("<!-- x");
+    expect(hostile.match(/The order of merging matters\./gu)).toHaveLength(1);
+    const sub = hostile.split("**The order of merging matters.**")[1]!.split("\n\n")[0]!.split("\n").filter((line) => line.trim().startsWith("- "));
+    expect(sub).toHaveLength(5);
+    expect(sub.at(-1)).toContain("and 2 more");
   });
 
   it("is in the whole description between the markers, and the description stays within its cap", () => {
     const text = rovaraPullRequestBody({ summary: ["Retry the payment"], fallbackTitle: "t", workflow: workflow(), context: { mergeOrderLines: ["Merge order: payments-lib first, then app."] }, reviewLines: () => ["- no findings"], pageUrl: undefined });
-    expect(text).toContain("## Merge order");
+    expect(text.indexOf("The order of merging matters.")).toBeGreaterThan(text.indexOf("<!-- rovara:checks-and-reviews -->"));
+    expect(text.indexOf("The order of merging matters.")).toBeLessThan(text.indexOf("<!-- /rovara:checks-and-reviews -->"));
     expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(30_000);
   });
 

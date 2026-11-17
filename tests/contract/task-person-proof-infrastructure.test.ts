@@ -226,18 +226,23 @@ describe("the named TEST proof-only installation gate", () => {
     // DEC 254za: all six re-pinned for the callback signing key's secret (legacy included): the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables and the dispatcher's conditional read.
     // Batch 12 (second-merge re-pin of #872 over #865, plus #871's Linear webhook route; DEC 254za, DEC 254y, rule D): named and foreign re-pinned. Verified on this tree: with only
     // LinearWebhookRoute and #865's one slack-workspaces statement removed, #872's approved pins hold exactly (named fd809c0e/98b1dae8, foreign ca40bea2/694d8393); legacy unchanged.
+    // DEC 254zg (a), owner-approved re-pin (#891): #865's slack-workspaces statement now lives only in a policy under CompanySignIn's condition (tests/support/company-signin-template.ts
+    // asserts and removes it with the rest of the switch). Batch 13 measured code/next + #891 alone: named 92a9b3f3/594a31af, foreign ceee7bbe/11c5f75a; with LinearWebhookRoute also
+    // removed those are exactly #872's approved pins (named fd809c0e/98b1dae8, foreign ca40bea2/694d8393). Batch 13 (rule D; #886/#906, DEC 254z-amend3 / 254zm): and re-pinned for
+    // test services' additions only (TestServices and TestServiceImages parameters, td/ti in the broker's and the dispatcher's AGENTX_SETTINGS, the session steps' two variables).
+    // Verified on this tree: with exactly those taken out, the code/next + #891 values above hold. Legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "bdb2015d5b1c6109460a2c0792843ad287887a58563c9296b3eb6ffbadddeef4",
-        withoutRoute: "86a20df32bf44f4662ed5b42f5932509e5d889b2ec1cad136efaf698db863bd1",
+        withRoute: "bfaeec0be69165a797add99c89111629b3b0461600c39a5f4800391756ab83b2",
+        withoutRoute: "bdf5fe0ee2b1f890357d82e40d33cefc0040b86f2b82f82eb694b4c72546910c",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "d4e48c02332336afe846bfab4eca130bec50b27094b4a8afc2846e401faaa522",
-        withoutRoute: "d29f0fb5456b2e4611622ad9b60fb2d0fbb30cc787995df42373d1ae28091d58",
+        withRoute: "c1e861032104271daeb6f062e953c509c9ad87378b0a01b6cfe8d23293314c12",
+        withoutRoute: "5b025719156499cad762121451e545c5df08161f67419cc78f74a649e6310e99",
       },
       {
         label: "legacy",

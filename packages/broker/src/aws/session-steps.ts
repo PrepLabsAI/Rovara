@@ -5,6 +5,7 @@ import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
+import { hostedWorkersRunTestServices } from "./hosted-test-services.js";
 import { MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager } from "./sessions.js";
@@ -64,6 +65,11 @@ export interface SessionStepsDependencies {
   logGroupName: string;
   /** GET on the worker's /ping; resolves to what it reported, rejects when unreachable. */
   ping: (url: string) => Promise<WorkerPing | undefined>;
+  /**
+   * DEC 254zm: whether this install's workers run test services (`hostedWorkersRunTestServices`: the switch is on AND TestServiceImages is `mirrored`). Then the boot configuration carries `testServices`, rendered
+   * as AGENTX_TEST_SERVICES=1, and the worker's boot runs the test-services stage its image carries. Otherwise nothing is added and the boot script is byte-identical to before.
+   */
+  testServices?: boolean;
 }
 
 /** The body of the worker's /ping, or of a failed boot's report in its place. */
@@ -134,6 +140,7 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           ...(settings.anthropicSecretArn ? { anthropicSecretArn: settings.anthropicSecretArn } : {}),
           ...(settings.openaiSecretArn ? { openaiSecretArn: settings.openaiSecretArn } : {}),
           ...(settings.modelFallback ? { modelFallback: settings.modelFallback } : {}),
+          ...(dependencies.testServices === true ? { testServices: true as const } : {}),
           logGroupName: dependencies.logGroupName,
         }, dependencies.bootScript());
         // Already base64 gzip, the form RunInstances takes (#229).
@@ -222,4 +229,5 @@ export const handler = createSessionStepsHandler({
   controlPlaneUrl: process.env.CONTROL_PLANE_URL ?? "",
   logGroupName: process.env.WORKER_LOG_GROUP_NAME ?? "",
   ping: (url) => pingWorker(url),
+  testServices: hostedWorkersRunTestServices(process.env),
 });

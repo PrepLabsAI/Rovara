@@ -46,6 +46,8 @@ interface DaemonOptions {
   sandboxOnRunNetwork?: boolean;
   /** Extra container on the run network after the sandbox joined. */
   intruder?: boolean;
+  /** A daemon that reports a different network address for one named member. */
+  memberAddress?: { helper?: string; sandbox?: string };
   helperStopsImmediately?: boolean;
   /** The first N disconnects do nothing. */
   ignoreDisconnects?: number;
@@ -98,7 +100,7 @@ function fakeDaemon(options: DaemonOptions = {}) {
         if (found === undefined) return fail("No such network");
         const template = values(args, "--format")[0]!;
         if (template === "{{json .Containers}}") {
-          return ok(JSON.stringify(Object.fromEntries(containers.filter((c) => c.networks.has(found.name)).map((c) => [c.id, { Name: c.name, IPv4Address: `${c.networks.get(found.name)!}/24` }]))));
+          return ok(JSON.stringify(Object.fromEntries(containers.filter((c) => c.networks.has(found.name)).map((c) => [c.id, { Name: c.name, IPv4Address: `${(c.name === SANDBOX ? options.memberAddress?.sandbox : c.name.endsWith("-fakes") ? options.memberAddress?.helper : undefined) ?? c.networks.get(found.name)!}/24` }]))));
         }
         return ok(formatLabels(found.labels, found.id, template));
       }
@@ -427,6 +429,8 @@ describe("starting the helper", () => {
     expect(daemon.containers.map((c) => c.name).sort()).toEqual([SANDBOX, "intruder"]);
     expect([...daemon.containers.find((c) => c.name === SANDBOX)!.networks.keys()]).toEqual([TASK_SANDBOX_NETWORK]);
   });
+  it("a helper reported at the wrong address is refused and removed", () => failsClosed({ memberAddress: { helper: "172.30.9.99" } }));
+  it("a sandbox reported at the wrong address is refused and the helper is removed", () => failsClosed({ memberAddress: { sandbox: "172.30.9.99" } }));
   it("a helper whose first summary is for another company, task or digest never counts as ready", async () => {
     for (const change of [{ workspaceId: "11111111-1111-4111-8111-111111111111" }, { operationId: "11111111-1111-4111-8111-111111111111" }, { digest: "0".repeat(64) }, { trusted: false }]) {
       await failsClosed({ summary: (helper) => { const bound = JSON.parse(fakeSummary(helper)) as object; return `${JSON.stringify(change.trusted === false ? { schemaVersion: 1, trusted: false } : { ...bound, ...change })}\n`; } });

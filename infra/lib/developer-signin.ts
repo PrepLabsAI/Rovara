@@ -6,6 +6,7 @@ import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import { packagedFunction } from "./control-plane.js";
+import { COMPANY_SELF_SERVE_VARIABLE, companySignInParameters, type CompanySignInParameters, type CompanySignInSwitch } from "./company-signin.js";
 
 /** One plain address, or empty. The function checks it again (packages/broker/src/aws/step-up-email.ts) and builds no sender for anything else. */
 export const STEP_UP_EMAIL_SENDER_PATTERN = "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$";
@@ -26,6 +27,8 @@ export interface DeveloperSignInParameters {
   stepUpEmailSender?: CfnParameter;
   /** DEC 254h, named environments only: GitHub sign-in (offered only with Code's company layer), its OAuth app's client id, and when it was last turned on. */
   github?: { enabled: CfnParameter; clientId: CfnParameter; since: CfnParameter };
+  /** DEC 254zg (a), named environments only: Code's company layer (CompanySignIn) and self-serve create (CompanySelfServe), both off by default (company-signin.ts). */
+  company?: CompanySignInParameters;
 }
 
 export interface DeveloperTaskParameters {
@@ -71,7 +74,9 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
     clientId: new CfnParameter(stack, "DeveloperGithubClientId", { type: "String", default: "", allowedPattern: "^[A-Za-z0-9._-]{0,64}$", description: "Client ID of the GitHub OAuth app for developer sign-in" }),
     since: new CfnParameter(stack, "DeveloperGithubSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When GitHub sign-in was last turned on, in epoch seconds; GitHub sessions started before it are refused" }),
   };
-  return { ...signIn, tasks, stepUpEmailSender, github };
+  // DEC 254zg (a): declared last, so every parameter before them keeps its order.
+  const company = companySignInParameters(stack);
+  return { ...signIn, tasks, stepUpEmailSender, github, company };
 }
 
 /**
@@ -102,6 +107,8 @@ export interface DeveloperSignInProps {
    * optional string, but Table's getter returns string | undefined, which this repo's
    * exactOptionalPropertyTypes rejects as an ITable. */
   turnRecords: dynamodb.Table;
+  /** DEC 254zg (a), named environments only: the company layer's switch (control-plane.ts makes it from parameters.company, before the Slack company mode that requires it). */
+  company?: CompanySignInSwitch;
 }
 
 export class DeveloperSignIn extends Construct {
@@ -268,6 +275,7 @@ export class DeveloperSignIn extends Construct {
       // test addresses step up.) An empty parameter names no identity, and the function then builds no sender.
       if (p.stepUpEmailSender === undefined) throw new Error("a named environment declares StepUpEmailSender");
       if (p.github === undefined) throw new Error("a named environment declares the GitHub sign-in parameters");
+      if (p.company === undefined) throw new Error("a named environment declares the company sign-in parameters");
       // DEC 254h: GitHub sign-in. The client secret is read by reference (its name) by this function only; the grant names that one secret.
       const githubSecretName = `agentx/${props.env}/developer-github`;
       fn.addEnvironment("DEVELOPER_SIGNIN_GITHUB", p.github.enabled.valueAsString);
@@ -298,14 +306,21 @@ export class DeveloperSignIn extends Construct {
       }));
     }
     props.slackSecret.grantRead(fn);
-    // Guided onboarding PR 4 (slack-install-identity.ts): Add to Slack's code exchange runs here, beside the Slack app's client secret; the bot token it gets is stored, read
-    // (to revoke) and dropped under agentx/<env>/slack-workspaces/<company>/<team>, the family slack-workspace-tokens.ts reads. Creates carry no tags (no TagResource) and
-    // nothing deletes: a dropped token is overwritten with a value holding none. Named environments only, beside the company layer.
-    if (named) {
-      fn.addToRolePolicy(new iam.PolicyStatement({
+    // DEC 254zg (a): the company layer's switch. Named environments only (the legacy template stays as deployed).
+    const company = named ? props.company : undefined;
+    if (named && company === undefined) throw new Error("a named environment has the company sign-in switch");
+    if (company !== undefined) {
+      company.addTo(fn);
+      fn.addEnvironment(COMPANY_SELF_SERVE_VARIABLE, company.selfServeValue);
+      // Guided onboarding PR 4 (slack-install-identity.ts): Add to Slack's code exchange runs here, beside the Slack app's client secret; the bot token it gets is stored, read
+      // (to revoke) and dropped under agentx/<env>/slack-workspaces/<company>/<team>, the family slack-workspace-tokens.ts reads. Creates carry no tags (no TagResource) and
+      // nothing deletes: a dropped token is overwritten with a value holding none. DEC 254zg (a): a separate policy under CompanySignInOn, so with company sign-in off the
+      // template holds no such grant.
+      company.grant("SlackWorkspaceTokens", fn.role!, [new iam.PolicyStatement({
+        sid: "WriteSlackWorkspaceTokens",
         actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue"],
         resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.naming.env}/slack-workspaces/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
-      }));
+      })]);
     }
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
@@ -364,6 +379,8 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
     addBrokerSetting(broker, props.naming, "signInSlackSince", p.slackSince.valueAsString);
     addBrokerSetting(broker, props.naming, "oidcSince", p.oidcSince.valueAsString);
+    // DEC 254zg (a): the broker's COMPANY_SIGNIN (packed), from the same switch.
+    if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", company.flag);
     if (tasks !== undefined) {
       addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
       // Hosted wiring (d), named environments only: the company audit and event reads (still behind SIGN_IN_CLIENT_ROUTES, which nothing in infra sets). Membership is read from

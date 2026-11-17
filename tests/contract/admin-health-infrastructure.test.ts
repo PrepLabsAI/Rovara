@@ -220,6 +220,12 @@ describe("the health route's grants (A13)", () => {
       // inside the 60-second window is a no-op, then expired; and a connect start's state row (10-minute single-use state), expired one day after its expiry. Nothing else in that
       // file carries the attribute (the connection, binding, picks and audit rows are durable).
       "packages/broker/src/aws/linear-connections.ts",
+      // Wiki build run (#892, #905; DEC 254zzd, owner-approved): a run's own rows (WIKI_BUILD_NOTES, WIKI_BUILD_PAGE_DONE and the WIKI_CHECK verdict cache, in the company's
+      // ORG#<company>#WIKI_BUILD#<project> partition), each kept WIKI_BUILD_KEEP_SECONDS (31 days) through wikiExpiryOf, then expired. The wiki pages themselves (wiki-store) carry no expiry.
+      "packages/broker/src/core/wiki-build/keys.ts",
+      // Wiki for agents (#896; DEC 254zzd, owner-approved): the WIKI_AGENT_USE_REF row (an operation's pointer to its task, 30 days) and the WIKI_AGENT_USE row (which pages a step was
+      // given and read, 180 days), then expired. The project's "Give the wiki to agents" switch row carries no expiry.
+      "packages/broker/src/core/wiki/agent-context.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

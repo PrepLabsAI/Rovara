@@ -47,6 +47,10 @@ describe("changed-prompt classification over real git", () => {
     const n = await repo({ "x.ts": Buffer.from([0x61]) }, { "x.ts": Buffer.from([0xff, 0x61]) });
     expect(await candidatePromptChanges(n.repositories, n.candidates, sig(), n.repositories[0]!.baseCommitSha)).toBeUndefined();
   });
+  it("a NUL byte in a changed source blob -> unknown", async () => {
+    const r = await repo({ "x.ts": Buffer.from("export const value = 1;\n") }, { "x.ts": Buffer.from("export const value = 2;\0\n") });
+    expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
+  });
   it("mode-only change -> none_found", async () => {
     const r = await repo({ "run.sh.ts": "x\n" }, {}, () => undefined);
     // chmod then commit

@@ -2168,6 +2168,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "MaxLength": 254,
       "Type": "String",
     },
+    "TestServiceImages": {
+      "AllowedValues": [
+        "none",
+        "mirrored",
+      ],
+      "Default": "none",
+      "Description": "Test service images: none (the default) or mirrored once the starter copies are checked",
+      "Type": "String",
+    },
+    "TestServices": {
+      "AllowedValues": [
+        "1",
+        "0",
+      ],
+      "Default": "1",
+      "Description": "Test services: 1 on (the default), 0 off",
+      "Type": "String",
+    },
     "WorkflowDependenciesEnabled": {
       "AllowedValues": [
         "true",
@@ -2558,6 +2576,14 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   ",ss=",
                   {
                     "Ref": "DeveloperSignInSlack",
+                  },
+                  ",td=",
+                  {
+                    "Ref": "TestServices",
+                  },
+                  ",ti=",
+                  {
+                    "Ref": "TestServiceImages",
                   },
                   ",tm=",
                   {
@@ -5898,34 +5924,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
-              "Action": [
-                "secretsmanager:CreateSecret",
-                "secretsmanager:PutSecretValue",
-                "secretsmanager:GetSecretValue",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":secretsmanager:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":secret:agentx/staging/slack-workspaces/*",
-                  ],
-                ],
-              },
-            },
-            {
               "Action": "secretsmanager:GetSecretValue",
               "Effect": "Allow",
               "Resource": {
@@ -7239,6 +7237,21 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Environment": {
           "Variables": {
             "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
+            "AGENTX_SETTINGS": {
+              "Fn::Join": [
+                "",
+                [
+                  "td=",
+                  {
+                    "Ref": "TestServices",
+                  },
+                  ",ti=",
+                  {
+                    "Ref": "TestServiceImages",
+                  },
+                ],
+              ],
+            },
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
             },
@@ -11913,6 +11926,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 "Arn",
               ],
             },
+            "ROVARA_TEST_SERVICES": {
+              "Ref": "TestServices",
+            },
+            "ROVARA_TEST_SERVICES_HOSTED_IMAGES": {
+              "Ref": "TestServiceImages",
+            },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
             },
@@ -14546,6 +14565,117 @@ exports[`named environment templates > agentx-staging-foundation is unchanged 1`
             },
             {
               "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-staging--test-services/postgres-16/postgres",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-staging--test-services/postgres-17/postgres",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-staging--test-services/mysql-8/mysql",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-staging--test-services/redis-7/redis",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-staging--test-services/mongo-7/mongo",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "TestServiceImageRead",
+            },
+            {
+              "Action": [
                 "bedrock:InvokeModel",
                 "bedrock:InvokeModelWithResponseStream",
               ],
@@ -14821,6 +14951,151 @@ exports[`named environment templates > agentx-staging-foundation is unchanged 1`
         "ToPort": 8080,
       },
       "Type": "AWS::EC2::SecurityGroupEgress",
+    },
+    "Ec2WorkersTestServiceMirrorRepository060FE5D57": {
+      "DeletionPolicy": "RetainExceptOnCreate",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-staging--test-services/postgres-16/postgres",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "postgres-16",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository1A4EF4724": {
+      "DeletionPolicy": "RetainExceptOnCreate",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-staging--test-services/postgres-17/postgres",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "postgres-17",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository2D96037C1": {
+      "DeletionPolicy": "RetainExceptOnCreate",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-staging--test-services/mysql-8/mysql",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "mysql-8",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository33264DADD": {
+      "DeletionPolicy": "RetainExceptOnCreate",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-staging--test-services/redis-7/redis",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "redis-7",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository4E241B2C0": {
+      "DeletionPolicy": "RetainExceptOnCreate",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-staging--test-services/mongo-7/mongo",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "mongo-7",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
     },
     "Ec2WorkersWorkerLogsFFDA1567": {
       "DeletionPolicy": "Delete",

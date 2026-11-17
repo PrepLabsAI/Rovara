@@ -102,6 +102,27 @@ function rowResult(row: TestingRow): string {
   return `${ROW_MARK[row.status]} ${word}${row.reason === undefined ? "" : `: ${TESTING_REASON_TEXT[row.reason]}`}`;
 }
 
+/**
+ * L4-C: the table of a Checks drawer: one row per check, a row that is not a plain pass FIRST (a failed row is the first row), the plain passes after, then at level 2 and above the plain passes as one count line. The rows' words
+ * are the section's (`rowResult`); a Rovara-made-mock pass is never folded into the plain count. Nothing is dropped at any level but plain passes.
+ */
+export function testingTableLines(rows: readonly TestingRow[], level: number): string[] {
+  const plain = (row: TestingRow): boolean => row.status === "passed" && row.madeByRovara !== true;
+  const ordered = [...rows.filter((row) => !plain(row)), ...rows.filter(plain)];
+  const fold = level >= 2;
+  const shown = fold ? ordered.filter((row) => !plain(row)) : ordered;
+  const commandMax = level >= 4 ? 30 : level === 3 ? 40 : level === 1 || level === 2 ? 60 : TESTING_COMMAND_MAX;
+  const labelMax = level >= 4 ? 40 : level === 3 ? 60 : 80;
+  const lines: string[] = [];
+  if (shown.length > 0) lines.push("| Check | Command | Result |", "| --- | --- | --- |", ...shown.map((row) => `| ${cell(inertLine(row.label, labelMax))} | \`${cell(inertLine(row.command, commandMax))}\` | ${rowResult(row)} |`));
+  const passed = rows.filter(plain);
+  if (fold && passed.length > 0) {
+    const tests = passed.reduce((sum, row) => sum + (row.passedTests ?? 0), 0);
+    lines.push("", `${String(passed.length)} more check${passed.length === 1 ? "" : "s"} passed${tests > 0 ? ` (${String(tests)} tests)` : ""}; their rows are left out to keep this description short.`);
+  }
+  return lines;
+}
+
 /** The heading's result in its fixed words. */
 export const testingHeading = (view: Pick<TestingView, "result">): string => `## Testing — ${TESTING_RESULT_LABELS[view.result]}`;
 

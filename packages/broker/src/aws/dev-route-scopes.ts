@@ -102,6 +102,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/send-back", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/review-findings", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-retry", requires: "tasks:act" },
+  // S3: the owner's answers to Understand's questions (a core task's; a workflow task has none to answer). The route keeps it to the task's owner.
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/answers", requires: "tasks:act" },
   // #644: a comment, or steering the running step (which the route itself keeps to the task's owner).
   { method: "POST", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:act" },
@@ -219,12 +221,27 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // How we work (read only): no named scope reads a project's settings, so full access only.
   { method: "GET", path: "/v1/app/projects/{project}/how-we-work", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/playbook", requires: "full" },
+  // DEC 254z-amend3: a project's test environment state (read only: whether test services are on, why they are not available here, the catalog). Like how we work, no named scope reads it: full access only.
+  { method: "GET", path: "/v1/app/projects/{project}/test-environment", requires: "full" },
   // Guided onboarding L2-3: a project's setup run (it spends model money and runs the repository's commands): full access only, then a live company owner or admin, or the project's
   // administrator, to change; a project user may read it.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/stop", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
+  // Wiki W0: a project's free file map (code host listings only: no model call, nothing spent or stored): full access only, then a live company owner or admin, or the project's administrator, to make one;
+  // any person with a role on the project reads a kept one.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
+  // Lead 4 W2: the project wiki's reads (core-host/wiki-routes.ts): full access only, then any live role on the project (a company owner or admin, or a project grant). No writes here.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
+  // L4-D (DEC 254z b): "Use this setup" (a candidate and its check), dropping it, and deciding it (a fresh step-up, then the risk-based approver rule: a project maintainer for low and
+  // medium risk, a company owner or admin for high).
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/discard", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/decide", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

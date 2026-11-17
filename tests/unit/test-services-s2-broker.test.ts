@@ -82,7 +82,7 @@ describe("when a task may use an environment with Rovara local AWS", () => {
     expect(environmentUnusedReason(asEnvironment(body()), ON)).toBeUndefined();
   });
   it("is not used with tx off (today's reason for any dependency)", () => {
-    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_ENVIRONMENT: "1" })).toBe("dependencies_not_connected");
+    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBe("dependencies_not_connected");
   });
   it("is used for any service of the table, and not for one it does not know, in the fixed words", () => {
     expect(environmentUnusedReason(asEnvironment(body([aws("sns")])), ON)).toBeUndefined();
@@ -233,7 +233,7 @@ describe("approval", () => {
     await expect(approved(body(), otherEngine)).rejects.toThrow(/not available yet/iu);
   });
   it("is not approvable with tx off", async () => {
-    const h = await bench({ project: PROJECT, env: { ROVARA_TEST_ENVIRONMENT: "1" } });
+    const h = await bench({ project: PROJECT, env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" } });
     await expect(h.propose(body())).rejects.toThrow(/not switched on/iu);
   });
 });
@@ -268,8 +268,8 @@ describe("the plan of a task with Rovara local AWS (checks and coding)", () => {
     const h = await approved(body());
     let reads = 0;
     h.deps.serviceCatalog = async () => { reads += 1; return catalog(); };
-    expect(await testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, { ROVARA_TEST_ENVIRONMENT: "1" })).toBeUndefined();
-    expect(await testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, { ROVARA_TEST_ENVIRONMENT: "1" })).toBeUndefined();
+    expect(await testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
+    expect(await testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
     expect(reads).toBe(0);
   });
   it("is the plain plan, byte for byte, for an environment with real software only", async () => {
@@ -363,7 +363,7 @@ describe("with tx off, or with no emulated dependency, a draft is the plain one"
   const draftOf = (candidates?: unknown[]): unknown => JSON.parse(JSON.stringify({ environment: body(null), valueSources: [], pendingServices: [], notes: ["Found pytest."], questions: [], ...(candidates === undefined ? {} : { dependencies: candidates }) }));
   const options = (env: NodeJS.ProcessEnv) => ({ env, propose: context() });
   it("proposes nothing from AWS candidates with tx off", () => {
-    const off = sanitizeTestEnvDraft(draftOf([candidate("aws:s3"), candidate("aws:sqs")]), options({ ROVARA_TEST_ENVIRONMENT: "1" }))!;
+    const off = sanitizeTestEnvDraft(draftOf([candidate("aws:s3"), candidate("aws:sqs")]), options({ ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" }))!;
     expect(off.environment.dependencies).toBeUndefined();
     expect(off).toEqual(sanitizeTestEnvDraft(draftOf())!);
   });

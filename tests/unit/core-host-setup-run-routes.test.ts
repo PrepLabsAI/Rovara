@@ -11,7 +11,7 @@ import { SETUP_AGENT_BUSY } from "../../packages/broker/src/core/setup-agent/age
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_RUN_AUDIT_UNAVAILABLE, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, SETUP_RUN_UNAVAILABLE, SETUP_RUN_UNREADABLE, type HostedSetupRunWiring, type SetupRunStanding,
+  SETUP_APPROVAL_UNAVAILABLE, SETUP_RUN_AUDIT_UNAVAILABLE, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, SETUP_RUN_UNAVAILABLE, SETUP_RUN_UNREADABLE, type HostedSetupRunWiring, type SetupRunStanding,
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -278,11 +278,14 @@ describe("hosted setup run: starting, re-running and stopping", () => {
     expect(setupEvents(world)[1]?.details).toMatchObject({ basis: "company-owner", requestId: stopId });
   });
 
-  it("does not serve confirm or discard on hosted Code yet (nothing could approve the candidate): they stay the old broker's 'route not found', writing nothing", async () => {
-    const { world, person, routes } = await setupWorld();
+  it("serves confirm and discard only with the hosted approval wired (L4-D; nothing could approve the candidate otherwise), and never the laptop page's command or eval confirm, writing nothing", async () => {
+    const { world, person, routes, call } = await setupWorld();
     const admin = person("p-admin", FAKE_COMPANY, "admin");
-    for (const path of [`${RUN}/confirm`, `${RUN}/discard`, `${RUN}/command`, `${RUN}/eval-confirm`]) {
+    for (const path of [`${RUN}/command`, `${RUN}/eval-confirm`]) {
       expect(await routes.route(post(path, { requestId: randomUUID(), expectedRevision: 1 }), admin), path).toBeUndefined();
+    }
+    for (const path of [`${RUN}/confirm`, `${RUN}/discard`]) {
+      expect((await call(post(path, { requestId: randomUUID(), expectedRevision: 1 }), admin)).body, path).toEqual({ error: { code: "NOT_FOUND", message: SETUP_APPROVAL_UNAVAILABLE } });
     }
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
     expect(setupEvents(world)).toEqual([]);

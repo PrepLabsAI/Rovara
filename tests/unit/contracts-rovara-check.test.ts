@@ -172,3 +172,60 @@ describe("Rovara's own Check is never read as the customer's CI", () => {
     expect(withoutOwnRovaraCheck(input, undefined)).toBe(input);
   });
 });
+
+// L4-C B4: with a verdict the Check says the description's words; the verdict is words only and never moves the conclusion.
+describe("the verdict in the Check (L4-C B4)", () => {
+  const verdict = { resultKind: "verified", heading: "Verified · Low risk · nothing extra to check", body: ["**Changed** 4 files, +86 -12.", "**Needs you** The normal code review. Nothing else."] };
+  // Mutant C1: the verdict changes a conclusion. Killed by the loop: every input gives the same status and conclusion with and without a verdict.
+  it("never changes the status or the conclusion, for any input of the table", () => {
+    const inputs: Array<Partial<RovaraCheckInput>> = [
+      {}, { proof: PROCEED }, { proof: { ...PROCEED, warns: true, reasons: ["changed_code_not_run"] } }, { proof: HELD }, { proof: HELD, override: { by: "Priya" } }, { problem: "rovara_problem" }, { problem: "not_run" },
+      { ci: "unreadable" }, { ci: "none" }, { fullSuite: "failed" }, { fullSuite: "pending", proof: PROCEED }, { fullSuite: "not_run", proof: PROCEED }, { ciMode: "sandbox_only", proof: PROCEED }, { stopped: true }, { nowMs: T0 + ROVARA_CHECK_STALE_MS + 1 },
+    ];
+    for (const over of inputs) {
+      const without = of(over);
+      const withIt = of({ ...over, verdict });
+      expect(withIt.status, JSON.stringify(over)).toBe(without.status);
+      expect(withIt.conclusion, JSON.stringify(over)).toBe(without.conclusion);
+    }
+  });
+  it("a Ready check is titled with the verdict's heading and the text starts with the verdict's lines, then the gate's parts", () => {
+    const check = of({ proof: PROCEED, verdict });
+    expect(check.title).toBe(verdict.heading);
+    expect(check.text.startsWith(`${verdict.heading}\n\n**${verdict.heading}**\n**Changed** 4 files, +86 -12.`)).toBe(true);
+    expect(check.text.indexOf("**Changed**")).toBeLessThan(check.text.indexOf("**Change proof**"));
+    expect(check.text).toContain("**Your CI**");
+  });
+  it("a hold, a neutral reason and a proof warning keep the gate's own sentence as the title, and the verdict is in the text", () => {
+    for (const over of [{ proof: HELD }, { proof: HELD, override: { by: "Priya" } }, { problem: "not_run" as const }, { ci: "none" as const, proof: PROCEED }, { proof: { ...PROCEED, warns: true, reasons: ["changed_code_not_run" as const] } }]) {
+      const check = of({ ...over, verdict });
+      expect(check.title, JSON.stringify(over)).not.toBe(verdict.heading);
+      expect(check.text).toContain(verdict.heading);
+    }
+  });
+  it("a verdict that failed or could not run never becomes the title of a green Check", () => {
+    for (const resultKind of ["code_failed", "blocked_by_environment", "checks_failed", "checks_could_not_run"]) {
+      const check = of({ proof: PROCEED, verdict: { ...verdict, resultKind, heading: "Code failed · High risk · 2 things to check" } });
+      expect(check.conclusion).toBe("success");
+      expect(check.title).toBe("Ready: the change proof holds");
+      expect(check.text).toContain("Code failed · High risk · 2 things to check");
+    }
+  });
+  it("is bounded, and a verdict that does not fit is left out: the Check is exactly what it was, never refused and never another conclusion", () => {
+    const long = of({ proof: PROCEED, verdict: { ...verdict, body: Array.from({ length: 200 }, () => "x".repeat(2_000)) } });
+    expect(long.text.length).toBeLessThanOrEqual(ROVARA_CHECK_TEXT_MAX);
+    expect(Array.from(long.title).length).toBeLessThanOrEqual(ROVARA_CHECK_TITLE_MAX);
+    const plain = of({ proof: PROCEED });
+    for (const bad of [{ ...verdict, heading: "a<b" }, { ...verdict, heading: "x".repeat(ROVARA_CHECK_TITLE_MAX + 1) }, { ...verdict, body: ["<!-- hide -->"] }, { ...verdict, body: ["a\nb"] }, { ...verdict, extra: 1 }, { ...verdict, body: Array.from({ length: 601 }, () => "x") }, "not an object"]) {
+      const dropped = of({ proof: PROCEED, verdict: bad as never });
+      expect(dropped).toEqual(plain);
+      expect(JSON.stringify(dropped)).not.toContain("hide");
+    }
+    // Even for a held draft: a malformed verdict never turns a failure into a neutral Check.
+    expect(of({ proof: HELD, verdict: { ...verdict, heading: "a<b" } }).conclusion).toBe("failure");
+  });
+  it("without a verdict the Check is exactly what it was", () => {
+    expect(of({ proof: PROCEED }).title).toBe("Ready: the change proof holds");
+    expect(of({ proof: PROCEED }).text).not.toContain("**Changed**");
+  });
+});

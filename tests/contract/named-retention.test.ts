@@ -10,7 +10,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
 
-type Resource = { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string; Properties?: { Name?: unknown } };
+type Resource = { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string; Properties?: { Name?: unknown; RepositoryName?: unknown } };
 type Templates = Record<string, Record<string, Resource>>;
 
 function templates(context: Record<string, string>): Templates {
@@ -39,7 +39,11 @@ describe("retained resources in a named environment", () => {
         "Artifacts AWS::S3::Bucket", "CallbackSigningKeySecret AWS::SecretsManager::Secret", "DeveloperSignInTable AWS::DynamoDB::Table", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
         "SlackThreads AWS::DynamoDB::Table", "State AWS::DynamoDB::Table", "TurnRecords AWS::DynamoDB::Table",
       ],
-      "agentx-staging-foundation": ["VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key"],
+      // Batch 13 (#906, DEC 254zm): the five test-service starter copy repositories, kept so a pinned copy outlives a replacement (their names are checked below).
+      "agentx-staging-foundation": [
+        "Ec2WorkersTestServiceMirrorRepository0 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository1 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository2 AWS::ECR::Repository",
+        "Ec2WorkersTestServiceMirrorRepository3 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository4 AWS::ECR::Repository", "VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key",
+      ],
       "agentx-staging-identity": [],
       "agentx-staging-runtime": [],
       "agentx-staging-slack": [],
@@ -53,6 +57,12 @@ describe("retained resources in a named environment", () => {
     // DEC 254za: the one retained secret #872 adds is exactly agentx/<env>/callback-key.
     const callbackSecrets = Object.entries(named["agentx-staging-control-plane"]!).filter(([id]) => id.startsWith("CallbackSigningKeySecret") && !id.includes("Policy"));
     expect(callbackSecrets.map(([, resource]) => resource.Properties?.Name)).toEqual(["agentx/staging/callback-key"]);
+    // Batch 13 (#906): exactly the five starter copy repositories, outside the environment's pull-through prefix.
+    const mirrors = Object.entries(named["agentx-staging-foundation"]!).filter(([id]) => id.startsWith("Ec2WorkersTestServiceMirrorRepository"));
+    expect(mirrors.map(([, resource]) => resource.Properties?.RepositoryName).sort()).toEqual([
+      "agentx-staging--test-services/mongo-7/mongo", "agentx-staging--test-services/mysql-8/mysql", "agentx-staging--test-services/postgres-16/postgres",
+      "agentx-staging--test-services/postgres-17/postgres", "agentx-staging--test-services/redis-7/redis",
+    ]);
   });
 
   it("retains the Cognito user pool and attempt-specific Slack diagnostic records", () => {

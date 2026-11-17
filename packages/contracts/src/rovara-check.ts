@@ -13,6 +13,10 @@
 // An in-progress Check older than `ROVARA_CHECK_STALE_MS`, or one whose task Rovara stopped following, is neutral ("Rovara could not finish"): a required check must not hang.
 // GitHub counts `success`, `neutral` and `skipped` as passing for a required check, and `failure` as blocking.
 //
+// L4-C B4: with a `verdict` (the pull request's verdict object, rendered by the broker: `prVerdictOf`) the Check says the same words as the description. The title of a Ready (success) Check is the verdict's heading, unless the
+// verdict's result is one that failed or could not run (a green Check must never be titled "Code failed"); a hold, a neutral reason and a refusal keep their own sentence as the title. The text starts with the verdict's
+// lines and its "Check these before you approve" list, then the three parts above (Change proof, Your CI, Full suite), which are the gate. The verdict never changes the conclusion: the table above is the only thing that does.
+//
 // Every word is fixed except the overriding person's name, which is made inert (no mention, link, markup or secret). Input is checked at runtime: anything that does not fit is a fixed
 // neutral refusal that echoes nothing, never a throw and never a guess.
 import { z } from "zod";
@@ -55,9 +59,19 @@ const RovaraCheckInputSchema = z.object({
   nowMs: CLOCK,
   /** Rovara stopped following this pull request's task (closed, released, gone). */
   stopped: z.boolean().optional(),
+  /** L4-C B4: the verdict of the pull request's code, rendered (inert, one markdown line each). Absent: the Check is what it was. */
+  verdict: z.unknown().optional(),
 }).strict();
 
-export type RovaraCheckInput = z.input<typeof RovaraCheckInputSchema>;
+/** The verdict as the Check takes it, checked on its own: one that does not fit is left out (the Check is then what it was), never a reason to refuse the whole input or to change a conclusion. */
+const VerdictSchema = z.object({
+  resultKind: z.string().min(1).max(60),
+  heading: z.string().min(1).max(ROVARA_CHECK_TITLE_MAX).regex(/^[^\p{Cc}\p{Cf}<]*$/u),
+  body: z.array(z.string().max(2_000).regex(/^[^\p{Cc}<]*$/u)).max(600),
+}).strict();
+export type RovaraCheckVerdict = z.infer<typeof VerdictSchema>;
+
+export type RovaraCheckInput = Omit<z.input<typeof RovaraCheckInputSchema>, "verdict"> & { verdict?: RovaraCheckVerdict | undefined };
 export type RovaraCheckProblem = (typeof ROVARA_CHECK_PROBLEMS)[number];
 export type RovaraCheckFullSuite = (typeof ROVARA_CHECK_FULL_SUITE)[number];
 export type RovaraCheckConclusion = "success" | "failure" | "neutral";
@@ -72,6 +86,8 @@ export interface RovaraCheckPayload {
 }
 
 const COULD_NOT_FINISH = "Rovara could not finish";
+/** Verdict results under which a Ready (success) Check keeps its own title: the heading would read as a failure on a green Check. */
+const VERDICT_BAD_RESULTS: ReadonlySet<string> = new Set(["code_failed", "blocked_by_environment", "checks_failed", "checks_could_not_run"]);
 const RELAXED_WORDS = "More than 10% of this project's recent pull requests were held, so this is a warning, not a hold.";
 
 const PROBLEM_TITLES: Readonly<Record<RovaraCheckProblem, string>> = Object.freeze({
@@ -103,9 +119,9 @@ function titled(text: string): string {
 function bounded(text: string): string {
   return text.length <= ROVARA_CHECK_TEXT_MAX ? text : `${text.slice(0, ROVARA_CHECK_TEXT_MAX - 1)}…`;
 }
-function finish(input: { status: RovaraCheckPayload["status"]; conclusion?: RovaraCheckConclusion; title: string; lines: string[]; sections?: Array<{ heading: string; lines: string[] }> }): RovaraCheckPayload {
+function finish(input: { status: RovaraCheckPayload["status"]; conclusion?: RovaraCheckConclusion; title: string; lines: string[]; sections?: Array<{ heading: string; lines: string[] }>; verdictLines?: string[] }): RovaraCheckPayload {
   const sections = (input.sections ?? []).filter((section) => section.lines.length > 0);
-  const text = [...input.lines, ...sections.flatMap((section) => ["", `**${section.heading}**`, ...section.lines.map((line) => `- ${line}`)]), "", "Open in Rovara for the details and the actions (re-run, mark ready anyway)."].join("\n");
+  const text = [...input.lines, ...(input.verdictLines === undefined || input.verdictLines.length === 0 ? [] : ["", ...input.verdictLines]), ...sections.flatMap((section) => ["", `**${section.heading}**`, ...section.lines.map((line) => `- ${line}`)]), "", "Open in Rovara for the details and the actions (re-run, mark ready anyway)."].join("\n");
   return {
     status: input.status, ...(input.status === "completed" && input.conclusion !== undefined ? { conclusion: input.conclusion } : {}),
     title: titled(input.title), summary: bounded(input.lines.join("\n")), text: bounded(text),
@@ -131,11 +147,18 @@ export function rovaraCheckOf(raw: RovaraCheckInput): RovaraCheckPayload {
     { heading: "Your CI", lines: input.ciMode === "sandbox_only" ? ["This project is checked in Rovara's sandbox only, by its own choice."] : [CI_WORDS[input.ci]] },
     { heading: "Full suite", lines: input.fullSuite === "not_needed" ? [] : [FULL_SUITE_WORDS[input.fullSuite]] },
   ];
-  const done = (conclusion: RovaraCheckConclusion, title: string): RovaraCheckPayload => finish({ status: "completed", conclusion, title, lines: [title], sections });
+  const checkedVerdict = VerdictSchema.safeParse(input.verdict);
+  const verdict = input.verdict === undefined || !checkedVerdict.success ? undefined : checkedVerdict.data;
+  // The verdict is said in the text whatever the conclusion; it is the title only of a Ready Check whose result did not fail (the gate's own sentence is the title everywhere else).
+  const verdictLines = verdict === undefined ? undefined : [`**${verdict.heading}**`, ...verdict.body];
+  const done = (conclusion: RovaraCheckConclusion, title: string, ready = false): RovaraCheckPayload => {
+    const shown = ready && conclusion === "success" && verdict !== undefined && !VERDICT_BAD_RESULTS.has(verdict.resultKind) ? verdict.heading : title;
+    return finish({ status: "completed", conclusion, title: shown, lines: [shown], sections, ...(verdictLines === undefined ? {} : { verdictLines }) });
+  };
   const running = (title: string): RovaraCheckPayload => {
     if (input.stopped === true) return done("neutral", `${COULD_NOT_FINISH}: Rovara stopped following this pull request`);
     if (input.nowMs - input.firstSeenAtMs > ROVARA_CHECK_STALE_MS) return done("neutral", `${COULD_NOT_FINISH} in time (it does not block the merge)`);
-    return finish({ status: "in_progress", title, lines: [title], sections });
+    return finish({ status: "in_progress", title, lines: [title], sections, ...(verdictLines === undefined ? {} : { verdictLines }) });
   };
 
   if (input.problem !== undefined) return done("neutral", PROBLEM_TITLES[input.problem]);
@@ -152,7 +175,7 @@ export function rovaraCheckOf(raw: RovaraCheckInput): RovaraCheckPayload {
   if (input.fullSuite === "pending") return running("Draft checked; full suite running");
   if (input.fullSuite === "not_run") return done("neutral", "Full suite not run (it does not block the merge)");
   // A proof is claimed only where one was judged and proved something; a head that is ready with nothing judged says only "Ready".
-  if (input.proof.kind === "proceed") return done("success", input.proof.warns ? "Ready, with a warning about the change proof" : input.proof.provenCount > 0 ? "Ready: the change proof holds" : "Ready");
+  if (input.proof.kind === "proceed") return done("success", input.proof.warns ? "Ready, with a warning about the change proof" : input.proof.provenCount > 0 ? "Ready: the change proof holds" : "Ready", !input.proof.warns);
   return running("Rovara is checking this change");
 }
 

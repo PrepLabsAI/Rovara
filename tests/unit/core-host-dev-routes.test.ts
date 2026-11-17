@@ -223,6 +223,40 @@ describe("the core's handlers on the deployed API", () => {
   });
 });
 
+// Lead 4 W2: the project wiki's reads through the dev routes: the member company's own store, the generic guards first.
+describe("the project wiki's reads on the deployed API", () => {
+  const WIKI = "/v1/app/projects/payments/wiki";
+  it("serves the member company's own wiki, asking the standing for that company only", async () => {
+    const { world, app, companyOf, remember } = await world2();
+    const seen: string[] = [];
+    const wiki = { standing: async (personId: string, companyId: string, project: string) => { seen.push(`${companyId}/${project}`); return { access: "view" as const }; }, projectRepositories: async () => ["web"] };
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, wiki }) });
+    const index = await routes.route(get(WIKI), remember(OTHER));
+    expect(index?.statusCode).toBe(200);
+    expect(JSON.parse(index!.body)).toEqual({ project: "payments", state: "empty", pages: [] });
+    expect(seen).toEqual([`${OTHER}/payments`]);
+    void world;
+  });
+
+  it("refuses a script token (403) and a caller with no member company (401) before anything is read; unwired is 'not on the core yet'", async () => {
+    const { app, companyOf, remember } = await world2();
+    const standing = vi.fn(async () => ({ access: "view" as const }));
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, wiki: { standing, projectRepositories: async () => ["web"] } }) });
+    for (const path of [WIKI, `${WIKI}/pages/overview`, `${WIKI}/pages/overview/sources`]) {
+      const token = await routes.route(get(path), { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+      expect(token?.statusCode, path).toBe(403);
+      expect((JSON.parse(token!.body) as { error: { message: string } }).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
+      const stranger = callerOf(FAKE_COMPANY);
+      expect((await routes.route(get(path), { ...stranger, principal: { ...stranger.principal, personId: "no-membership" } }))?.statusCode, path).toBe(401);
+    }
+    expect(standing).not.toHaveBeenCalled();
+    const unwired = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    const answer = await unwired.route(get(WIKI), remember(FAKE_COMPANY));
+    expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(NOT_ON_THE_CORE_YET);
+    expect(await routes.route(post(WIKI), remember(FAKE_COMPANY))).toBeUndefined();
+  });
+});
+
 // Lane ID part 2: a fresh step-up (a factor Code owns, checked on the route against the company's window) opens the two acts this API refused.
 describe("a fresh step-up opens making a script token and acting on a decision card", () => {
   const BODY = { requestId: "", name: "ci", projects: ["payments"], permissions: ["read"] };

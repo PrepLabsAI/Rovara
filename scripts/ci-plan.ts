@@ -2,10 +2,10 @@
 // affect, while a FULL run (everything, as before) stays available and is the one a merge needs.
 //
 // FULL mode: a push to code/next, a manual run, a pull request labelled `full-ci`, or one whose title starts with "Batch " or "Sync mainline". It runs every job
-// in full: all test shards, the whole lint, the Linux runtime check, the device emulator check and the release check. The `ci-mode (full)` check exists only then.
+// in full: all test shards, the whole lint, the Linux runtime check and the release check (the device emulator check only on a push or a "Batch " pull request; see DEVICE_PATTERNS). The `ci-mode (full)` check exists only then.
 // AFFECTED mode (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach (vitest --changed plus the tests that name a
 // changed file or one of the packages it touches), in 2 shards; lint covers the lint shards that hold changed files; the Linux runtime, device emulator and release checks run only
-// when files in their area change; a Markdown-only change that no test reads runs nothing but the plan. Anything shared (vitest config, package.json, the lockfile,
+// when files in their area change (the device emulator check: only device code, DEC 254zn); a Markdown-only change that no test reads runs nothing but the plan. Anything shared (vitest config, package.json, the lockfile,
 // tests/support, the workflow) falls back to the whole test suite, and the lint settings to the whole lint.
 //
 // Node runs this file directly, before `npm ci`, so it imports only Node's own modules and uses only erasable syntax. (The docs-only rule that lived in
@@ -49,8 +49,16 @@ export interface Plan {
   shards: number;
   lint: Scope;
   linux: boolean;
-  /** The device emulator check (`device-runtime`), planned like `linux` but not part of the `local` gate yet. */
+  /**
+   * The device emulator check (`device-runtime`) runs (DEC 254zn quarantine): when device or emulator code changes (DEVICE_PATTERNS), and once in each batch or scheduled full run (DEVICE_FULL_EVENTS,
+   * DEVICE_FULL_TITLE_PREFIX) so indirect breakage is still seen; never in other runs. Not part of the `local` gate.
+   */
   device: boolean;
+  /**
+   * The change itself touches device or emulator code, so a red `device-runtime` must fail the run. When the job runs for any other reason (a batch, a scheduled or code/next run) the workflow
+   * marks it `continue-on-error`: the emulator test is flaky and a flake must not block changes that cannot affect it. False when no changed-file list exists (push, schedule, manual run).
+   */
+  deviceRequired: boolean;
   release: boolean;
   /** Test files to run in addition to vitest's own --changed selection (they name a changed file or a changed package); only when tests is "changed". */
   extraTests: string[];
@@ -134,7 +142,10 @@ export const LINUX_PATTERNS: readonly RegExp[] = [
   /^tsconfig[^/]*\.json$/,
 ];
 
-/** The device emulator check's area (device testing, DEC 244): the device executor image, the device code and tests, the CI image list, the plan and the workflow itself. */
+/**
+ * The device emulator check's area (device testing, DEC 244; narrowed by DEC 254zn): the device executor image, the device code and tests, and the CI image list that pins its base image.
+ * The shared files (the workflow, the plan and gate scripts, the manifests, tsconfig, the Node version) are NOT here: the emulator test is flaky, and a change to them does not touch device code.
+ */
 export const DEVICE_PATTERNS: readonly RegExp[] = [
   /^environments\/device-executor\//,
   /^packages\/contracts\/src\/device-/,
@@ -142,14 +153,13 @@ export const DEVICE_PATTERNS: readonly RegExp[] = [
   /^tests\/linux\/device-/,
   /^tests\/fixtures\/device-/,
   /^tests\/support\/device-/,
-  /^scripts\/(ci-images|ci-plan|ci-gate)\.ts$/,
+  /^scripts\/ci-images\.ts$/,
   /^\.github\/ci-images\.json$/,
-  /^\.github\/workflows\/ci\.yml$/,
-  /^package\.json$/,
-  /^package-lock\.json$/,
-  /^\.node-version$/,
-  /^tsconfig[^/]*\.json$/,
 ];
+/** Runs that are not a pull request but run the emulator once anyway: a merge to code/next (the batch landing) and a scheduled full run. A manual run does not. */
+export const DEVICE_FULL_EVENTS: readonly string[] = ["push", "schedule"];
+/** A pull request titled like this (a batch) runs the emulator once too, without making it required. */
+export const DEVICE_FULL_TITLE_PREFIX = "Batch ";
 
 /** The release check's area: the release scripts and the infrastructure, plus the manifests and the workflow. */
 export const RELEASE_PATTERNS: readonly RegExp[] = [
@@ -201,13 +211,15 @@ export function relatedTests(changed: readonly string[], packages: readonly Pack
 
 export function planCi(input: PlanInput): Plan {
   const reason = fullReason(input);
+  const deviceRequired = input.changed.some((file) => anyMatch(file, DEVICE_PATTERNS));
+  const deviceFull = DEVICE_FULL_EVENTS.includes(input.event) || (input.event === "pull_request" && input.title.startsWith(DEVICE_FULL_TITLE_PREFIX));
   if (reason !== undefined) {
-    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: "all", linux: true, device: true, release: true, extraTests: [] };
+    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: "all", linux: true, device: deviceRequired || deviceFull, deviceRequired, release: true, extraTests: [] };
   }
   const { changed } = input;
   const docs = docsOnlyChange(changed, input.testSources);
   if (docs.docsOnly) {
-    return { mode: "affected", modeReason: "a pull request", docsOnly: true, tests: "none", testsReason: docs.reason, shards: 1, lint: "none", linux: false, device: false, release: false, extraTests: [] };
+    return { mode: "affected", modeReason: "a pull request", docsOnly: true, tests: "none", testsReason: docs.reason, shards: 1, lint: "none", linux: false, device: false, deviceRequired: false, release: false, extraTests: [] };
   }
   const shared = changed.find((file) => anyMatch(file, SHARED_TEST_PATTERNS));
   const extraTests = shared === undefined && changed.length > 0 ? relatedTests(changed, input.packages, input.testSources) : [];
@@ -230,7 +242,8 @@ export function planCi(input: PlanInput): Plan {
     shards: tests === "all" ? FULL_SHARDS : AFFECTED_SHARDS,
     lint,
     linux: changed.length === 0 || changed.some((file) => anyMatch(file, LINUX_PATTERNS)),
-    device: changed.length === 0 || changed.some((file) => anyMatch(file, DEVICE_PATTERNS)),
+    device: deviceRequired || deviceFull || changed.length === 0,
+    deviceRequired,
     release: changed.length === 0 || changed.some((file) => anyMatch(file, RELEASE_PATTERNS)),
     extraTests: tests === "changed" ? extraTests : [],
   };
@@ -246,6 +259,7 @@ export function planOutputs(plan: Plan): Record<string, string> {
     lint: plan.lint,
     linux: String(plan.linux),
     device: String(plan.device),
+    device_required: String(plan.deviceRequired),
     release: String(plan.release),
   };
 }
@@ -289,7 +303,7 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);
   console.log(plan.docsOnly
     ? `Markdown-only change: ${plan.testsReason}; nothing but this plan runs.`
-    : `tests: ${plan.tests} (${plan.testsReason}), ${plan.shards} shard(s); lint: ${plan.lint}; linux-runtime: ${plan.linux}; device-runtime: ${plan.device}; release: ${plan.release}; ${plan.extraTests.length} extra test file(s).`);
+    : `tests: ${plan.tests} (${plan.testsReason}), ${plan.shards} shard(s); lint: ${plan.lint}; linux-runtime: ${plan.linux}; device-runtime: ${plan.device} (${plan.deviceRequired ? "required: device code changed" : "non-blocking"}); release: ${plan.release}; ${plan.extraTests.length} extra test file(s).`);
   if (process.env.GITHUB_OUTPUT !== undefined) appendFileSync(process.env.GITHUB_OUTPUT, `${Object.entries(planOutputs(plan)).map(([key, value]) => `${key}=${value}`).join("\n")}\n`);
   if (process.env.CI_EXTRA_TESTS !== undefined) writeFileSync(process.env.CI_EXTRA_TESTS, plan.extraTests.map((file) => `${file}\n`).join(""));
 }

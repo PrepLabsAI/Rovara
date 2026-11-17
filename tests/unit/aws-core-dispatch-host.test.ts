@@ -1,4 +1,6 @@
-import { agentModelIdentity } from "@agentx/contracts";
+import { agentModelIdentity, TestEnvironmentBodySchema, testEnvDigest } from "@agentx/contracts";
+import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
+import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 // Engine host (lane E2, step 4): the dispatcher Lambda as the host of the core's dispatch, over Code's EC2 session machines. Ported from the monolith's host test.
@@ -368,6 +370,39 @@ describe("the core on the dispatcher", () => {
       expect(runtime.flow.deps.learned).toBe(readers.get(company));
     }
     expect(declared.mock.calls.map((call) => call[1])).toEqual([COMPANY_A, COMPANY_B]);
+  });
+
+  it("DEC 254zm: each company's runtime is told its OWN projects' approved test environments (a step's plan), never another company's", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const built = createDispatcherCoreHost({ ...made.inputs, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)), flow: { standingInstructions: null, modelAccess: null, learned: null } });
+    const a = await built.app.runtimeFor(COMPANY_A);
+    const b = await built.app.runtimeFor(COMPANY_B);
+    expect(a.flow.deps.testEnvironment).toBeDefined();
+    expect(b.flow.deps.testEnvironment).toBeDefined();
+    // Company B approved an environment for its project "shared-name"; company A's runtime reads only A's rows for the same project name.
+    const body = TestEnvironmentBodySchema.parse({
+      tier: "sandbox", repos: [{ repositoryId: "demo", setupCommands: [], checks: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 }, kind: "test" }] }],
+      roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, nightly: { enabled: false, cronUtc: "0 6 * * *", branch: "main" }, services: [],
+      data: { seeds: [], generator: "faker_seeded", seed: 7 }, accounts: [], prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false },
+    });
+    const digest = testEnvDigest(body);
+    await b.flow.deps.store.put({ item: documentOf({ ...testEnvRevisionKey(COMPANY_B, "shared-name", 1), entityType: "TEST_ENV_REVISION", orgId: COMPANY_B, project: "shared-name", revision: 1, approvedAt: "2026-11-09T09:00:00.000Z", approvedBy: "owner", digest, requestId: "r1", lessSafe: [], environment: body }) });
+    await b.flow.deps.store.put({ item: documentOf({ ...testEnvLatestKey(COMPANY_B, "shared-name"), entityType: "TEST_ENV_LATEST", orgId: COMPANY_B, project: "shared-name", revision: 1, digest }) });
+    expect(await a.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).toEqual({});
+    expect(await b.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).not.toEqual({});
+  });
+
+  it("lead 4 A1: each company's runtime on the dispatcher carries its own wiki reader, which gives a step nothing for another company's workspace or when no switch is on", async () => {
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const built = createDispatcherCoreHost({ ...made.inputs, flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
+    const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
+    expect(typeof a.flow.deps.wiki).toBe("function");
+    expect(a.flow.deps.wiki).not.toBe(b.flow.deps.wiki);
+    const step = { project: "alpha", taskId: "11111111-1111-4111-8111-111111111111", operationId: "aaaaaaaa-1111-4111-8111-111111111111", workflowMode: "PLAN", repositories: ["web"] };
+    expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_B })).toEqual({});
+    expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_A })).toEqual({});
   });
 
   it("builds no company's runtime until every flow input a worker job carries is declared, and places the worker on the install's own workers only", async () => {
