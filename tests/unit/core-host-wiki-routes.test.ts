@@ -105,6 +105,28 @@ describe("wiki read routes: who reads", () => {
     expect((await w.get(A, "owner", "/v1/app/projects/gamma/wiki")).status).toBe(404);
   });
 
+  it("a malformed project name is refused before anyone's standing is read", async () => {
+    const w = await seeded();
+    const asked: string[] = [];
+    for (const path of ["/v1/app/projects/Alpha/wiki", "/v1/app/projects/alpha%23x/wiki", "/v1/app/projects/%E0%A4%A/wiki"]) {
+      expect((await w.get(A, "ada", path, { standing: async (personId, companyId, project) => { asked.push(`${companyId}/${project}/${personId}`); return { access: "view" }; } })).status).toBe(404);
+    }
+    expect(asked).toEqual([]);
+  });
+
+  it("a project whose repository list is not a list reads as missing", async () => {
+    const w = await seeded();
+    for (const weird of [{ length: 1 }, "web", null]) expect((await w.get(A, "ada", "/v1/app/projects/alpha/wiki", { projectRepositories: async () => weird as never })).status).toBe(404);
+  });
+
+  it("any other fault is a fixed 503 that echoes nothing", async () => {
+    const w = await seeded();
+    await w.a.addNote("alpha", { pageId: "overview", text: "n", authorId: "ada" });
+    const answer = await w.get(A, "ada", "/v1/app/projects/alpha/wiki/pages/overview", { displayName: async () => ({ leak: "SECRET-CAUSE" }) as never });
+    expect(answer).toMatchObject({ status: 503, body: { error: { message: WIKI_UNAVAILABLE } } });
+    expect(answer.raw).not.toContain("SECRET-CAUSE");
+  });
+
   it("an unknown or malformed standing is no standing", async () => {
     const w = await seeded();
     for (const weird of [{ access: "admin" }, { access: "MANAGE" }, null, undefined, "view"]) {

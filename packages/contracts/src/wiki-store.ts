@@ -11,7 +11,8 @@
 //  - Notes: people see a note at once; agents see it only after a project maintainer (or a company owner or admin) approves it.
 //  - Flags ("Mark wrong"): a person's optional reason is their words (erased with them); an open flag hides its claim, or its whole page, from agents.
 //  - A removed repository (or one Rovara lost access to) has its pages and every cross-repo page that names it deleted at once (`deleteRepository`).
-//  - Answer records (J1) expire 30 days after they are written, like Ask's.
+//  - Answer records (J1) expire 30 days after they are written, like Ask's. Expiry is app-driven, not a table TTL: a read treats a record past its `expiresAt` as gone, and a bounded
+//    sweep (`expireAnswers`, run on every answer write and schedulable) deletes expired rows.
 import { z } from "zod";
 import { type OrgId } from "./browser-ids.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
@@ -47,6 +48,8 @@ export const WIKI_LIMITS = {
 export const WIKI_QUOTE_MAX = 200;
 /** How long an answer record is kept (days), like Ask's answers. */
 export const WIKI_ANSWER_RETENTION_DAYS = 30;
+/** The most expired answer records one sweep deletes. */
+export const WIKI_ANSWER_SWEEP_MAX = 200;
 
 // ---- Small shapes -----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -366,12 +369,15 @@ export type WikiSourcesResponse = z.infer<typeof WikiSourcesResponseSchema>;
 /** Who reads a page: a person (every note, pending marked; every claim) or an agent (approved notes only; flagged and `not_found` claims and the blocks resting on them left out). */
 export type WikiAudience = "person" | "agent";
 
+/** What an agent learns of an open flag: which page or claim is marked, never who marked it or why. */
+export type WikiAgentFlag = Pick<WikiFlag, "flagId" | "pageId" | "state" | "claimId">;
+
 /** A page as read for an audience. For an agent, a page with an open page-level flag is not returned at all. */
 export interface WikiPageRead {
   page: WikiPage;
   notes: WikiNote[];
-  /** Open flags on the page and its claims (a person's reasons are included only for audience "person"). */
-  flags: WikiFlag[];
+  /** Open flags on the page and its claims. For audience "person" each is the whole flag (who, why, when); an agent gets only which claim (or the page) is marked. */
+  flags: Array<WikiAgentFlag & Partial<Pick<WikiFlag, "by" | "reason" | "createdAt">>>;
   /** Block ids whose claims include a `changed` one ("may be out of date"). */
   staleBlockIds: string[];
 }
@@ -429,10 +435,12 @@ export interface WikiStore {
   readBuild(project: string, buildId: string): Promise<WikiBuildRecord | undefined>;
   /** The most recent build (by start time), if any. */
   lastBuild(project: string): Promise<WikiBuildRecord | undefined>;
-  /** Writes an answer record that expires `WIKI_ANSWER_RETENTION_DAYS` after now. */
+  /** Writes an answer record that expires `WIKI_ANSWER_RETENTION_DAYS` after now (and first sweeps expired ones, `expireAnswers`). */
   writeAnswer(project: string, record: WikiAnswerRecordWrite): Promise<WikiAnswerRecord>;
   /** An answer record, or undefined when there is none or it has expired. */
   readAnswer(project: string, answerId: string): Promise<WikiAnswerRecord | undefined>;
+  /** Deletes up to `limit` (default and most `WIKI_ANSWER_SWEEP_MAX`) answer records of the project whose time is past. Answers how many went. */
+  expireAnswers(project: string, limit?: number): Promise<number>;
   /** The person-erase step: the person's notes and answer records are deleted and their "Mark wrong" reasons removed, in every given project. */
   erasePerson(projects: readonly string[], personId: string): Promise<WikiPersonErasure>;
 }
