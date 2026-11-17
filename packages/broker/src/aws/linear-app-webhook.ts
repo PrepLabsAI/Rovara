@@ -8,10 +8,13 @@
 //   4. `organizationId` is routed to the company it is bound to (LINEAR_WORKSPACE#<id>); an unknown workspace is a 200 no-op with the SAME answer as a delivered one (no oracle);
 //   5. "OAuthApp revoked": the company's connection is marked disconnected and its tokens dropped;
 //   6. Issue and Comment events: only then routed to the company's projects whose picked team is the event's team, each handed to `deliver` (company, project, team, type,
-//      action, the parsed body). Nothing in the body names a company or a project; only the binding and the company's own picks do.
+//      action, the parsed body, the delivery itself). Nothing in the body names a company or a project; only the binding and the company's own picks do. PR 20's `deliver`
+//      (linear-app-intake.ts) puts each into the project's tracker intake; a company that is not connected gets a log line and nothing else.
 // The per-project hook secret path (an API-key project's own Linear webhook, `linearTracker({ hook })`) is untouched: it verifies with the same function and its own secret.
 import { z } from "zod";
+import type { RawDelivery } from "@agentx/contracts";
 import { verifyLinearSignature } from "../plugins/tracker/linear/webhook.js";
+import { linearDeliveryOf } from "./linear-app-intake.js";
 import type { LinearAppSettings, LinearConnections } from "./linear-connections.js";
 
 export const LINEAR_WEBHOOK_PATH = "/v1/linear/webhooks";
@@ -27,6 +30,10 @@ export interface LinearProjectEvent {
   type: "Issue" | "Comment";
   action: string;
   body: unknown;
+  /** The Linear workspace the delivery is from (the company's bound one). */
+  organizationId: string;
+  /** The delivery as received (the raw body and its signature header), so the intake verifies it again with the per-project hook's own code (PR 20). */
+  delivery: RawDelivery;
 }
 
 export interface LinearWebhookWiring {
@@ -95,13 +102,17 @@ export async function handleLinearAppWebhook(wiring: LinearWebhookWiring, input:
     if (type !== "Issue" && type !== "Comment") return OK;
     // 6. Only a connected company's projects, and only those whose picked team is the event's.
     const connection = await wiring.connections.connection(companyId);
-    if (connection === undefined || connection.status !== "connected" || connection.organizationId !== envelope.data.organizationId) return OK;
+    if (connection === undefined || connection.status !== "connected" || connection.organizationId !== envelope.data.organizationId) {
+      // PR 20: no intake for a company whose connection needs reconnecting or is gone; said once per event, ids only (Cloud shows the notice, PR 13).
+      wiring.log({ companyId, event: "linear.webhook_not_connected", status: connection === undefined ? "not_connected" : connection.status !== "connected" ? connection.status : "other_workspace", type, action });
+      return OK;
+    }
     const teamId = teamOf(type, parsedBody);
     if (teamId === undefined) return OK;
     const projects = (await wiring.connections.teamPicks(companyId)).filter((pick) => pick.teamId.toLowerCase() === teamId.toLowerCase()).map((pick) => pick.project);
     for (const project of projects) {
       if (wiring.deliver === undefined) wiring.log({ companyId, event: "linear.webhook_routed", project, type, action });
-      else await wiring.deliver({ companyId, project, teamId, type, action, body: parsedBody });
+      else await wiring.deliver({ companyId, project, teamId, type, action, body: parsedBody, organizationId: envelope.data.organizationId, delivery: linearDeliveryOf(input.rawBody, input.headers) });
     }
     return OK;
   } catch {
