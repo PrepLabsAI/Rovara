@@ -311,8 +311,8 @@ describe("one workspace per company, one company per workspace (DEC 254l item 4)
           raced = true;
           await createSlackWorkspaceBindings({ client: w.db, tableName: "State" }).bind(A, "T0ACME", "operator");
         }
-        return db.send(command as never);
-      } } as typeof db;
+        return db.send(command);
+      } };
     }
     const token = tokenOf("acme-b");
     const callsBefore = w.sm.calls.length; const logsBefore = w.logs.length;
@@ -320,7 +320,7 @@ describe("one workspace per company, one company per workspace (DEC 254l item 4)
     const text = (args: unknown[]) => args.map((arg) => typeof arg === "string" ? arg : arg instanceof Uint8Array ? Buffer.from(arg).toString("utf8") : JSON.stringify(arg)).join(" ");
     const spies = [
       ...(["log", "info", "warn", "error", "debug"] as const).map((level) => vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { printed.push(text(args)); })),
-      ...([process.stdout, process.stderr] as const).map((stream) => vi.spyOn(stream, "write").mockImplementation(((...args: unknown[]) => { printed.push(text(args.slice(0, 1))); return true; }) as typeof stream.write)),
+      ...([process.stdout, process.stderr] as const).map((stream) => vi.spyOn(stream, "write").mockImplementation(((...args: unknown[]) => { printed.push(text(args.slice(0, 1))); return true; }))),
     ];
     let refused: Awaited<ReturnType<typeof w.connect>>;
     try { refused = await w.connect("acme-b", w.b); } finally { for (const spy of spies) spy.mockRestore(); }
