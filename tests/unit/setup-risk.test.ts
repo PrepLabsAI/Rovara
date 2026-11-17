@@ -10,7 +10,7 @@ const base: ProjectDefinition = {
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
   setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])],
 };
-const next = (changes: Record<string, unknown>): ProjectDefinition => ({ ...base, revision: 4, ...changes }) as ProjectDefinition;
+const next = (changes: Record<string, unknown>): ProjectDefinition => ({ ...base, revision: 4, ...changes });
 
 describe("classifySetupChange", () => {
   it("is low for a changed install or test command, a version bump in a command and a cache path, and ignores the revision number and the origins bookkeeping", () => {
@@ -64,14 +64,13 @@ describe("classifySetupChange", () => {
       expect(result.changes, JSON.stringify(changes)).toContainEqual({ area: "other", risk: "high" });
     }
     // A removed field is a change too.
-    const { network: _gone, ...withoutNetwork } = { ...base, network: { allowedHosts: ["a.example.com"] } };
-    expect(classifySetupChange({ ...base, network: { allowedHosts: ["a.example.com"] } } as ProjectDefinition, { ...withoutNetwork, revision: 4 } as ProjectDefinition).risk).toBe("high");
+    expect(classifySetupChange({ ...base, network: { allowedHosts: ["a.example.com"] } }, { ...base, revision: 4 }).risk).toBe("high");
   });
 
   it("is high when the approved revision it compares with is missing or unreadable, or the candidate is not an object", () => {
     expect(classifySetupChange(undefined, next({}))).toEqual({ risk: "high", changes: [{ area: "other", risk: "high" }] });
-    expect(classifySetupChange(base, null as unknown as ProjectDefinition).risk).toBe("high");
-    expect(classifySetupChange("x" as unknown as ProjectDefinition, next({})).risk).toBe("high");
+    expect(classifySetupChange(base, null).risk).toBe("high");
+    expect(classifySetupChange("x", next({})).risk).toBe("high");
     expect(classifySetupChange(base, next({ setup: "npm ci" })).risk).toBe("high");
   });
 

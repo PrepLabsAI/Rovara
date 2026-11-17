@@ -46,14 +46,14 @@ async function register(world: FakeWorld, companyId: string, name: string): Prom
 
 /** A candidate revision 2 waiting for a decision, its check on a workspace in `status` (READY: passed). */
 async function seedCandidate(world: FakeWorld, companyId: string, name: string, changes: Record<string, unknown>, status = "READY"): Promise<{ digest: string; workspaceId: string }> {
-  const definition = { ...project(name), revision: 2, ...changes } as ProjectDefinition;
+  const definition = { ...project(name), revision: 2, ...changes };
   await world.store.put({ item: { ...projectRevisionKey(companyId, name, 2), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
   const workspaceId = randomUUID();
   await world.store.put({ item: { ...workspaceKey(companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId, orgId: companyId, status } });
   const digest = setupApplyDigest(definition.setup, definition.readiness);
   const at = new Date(world.clock.now).toISOString();
   await world.store.put({ item: {
-    ...setupApplyKey(companyId as OrgId, name), entityType: "SETUP_APPLY", orgId: companyId, project: name, taskId: "", requestId: randomUUID(), by: "p-runner", digest, baseRevision: 1, candidateRevision: 2,
+    ...setupApplyKey(companyId, name), entityType: "SETUP_APPLY", orgId: companyId, project: name, taskId: "", requestId: randomUUID(), by: "p-runner", digest, baseRevision: 1, candidateRevision: 2,
     state: "checking", check: { workspaceId, revision: 2, startedAt: at, startedBy: "p-runner" }, reply: {}, createdAt: at,
   } });
   return { digest, workspaceId };
@@ -118,8 +118,8 @@ async function setupWorld(options: { approval?: boolean } = {}) {
 }
 
 const decideBody = (digest: string, outcome: "approve" | "reject" = "approve", revision = 2) => ({ requestId: setupDecisionRequestId(digest, revision) + randomUUID().slice(0, 8), outcome, seen: { revision, artifactDigest: digest } });
-const applyRow = (world: FakeWorld, companyId: string, name = "payments") => world.store.get(setupApplyKey(companyId as OrgId, name));
-const latestOf = async (world: FakeWorld, companyId: string, name = "payments") => (await world.store.get(orgProjectCatalogKey(companyId as OrgId, name)))?.["latestRevision"];
+const applyRow = (world: FakeWorld, companyId: string, name = "payments") => world.store.get(setupApplyKey(companyId, name));
+const latestOf = async (world: FakeWorld, companyId: string, name = "payments") => (await world.store.get(orgProjectCatalogKey(companyId, name)))?.["latestRevision"];
 
 describe("hosted setup approval: who may decide, by the candidate's risk", () => {
   it("lets a project maintainer approve a LOW risk candidate (changed commands); the project moves to the candidate, the audit names the approver and the subject", async () => {
@@ -304,7 +304,7 @@ describe("hosted setup approval: confirm and discard", () => {
     const answer = await call(post(`${RUN}/confirm`, { requestId, expectedRevision: 1 }), admin);
     expect(answer.status).toBe(400);
     expect(answer.body["error"]).toMatchObject({ code: "CONFIG_INVALID", message: "There is no setup from Rovara to use. Ask Rovara to set the project up first." });
-    expect(audit.filter((event) => event.action === "setup_run.confirm_requested")).toEqual([expect.objectContaining({ actor: { type: "person", id: "p-admin" }, details: expect.objectContaining({ requestId, basis: "company-admin" }) })]);
+    expect(audit.filter((event) => event.action === "setup_run.confirm_requested")).toEqual([expect.objectContaining({ actor: { type: "person", id: "p-admin" }, details: expect.objectContaining({ requestId, basis: "company-admin" }) as unknown })]);
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
     const developer = person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
     expect((await call(post(`${RUN}/confirm`, { requestId: randomUUID(), expectedRevision: 1 }), developer)).status).toBe(403);
@@ -357,13 +357,13 @@ describe("hosted approvers: a setup candidate's proof", () => {
   it("refuses a setup proof for another project, revision, digest or answer, a request without the project named, and a non-member", async () => {
     const cases: Array<[ApprovalRequest, string, string]> = [
       [request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: "ledger" }, projectName: "ledger", card: { cardId: "setup_proposal:ledger", contentVersion: DIGEST } }), token(), "other_subject"],
-      [request({ projectName: undefined }), token(), "no_rule_for_this_request"],
+      [Object.fromEntries(Object.entries(request()).filter(([field]) => field !== "projectName")) as unknown as ApprovalRequest, token(), "no_rule_for_this_request"],
       [request({ projectName: "ledger" }), token(), "no_rule_for_this_request"],
       [request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: "-bad" }, projectName: "-bad" }), token(), "no_rule_for_this_request"],
       [request({ revision: 3 }), token(), "other_revision"],
       [request({ outcome: "reject" }), token(), "other_answer"],
       [request(), token({ personId: "bob" }), "not_a_member"],
-      [request({ companyId: OTHER as OrgId }), token(), "wrong_company"],
+      [request({ companyId: OTHER }), token(), "wrong_company"],
     ];
     for (const [req, value, reason] of cases) expect(await point().verify(req, proof(req, value)), reason).toEqual({ approved: false, reason });
   });
