@@ -49,10 +49,11 @@ describe("sign-in by live membership (DEC 254b a)", () => {
     const w = world();
     await w.setup();
     await w.operator({ kind: "company-preapprove", companyId: X, email: "carol@example.test", role: "member", expiresInHours: 24 });
-    // The method page offers only what the shared method allows: the install's OIDC (the install's Slack is bound to the built-in company, not X).
+    // The method page offers the shared methods: the install's OIDC and (DEC 254e) the install's Slack app, for any workspace.
     const page = await w.http(httpEvent("GET", `/v1/auth/authorize?${new URLSearchParams({ response_type: "code", client_id: "web-app", redirect_uri: WEB, state: "s", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", company: X }).toString()}`));
-    expect(page.statusCode).toBe(302);
-    expect(page.headers.location).toContain(OIDC_ISSUER);
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain("method=oidc");
+    expect(page.body).toContain("method=slack");
     const signed = await w.signIn("carol", { company: X });
     expect(signed.refused).toBeUndefined();
     expect(w.sessionOf(person("carol"))).toEqual([expect.objectContaining({ companyId: X, installMethod: true })]);
@@ -108,17 +109,6 @@ describe("sign-in by live membership (DEC 254b a)", () => {
     expect((await w.refresh(signed.refresh!)).status).toBe(400);
     expect((await w.signIn("owner")).refused).toBe("not invited");
     expect(JSON.stringify(w.logs)).not.toContain("read-canary");
-  });
-
-  it("the install's Slack admits a member of a self-serve company only when its team is bound to that company", async () => {
-    const w = world();
-    await w.setup();
-    w.deps.slackTeamCompany = () => X;
-    await w.operator({ kind: "company-preapprove", companyId: X, email: "dana@example.test", role: "member", expiresInHours: 24 });
-    const page = await w.http(httpEvent("GET", `/v1/auth/authorize?${new URLSearchParams({ response_type: "code", client_id: "web-app", redirect_uri: WEB, state: "s", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", company: X }).toString()}`));
-    expect(page.statusCode).toBe(200);
-    expect(page.body).toContain("method=slack");
-    expect(page.body).toContain("method=oidc");
   });
 
   it("each person gets only their own company and cannot use the other's method or name the other company", async () => {

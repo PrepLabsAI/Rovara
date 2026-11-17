@@ -70,6 +70,7 @@ import {
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
+import { mergeSurvivor } from "../aws/install-company.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { createFactorAdmin } from "./factor-admin.js";
@@ -245,7 +246,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (!await deps.company.hasOwnIssuer(companyId)) {
       // DEC 254b (a): the shared method. The install's OIDC, and the install's Slack only for the company its team is bound to. None on: unavailable.
       const shared: DeveloperSignInMethod[] = [];
-      for (const method of enabledMethods(deps)) if (method === "oidc" || await slackCompany() === companyId) shared.push(method);
+      // DEC 254e: the install's Slack app serves every company (any workspace), as does the install's OIDC.
+      for (const method of enabledMethods(deps)) shared.push(method);
       return shared.length === 0 ? undefined : shared;
     }
     const selected = await deps.companyIssuer?.(companyId);
@@ -253,15 +255,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return [...enabledMethods(deps).filter((method) => method === "slack"), "oidc"];
   };
   /**
-   * Recheck live membership at each mint. The stored company only selects the method. DEC 254b (a): an OIDC session for a company other than the
-   * built-in one must match how that company signs in NOW: marked `installMethod` exactly when the company has no issuer of its own.
+   * Recheck live membership at each mint. The stored company only selects the method. DEC 254b (a), 254e: a session (OIDC or Slack) for a company
+   * other than the built-in one must match how that company signs in NOW: marked `installMethod` exactly when the company has no issuer of its own.
    */
   async function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
     if (deps.company === undefined) return true;
     try {
-      if (installMethod === true && (amr !== "oidc" || companyId === undefined || companyId === IMPLICIT_COMPANY_ID)) return false;
-      if (amr === "oidc" && companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID && await deps.company.hasOwnIssuer(companyId) === (installMethod === true)) return false;
-      const candidate = amr === "slack" ? await slackCompany() : companyId ?? IMPLICIT_COMPANY_ID;
+      if (installMethod === true && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID)) return false;
+      if (companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) {
+        if (await deps.company.hasOwnIssuer(companyId)) {
+          // A company with its own sign-in: never the shared method; its Slack only while the install workspace is bound to it (as before).
+          if (installMethod === true || (amr === "slack" && await slackCompany() !== companyId)) return false;
+        } else if (installMethod !== true) return false;
+      }
+      // DEC 254e: for Slack too, the company is the session's (membership checked below), never the workspace's binding.
+      const candidate = companyId ?? IMPLICIT_COMPANY_ID;
       if (!OrgIdSchema.safeParse(candidate).success || (companyId !== undefined && companyId !== candidate)) return false;
       let member = await deps.company.membership(personId);
       if (member === undefined && legacy && candidate === IMPLICIT_COMPANY_ID) {
@@ -281,7 +289,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
    * company instead). Every company route still refuses such a session; only the access check and company create read it.
    */
   async function companylessMayMint(personId: string, amr: DeveloperSignInMethod, registered: SignInClientRecord | undefined): Promise<boolean> {
-    if (deps.company === undefined || deps.companyInvites === undefined || amr !== "oidc") return false;
+    // DEC 254e: Slack (any workspace) as well as the install's OIDC.
+    if (deps.company === undefined || deps.companyInvites === undefined || (amr !== "oidc" && amr !== "slack")) return false;
     if (registered === undefined || registered.installLevel !== true || registered.fullAccess !== true || registered.webApp !== true) return false;
     return deps.companyInvites.companylessEligible(personId);
   }
@@ -563,8 +572,26 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return client({ error: "access_denied", error_description: `${result.reason}${hint}` });
     }
     const identity = result.identity;
-    const developerId = ownerKeyForSubject(identity.issuer, identity.subject);
-    const existing = await store.getDeveloper(developerId);
+    const signedInId = ownerKeyForSubject(identity.issuer, identity.subject);
+    let developerId = signedInId;
+    let existing = await store.getDeveloper(developerId);
+    // DEC 254b: with Code's company layer on, a sign-in an operator merged into another (`mergedInto`) is seated as its survivor: the session, the
+    // membership and every check are the survivor's, and neither record is rewritten by this sign-in. The walk is #820's: at most 8 hops, no
+    // loops, and a revoked or unreadable record anywhere refuses.
+    let merged = false;
+    if (deps.company !== undefined && existing !== undefined && (existing as { mergedInto?: unknown }).mergedInto !== undefined) {
+      try {
+        const walk = await mergeSurvivor((id) => store.getDeveloper(id), signedInId);
+        developerId = walk.survivorId;
+        existing = await store.getDeveloper(developerId);
+        merged = existing !== undefined;
+      } catch { merged = false; }
+      if (!merged) {
+        deps.log({ event: "signin.refused", method, reason: "merge_refused", developerId: signedInId });
+        if (request.browserReturnTo !== undefined) return browserReturn(request.browserReturnTo, false);
+        return client({ error: "access_denied", error_description: "your AgentX sign-in was turned off by an admin; contact an admin" });
+      }
+    }
     if (existing?.revoked === true) {
       deps.log({ event: "signin.refused", method, reason: "developer_revoked", developerId });
       if (request.browserReturnTo !== undefined) return browserReturn(request.browserReturnTo, false);
@@ -581,17 +608,24 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const installLevel = request.clientId === undefined || registered?.installLevel === true;
       let candidate: string | undefined;
       let revokedMember = false;
+      // DEC 254e: the same for Slack, from any workspace: the company comes only from live membership (or `company=`), never from the workspace.
       try {
-        const member = method !== "slack" && request.companyId === undefined && installLevel ? await deps.company.membership(developerId) : undefined;
+        const member = request.companyId === undefined && installLevel ? await deps.company.membership(developerId) : undefined;
         revokedMember = member?.revokedAt !== undefined;
-        candidate = method === "slack" ? await slackCompany() : request.companyId ?? member?.companyId ?? IMPLICIT_COMPANY_ID;
+        candidate = request.companyId ?? member?.companyId ?? IMPLICIT_COMPANY_ID;
       } catch { candidate = undefined; }
       const clientAllowed = request.clientId === undefined || (registered !== undefined && (registered.installLevel === true || (registered.companyId ?? IMPLICIT_COMPANY_ID) === candidate));
-      // The install's OIDC admits into a company other than the built-in one only when that company has no issuer of its own (no downgrade).
-      installMethod = method === "oidc" && installProvider && candidate !== undefined && candidate !== IMPLICIT_COMPANY_ID;
+      // The install's methods (its OIDC, its Slack app) admit into a company other than the built-in one only when that company has no issuer of
+      // its own (no downgrade). The one exception, as before: a company with an issuer whose install workspace is bound to it keeps that Slack.
+      installMethod = installProvider && candidate !== undefined && candidate !== IMPLICIT_COMPANY_ID;
       let ownIssuer = false;
       // A removed member is told so by the join below, whatever their company's sign-in.
       if (installMethod && !revokedMember) { try { ownIssuer = await deps.company.hasOwnIssuer(candidate!); } catch { candidate = undefined; } }
+      if (ownIssuer && method === "slack" && identity.slackUserId !== undefined) {
+        let bound: boolean;
+        try { bound = await slackCompany() === candidate; } catch { bound = false; }
+        if (bound) { ownIssuer = false; installMethod = false; }
+      }
       if (ownIssuer) {
         deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
@@ -614,16 +648,20 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     let slackUserId = identity.slackUserId;
     // ProviderIdentity.email is set only for a verified email (providers.ts), so only a verified
-    // email is ever looked up in Slack. A person with no company is looked up in no company's Slack.
-    const directory = companyless ? undefined : companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
+    // email is ever looked up in Slack. A person with no company is looked up in no company's Slack, and so is a person from another Slack
+    // workspace (DEC 254e: no install or company directory speaks for their workspace).
+    const foreignSlack = method === "slack" && identity.slackTeam !== undefined && identity.slackUserId === undefined;
+    const directory = companyless || foreignSlack ? undefined : companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
     if (slackUserId === undefined && identity.email !== undefined && directory !== undefined) {
       const link = await directory.lookupByEmail(identity.email);
       slackUserId = link === "unavailable" ? (companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? existing?.slackUserId : undefined) : link === "none" ? undefined : link.userId;
     }
-    await store.upsertDeveloper({
+    // A merged sign-in rewrites neither its own record nor the survivor's.
+    if (!merged) await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
       ...(identity.email === undefined ? {} : { email: identity.email }),
       ...(slackUserId === undefined ? {} : { slackUserId }),
+      ...(identity.slackTeam === undefined ? {} : { slackTeamId: identity.slackTeam.id, ...(identity.slackTeam.name === undefined ? {} : { slackTeamName: identity.slackTeam.name }) }),
     }, companyId, companyless ? { companyless: true } : {});
     if (request.browserReturnTo !== undefined) {
       if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined)) return browserReturn(request.browserReturnTo, false);

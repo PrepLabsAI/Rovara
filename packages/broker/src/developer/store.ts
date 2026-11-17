@@ -33,7 +33,10 @@ export interface AuthRequestRecord { id: string; clientRedirectUri: string; clie
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
-  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
+  email?: string; slackUserId?: string;
+  /** DEC 254e: the Slack workspace (id, and its name when Slack gives one) of a Slack sign-in with Code's company layer on. Never a company. */
+  slackTeamId?: string; slackTeamName?: string;
+  firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
   /**
    * ID-STEPUP-FOLLOWUPS (a): where step-up codes go. Captured once, from the verified email of the person's FIRST sign-in, or set by a company admin; a later sign-in never changes it,
    * whatever the provider now says (`email` follows the provider; this does not). Absent: no email factor until an admin sets one.
@@ -347,6 +350,12 @@ export class DeveloperSignInStore {
     else { setClauses.push("email = :email"); values[":email"] = profile.email; }
     if (profile.slackUserId === undefined) removeClauses.push("slackUserId");
     else { setClauses.push("slackUserId = :slackUserId"); values[":slackUserId"] = profile.slackUserId; }
+    // DEC 254e: written only when given (company layer on), so every other sign-in's write is exactly as before.
+    if (profile.slackTeamId !== undefined) {
+      setClauses.push("slackTeamId = :slackTeamId"); values[":slackTeamId"] = profile.slackTeamId;
+      if (profile.slackTeamName === undefined) removeClauses.push("slackTeamName");
+      else { setClauses.push("slackTeamName = :slackTeamName"); values[":slackTeamName"] = profile.slackTeamName; }
+    }
 
     const update = (withName: boolean) => this.input.documentClient.send(new UpdateCommand({
       TableName: this.input.tableName,

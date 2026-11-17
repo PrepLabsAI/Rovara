@@ -627,11 +627,14 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
   return response.Item;
 }
 
-/** Company policy is selected only from live membership and the stored OIDC session.
+/** Company policy is selected only from live membership and the stored session (OIDC, and since DEC 254e Slack too).
  * Fixed-size reads share one budget and the host's existing SDK timeout; no cache or token company.
- * Undefined: the session is held to the install's own OIDC (the built-in company, or a shared-method session of a company with no issuer). */
+ * Undefined: the session is held to the install's own method (the built-in company, a shared-method session of a company with no issuer, or a
+ * Slack session of a company whose install workspace is bound to it). */
 async function companyOidcSession(deps: DeveloperRouteDependencies, session: SessionRecord, resolvedCompany?: string): Promise<DeveloperRecord | undefined> {
-  if (deps.companies === undefined || session.amr !== "oidc") return undefined;
+  // DEC 254e: a Slack session is checked here when it carries the shared-method mark (the sign-in server rechecks every Slack session at refresh,
+  // as before); an OIDC session always.
+  if (deps.companies === undefined || !(session.amr === "oidc" || (session.amr === "slack" && session.installMethod !== undefined))) return undefined;
   try {
     const scope = boundedCompanyReads(deps.documentClient, deps.now);
     const companyId = resolvedCompany ?? await scope.read(() => resolveCompany(deps.companies, session.developerId));
@@ -641,7 +644,7 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
       return undefined;
     }
     const parsed = z.object({
-      sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.literal("oidc"),
+      sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.enum(["oidc", "slack"]),
       companyId: OrgIdSchema, startedAt: z.iso.datetime(), endsAt: z.number().finite(),
       reviewExpiresAt: z.number().finite().optional(), installMethod: z.literal(true).optional(),
     }).safeParse(await scope.read(async () => session));
@@ -651,7 +654,7 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
     // DEC 254b (a): a company with no issuer row signs in only through the install's own OIDC (the shared method), and only a session the sign-in
     // server marked so; the install's switch and since time then hold, as for the built-in company. A company with any issuer row never takes it.
     if (response.Item === undefined) {
-      if (parsed.data.installMethod !== true || !deps.developer.methods.oidc) throw new Error("shared method");
+      if (parsed.data.installMethod !== true || !deps.developer.methods[parsed.data.amr]) throw new Error("shared method");
       scope.check();
       return undefined;
     }
@@ -1173,7 +1176,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
  * no-company sign-in wrote (never a legacy person's). Read live, on the sign-in table; any doubt is no.
  */
 async function companylessSession(deps: DeveloperRouteDependencies, client: SignInClientRecord, session: SessionRecord): Promise<boolean> {
-  if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || session.amr !== "oidc" || session.companyId !== undefined) return false;
+  if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || (session.amr !== "oidc" && session.amr !== "slack") || session.companyId !== undefined) return false;
   try {
     const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
     if (membership.Item !== undefined) return false;
