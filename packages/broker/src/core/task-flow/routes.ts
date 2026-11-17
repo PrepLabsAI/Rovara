@@ -4,6 +4,7 @@
 import { AgentXError, agentXError } from "@agentx/contracts";
 import type { TaskCaller } from "./deps.js";
 import type { TaskFlow } from "./flow.js";
+import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "./involved.js";
 
 export interface TaskRouteRequest {
   method: string;
@@ -41,7 +42,12 @@ export async function handleTaskRoute(flow: TaskFlow, request: TaskRouteRequest)
       const started = await flow.start({ ...request.caller, origin: "app" }, jsonBody(request.body));
       return { status: started.duplicate ? 200 : 201, body: { task: started.task } };
     }
-    if (path === TASKS && request.method === "GET") return { status: 200, body: await flow.list(request.caller) };
+    // `?involved=1` (exactly): the tasks the caller was added to, every one re-checked against the live task access. Any other query is the ordinary list, unchanged.
+    if (path === TASKS && request.method === "GET") {
+      const query = new URLSearchParams(request.path.split("?")[1] ?? "");
+      if (wantsInvolved(query)) return { status: 200, body: await listInvolvedTasks(flow.deps, request.caller, involvedListOptions(query)) };
+      return { status: 200, body: await flow.list(request.caller) };
+    }
     const match = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(\/close)?$/.exec(path);
     if (match !== null && request.method === "GET" && match[2] === undefined) return { status: 200, body: { task: await flow.get(request.caller, match[1]!) } };
     if (match !== null && request.method === "POST" && match[2] === "/close") return { status: 200, body: { task: await flow.close(request.caller, match[1]!) } };
