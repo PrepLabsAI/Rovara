@@ -625,4 +625,6 @@ describe("what did not change", () => {
 // The sha256 of every route row (method, path, requirement) except the two this PR adds, joined by newlines, as the table stood on code/next before this change.
 // Batch 10: re-pinned with the batch's 22 new rows (all added, none changed; code/next's 81 rows in the same order still give 622d8b9d...): #830/#832 GitHub connect (5),
 // #836/#840 Slack install and channel (9), #835 engine model (2), #839 archive/restore (4), #837 bulk create and available repositories (2).
-const EXISTING_ROUTES_DIGEST = "805695cd2db86ae015240da9fada23f58bd1b7e2eba6aa4835b35ca94df3a31a";
+// DEC 254y (2), batch 12: re-pinned for #838's 7 new /v1/dev/company/linear* rows and L2-4's 3 new /v1/dev/projects/{p}/intake* rows on top of batch 10's table (all added, none
+// changed). Removing exactly those 10 rows still gives 805695cd...; removing instead the 9 Slack rows gives #848's approved e616631e...; removing both gives 9c594d20....
+const EXISTING_ROUTES_DIGEST = "0a31f2f4e84da798667be48dce0fddb0a79c734749235da3ae47b1cfc4544db6";

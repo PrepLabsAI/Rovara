@@ -8483,6 +8483,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::ApiGatewayV2::Authorizer",
     },
+    "LinearWebhookRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/linear/webhooks",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
     "ModelAccessRoute": {
       "Properties": {
         "ApiId": {
