@@ -42,6 +42,23 @@ describe("machine size pick: the switch", () => {
   });
 });
 
+describe("machine size pick: the install's largest size (DEC 254zv)", () => {
+  it("launches the default, not a stored size above the maximum", async () => {
+    const w = world({ ...ON, ROVARA_MACHINE_SIZE_MAX_VCPU: "8" });
+    const id = w.workspace(COMPANY_A, "api");
+    w.choose(COMPANY_A, "api", "arm64-32-128");
+    expect(await w.pick!(id)).toEqual({});
+    w.choose(COMPANY_A, "api", "arm64-8-32");
+    expect(await w.pick!(id)).toEqual({ machine: { instanceType: "m6g.2xlarge", chip: "arm64" } });
+  });
+  it("launches a big stored size when the install allows it (the default)", async () => {
+    const w = world();
+    const id = w.workspace(COMPANY_A, "api");
+    w.choose(COMPANY_A, "api", "arm64-32-128");
+    expect(await w.pick!(id)).toEqual({ machine: { instanceType: "m6g.8xlarge", chip: "arm64" } });
+  });
+});
+
 describe("machine size pick: whose choice", () => {
   it("launches the project's chosen arm64 size", async () => {
     const w = world();

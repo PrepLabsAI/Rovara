@@ -85,6 +85,16 @@ describe("hosted machine-size dispatcher", () => {
     const body = JSON.parse(r.body) as { currentSize: string; choices: Array<{ id: string; costNote?: string }> };
     expect(body.currentSize).toBe(rowId); expect(body.choices).toHaveLength(10); for (const choice of body.choices) expect(typeof choice.costNote).toBe("string");
   });
+  it("refuses a size above the install's maximum with fixed words and lists only the allowed sizes (DEC 254zv)", async () => {
+    vi.stubEnv("ROVARA_MACHINE_SIZE_MAX_VCPU", "8");
+    try {
+      const w = world(); const before = w.stored();
+      await w.refused("CONFIG_INVALID", "rowId: that machine size is not offered on this install", "arm64-16-64", "pa", 400);
+      expect(w.stored()).toBe(before);
+      const ok = await w.call("POST", "arm64-8-32"); expect(ok.statusCode).toBe(200);
+      expect((JSON.parse(ok.body) as { choices: unknown[] }).choices).toHaveLength(6);
+    } finally { vi.unstubAllEnvs(); }
+  });
   it("refuses a missing size", async () => { const w = world(); const before = w.stored(); const r = await w.read("/v1/dev/projects/pa/machine-size", { method: "POST", headers: { authorization: "Bearer e30.eyJhenAiOiJjbG91ZC1wYWdlIn0.sig" }, body: "{}" }); expect(r.statusCode).toBe(400); expect(r.body).toContain("Choose one of the listed machine sizes"); expect(w.stored()).toBe(before); });
   it.each(["tasks:read", "profile:name"] as const)("refuses scoped client %s", async (scope) => { const w = world(); w.client("scoped", [scope]); await w.refused("FORBIDDEN", PAGE); });
   it.each(["tool", "cli"] as const)("refuses non-page client %s", async (kind) => { const w = world(); w.client(kind); await w.refused("FORBIDDEN", PAGE); });

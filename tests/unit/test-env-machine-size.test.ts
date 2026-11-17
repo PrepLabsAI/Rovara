@@ -1,7 +1,7 @@
 // TE-C5 part B (broker): the machine-size switch, the stored measurement (facts only, never the proof row), the person's stored choice and the card. Switch off: nothing is read or written.
 import { describe, expect, it } from "vitest";
 import { MACHINE_SIZE_ROWS, TestEnvironmentBodySchema, type TestEnvProveReport } from "@agentx/contracts";
-import { MACHINE_SIZE_VARIABLE, machineCard, machineSizeEnabled, readMachineChoice, readMachineFacts, recordMachineMeasurement, setMachineChoice, testEnvMachineChoiceKey, testEnvMachineKey } from "../../packages/broker/src/core/test-env/machine-size.js";
+import { MACHINE_SIZE_ABOVE_MAX, MACHINE_SIZE_MAX_VCPU_VARIABLE, MACHINE_SIZE_VARIABLE, machineCard, machineSizeMaxVcpu, offeredMachineRows, machineSizeEnabled, readMachineChoice, readMachineFacts, recordMachineMeasurement, setMachineChoice, testEnvMachineChoiceKey, testEnvMachineKey } from "../../packages/broker/src/core/test-env/machine-size.js";
 import { readTestEnvProveReport } from "../../packages/broker/src/core/test-env/environment.js";
 import { bench, BENCH_ORG } from "../support/test-env-bench.js";
 const COMPANY_B_ID = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -230,5 +230,68 @@ describe("the card", () => {
     const w = await world();
     await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest)) });
     expect((await machineCard(w.deps, COMPANY_B_ID as never, w.project, w.digest))?.lines[0]).toBe("Machine size: not measured");
+  });
+});
+
+describe("the install's largest size (ROVARA_MACHINE_SIZE_MAX_VCPU, DEC 254zv)", () => {
+  const withMax = (value: string | undefined) => ({ ...ON, ...(value === undefined ? {} : { [MACHINE_SIZE_MAX_VCPU_VARIABLE]: value }) });
+  it("offers all ten sizes by default (unset or empty)", () => {
+    expect(offeredMachineRows(withMax(undefined))).toHaveLength(10);
+    expect(offeredMachineRows(withMax(""))).toHaveLength(10);
+    expect(machineSizeMaxVcpu(withMax(undefined))).toBe(Number.POSITIVE_INFINITY);
+  });
+  it.each([["32", 10], ["16", 8], ["8", 6], ["4", 4], ["2", 2], ["1", 2], ["9999", 10]])("a maximum of %s vCPU offers %i sizes, the standard size always among them", (value, count) => {
+    const rows = offeredMachineRows(withMax(value));
+    expect(rows).toHaveLength(count);
+    expect(rows.map(row => row.id)).toContain("arm64-2-8");
+    for (const row of rows) expect(row.vcpu).toBeLessThanOrEqual(Math.max(Number(value), 2));
+  });
+  it.each(["0", "-8", "8.5", "eight", "8 ", " 8", "0x10", "1e1", "00000", "99999", "NaN", "Infinity"])("fails closed to the standard size for the unusable value %j, never to all sizes", (value) => {
+    expect(offeredMachineRows(withMax(value)).map(row => row.id)).toEqual(["arm64-2-8", "x86_64-2-8"]);
+  });
+  it("the card offers only the allowed sizes", async () => {
+    const w = await world(withMax("8"));
+    const card = await machineCard(w.deps, BENCH_ORG, w.project, w.digest);
+    expect(card?.choices.map(choice => choice.id)).toEqual(["arm64-2-8", "arm64-4-16", "arm64-8-32", "x86_64-2-8", "x86_64-4-16", "x86_64-8-32"]);
+  });
+  it("the suggestion never names a size above the maximum, and says so when nothing fits", async () => {
+    const w = await world(withMax("8"));
+    await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest, { fullSuite: { peakMemoryMiB: 30_000, durationMs: 35 * 60_000, tests: 10 } })) });
+    const card = await machineCard(w.deps, BENCH_ORG, w.project, w.digest);
+    expect(card?.suggestedRowId).toBeUndefined();
+    expect(card?.lines[1]).toContain("no available size meets the measured memory requirement");
+    const open = await world(withMax(undefined));
+    await recordMachineMeasurement(open.deps, { orgId: BENCH_ORG, project: open.project, body: body(reportFor(open.digest, { fullSuite: { peakMemoryMiB: 30_000, durationMs: 35 * 60_000, tests: 10 } })) });
+    expect((await machineCard(open.deps, BENCH_ORG, open.project, open.digest))?.suggestedRowId).toBe("arm64-16-64");
+  });
+  it("a long suite does not step up past the maximum", async () => {
+    const w = await world(withMax("4"));
+    await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest, { steps: [{ step: "full_suite", status: "passed", durationMs: 90 * 60_000 }], fullSuite: { peakMemoryMiB: 6246, durationMs: 90 * 60_000, tests: 10 } })) });
+    expect((await machineCard(w.deps, BENCH_ORG, w.project, w.digest))?.suggestedRowId).toBe("arm64-4-16");
+  });
+  it.each(["arm64-16-64", "arm64-32-128", "x86_64-16-64", "x86_64-32-128"])("refuses the listed size %s above a maximum of 8, with fixed words, and stores nothing", async (rowId) => {
+    const w = await world(withMax("8"));
+    const error = await setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId }).catch((e: unknown) => e as Error);
+    expect(error).toMatchObject({ code: "CONFIG_INVALID" });
+    expect((error as Error).message).toBe(`CONFIG_INVALID: ${MACHINE_SIZE_ABOVE_MAX}`);
+    expect(await w.store.get(testEnvMachineChoiceKey(BENCH_ORG, w.project))).toBeUndefined();
+  });
+  it("accepts a size at or below the maximum", async () => {
+    const w = await world(withMax("8"));
+    await setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId: "x86_64-8-32" });
+    expect(await readMachineChoice(w.deps, BENCH_ORG, w.project)).toBe("x86_64-8-32");
+  });
+  it("a stored choice above a lowered maximum reads as none, so it cannot launch", async () => {
+    const w = await world(withMax(undefined));
+    await setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId: "arm64-32-128" });
+    expect(await readMachineChoice(w.deps, BENCH_ORG, w.project)).toBe("arm64-32-128");
+    const lowered = { ...w.deps, env: withMax("16") };
+    expect(await readMachineChoice(lowered, BENCH_ORG, w.project)).toBeUndefined();
+    expect((await machineCard(lowered, BENCH_ORG, w.project, w.digest))?.chosenRowId).toBeUndefined();
+    expect(await readMachineChoice({ ...w.deps, env: withMax("32") }, BENCH_ORG, w.project)).toBe("arm64-32-128");
+  });
+  it("an unknown id keeps the listed-sizes refusal, not the maximum's", async () => {
+    const w = await world(withMax("8"));
+    await expect(setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId: "arm64-64-256" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: rowId: choose one of the listed machine sizes" });
   });
 });

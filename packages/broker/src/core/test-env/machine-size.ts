@@ -11,7 +11,7 @@
 // the advertising of `task.testEnvProveMeasure.v1` are not built yet, so no production caller exists.
 import {
   MACHINE_SIZE_ROWS, MachineFactsSchema, SetupProveResultBodySchema, agentXError, machineAdviceOf, machineCostWords, machineFactsOf, machineRowLabel, MACHINE_STORED_ONLY_LINE, projectPk, when,
-  type DocumentKey, type MachineFacts, type OrgId,
+  type DocumentKey, type MachineFacts, type MachineSizeRow, type OrgId,
 } from "@agentx/contracts";
 import { documentOf, expired, expiryOf, type TestEnvDeps } from "./deps.js";
 import { testEnvProposalKey } from "./environment.js";
@@ -28,16 +28,36 @@ export const machineSizeRunEnabled = (env: NodeJS.ProcessEnv = process.env): boo
 export const MACHINE_SIZE_X86_VARIABLE = "ROVARA_MACHINE_SIZE_X86";
 export const machineSizeX86Enabled = (env: NodeJS.ProcessEnv = process.env): boolean => optIn(env, MACHINE_SIZE_X86_VARIABLE);
 
+/**
+ * ROVARA_MACHINE_SIZE_MAX_VCPU (DEC 254zv): the install's largest machine size, in vCPUs. Unset or empty: all ten sizes. A whole number from 1 to 9999: only sizes with at most that many vCPUs
+ * (the standard 2 vCPU size is always offered, so a value below 2 means 2). Anything else (a typo, a negative or fractional number, text) fails closed to the standard size's 2 vCPUs, never to "all".
+ * It filters what the card offers and suggests, what a choice may name, and what a stored choice reads back as (so lowering it stops a stored bigger choice from launching).
+ */
+export const MACHINE_SIZE_MAX_VCPU_VARIABLE = "ROVARA_MACHINE_SIZE_MAX_VCPU";
+const STANDARD_VCPU = 2;
+export function machineSizeMaxVcpu(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[MACHINE_SIZE_MAX_VCPU_VARIABLE];
+  if (raw === undefined || raw === "") return Number.POSITIVE_INFINITY;
+  return /^[0-9]{1,4}$/u.test(raw) && Number(raw) > 0 ? Math.max(Number(raw), STANDARD_VCPU) : STANDARD_VCPU;
+}
+/** The sizes this install offers, in the table's order. */
+export const offeredMachineRows = (env: NodeJS.ProcessEnv = process.env): readonly MachineSizeRow[] => {
+  const max = machineSizeMaxVcpu(env);
+  return MACHINE_SIZE_ROWS.filter(row => row.vcpu <= max);
+};
+const offeredIds = (env: NodeJS.ProcessEnv | undefined): readonly string[] => offeredMachineRows(env ?? process.env).map(row => row.id);
+
 /** A measurement is kept this long: a proposal lives 7 days, an approved environment's card is read soon after. */
 export const MACHINE_MEASURE_TTL_MS = 30 * 86_400_000;
 const ENTITY_MEASURE = "TEST_ENV_MACHINE_MEASURE";
 const ENTITY_CHOICE = "TEST_ENV_MACHINE_CHOICE";
 const DIGEST = /^[a-f0-9]{64}$/u;
-const ROW_IDS: readonly string[] = MACHINE_SIZE_ROWS.map(row => row.id);
 
 export const testEnvMachineKey = (orgId: OrgId, project: string, digest: string): DocumentKey => ({ pk: projectPk(orgId, project), sk: `TESTENV#MACHINE#${digest}` });
 export const testEnvMachineChoiceKey = (orgId: OrgId, project: string): DocumentKey => ({ pk: projectPk(orgId, project), sk: "TESTENV#MACHINE_CHOICE" });
 
+/** Fixed words: the refusal of a listed size above this install's maximum. */
+export const MACHINE_SIZE_ABOVE_MAX = "rowId: that machine size is not offered on this install";
 const switchedOff = () => agentXError("CALLBACK_FORBIDDEN", "machine sizing is not on");
 type Row = Record<string, unknown>;
 const readRow = async (deps: TestEnvDeps, key: DocumentKey): Promise<Row | undefined> => {
@@ -78,7 +98,8 @@ export async function readMachineFacts(deps: TestEnvDeps, orgId: OrgId, project:
 export async function setMachineChoice(deps: TestEnvDeps, input: { orgId: OrgId; project: string; rowId: unknown }): Promise<{ rowId: string }> {
   if (!machineSizeEnabled(deps.env ?? process.env)) throw agentXError("NOT_AVAILABLE_HERE", "machine sizing is not on");
   const rowId = input.rowId;
-  if (typeof rowId !== "string" || !ROW_IDS.includes(rowId)) throw agentXError("CONFIG_INVALID", "rowId: choose one of the listed machine sizes");
+  if (typeof rowId !== "string" || !MACHINE_SIZE_ROWS.some(row => row.id === rowId)) throw agentXError("CONFIG_INVALID", "rowId: choose one of the listed machine sizes");
+  if (!offeredIds(deps.env).includes(rowId)) throw agentXError("CONFIG_INVALID", MACHINE_SIZE_ABOVE_MAX);
   await deps.store.put({ item: documentOf({ ...testEnvMachineChoiceKey(input.orgId, input.project), entityType: ENTITY_CHOICE, orgId: input.orgId, project: input.project, rowId, chosenAt: new Date(deps.now()).toISOString() }) });
   return { rowId };
 }
@@ -88,7 +109,7 @@ export async function readMachineChoice(deps: TestEnvDeps, orgId: OrgId, project
   if (!machineSizeEnabled(deps.env ?? process.env)) return undefined;
   const row = await readRow(deps, testEnvMachineChoiceKey(orgId, project));
   const rowId = row?.["rowId"];
-  return row !== undefined && row["entityType"] === ENTITY_CHOICE && row["orgId"] === orgId && row["project"] === project && typeof rowId === "string" && ROW_IDS.includes(rowId) ? rowId : undefined;
+  return row !== undefined && row["entityType"] === ENTITY_CHOICE && row["orgId"] === orgId && row["project"] === project && typeof rowId === "string" && offeredIds(deps.env).includes(rowId) ? rowId : undefined;
 }
 
 export interface MachineCard {
@@ -107,11 +128,12 @@ export async function machineCard(deps: TestEnvDeps, orgId: OrgId, project: stri
   if (!machineSizeEnabled(deps.env ?? process.env)) return undefined;
   const facts = digest === undefined ? undefined : await readMachineFacts(deps, orgId, project, digest).catch(() => undefined);
   const chosen = await readMachineChoice(deps, orgId, project).catch(() => undefined);
-  const advice = machineAdviceOf(facts);
+  const offered = offeredMachineRows(deps.env ?? process.env);
+  const advice = machineAdviceOf(facts, { available: offered.map(row => row.id) });
   const chosenLabel = chosen === undefined ? undefined : machineRowLabel(chosen);
   return {
     lines: [advice.headline, `Why: ${advice.reasons.join("; ")}`, `Your choice: ${chosenLabel ?? "none yet"}`, MACHINE_STORED_ONLY_LINE],
-    choices: MACHINE_SIZE_ROWS.map((row) => { const costNote = machineCostWords(row.id); return { id: row.id, label: machineRowLabel(row.id)!, ...(costNote === undefined ? {} : { costNote }) }; }),
+    choices: offered.map((row) => { const costNote = machineCostWords(row.id); return { id: row.id, label: machineRowLabel(row.id)!, ...(costNote === undefined ? {} : { costNote }) }; }),
     ...(facts?.peakMemoryMiB === undefined ? {} : { measuredPeakMemoryMiB: facts.peakMemoryMiB }),
     ...(facts?.suiteMs === undefined ? {} : { testTimeMs: facts.suiteMs }),
     ...(advice.row === undefined ? {} : { suggestedRowId: advice.row.id }), ...(chosen === undefined ? {} : { chosenRowId: chosen }),
