@@ -34,6 +34,13 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/access", requires: "none" },
   // #634: the person chooses their own name.
   { method: "PUT", path: "/v1/dev/me/name", requires: "profile:name" },
+  // DEC 254w: connected sign-ins. Full access only (the web app); DeveloperIdentity also checks the session, the step-up and the person.
+  { method: "GET", path: "/v1/dev/me/sign-ins", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/sign-ins/link", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/sign-ins/link/finish", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/me/sign-ins/{method}", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/members/{personId}/sign-ins", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/members/{personId}/sign-ins/{method}", requires: "full" },
   // Spec 065b: a project from a repository the GitHub App can reach.
   { method: "POST", path: "/v1/dev/client/projects", requires: "projects:create" },
   { method: "GET", path: "/v1/dev/client/repositories", requires: "projects:create" },

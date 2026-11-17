@@ -68,6 +68,8 @@ import {
   type RemovePersonPasskeysResponse,
   type SetFactorEmailRequest,
   type SetFactorEmailResponse,
+  type SignInLinkStartRequest, type SignInLinkFinishRequest, type SignInLinksListRequest, type SignInUnlinkRequest,
+  type SignInLinkStartResponse, type SignInLinkFinishResponse, type SignInLinksListResponse, type SignInUnlinkResponse,
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
@@ -75,6 +77,7 @@ import { mergeSurvivor } from "../aws/install-company.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { createFactorAdmin } from "./factor-admin.js";
+import { createSignInLinks } from "./sign-in-links.js";
 import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
@@ -324,6 +327,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // As a refresh checks: the session's method is still on, and was on when it started.
     methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, methodSince(config, session.amr)),
   });
+  // DEC 254w: connecting a second sign-in method to the signed-in person (sign-in-links.ts).
+  const signInLinks = createSignInLinks({
+    store, company: () => deps.company, provider, methodEnabled: (method) => enabledMethods(deps).includes(method),
+    methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, methodSince(config, session.amr)),
+    registeredClient: (clientId) => registeredClient(clientId), installSlackCompany: () => slackCompany(),
+    slackTeamCompany: async (teamId) => deps.slackTeamCompany === undefined ? undefined : deps.slackTeamCompany(teamId), endpoint, now: deps.now, log: deps.log,
+  });
   const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
@@ -535,6 +545,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   });
 
   async function callback(method: DeveloperSignInMethod, query: URLSearchParams, headers: Record<string, string | undefined>): Promise<HttpResult> {
+    // DEC 254w: a connect link's callback (its state is a link id, never a sign-in request's).
+    if (deps.company !== undefined && signInLinks.isLinkState(query.get("state"))) return signInLinks.callback(method, query);
     const state = query.get("state") ?? "";
     const pending = state === "" ? undefined : await store.getAuthRequest(state);
     if (pending === undefined || pending.method !== method) return expired();
@@ -686,6 +698,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const link = await directory.lookupByEmail(identity.email);
       slackUserId = link === "unavailable" ? (companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? existing?.slackUserId : undefined) : link === "none" ? undefined : link.userId;
     }
+    // DEC 254w: a Slack user the person connected stays their Slack link whatever this sign-in's method or lookup says.
+    if (existing?.linkedSlackUserId !== undefined) slackUserId = existing.linkedSlackUserId;
     // A merged sign-in rewrites neither its own record nor the survivor's.
     if (!merged) await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
@@ -958,9 +972,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
       | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
-      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput,
+      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput
+      | SignInLinkStartRequest | SignInLinkFinishRequest | SignInLinksListRequest | SignInUnlinkRequest,
   ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
-    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue> => {
+    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue
+    | SignInLinkStartResponse | SignInLinkFinishResponse | SignInLinksListResponse | SignInUnlinkResponse> => {
     if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
       if (deps.companyImport !== undefined && (event.kind === "company-import" || event.kind === "company-import-undo")) return companyImportOperator({ store: deps.companyImport, log: deps.log }, event);
@@ -970,6 +986,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (event.kind === "remove-passkey") return factorAdmin.removePasskey(event);
       if (event.kind === "remove-person-passkeys") return factorAdmin.removePersonPasskeys(event);
       if (event.kind === "set-factor-email") return factorAdmin.setFactorEmail(event);
+      // DEC 254w: connected sign-ins. Each checks the caller's own live session in this table.
+      if (event.kind === "sign-in-link-start") return signInLinks.start(event);
+      if (event.kind === "sign-in-link-finish") return signInLinks.finish(event);
+      if (event.kind === "sign-in-links-list") return signInLinks.list(event);
+      if (event.kind === "sign-in-unlink") return signInLinks.unlink(event);
       // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);

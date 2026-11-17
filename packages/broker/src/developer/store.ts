@@ -36,6 +36,10 @@ export interface DeveloperRecord { developerId: string; provider: DeveloperSignI
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
   email?: string; slackUserId?: string;
+  /** DEC 254w: the install-workspace Slack user of a Slack sign-in this person CONNECTED (sign-in-links.ts). A sign-in keeps it as the person's Slack link. */
+  linkedSlackUserId?: string;
+  /** DEC 254w: on a connected sign-in's own record, the person it signs in as (the same field an operator's merge writes). */
+  mergedInto?: string;
   /** DEC 254e: the Slack workspace (id, and its name when Slack gives one) of a Slack sign-in with Code's company layer on. Never a company. */
   slackTeamId?: string; slackTeamName?: string;
   firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
@@ -147,6 +151,8 @@ export class DeveloperSignInStore {
 
   private seconds(): number { return Math.floor(this.input.now() / 1000); }
   private iso(): string { return new Date(this.input.now()).toISOString(); }
+  /** DEC 254w: the table and client, for the sign-in link writes (sign-in-links.ts), which commit several rows in one transaction. */
+  table(): { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string } { return { documentClient: this.input.documentClient, tableName: this.input.tableName }; }
 
   private async get<T>(pk: string): Promise<(T & { pk: string; sk: string }) | undefined> {
     const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: { pk, sk: META }, ConsistentRead: true })) as { Item?: T & { pk: string; sk: string } };
