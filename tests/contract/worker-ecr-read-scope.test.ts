@@ -12,7 +12,7 @@
 //   2. every image reference the boot paths pull is covered by an ARN the role reads, and a reference outside them (another environment, an unrelated repository) is not;
 //   3. the set of `docker pull` sites in the boot scripts is pinned, so a new pull cannot appear without this file being revisited;
 //   4. the legacy (production) template's statement is unchanged; the default boundary still allows the actions.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { Stack, type App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -139,17 +139,25 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
   });
 
   it("the boot scripts' docker pull sites are exactly the ones this scope was derived from", () => {
-    const boot = readFileSync("packages/worker/ec2/boot.sh", "utf8");
-    const stage = readFileSync("packages/worker/ec2/test-services-stage.sh", "utf8");
-    const pulls = (text: string) => [...text.matchAll(/docker pull (?:--[a-z-]+ )*("?\$[A-Za-z0-9_{}"]+"?)/gu)].map((match) => match[1]!.replace(/["{}]/gu, "")).sort();
-    // pull_image_once "$1" is called with the worker image only (pull_worker_image); the qualification script pulls the executor it is given
-    expect(pulls(boot)).toEqual(["$CONTAINED_IMAGE", "$EXECUTOR", "$EXECUTOR_IMAGE", "$1"].sort());
-    expect(boot).toContain('retry "could not download the worker image" pull_image_once "$AGENTX_WORKER_IMAGE"');
+    // every EC2 boot script except the swebench one (its own role): a new script cannot add a pull unseen
+    const scripts = readdirSync("packages/worker/ec2").filter((name) => name.endsWith(".sh") && name !== "swebench-boot.sh").sort();
+    expect(scripts).toEqual(["boot.sh", "test-services-stage.sh"]);
+    const read = (name: string) => readFileSync(`packages/worker/ec2/${name}`, "utf8");
+    const boot = read("boot.sh");
+    const stage = read("test-services-stage.sh");
+    // `docker pull X` and `docker image pull X`, whether X is a variable or a literal reference
+    const pulls = (text: string) => [...text.matchAll(/docker (?:image )?pull(?: --[a-z-]+)* (\S+)/gu)].map((match) => match[1]!.replace(/[";|&)]+$/u, "").replace(/["{}]/gu, "")).sort();
+    // calls of the helper that wraps `docker pull "$1"`
+    const helperCalls = (text: string) => [...text.matchAll(/pull_image_once (\S+)/gu)].map((match) => match[1]!).filter((arg) => arg !== "()").sort();
+    expect(pulls(boot)).toEqual(["$1", "$CONTAINED_IMAGE", "$EXECUTOR", "$EXECUTOR_IMAGE"]);
+    expect(helperCalls(boot)).toEqual(['"$AGENTX_WORKER_IMAGE"']); // the worker image only (pull_worker_image)
     expect(boot).toContain("AGENTX_SANDBOX_IMAGE=$AGENTX_WORKER_IMAGE");
     expect(boot).toContain("readonly CONTAINED_IMAGE=node@sha256:"); // Docker Hub: no ECR
     expect(pulls(stage)).toEqual(["$reference"]);
-    // every ECR login in the boot scripts is for the worker image's registry (this account), the executor's, or the starter copies' (all this account's)
+    expect(helperCalls(stage)).toEqual([]);
+    // every ECR login is for this account's registry: the worker image's (boot.sh), the executor's (qualification), the starter copies' (stage)
     expect([...boot.matchAll(/ecr get-login-password/gu)]).toHaveLength(2);
+    expect([...stage.matchAll(/ecr get-login-password/gu)]).toHaveLength(1);
   });
 
   it("the legacy (production) role's statement is unchanged: this change is for named environments", () => {

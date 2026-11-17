@@ -137,7 +137,8 @@ agentx --env <env> upgrade --region <region> --to <version> --source <checkout o
 
 `--to` or `--release`, when given, must be the checkout's tag. An `agentx` built from source needs
 neither: it upgrades to the checkout's tag, and reads the images from `--worker-image` and
-`--slack-image`, or else from that tag's `release.json` on GitHub.
+`--slack-image`, or else from that tag's `release.json` on GitHub. A `--worker-image` must be in
+the install's account and region under `agentx-<env>/` (the worker role reads only that prefix).
 
 **For a pipeline: `upgrade --export`.** This writes the upgrade as files and changes nothing:
 

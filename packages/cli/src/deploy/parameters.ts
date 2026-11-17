@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -173,6 +173,20 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
 }
 
 /**
+ * L4-IAM: the worker role reads images only under the environment's ECR pull-through prefix (`agentx-<env>/`) and its test-service copies, so a worker image anywhere else
+ * would deploy cleanly and then fail every instance boot ("could not download the worker image"). Refused here, before anything is deployed. Fixed words, no echo.
+ */
+function checkedWorkerOverride(uri: string, answers: Pick<InstallAnswers, "env" | "account" | "region" | "partition">): string {
+  checkedImageOverride(uri, "worker");
+  const suffix = ECR_HOST_SUFFIX[answers.partition ?? "aws"];
+  if (suffix === undefined) throw new Error(`unknown AWS partition ${answers.partition}`);
+  if (!uri.startsWith(`${answers.account}.dkr.ecr.${answers.region}.${suffix}/${environmentPullThroughPrefix(answers.env)}/`)) {
+    throw new Error("the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix");
+  }
+  return uri;
+}
+
+/**
  * The image URI for `which`: the answers' override when given (validated to be a digest
  * reference, used as-is), otherwise the release's public image mapped through the account's
  * pull-through cache. Only the non-override path needs the access stack's `PullThroughPrefix`
@@ -180,7 +194,7 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
  */
 function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outputs: Partial<Record<DeployPart, StackOutputs>>): string {
   const override = answers.images?.[which];
-  if (override !== undefined) return checkedImageOverride(override, which);
+  if (override !== undefined) return which === "worker" ? checkedWorkerOverride(override, answers) : checkedImageOverride(override, which);
   const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
   return privateImageUri(requiredImage(answers.release, which), imageTarget(answers, prefix));
 }
