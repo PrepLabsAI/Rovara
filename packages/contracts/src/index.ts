@@ -378,6 +378,8 @@ export * from "./wiki-store.js";
 // Lead 4 J1: the smart Just answer service (limits, request, answer object, fixed words).
 export * from "./answers.js";
 export * from "./answer-keys.js";
+// Lead 4 J3: the web start box's path suggestion (the Slack intake's first look and classifier, for the web).
+export * from "./start-suggest.js";
 export * from "./spec-target.js";
 
 // Setup and test health: saved environments (SH3).

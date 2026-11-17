@@ -580,6 +580,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
           },
+          // Lead 4 J3: the web start box's path suggestion. Any live role on the project asks (the setup run's standing). NO classifier yet: the gateway's "answers" purpose is Cloud lane L4-E, so until it lands every
+          // suggestion says the classifier is unavailable (small talk is still answered, free). Pass `route` here when it does.
+          startSuggest: { standing: setupRunStanding },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
         };

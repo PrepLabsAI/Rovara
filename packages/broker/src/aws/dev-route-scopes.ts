@@ -201,6 +201,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/wiki", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
+  // Lead 4 J3: the start box's path suggestion (core-host/start-suggest-routes.ts): full access only, then any live role on the project. Starts nothing, stores nothing.
+  { method: "POST", path: "/v1/app/projects/{project}/code/suggest", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
