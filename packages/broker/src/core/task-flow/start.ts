@@ -164,7 +164,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const title = redactedTitle(request);
   const ownerKey = taskOwnerKey(developerId, taskId);
   const requestText = storedRequestText(request.instructions);
-  const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt, ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
+  const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt, origin: origin.data, ...(run?.setupAgent === undefined ? {} : { purpose: "setup_agent" as const }), ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
   // The approved test environment the task starts with, pinned in the start's own transaction: a later approval changes the NEXT task, never this one.
   const testEnvironment = asWorkflow ? await deps.testEnvironment?.forStart({ project: request.project, taskId }) : undefined;
 

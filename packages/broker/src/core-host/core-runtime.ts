@@ -13,6 +13,7 @@ import { createTaskFlowFromRegistry, type RegistryTaskFlowOptions, type TaskFlow
 import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flow/deps.js";
 import { withStepFenceRetry } from "./step-fence.js";
 import { startFenceItems } from "../core/task-flow/start-fence.js";
+import { reportStartItems } from "../core/report/task-row.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
 import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
@@ -111,7 +112,9 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     const stamped = stampForNewTask(options.flags, companyId, options.now());
     if (stamped.engine !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
     const own = given?.(input);
-    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped)] };
+    // The cost report's row for this task (lead 4, A2), in the start's own transaction: the task and its row exist together or not at all. It never throws.
+    const reported = reportStartItems({ companyId, taskId: input.taskId, project: input.project, title: input.title, origin: input.origin, purpose: input.purpose, receivedAt: input.receivedAt });
+    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped), ...reported] };
   };
   const base = createTaskFlowFromRegistry(withStepFenceRetry(withCompanyMachines(registry, companyId)), {
     ...options.flowOptions,

@@ -49,6 +49,7 @@ import type { CoreRuntime } from "./core-runtime.js";
 import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
 import type { AgentModelChoice } from "./gateway-model-selection.js";
 import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
+import { isReportPath, routeHostedReport, type HostedReportWiring } from "./report-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -133,6 +134,8 @@ export interface CoreDevWiring {
   auditFor?: (caller: DeployedCaller, sink: AuditSink) => AuditSink;
   /** Guided onboarding L2-3: the hosted setup run (`/v1/app/projects/<p>/setup-agent...`, setup-run-routes.ts). Absent: those paths say "not on the core yet". */
   setupRun?: HostedSetupRunWiring;
+  /** Lead 4 A1/A2: the cost and time report (`/v1/app/org/report/...` and `POST /v1/app/tasks/<id>/feature`, report-routes.ts). Absent: those paths say "not on the core yet". */
+  report?: HostedReportWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -158,7 +161,7 @@ function owns(path: string, method: string): boolean {
   if (TASK_READ.test(path) || PLAYBOOK.test(path)) return method === "GET";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
-  if (isSetupRunPath(path, method)) return true;
+  if (isSetupRunPath(path, method) || isReportPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -355,6 +358,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
             request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
+          });
+        }
+        if (isReportPath(path, request.method)) {
+          // Lead 4 A1/A2: the company's own runtime, the caller's live role from membership, the request's audit sink naming the caller.
+          if (target.wiring.report === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedReport({
+            request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.report,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
           });
         }
         const playbook = PLAYBOOK.exec(path);
