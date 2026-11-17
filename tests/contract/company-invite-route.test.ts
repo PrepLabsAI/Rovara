@@ -1,4 +1,4 @@
-import { CLIENT_SCOPES } from "@agentx/contracts";
+import { CLIENT_SCOPES, companyInviteCodeHash } from "@agentx/contracts";
 import { expect, it, vi } from "vitest";
 import { PERSON, TIME } from "../support/company-route-harness.js";
 import { inviteCompanyWorld as inviteWorld } from "../support/signin-company-world.js";
@@ -14,8 +14,14 @@ const hash = emailIndexKey(email).pk.slice(6);
 
 it("member admin adds and withdraws a hashed approval through the real identity handler", async () => {
   const h = await inviteWorld(); h.claims.companyId = B;
-  expect((await h.post()).statusCode).toBe(200);
-  expect(h.forwarded).toEqual([{ kind: "company-preapprove", companyId: A, email, role: "member", expiresInHours: 24, createdBy: PERSON }]);
+  const posted = await h.post();
+  expect(posted.statusCode).toBe(200);
+  // DEC 254h: the answer carries the invite link secret once; only its hash was forwarded.
+  const invite = (JSON.parse(posted.body) as { ok: true; invite: { secret: string; expiresAt: string } }).invite;
+  const stored = (await h.identity.company.list(A)).preapprovals.find((row) => row.emailHash === hash)!;
+  expect(JSON.parse(posted.body)).toEqual({ ok: true, invite: { secret: expect.stringMatching(/^rvlink_[A-Za-z0-9_-]{32}$/) as unknown, expiresAt: new Date(stored.expiresAt * 1000).toISOString() }, requestId: "company-test" });
+  expect(h.forwarded).toEqual([{ kind: "company-preapprove", companyId: A, email, role: "member", expiresInHours: 24, createdBy: PERSON, inviteHash: companyInviteCodeHash(invite.secret) }]);
+  expect(JSON.stringify(h.forwarded)).not.toContain(invite.secret.slice(7));
   expect((await h.identity.company.list(A)).preapprovals.find((row) => row.emailHash === hash)).toMatchObject({ role: "member", createdBy: PERSON });
   expect((await h.withdraw()).statusCode).toBe(200);
   expect(h.forwarded[1]).toEqual({ kind: "company-preapproval-withdraw", companyId: A, emailHash: hash, createdBy: PERSON });
@@ -82,19 +88,29 @@ it("malformed hash and unavailable forwarding refuse without leaked causes", asy
 it("the production broker dispatcher supplies the membership reader and invite transport", async () => {
   const { createDeveloperTaskBroker, MAYA } = await import("../support/developer-task-broker.js");
   const forwarded: unknown[] = [];
-  const h = await createDeveloperTaskBroker({ developerExtra: { companies: { companyOf: async () => A }, companyPreapprovals: async (event) => { forwarded.push(event); return true; } } });
+  const h = await createDeveloperTaskBroker({ developerExtra: { companies: { companyOf: async () => A }, companyPreapprovals: async (event) => { forwarded.push(event); return { expiresAt: 2_000_000_000 }; } } });
   h.db.set({ ...membershipKey(MAYA.developerId), entityType: "COMPANY_MEMBERSHIP", personId: MAYA.developerId, companyId: A, role: "admin", joinedAt: TIME });
   const answer = await h.dev(MAYA, "POST", path, { email, role: "member", expiresInHours: 24 });
-  expect(answer.status).toBe(200); expect(forwarded).toEqual([{ kind: "company-preapprove", companyId: A, email, role: "member", expiresInHours: 24, createdBy: MAYA.developerId }]);
+  expect(answer.status).toBe(200); expect(forwarded).toEqual([{ kind: "company-preapprove", companyId: A, email, role: "member", expiresInHours: 24, createdBy: MAYA.developerId, inviteHash: expect.stringMatching(/^[a-f0-9]{64}$/) as unknown }]);
+  expect(answer.body).toMatchObject({ ok: true, invite: { expiresAt: "2033-05-18T03:33:20.000Z" } });
 });
 
 it("the broker forwarding seam runtime-refuses every operator kind and malformed invite", async () => {
-  const invoke = vi.fn(async () => ({ Payload: Buffer.from('{"ok":true}') }));
+  const invoke = vi.fn(async () => ({ Payload: Buffer.from('{"ok":true,"expiresAt":1800000000}') }));
   const forward = routes.companyPreapprovalsThroughLambda(invoke);
-  const good = { kind: "company-preapprove" as const, companyId: A, email, role: "member" as const, expiresInHours: 1, createdBy: PERSON };
-  expect(await forward(good)).toBe(true); invoke.mockClear();
-  for (const event of [ { ...good, kind: "company-create" }, { ...good, role: "admin" }, { ...good, companyId: "private-canary" }, { ...good, createdBy: undefined }, { ...good, expiresInHours: 0 } ]) expect(await forward(event as Parameters<typeof forward>[0])).toBe(false);
+  const good = { kind: "company-preapprove" as const, companyId: A, email, role: "member" as const, expiresInHours: 1, createdBy: PERSON, inviteHash: "a".repeat(64) };
+  expect(await forward(good)).toEqual({ expiresAt: 1_800_000_000 }); invoke.mockClear();
+  for (const event of [ { ...good, kind: "company-create" }, { ...good, role: "admin" }, { ...good, companyId: "private-canary" }, { ...good, createdBy: undefined }, { ...good, expiresInHours: 0 }, { ...good, inviteHash: undefined }, { ...good, inviteHash: "rvlink_private-canary" } ]) expect(await forward(event as Parameters<typeof forward>[0])).toBe(false);
   expect(invoke).not.toHaveBeenCalled();
+  // A stored invitation whose expiry did not come back: 404, and the secret is never shown.
+  const h = await inviteWorld();
+  h.deps.developer.companyPreapprovals = async () => ({});
+  const blind = await h.post();
+  expect(blind.statusCode).toBe(404); expect(blind.body).not.toContain("rvlink_");
+  // A reply whose expiry is not a positive whole number is no answer.
+  for (const reply of ['{"ok":true,"expiresAt":"soon"}', '{"ok":true,"expiresAt":-1}', '{"ok":false,"error":"unavailable"}']) {
+    expect(await routes.companyPreapprovalsThroughLambda(async () => ({ Payload: Buffer.from(reply) }))(good)).toBe(false);
+  }
 });
 
 it.each([{ revokedAt: TIME }, { personId: "b".repeat(64) }])("a membership change after company resolution still refuses: %j", async (damage) => {

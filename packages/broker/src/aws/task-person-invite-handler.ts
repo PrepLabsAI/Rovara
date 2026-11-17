@@ -101,7 +101,7 @@ function validRegistry(row: Record<string, unknown> | undefined, taskId: string,
     && Object.keys(row).sort().join(",") === "createdAt,developerId,issuer,method,name,personId,pk,schemaVersion,sk,slackUserId,subject"
     && row.schemaVersion === 1 && row.personId === personId && row.developerId === developerId
     && SlackUserIdSchema.safeParse(row.slackUserId).success
-    && (row.method === "slack" || row.method === "oidc") && typeof row.issuer === "string" && row.issuer.length > 0
+    && (row.method === "slack" || row.method === "oidc" || row.method === "github") && typeof row.issuer === "string" && row.issuer.length > 0
     && typeof row.subject === "string" && row.subject.length > 0 && typeof row.name === "string"
     && typeof row.createdAt === "string" && Number.isFinite(Date.parse(row.createdAt));
 }
