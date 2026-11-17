@@ -107,7 +107,7 @@ import { fixedAutomationSwitch, type AutomationSwitch } from "../../core/automat
 import { createScheduleRouter } from "../../core/automation/schedule-router.js";
 import { createChannelSink } from "../../core/channel/sink.js";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
-import { createCallbackService, createDecisionService, createNoticeService, createSessionService } from "../../services/index.js";
+import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
 import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
@@ -173,6 +173,8 @@ export interface LocalAppOptions {
   lessonsEnabled?: () => boolean;
   /** Whether the setup agent is served (`ROVARA_SETUP_AGENT=0` turns it off). The runtime gives it from its environment; default on. */
   setupAgent?: boolean;
+  /** W3b: the wiki build run's callback seams (the standing read, the code host's file read and the wiki store's page sink). Absent: the `wiki-build` action is not served here (W4 wires it with the routes). */
+  wikiBuild?: CallbackServiceOptions["wikiBuild"];
   /** The websites this install's machines reach by their own list, so a setup run's ask for one of them is "already allowed". */
   installDomains?: () => readonly string[];
   /** FIX-0518: whether the owner let this project's sandboxes reach the model hosts (the owner's config). True puts the fixed sentence in the evidence of the project's runs. Absent: never. */
@@ -698,7 +700,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
   browserSuggestion.current = (project) => setupAgent.browserEvidenceSuggestion(project);
   const callbackHandler = createCallbackService({
-    flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}),
+    flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}), ...(options.wikiBuild === undefined ? {} : { wikiBuild: options.wikiBuild }),
     // The saved sign-in is read only for a run whose recipe has one, from the company's own secret path (`browser-evidence-sign-in-callback.ts`).
     ...(browserEvidence === undefined ? {} : { browserEvidenceSignIn: browserEvidence.signInReader }),
     // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). The approval uses only the

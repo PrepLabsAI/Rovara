@@ -11,6 +11,7 @@ import type {
   SetupRunSummary,
   SetupVerification,
   StoredDocument,
+  WikiBuildWire,
   WorkspaceStatus,
 } from "@agentx/contracts";
 import type { DeveloperTaskPointerRecord, DeveloperTaskRecord } from "../../developer/task-records.js";
@@ -32,7 +33,9 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   /** The person asked for the design to be reviewed before any code (`design first`), whatever the project's setting says. */
   designFirst?: { by: string; at: string };
   /** What the task is for, when it is not ordinary work: a run that sets a project up by running its commands (`core/setup-agent`). */
-  purpose?: "setup_agent";
+  purpose?: "setup_agent" | "wiki_build";
+  /** A wiki build run (purpose `wiki_build`): its limits and the commits it reads, fixed when it started. The project's pointer holds the rest (core/wiki-build). */
+  wikiBuild?: WikiBuildWire;
   /** A setup run: the limits it started with. */
   setupAgentLimits?: SetupAgentLimits;
   /** A setup run: who pressed Stop and when. Written before the cancel, so the end can tell a person's stop from any other cancel. */
@@ -53,7 +56,7 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
 export type TaskPointerRecord = Omit<DeveloperTaskPointerRecord, "requester" | "pendingWorkflowMode"> & {
   requester: { kind: "developer"; developerId: string; provider: string };
   /** The mode the first run is queued with; a setup run's is its own (`SETUP_AGENT`). */
-  pendingWorkflowMode?: "PLAN" | "IMPLEMENT" | "SETUP_AGENT";
+  pendingWorkflowMode?: "PLAN" | "IMPLEMENT" | "SETUP_AGENT" | "WIKI_BUILD";
 };
 
 /** `WORKSPACE#<id>/META`: where a task's worker runs. `machine` is set once a worker machine was started for it. */

@@ -14,7 +14,7 @@
 //   `submitWikiPage` takes the worker's answer for the granted page only, re-checks every citation (check.ts) and writes what survived through the page sink. A page is "done" only once the
 //                    sink wrote it (or nothing on it survived), so a stop at any point keeps every finished page and a continue never writes them again.
 import {
-  WIKI_BUILD_PAYER_KIND, WIKI_BUILD_WORDS, WikiBuildPinsSchema, WikiPageDraftSchema, agentXError, change, effectiveWikiBuildLimits, oneLineText, when, wikiPageFits,
+  WIKI_BUILD_PAYER_KIND, WIKI_BUILD_WORDS, WIKI_BUILD_WORKFLOW_MODE, WikiBuildPinsSchema, WikiPageDraftSchema, agentXError, change, effectiveWikiBuildLimits, oneLineText, when, wikiPageFits,
   type DocumentStore, type JsonValue, type OrgId, type TransactItem, type WikiBuildEndWord, type WikiBuildLimits, type WikiBuildPins, type WikiBuildRecord, type WikiBuildSummary, type WikiFileMap,
   type WikiPagePlan, type WikiPageSink,
 } from "@agentx/contracts";
@@ -25,8 +25,8 @@ import { wikiBuildNotesKey, wikiBuildPartition, wikiBuildRunKey, wikiExpiryOf, w
 import { planWikiPages } from "./plan.js";
 import { cleanWikiNotes, frameWikiNotes, wikiPageInstructions } from "./prompt.js";
 
-/** The operation mode of a build run's own step (the follow-up PR adds it to the task flow and the worker). */
-export const WIKI_BUILD_WORKFLOW_MODE = "WIKI_BUILD" as const;
+/** The operation mode of a build run's own step (defined in the contract so the worker and the broker read one definition). */
+export { WIKI_BUILD_WORKFLOW_MODE };
 /** Grace after the run's clock before a run that never reported an end reads as failed. */
 const STALE_GRACE_MIN = 60;
 
@@ -47,8 +47,8 @@ export const WikiPageAnswerSchema = z.object({
   pageId: z.string().min(1).max(420),
   spentCents: z.number().int().min(0).max(1_000_000),
   draft: z.unknown().optional(),
-  /** The worker could not write the page: the run ends with this word (a model key refused, a repository unreadable at its commit, anything else). */
-  failure: z.enum(["needs_ai_key", "repo_unreadable", "infrastructure"]).optional(),
+  /** The worker could not write the page: the run ends with this word (a model key refused, a repository unreadable at its commit, its own spend reached the ceiling it was given, anything else). The page is not done: a continue writes it again. */
+  failure: z.enum(["needs_ai_key", "repo_unreadable", "budget_used", "infrastructure"]).optional(),
 }).strict();
 export const WikiNextBodySchema = z.object({ spentCents: z.number().int().min(0).max(1_000_000) }).strict();
 
@@ -429,8 +429,8 @@ async function recordBuild(deps: WikiPageLoopDeps, scope: WikiRunScope): Promise
 
 export type WikiPageJob =
   /**
-   * `spendCeilingCents`: the most this run's own metered spend (the `spentCents` the worker reports) may reach. The worker stops its session there (part 2); the broker grants no page
-   * whose reserve does not fit under it.
+   * `spendCeilingCents`: the most this run's own metered spend (the `spentCents` the worker reports) may reach: what is left of the build cap, and at most one page's reserve above what the broker
+   * already knows was spent. The worker stops its session there (a page that cannot finish inside its reserve ends the run `budget_used`); the broker grants no page whose reserve does not fit under the cap.
    */
   | { kind: "page"; page: WikiPagePlan; pins: WikiBuildPins; instructions: string; notes?: string; spendCeilingCents: number }
   | { kind: "end"; word: WikiBuildEndWord };
@@ -444,10 +444,13 @@ async function runPointer(deps: WikiPageLoopDeps, scope: WikiRunScope): Promise<
   return pointer;
 }
 
-async function jobFor(deps: WikiPageLoopDeps, pointer: WikiBuildPointer, page: WikiPagePlan): Promise<WikiPageJob> {
+async function jobFor(deps: WikiPageLoopDeps, pointer: WikiBuildPointer, page: WikiPagePlan, spentCents: number): Promise<WikiPageJob> {
   const notesRow = await deps.store.get(wikiBuildNotesKey(pointer));
   const framed = notesRow?.["orgId"] === pointer.orgId && notesRow["project"] === pointer.project ? frameWikiNotes(cleanWikiNotes(notesRow["notes"])) : undefined;
-  const ceiling = Math.max(0, pointer.limits.budgetCents - (Number.isSafeInteger(pointer.spentEarlierCents) ? pointer.spentEarlierCents : pointer.limits.budgetCents));
+  // The ceiling is the most this run's metered spend may reach: what is left of the build cap, and never more than what the broker KNOWS was spent plus ONE page's reserve. The worker reports its spend only between pages, so a page
+  // that dies unreported (a Stop, a crash, a lost machine) cost at most its reserve, which is exactly what a continue charges for a page that was out: the cap cannot be slipped past by stopping and continuing (review M2).
+  const capLeft = Math.max(0, pointer.limits.budgetCents - (Number.isSafeInteger(pointer.spentEarlierCents) ? pointer.spentEarlierCents : pointer.limits.budgetCents));
+  const ceiling = Math.min(capLeft, Math.max(0, spentCents) + pointer.limits.pageReserveCents);
   return { kind: "page", page, pins: pointer.pins, instructions: wikiPageInstructions(page, pointer.pins), spendCeilingCents: ceiling, ...(framed === undefined ? {} : { notes: framed }) };
 }
 
@@ -479,7 +482,7 @@ export async function nextWikiPage(deps: WikiPageLoopDeps, scope: WikiRunScope, 
   if (deps.now() - Date.parse(pointer.startedAt) > pointer.limits.wallClockMin * 60_000) return ended(deps, scope, "time_used");
   if (pointer.granted !== undefined) {
     const out = pointer.plan.find((page) => page.id === pointer.granted!.pageId);
-    if (out !== undefined) return jobFor(deps, pointer, out);
+    if (out !== undefined) return jobFor(deps, pointer, out, spent);
   }
   const next = remainingPages(pointer)[0];
   if (next === undefined) return ended(deps, scope, "built");
@@ -495,9 +498,9 @@ export async function nextWikiPage(deps: WikiPageLoopDeps, scope: WikiRunScope, 
     if (now.stop !== undefined) return ended(deps, scope, "stopped_by_person");
     const out = now.granted === undefined ? undefined : now.plan.find((page) => page.id === now.granted!.pageId);
     if (out === undefined) throw agentXError("CONFIG_INVALID", "the wiki build moved; ask again");
-    return jobFor(deps, now, out);
+    return jobFor(deps, now, out, Math.max(now.spentCents, spent));
   }
-  return jobFor(deps, pointer, next);
+  return jobFor(deps, pointer, next, spent);
 }
 
 export interface WikiPageReceipt { pageId: string; kept: boolean; claimsKept: number; claimsDropped: number; complete: boolean }
