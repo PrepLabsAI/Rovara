@@ -391,6 +391,17 @@ describe("the learning mode", () => {
 });
 
 describe("lessons used by a task", () => {
+  it("adds only the task's own company and project wiki-use row to the existing read", async () => {
+    const w = await setUp();
+    const seen: Array<[OrgId, string, string]> = [];
+    const { api: target } = api(w, { wikiTaskUse: async (companyId, project, taskId) => { seen.push([companyId, project, taskId]); return { given: ["overview"], read: ["overview"] }; } });
+    const taskId = w.tasks.get(A)!;
+    expect(await call(target, "a-contrib", "GET", `${P}/tasks/${taskId}/lessons`)).toMatchObject({ ok: true, body: { wikiUse: { given: ["overview"], read: ["overview"] } } });
+    expect(seen).toEqual([[A, "payments", taskId]]);
+    expect(await call(target, "a-contrib", "GET", `${P.replace("payments", "ledger")}/tasks/${taskId}/lessons`)).toMatchObject({ ok: false, code: "NOT_FOUND", message: NO_SUCH_PROJECT });
+    expect(seen).toHaveLength(1);
+  });
+
   it("answers for a task of the project, to the roster; another project or a malformed id is 'no such task'", async () => {
     const w = await setUp();
     const { api: target } = api(w);
@@ -398,6 +409,19 @@ describe("lessons used by a task", () => {
     expect(await call(target, "a-contrib", "GET", `${P}/tasks/${taskId}/lessons`)).toEqual({ ok: true, body: { project: "payments", taskId, lessons: [] } });
     expect(await call(target, "a-contrib", "GET", `${P}/tasks/not-a-task/lessons`)).toMatchObject({ ok: false, code: "TASK_NOT_FOUND" });
     expect(await call(target, "a-out", "GET", `${P}/tasks/${taskId}/lessons`)).toEqual({ ok: false, code: "NOT_FOUND", status: 404, message: NO_SUCH_PROJECT });
+  });
+
+  it("does not expose wiki-use page ids to an off-roster task owner", async () => {
+    const w = await setUp();
+    const real = w.lessons.get(A)!;
+    const taskId = w.tasks.get(A)!;
+    const wikiTaskUse = vi.fn(async () => ({ given: ["overview"], read: ["overview"] }));
+    const { api: target } = api(w, {
+      lessonsOf: async (companyId) => companyId === A ? { ...real, readTask: async () => ({ companyId: A, project: "payments", developerId: "a-out" }) } : undefined,
+      wikiTaskUse,
+    });
+    expect(await call(target, "a-out", "GET", `${P}/tasks/${taskId}/lessons`)).toMatchObject({ ok: true, body: { lessons: [] } });
+    expect(wikiTaskUse).not.toHaveBeenCalled();
   });
 
   it("a task the company's reader answers for another project, or (a wiring fault) for another company, is 'no such task'", async () => {
