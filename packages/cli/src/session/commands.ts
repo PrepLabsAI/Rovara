@@ -156,7 +156,7 @@ async function taskStop(deps: DeveloperSessionDeps, env: string | undefined, tas
   const answer = await appRequest(deps, env, `/v1/dev/tasks/${seg(taskId)}/cancel`, { method: "POST", body: { requestId: randomUUID() } });
   const task = answer.body.task as Body | undefined;
   if (task === undefined || typeof task !== "object") throw agentXError("RUNTIME_UNAVAILABLE", UNEXPECTED);
-  const lines = ["Stop requested.", `${str(task.title, "(no title)")}`, `  task ${taskId}${typeof task.project === "string" ? ` on ${str(task.project)}` : ""}${typeof task.status === "string" ? `; ${str(task.status).toLowerCase()}` : ""}`];
+  const lines = ["Stop requested.", `${str(task.title, "(no title)")}`, `  task ${taskId}${typeof task.project === "string" ? ` on ${str(task.project)}` : ""}${typeof task.status === "string" ? `; ${str(task.status.toLowerCase())}` : ""}`];
   return result(answer, answer.body, `${lines.join("\n")}\n`);
 }
 

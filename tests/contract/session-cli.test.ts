@@ -150,6 +150,13 @@ describe("session stop with a task ID (a core task on AWS has no session)", () =
     expect(h.calls[0]!.body!.requestId).not.toBe(h.calls[1]!.body!.requestId);
   });
 
+  it("makes the task's own words safe for a terminal on success too", async () => {
+    const h = await cli(() => ({ body: { task: { taskId: TASK, title: "Fix\u001b[31m retries", project: "pay\u001b[31mments", status: "CAN\u001b[31mCELLED" } } }));
+    expect(await h.run(["session", "stop", TASK]), h.errors()).toBe(0);
+    expect(h.text()).not.toContain("\u001b");
+    expect(h.text().match(/\[U\+001B\]/g)).toHaveLength(3);
+  });
+
   it("prints the data with --json", async () => {
     const h = await cli(() => ({ body: stopped }));
     expect(await h.run(["--json", "session", "stop", TASK]), h.errors()).toBe(0);
