@@ -2,6 +2,7 @@
 // that pins "everything else" does not have to know it. tests/contract/slack-company-workspaces-infrastructure.test.ts checks each grant in full.
 import { expect } from "vitest";
 import { removePackedPieces } from "./broker-environment-template.js";
+import { withoutCompanySignIn, withoutCompanySignInService } from "./company-signin-template.js";
 
 type Resource = { Type: string; Properties: Record<string, unknown>; Condition?: string };
 type Template = { Parameters?: Record<string, unknown>; Conditions?: Record<string, unknown>; Resources: Record<string, Resource> };
@@ -11,7 +12,8 @@ export const SLACK_COMPANY_POLICIES = ["SlackIngress", "ChannelApi", "DeveloperT
 /** Each consumer function's logical-id prefix and the variables the switch adds to it. */
 const VARIABLES: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
   [/^SlackIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME", "AGENTX_ENV", "SLACK_TEAM_ID"]],
-  [/^ChannelApiIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME"]],
+  // DEC 254zk: the channel API's company factory needs the environment's name too.
+  [/^ChannelApiIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME", "AGENTX_ENV"]],
   [/^DeveloperTaskNotifierFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "AGENTX_ENV"]],
   [/^DeveloperSignInFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME"]],
   [/^SessionsReconciler[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "AGENTX_ENV"]],
@@ -43,14 +45,17 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
     delete template.Resources[id];
   }
   for (const id of conditions) delete template.Conditions![id];
-  // L2-2 PR 18d: the Slack service's inputs, as outputs under the switch's condition only.
+  // L2-2 PR 18d: the Slack service's inputs. DEC 254zk: the table and the team are always output (the switch is the slack stack's own, set by config set); no state output.
   const outputs = (template as { Outputs?: Record<string, { Value: unknown; Condition?: string }> }).Outputs ?? {};
-  for (const id of ["SlackCompanyWorkspacesState", "SlackCompanyStateTableName", "SlackCompanyTeamId"]) {
+  expect(outputs).not.toHaveProperty("SlackCompanyWorkspacesState");
+  for (const id of ["SlackCompanyStateTableName", "SlackCompanyTeamId"]) {
     expect(outputs[id], id).toBeDefined();
-    expect(conditions, id).toContain(outputs[id]!.Condition);
+    expect(outputs[id]!.Condition, id).toBeUndefined();
     delete outputs[id];
   }
-  for (const [pattern, names] of VARIABLES) {
+  // DEC 254zc (6): the proof function's switch variables (its COMPANY_SIGNIN is withoutCompanySignIn's).
+  const variables = options.proof === true ? [...VARIABLES, [/^TaskPersonProofFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME"]] as const] : VARIABLES;
+  for (const [pattern, names] of variables) {
     const found = Object.entries(template.Resources).filter(([id, resource]) => pattern.test(id) && resource.Type === "AWS::Lambda::Function");
     expect(found, String(pattern)).toHaveLength(1);
     const variables = (found[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
@@ -64,19 +69,13 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
   }
   const broker = Object.entries(template.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
   const brokerVariables = (broker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  expect(JSON.stringify(brokerVariables.AGENTX_SETTINGS)).toContain('",cw=",{"Ref":"SlackCompanyWorkspaces"}');
+  // DEC 254zk: the conditioned switch flag ("1" only with company sign-in on too), not the raw parameter.
+  expect(JSON.stringify(brokerVariables.AGENTX_SETTINGS)).toMatch(/",cw=",\{"Fn::If":\["SlackCompanyModeOn[0-9A-F]{8}","1","0"\]\}/u);
   removePackedPieces(brokerVariables, "AGENTX_SETTINGS", ["cw"]);
-  // The same PR derives COMPANY_READS (always "enabled" in a named environment) instead of passing it, to make room in the broker's 4 KB environment
-  // (DERIVED_BROKER_VARIABLES). The broker still reads the same value; put the old literal back so the pins before it compare unchanged.
+  // COMPANY_READS: #845 derived it to make room, and so did #831 (DEC 254h) on code/next; tests/support/github-signin-template.ts puts the old literal back, once (batch 12 merge).
   expect(brokerVariables).not.toHaveProperty("COMPANY_READS");
-  // At its old place (after DEVELOPER_OIDC_ISSUER), so digests over the JSON text compare too.
-  const entries = Object.entries(brokerVariables);
-  const at = entries.findIndex(([name]) => name === "DEVELOPER_OIDC_ISSUER");
-  expect(at, "the broker's DEVELOPER_OIDC_ISSUER").toBeGreaterThanOrEqual(0);
-  entries.splice(at + 1, 0, ["COMPANY_READS", "enabled"]);
-  for (const name of Object.keys(brokerVariables)) delete brokerVariables[name];
-  Object.assign(brokerVariables, Object.fromEntries(entries));
-  return template;
+  // DEC 254zg (a): Slack company mode requires company sign-in, so the company layer's switch goes with it.
+  return withoutCompanySignIn(template, options);
 }
 
 /** L2-2 PR 18d: the named slack stack's addition: three off-by-default parameters and four container variables (the switch, the table, the team, the environment's name). */
@@ -95,5 +94,5 @@ export function withoutSlackCompanyService(input: unknown): unknown {
     ["AGENTX_ENV", expect.any(String)],
   ]);
   container.Environment = container.Environment.filter((entry) => !added.includes(entry));
-  return template;
+  return withoutCompanySignInService(template);
 }

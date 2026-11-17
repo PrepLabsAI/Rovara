@@ -28,7 +28,7 @@ function world(options: { webApp?: boolean; administrator?: boolean } = {}) {
   const h = identityHarness({ oidc: options.administrator === true ? { administrator: { claim: "groups", values: ["admins"] } } : {}, oidcUsers: users });
   const company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
   const ids = [X, Y]; let next = 0;
-  const invites = new CompanyInviteStore({ documentClient: h.db, tableName: "signin", now: h.now, company, newCompanyId: () => ids[next++]! });
+  const invites = new CompanyInviteStore({ documentClient: h.db, tableName: "signin", now: h.now, company, selfServeAllowed: true, newCompanyId: () => ids[next++]! });
   h.deps.company = company; h.deps.companyInvites = invites;
   const before = new Date(h.now() - 86_400_000).toISOString();
   const client = { pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Rovara", audience: "web-app", redirectUris: [WEB], loopback: false,

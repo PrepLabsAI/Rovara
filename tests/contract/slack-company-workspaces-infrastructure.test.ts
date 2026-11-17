@@ -54,9 +54,11 @@ beforeAll(() => {
 });
 
 describe("Slack company mode's switch (18a)", () => {
-  it("is one default-off parameter whose condition is exactly 'enabled'", () => {
+  it("is one default-off parameter whose condition is exactly 'enabled' AND company sign-in on (DEC 254zk)", () => {
     expect(named.Parameters.SlackCompanyWorkspaces).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
-    expect(named.Conditions[on]).toStrictEqual({ "Fn::Equals": [{ Ref: "SlackCompanyWorkspaces" }, "enabled"] });
+    const companyOn = Object.keys(named.Conditions).find((id) => id.startsWith("CompanySignInSwitchOn"))!;
+    expect(named.Conditions[companyOn]).toStrictEqual({ "Fn::Equals": [{ Ref: "CompanySignIn" }, "enabled"] });
+    expect(named.Conditions[on]).toStrictEqual({ "Fn::And": [{ "Fn::Equals": [{ Ref: "SlackCompanyWorkspaces" }, "enabled"] }, { Condition: companyOn }] });
   });
 
   it("does not exist in the deployment that predates environments", () => {
@@ -70,9 +72,10 @@ describe("Slack company mode's switch (18a)", () => {
       expect(resource.Type, id).toBe("AWS::IAM::Policy");
       expect(resource.Condition, id).toBe(on);
     }
-    // No other policy anywhere reaches the token family except DeveloperIdentity's existing Add to Slack statement.
+    // No other policy anywhere reaches the token family except DeveloperIdentity's Add to Slack grant, now its own policy under company sign-in's condition (DEC 254zg (a)).
     const others = Object.entries(named.Resources).filter(([id, resource]) => !id.startsWith("SlackCompanyMode") && JSON.stringify(resource.Properties).includes("slack-workspaces/"));
-    expect(others.map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""))).toEqual(["DeveloperSignInFunctionServiceRoleDefaultPolicy"]);
+    expect(others.map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""))).toEqual(["CompanySignInSwitchSlackWorkspaceTokens"]);
+    expect(others[0]![1].Condition).toMatch(/^CompanySignInSwitchOn[0-9A-F]{8}$/u);
   });
 
   it("gives the Slack Lambda and the channel API reads only: bindings, the company link row, project revisions, memberships and the token", () => {
@@ -143,12 +146,13 @@ describe("Slack company mode's switch (18a)", () => {
     expect(variablesOf(named, "DeveloperSignInFunction").STATE_TABLE_NAME).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] }, ""] });
     // 18d: the environment's name for the channel API, notifier and reconciler factories, "" while off.
     for (const fn of ["DeveloperTaskNotifierFunction", "SessionsReconciler"]) expect(variablesOf(named, fn).AGENTX_ENV, fn).toStrictEqual({ "Fn::If": [on, "staging", ""] });
-    expect(variablesOf(named, "ChannelApiIngress")).not.toHaveProperty("AGENTX_ENV");
-    // 18d: the Slack service's inputs exist as outputs only while the switch is on.
+    // DEC 254zk: the channel API's factory needs the environment's name too.
+    expect(variablesOf(named, "ChannelApiIngress").AGENTX_ENV).toStrictEqual({ "Fn::If": [on, "staging", ""] });
+    // 18d, DEC 254zk: the Slack service's table and team are always output (its switch is the slack stack's own, set by agentx config set slack.companyWorkspaces).
     const outputs = (named as unknown as { Outputs: Record<string, { Value: unknown; Condition?: string }> }).Outputs;
-    expect(outputs.SlackCompanyWorkspacesState).toStrictEqual({ Value: "enabled", Condition: on });
-    expect(outputs.SlackCompanyStateTableName).toStrictEqual({ Value: { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] }, Condition: on });
-    expect(outputs.SlackCompanyTeamId).toStrictEqual({ Value: { Ref: "SlackTeamId" }, Condition: on });
+    expect(outputs).not.toHaveProperty("SlackCompanyWorkspacesState");
+    expect(outputs.SlackCompanyStateTableName).toStrictEqual({ Value: { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] } });
+    expect(outputs.SlackCompanyTeamId).toStrictEqual({ Value: { Ref: "SlackTeamId" } });
     // 18c: the Slack Lambda's factory inputs, "" while off.
     expect(variablesOf(named, "SlackIngress").AGENTX_ENV).toStrictEqual({ "Fn::If": [on, "staging", ""] });
     expect(variablesOf(named, "SlackIngress").SLACK_TEAM_ID).toStrictEqual({ "Fn::If": [on, { Ref: "SlackTeamId" }, ""] });
@@ -156,7 +160,8 @@ describe("Slack company mode's switch (18a)", () => {
       expect(variablesOf(named, fn).DEVELOPER_SIGNIN_TABLE_NAME, fn).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "DeveloperSignInTable", "AWS::DynamoDB::Table")[0] }, ""] });
     }
     const broker = unpackedBrokerVariables(variablesOf(named, "Broker"));
-    expect(broker.SLACK_COMPANY_WORKSPACES).toEqual({ Ref: "SlackCompanyWorkspaces" });
+    // DEC 254zk: the conditioned switch flag ("1" only with company sign-in on too).
+    expect(broker.SLACK_COMPANY_WORKSPACES).toEqual({ "Fn::If": [on, "1", "0"] });
     // Derived now (room in the 4 KB environment); the broker still reads "enabled".
     expect(broker.COMPANY_READS).toBe("enabled");
     expect(variablesOf(named, "Broker")).not.toHaveProperty("COMPANY_READS");

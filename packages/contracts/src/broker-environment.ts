@@ -120,7 +120,15 @@ export interface BrokerSettingSpec {
   readonly variable: string;
   /** The value is a host (with an optional port) and the variable gets its https origin, `https://<value>`; an empty value stays empty. A slash cannot be packed, so the scheme is added here. */
   readonly httpsOrigin?: true;
+  /**
+   * DEC 254zg (a), 254zk (room in the broker's 4 KB): an on/off switch packed as one character, "1" or "0", which the variable gets as "enabled" or "disabled". Any other packed
+   * value stops the broker (a flag read wrongly would turn a feature on or off without a word).
+   */
+  readonly switchFlag?: true;
 }
+
+/** A switch flag's packed value and the variable's value (BrokerSettingSpec.switchFlag). */
+export const BROKER_SWITCH_FLAG_VALUES: Readonly<Record<string, "enabled" | "disabled">> = { "1": "enabled", "0": "disabled" };
 
 /**
  * The broker's settings that are stack parameters already constrained to plain text (a Number, an AllowedValues list or an AllowedPattern without separators): the infrastructure
@@ -149,11 +157,13 @@ export const BROKER_SETTINGS = {
   // to make room for the gateway settings in the broker's 4 KB.
   coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
   /** DEC 254o (b), L2-2: Slack company mode for workspaces other than SLACK_TEAM_ID (stack parameter SlackCompanyWorkspaces; the broker also needs COMPANY_SIGNIN=enabled). */
-  slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES" },
+  slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES", switchFlag: true },
   coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
   coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
   // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
   channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
+  // DEC 254zg (a): Code's company layer (the CompanySignIn parameter, through its condition: enabled or disabled), packed.
+  companySignIn: { code: "si", variable: "COMPANY_SIGNIN", switchFlag: true },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;

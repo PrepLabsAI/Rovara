@@ -15,7 +15,7 @@
 // whole, and every test that sets the variables itself) is left exactly as it is. Anything that cannot be read throws, in fixed words that name the variable and code but never a
 // value, so a broker that cannot name what it needs does not start.
 import {
-  BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE, DERIVED_BROKER_VARIABLES, EnvironmentNameSchema,
+  BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE, BROKER_SWITCH_FLAG_VALUES, DERIVED_BROKER_VARIABLES, EnvironmentNameSchema,
   decodeBrokerList, environmentRolePath, type BrokerNameSpec, type BrokerSettingSpec,
 } from "@agentx/contracts";
 
@@ -139,7 +139,13 @@ export function hydrateBrokerSettings(env: MutableEnvironment): void {
   // The settings first: they are plain values the rest does not need, and a bad list stops the broker before anything is built from it.
   for (const { spec, value } of brokerSettingsFromEnvironment(env)) {
     // A host setting (the core's model gateway) becomes its https origin; empty stays empty, so an unset gateway reads as unset.
-    if (!isSet(env[spec.variable])) env[spec.variable] = spec.httpsOrigin === true && value !== "" ? `https://${value}` : value;
+    if (isSet(env[spec.variable])) continue;
+    if (spec.switchFlag === true) {
+      // DEC 254zg (a): "1" or "0" only; anything else stops the broker rather than guess the switch.
+      const flag = Object.hasOwn(BROKER_SWITCH_FLAG_VALUES, value) ? BROKER_SWITCH_FLAG_VALUES[value] : undefined;
+      if (flag === undefined) throw new Error(`${BROKER_SETTINGS_VARIABLE} has no switch flag for ${spec.code} (${spec.variable})`);
+      env[spec.variable] = flag;
+    } else env[spec.variable] = spec.httpsOrigin === true && value !== "" ? `https://${value}` : value;
   }
 }
 

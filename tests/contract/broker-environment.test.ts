@@ -119,7 +119,7 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       expect(hydrated.HEALTH_DEAD_LETTER_QUEUES).toBe(JSON.stringify(Object.fromEntries(queues.map((spec) => [spec.label, resolver.ref(logicalIdOf(names.get(spec.code)))]))));
     });
 
-    for (const spec of Object.values(BROKER_SETTINGS)) {
+    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each))) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();
@@ -127,6 +127,16 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
         // A host setting (the core's model gateway, core switch-on blocker 2026-11-17) reaches the broker as its https origin.
         const expected = "httpsOrigin" in spec && spec.httpsOrigin === true ? `https://${value}` : value;
         expect(hydrated[spec.variable]).toBe(expected);
+      });
+    }
+
+    // DEC 254zg (a), 254zk: a switch flag is its switch's condition as "1" or "0", and the broker reads it as "enabled" or "disabled" (the measure takes Fn::If's first branch).
+    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => "switchFlag" in each)) {
+      it(`${spec.variable} (${spec.code}) is its switch's condition, packed as 1 or 0`, () => {
+        const packed = settings.get(spec.code) as { "Fn::If"?: [string, unknown, unknown] };
+        expect(packed["Fn::If"]?.slice(1)).toEqual(["1", "0"]);
+        expect((template as { Conditions?: Record<string, unknown> }).Conditions?.[packed["Fn::If"]![0]], "a real condition").toBeDefined();
+        expect(hydrated[spec.variable]).toBe("enabled");
       });
     }
 
