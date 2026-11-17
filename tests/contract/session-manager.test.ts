@@ -115,15 +115,19 @@ describe("session manager: first provisioning", () => {
 });
 
 describe("session manager: launched machine size (DEC 254zb)", () => {
-  it("keeps the launched type and the fallback reason, and a later reported launch without a fallback clears the reason", async () => {
-    const { sessions, workspaceId, session } = setup();
+  it("keeps the launched type and the fallback reason for the generation, and the next generation starts without the reason", async () => {
+    const { db, sessions, workspaceId, session } = setup();
     await sessions.ensureSession({ workspaceId, binding });
     await sessions.markVolume(workspaceId, 1, "vol-0123456789abcdef0");
     await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
     expect(session()).toMatchObject({ instanceType: "m6g.large", machineFallback: "size-unavailable" });
     expect(sessionFromItem(session()!)).toMatchObject({ instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    // A launch that reports no reason never clears one already recorded for this generation (an x86 choice the install cannot run is recorded before launch).
     await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef1", "10.42.128.11", { instanceType: "m6g.xlarge" });
-    expect(session()).toMatchObject({ instanceType: "m6g.xlarge" });
+    expect(session()).toMatchObject({ instanceType: "m6g.xlarge", machineFallback: "size-unavailable" });
+    db.set({ ...session()!, state: "FAILED", sessionState: "FAILED" });
+    await sessions.ensureSession({ workspaceId, binding });
+    expect(session()).toMatchObject({ state: "PROVISIONING", generation: 2 });
     expect(session()).not.toHaveProperty("machineFallback");
   });
 

@@ -51,16 +51,22 @@ export const WorkspaceSessionStateSchema = z.enum([
 export const WORKER_FEATURES_MAX = 300;
 export const WORKER_FEATURE_MAX_CHARS = 100;
 
+/** An EC2 instance type name (`m7g.large`). */
+export const InstanceTypeSchema = z.string().regex(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/, "invalid instance type");
+/**
+ * DEC 254zb: why a generation runs on the default size instead of its project's chosen one. `size-unavailable`: the provisioner could not launch the size here
+ * (capacity, not offered in the zone, quota). `x86-unavailable`: the install's worker image does not run on x86 yet.
+ */
+export const MachineFallbackSchema = z.enum(["size-unavailable", "x86-unavailable"]);
+export type MachineFallback = z.infer<typeof MachineFallbackSchema>;
+/** The only reason the provisioner itself reports. */
+export const ProvisionerMachineFallbackSchema = z.literal("size-unavailable");
+
 /**
  * The compute state of one ec2-ebs workspace, stored at `workspaceSessionKey(workspaceId)` in the
  * same partition as the workspace's OPERATION# items. `generation` counts provisioning attempts and
  * fences every write that belongs to one of them.
  */
-/** An EC2 instance type name (`m7g.large`). */
-export const InstanceTypeSchema = z.string().regex(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/, "invalid instance type");
-/** DEC 254zb: the one reason a session records when its chosen machine size fell back to the default size. */
-export const MachineFallbackSchema = z.literal("size-unavailable");
-
 export const WorkspaceSessionSchema = z
   .object({
     workspaceId: z.string().uuid(),

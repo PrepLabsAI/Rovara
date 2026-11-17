@@ -248,7 +248,7 @@ describe("provisioner: chosen machine size (DEC 254zb)", () => {
   });
 
   it("reads the pin for sized arm64 launches exactly as for the default one", () => {
-    const rename = (value: unknown) => JSON.parse(JSON.stringify(value).replace(/(RunInstancePinned|RunInstance|QualifiedAmiReadFailed|QualifiedAmiWellFormed|QualifiedAmiMalformed)Sized/g, "$1"));
+    const rename = (value: unknown): unknown => JSON.parse(JSON.stringify(value).replace(/(RunInstancePinned|RunInstance|QualifiedAmiReadFailed|QualifiedAmiWellFormed|QualifiedAmiMalformed)Sized/g, "$1"));
     for (const name of ["ReadQualifiedAmi", "QualifiedAmiWellFormed", "QualifiedAmiReadFailed", "QualifiedAmiMalformed"]) expect(rename(states[`${name}Sized`]), name).toEqual(states[name]);
     expect(states.QualifiedAmiWellFormedSized!.Choices![0]!.Next).toBe("RunInstancePinnedSized");
   });
@@ -301,7 +301,7 @@ describe("provisioner: chosen machine size (DEC 254zb)", () => {
   it("falls back once: no size, a fixed reason, no failure text and its own idempotency token, then today's path", async () => {
     const fallback = states.SizeUnavailable!;
     expect(fallback).toMatchObject({ Type: "Pass", Next: "ReadQualifiedAmi", Assign: { machine: null, machineFallback: "size-unavailable", failure: null } });
-    const token = await run((fallback.Assign as Record<string, string>).clientToken!, { clientToken: "ws-1-gen-2" });
+    const token: unknown = await run((fallback.Assign as Record<string, string>).clientToken!, { clientToken: "ws-1-gen-2" });
     expect(token).toBe("ws-1-gen-2-std");
     // The default path has no sized state, so a second fallback cannot happen.
     const reachable = new Set<string>();

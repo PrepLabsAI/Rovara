@@ -135,7 +135,8 @@ export class SessionManager {
               } }
             : { Update: this.update(workspaceId, {
                 set: { ...provisioning },
-                remove: ["instanceId", "privateIp", "launchedAt", "readyAt", "executionArn"],
+                // DEC 254zb: a new generation starts with no fallback reason; this one's is recorded when it is picked or launched.
+                remove: ["instanceId", "privateIp", "launchedAt", "readyAt", "executionArn", "machineFallback"],
                 ...(park ? { addWaiting: waitingOutboxId } : {}),
                 when: { state, generation: session.generation },
               }) };
@@ -180,13 +181,11 @@ export class SessionManager {
 
   /**
    * Records the launched instance. DEC 254zb: `launched.instanceType` is the type it launched as (kept, like `launchedAt`, for the machine time it used), and
-   * `launched.machineFallback` the fixed reason when the chosen size fell back to the default; a reported launch without one clears an earlier generation's reason.
+   * `launched.machineFallback` the fixed reason when the chosen size fell back to the default. An earlier generation's reason is cleared when provisioning starts.
    */
   async markInstance(workspaceId: string, generation: number, instanceId: string, privateIp: string, launched: { instanceType?: string; machineFallback?: "size-unavailable" } = {}): Promise<void> {
     await this.dependencies.documentClient.send(new UpdateCommand(this.update(workspaceId, {
       set: { instanceId, privateIp, launchedAt: this.now(), ...(launched.instanceType === undefined ? {} : { instanceType: launched.instanceType }), ...(launched.machineFallback === undefined ? {} : { machineFallback: launched.machineFallback }) },
-      // Only a provisioner that reports the type also reports the reason, so only its launches clear an earlier one (an older provisioner's write is unchanged).
-      ...(launched.instanceType !== undefined && launched.machineFallback === undefined ? { remove: ["machineFallback" as const] } : {}),
       when: { state: "PROVISIONING", generation },
     })));
   }

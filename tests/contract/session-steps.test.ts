@@ -112,7 +112,7 @@ describe("session steps", () => {
     await handler({ ...base, instanceType: "m6g.large", machineFallback: "size-unavailable" });
     expect(sessions.markInstance).toHaveBeenLastCalledWith(workspaceId, 2, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
     const calls = sessions.markInstance.mock.calls.length;
-    for (const bad of [{ machineFallback: "anything" }, { instanceType: "M6G LARGE" }, { instanceType: "" }, { instanceType: 7 }, { extra: 1 }]) {
+    for (const bad of [{ machineFallback: "anything" }, { machineFallback: "x86-unavailable" }, { instanceType: "M6G LARGE" }, { instanceType: "" }, { instanceType: 7 }, { extra: 1 }]) {
       await expect(handler({ ...base, instanceType: "m6g.large", ...bad })).rejects.toThrow();
     }
     expect(sessions.markInstance.mock.calls.length).toBe(calls);

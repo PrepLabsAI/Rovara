@@ -5,7 +5,7 @@ import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { InstanceTypeSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, MachineFallbackSchema, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
+import { InstanceTypeSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ProvisionerMachineFallbackSchema, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager } from "./sessions.js";
 
@@ -32,7 +32,7 @@ export const SessionStepSchema = z.discriminatedUnion("action", [
   // DEC 254zb: the type the instance launched as, and the fixed reason when a chosen size fell back to the default. Optional: an older provisioner sends neither.
   z.object({
     action: z.literal("recordInstance"), workspaceId: uuid, generation, instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/), privateIp: z.ipv4(),
-    instanceType: InstanceTypeSchema.optional(), machineFallback: MachineFallbackSchema.nullable().optional(),
+    instanceType: InstanceTypeSchema.optional(), machineFallback: ProvisionerMachineFallbackSchema.nullable().optional(),
   }).strict(),
   z.object({ action: z.literal("probePing"), privateIp: z.ipv4() }).strict(),
   z.object({ action: z.literal("markReady"), workspaceId: uuid, generation }).strict(),
