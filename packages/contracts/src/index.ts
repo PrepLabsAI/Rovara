@@ -302,6 +302,7 @@ export * from "./service-catalog-images.js";
 export * from "./catalog-trust.js";
 export * from "./owner-image-list.js";
 export * from "./owner-starter-images.js";
+export * from "./test-service-mirror.js";
 export * from "./service-catalog-verify.js";
 // TE-F0a (M2): the model catcher foundation. Pure contracts and data with no callers yet; Rovara's own agent-model files (model-providers.ts, model-sources.ts, e2e-model-*.ts) are separate (DECISIONS 157).
 export * from "./model-catalog.js";

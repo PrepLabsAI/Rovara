@@ -3,12 +3,13 @@
 // worker is sent it.
 import { describe, expect, it } from "vitest";
 import {
-  TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, testEnvDigest, type JsonValue, type TestEnvironmentBody,
+  TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_PLAN_FEATURE, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, testEnvDigest, type JsonValue, type TestEnvironmentBody,
 } from "@agentx/contracts";
 import { AWS_EMULATOR_SERVICES } from "../../packages/contracts/src/generated/aws-emulator-services.js";
 import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { createTaskTestEnvironment } from "../../packages/broker/src/core/test-env/seam.js";
+import { createTaskTestEnvironment, testServicesMissingWords } from "../../packages/broker/src/core/test-env/seam.js";
+import { TEST_SERVICES_UNAVAILABLE_WORDS } from "../../packages/broker/src/core/test-env/test-services-switch.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { acceptStep, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
@@ -131,5 +132,28 @@ describe("a wide plan at the dispatch guard", () => {
     const after = (await workspaceOperations(old.h.deps, refused.workspaceId)).find((entry) => entry.id === refused.operation.id)!;
     expect(after).toMatchObject({ status: "FAILED", error: TOO_OLD });
     expect(old.h.machines.delivered((await readWorkspace(old.h.deps, refused.workspaceId))!.machine!.machineId).map((job) => job.operationId)).not.toContain(refused.operation.id);
+  });
+});
+
+// DEC 254zm: a worker that offers no test services at all (on Code's AWS workers: its boot stage or pulls failed) is not "too old": the step ends with the fixed "not available here" words.
+describe("a plan with dependencies at a worker that offers no test services", () => {
+  const NO_TEST_SERVICES = WORKER_INVOCATION_FEATURES.filter((feature) => !feature.startsWith("task.testServices."));
+  it("is refused with the fixed 'not available here' words for the reason workers, and nothing is delivered", async () => {
+    const w = await world(NARROW, NO_TEST_SERVICES);
+    const { operation, workspaceId } = await acceptChecks(w);
+    await w.h.flow.dispatchOnce({ maxMessages: 10 });
+    const machine = (await readWorkspace(w.h.deps, workspaceId))!.machine!.machineId;
+    const after = (await workspaceOperations(w.h.deps, workspaceId)).find((entry) => entry.id === operation.id)!;
+    expect(after).toMatchObject({ status: "FAILED", error: TEST_SERVICES_UNAVAILABLE_WORDS.workers });
+    expect(w.h.machines.delivered(machine).map((job) => job.operationId)).not.toContain(operation.id);
+  });
+
+  it("the words only for a gap of test-services features that includes the base one; any other gap keeps 'too old'", () => {
+    expect(testServicesMissingWords([TEST_SERVICES_PLAN_FEATURE])).toBe(TEST_SERVICES_UNAVAILABLE_WORDS.workers);
+    expect(testServicesMissingWords([TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE])).toBe(TEST_SERVICES_UNAVAILABLE_WORDS.workers);
+    expect(testServicesMissingWords([TEST_SERVICES_AWS_ALL_SERVICES_FEATURE])).toBeUndefined();
+    expect(testServicesMissingWords([TEST_SERVICES_PLAN_FEATURE, "model.route"])).toBeUndefined();
+    expect(testServicesMissingWords(["task.readiness"])).toBeUndefined();
+    expect(testServicesMissingWords([])).toBeUndefined();
   });
 });

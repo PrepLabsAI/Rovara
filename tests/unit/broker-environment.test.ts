@@ -39,7 +39,7 @@ const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
   coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off",
-  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", testServices: "1",
+  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", testServices: "1", testServiceImages: "mirrored",
 } as const satisfies Record<BrokerSettingKey, string>;
 
 const names = (entries: Partial<Record<BrokerNameKey, string>> = NAMES): string => Object.entries(entries).map(([key, value]) => `${BROKER_NAMES[key as BrokerNameKey].code}=${value}`).join(",");
@@ -81,6 +81,9 @@ describe("hydrateBrokerEnvironment: nothing packed", () => {
     expect(BROKER_SETTINGS.testServices).toEqual({ code: "td", variable: "ROVARA_TEST_SERVICES" });
     expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=0" })["ROVARA_TEST_SERVICES"]).toBe("0");
     expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=1" })["ROVARA_TEST_SERVICES"]).toBe("1");
+    // DEC 254zm: whether the starter copies are in place, packed as `ti`.
+    expect(BROKER_SETTINGS.testServiceImages).toEqual({ code: "ti", variable: "ROVARA_TEST_SERVICES_HOSTED_IMAGES" });
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "ti=mirrored" })["ROVARA_TEST_SERVICES_HOSTED_IMAGES"]).toBe("mirrored");
     expect(Object.values(BROKER_SETTINGS).some((spec) => (spec.code as string) === "tx")).toBe(false);
   });
 
