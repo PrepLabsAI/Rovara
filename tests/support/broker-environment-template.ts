@@ -68,7 +68,8 @@ export function unpackedBrokerVariables(variables: Record<string, unknown>, temp
   for (const [code, value] of pieces(settings)) {
     const spec = settingSpecs.get(code);
     if (spec === undefined) throw new Error(`unknown setting code ${code}`);
-    out[spec.variable] = value;
+    // A switch flag (BrokerSettingSpec.switchFlag) packed as "1"/"0" reads as the broker reads it.
+    out[spec.variable] = spec.switchFlag === true && (value === "1" || value === "0") ? (value === "1" ? "enabled" : "disabled") : value;
   }
   const env = rest.AGENTX_ENV;
   if (typeof env === "string") for (const entry of DERIVED_BROKER_VARIABLES) out[entry.variable] = entry.kind === "text" ? entry.value(env) : entry.queueName(env);

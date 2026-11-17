@@ -13,6 +13,8 @@ describe("config keys (FR-048)", () => {
       "limits.workspacesPerMember", "limits.workspacesPerOrg", "limits.threadTurnsPerMinute",
       "slack.appPostedMessages", "alerts.address", "alerts.slowTurnMinutes",
       "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "coreEngine.switch", "coreEngine.modelGatewayUrl", "coreEngine.agentModel", "mcp.confirmElicitation",
+      // DEC 254zg (a), 254zk: Code's company layer, self-serve create and per-company Slack bots.
+      "company.signIn", "company.selfServe", "slack.companyWorkspaces",
     ]);
   });
 
