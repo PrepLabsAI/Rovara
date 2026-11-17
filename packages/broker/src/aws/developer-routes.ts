@@ -127,7 +127,8 @@ export interface DeveloperApiConfiguration {
    * or a throw, refuses the press (`freshStepUp`). Absent: the default.
    */
   stepUpWindowSeconds?: (companyId: string) => Promise<unknown>;
-  issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
+  /** `github` (DEC 254h): GitHub sign-in is on; only ever with Code's company layer. Absent: off. */
+  issuer: string; env: string; methods: { slack: boolean; oidc: boolean; github?: boolean }; slackTeamId?: string;
   /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
   since?: Partial<Record<DeveloperSignInMethod, number>>;
   signInTableName: string;
@@ -571,11 +572,15 @@ export function channelByNameThroughLambda(invoke: (payload: Uint8Array) => Prom
 }
 
 /** The broker's copy of each method's enabled-since cutoff (FR-045), from its environment. */
-export function developerSinceFromEnvironment(env: NodeJS.ProcessEnv): { slack?: number; oidc?: number } {
+export function developerSinceFromEnvironment(env: NodeJS.ProcessEnv): { slack?: number; oidc?: number; github?: number } {
   const slack = methodSince(env.DEVELOPER_SIGNIN_SLACK_SINCE);
   const oidc = methodSince(env.DEVELOPER_OIDC_SINCE);
-  return { ...(slack === undefined ? {} : { slack }), ...(oidc === undefined ? {} : { oidc }) };
+  const github = methodSince(env.DEVELOPER_GITHUB_SINCE);
+  return { ...(slack === undefined ? {} : { slack }), ...(oidc === undefined ? {} : { oidc }), ...(github === undefined ? {} : { github }) };
 }
+/** DEC 254h: GitHub sign-in counts as on only with Code's company layer on as well (the sign-in server never offers it otherwise). */
+export const githubSignInFromEnvironment = (env: NodeJS.ProcessEnv): boolean => env.DEVELOPER_SIGNIN_GITHUB === "enabled" && env.COMPANY_SIGNIN === "enabled";
+const methodName = (amr: DeveloperSignInMethod) => (amr === "slack" ? "Slack" : amr === "github" ? "GitHub" : "Company");
 
 /**
  * The sign-in server's public keys, read by invoking the DeveloperIdentity function with its own
@@ -620,9 +625,9 @@ export function developerClaims(claims: Record<string, unknown> | undefined, con
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   }
   const amr = claims.amr;
-  if (amr !== "slack" && amr !== "oidc") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  if (!config.methods[amr]) {
-    throw agentXError("AUTH_REQUIRED", `${amr === "slack" ? "Slack" : "Company"} sign-in is turned off in this environment; sign in another way with agentx login <url>`);
+  if (amr !== "slack" && amr !== "oidc" && amr !== "github") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  if (config.methods[amr] !== true) {
+    throw agentXError("AUTH_REQUIRED", `${methodName(amr)} sign-in is turned off in this environment; sign in another way with agentx login <url>`);
   }
   return { developerId: claims.sub, sessionId: claims.sid, amr };
 }
@@ -639,7 +644,8 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
 async function companyOidcSession(deps: DeveloperRouteDependencies, session: SessionRecord, resolvedCompany?: string): Promise<DeveloperRecord | undefined> {
   // DEC 254e: a Slack session is checked here when it carries the shared-method mark (the sign-in server rechecks every Slack session at refresh,
   // as before); an OIDC session always.
-  if (deps.companies === undefined || !(session.amr === "oidc" || (session.amr === "slack" && session.installMethod !== undefined))) return undefined;
+  // DEC 254h: a GitHub session too (GitHub is only ever the install's shared method), exactly as a marked Slack session.
+  if (deps.companies === undefined || !(session.amr === "oidc" || ((session.amr === "slack" || session.amr === "github") && session.installMethod !== undefined))) return undefined;
   try {
     const scope = boundedCompanyReads(deps.documentClient, deps.now);
     const companyId = resolvedCompany ?? await scope.read(() => resolveCompany(deps.companies, session.developerId));
@@ -649,7 +655,7 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
       return undefined;
     }
     const parsed = z.object({
-      sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.enum(["oidc", "slack"]),
+      sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.enum(["oidc", "slack", "github"]),
       companyId: OrgIdSchema, startedAt: z.iso.datetime(), endsAt: z.number().finite(),
       reviewExpiresAt: z.number().finite().optional(), installMethod: z.literal(true).optional(),
     }).safeParse(await scope.read(async () => session));
@@ -659,7 +665,7 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
     // DEC 254b (a): a company with no issuer row signs in only through the install's own OIDC (the shared method), and only a session the sign-in
     // server marked so; the install's switch and since time then hold, as for the built-in company. A company with any issuer row never takes it.
     if (response.Item === undefined) {
-      if (parsed.data.installMethod !== true || !deps.developer.methods[parsed.data.amr]) throw new Error("shared method");
+      if (parsed.data.installMethod !== true || deps.developer.methods[parsed.data.amr] !== true) throw new Error("shared method");
       scope.check();
       return undefined;
     }
@@ -705,7 +711,7 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
   // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
   // session at its next refresh.
   if (companyDeveloper === undefined && startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
-    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
+    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : token.amr === "github" ? "GitHub" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
   }
   const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
@@ -1181,7 +1187,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
  * no-company sign-in wrote (never a legacy person's). Read live, on the sign-in table; any doubt is no.
  */
 async function companylessSession(deps: DeveloperRouteDependencies, client: SignInClientRecord, session: SessionRecord): Promise<boolean> {
-  if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || (session.amr !== "oidc" && session.amr !== "slack") || session.companyId !== undefined) return false;
+  if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || (session.amr !== "oidc" && session.amr !== "slack" && session.amr !== "github") || session.companyId !== undefined) return false;
   try {
     const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
     if (membership.Item !== undefined) return false;
@@ -1213,7 +1219,7 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   }
   if (claims.azp !== client.clientId || claims.env !== deps.developer.env || typeof claims.sub !== "string" || typeof claims.sid !== "string") throw refused();
   const amr = claims.amr;
-  if ((amr !== "slack" && amr !== "oidc") || (!deps.developer.methods[amr] && !(deps.companies !== undefined && amr === "oidc"))) throw refused();
+  if ((amr !== "slack" && amr !== "oidc" && amr !== "github") || (deps.developer.methods[amr] !== true && !(deps.companies !== undefined && amr === "oidc"))) throw refused();
   try {
     const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
     if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
@@ -1227,7 +1233,7 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
       companyless = true;
     }
     const companyDeveloper = companyless ? undefined : await companyOidcSession(deps, session, companyId);
-    if (companyDeveloper === undefined && (!deps.developer.methods[amr] || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
+    if (companyDeveloper === undefined && (deps.developer.methods[amr] !== true || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
     const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
     if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
     // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full

@@ -10,6 +10,7 @@ import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { withoutGithubSignIn } from "../support/github-signin-template.js";
 
 skipLambdaBundling();
 
@@ -204,8 +205,10 @@ describe("developer sign-in infrastructure (named environments)", () => {
 
   it("lets DeveloperIdentity read only its own company sign-in secret besides the Slack secret, and the Slack adapter's signing secret", () => {
     const reads = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((s) => allows(s, "secretsmanager:GetSecretValue"));
-    expect(reads).toHaveLength(3);
+    // DEC 254h: plus exactly the GitHub sign-in secret, by its one name (named environments only).
+    expect(reads).toHaveLength(4);
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain(":secret:agentx/staging/developer-oidc-??????");
+    expect(JSON.stringify(reads.map((s) => s.Resource))).toContain(":secret:agentx/staging/developer-github-??????");
     // Spec 062 Phase 7c1b: its Slack directory reads go through the adapter's commands once SlackViaChannel is on.
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain("ChannelApiSlackAdapterSecret");
   });
@@ -606,6 +609,7 @@ describe("task-token key and membership IAM", () => {
     withoutCoreEngine(remainder);
     // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
+    withoutGithubSignIn(remainder, "staging");
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
@@ -1601,7 +1605,11 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples,
+/** DEC 254h: the sign-in function reads the GitHub OAuth app's client secret, that one secret only. */
+const githubSignInTuples: AccessTuple[] = [
+  ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/developer-github-??????","{}"],
+];
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
 ].sort(byText);
 
