@@ -78,6 +78,8 @@ import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { hostedAnswersModel } from "../core-host/gateway-answers.js";
+import { createModelStartRouter } from "../core/answers/model-start-router.js";
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE, adminOfferedModelsFromEnvironment, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { companyEngineModelRoute, companyEngineModelStartCheck, type EngineModelOfferedReader } from "../core-host/company-engine-model.js";
 import { evalReservationModules } from "../core-host/eval-authority-http.js";
@@ -432,6 +434,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true;
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
+  // L4-AG: the hosted answers model for each company (one gateway adapter for the deployment, made when first needed, never for an install without the gateway).
+  // Only a built model is kept: a first attempt that found no signer yet is tried again on the next runtime build.
+  let answersModelFor: ReturnType<typeof hostedAnswersModel>;
+  const answersModel = () => (answersModelFor ??= hostedAnswersModel(env, inputs.taskTokens));
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
   // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
   const modelChoices = createCompanyModelChoices({ reader: coreActive && env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
@@ -580,12 +586,21 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
           },
-          // Lead 4 J3: the web start box's path suggestion. Any live role on the project asks (the setup run's standing). NO classifier yet: the gateway's "answers" purpose is Cloud lane L4-E, so until it lands every
-          // suggestion says the classifier is unavailable (small talk is still answered, free). Pass `route` here when it does.
-          startSuggest: { standing: setupRunStanding },
-          // Lead 4 J1: the smart Just answer. Any live role on the project asks (the setup run's standing); the code is the project's own repositories on the company's code host. NO model yet: the gateway's
-          // "answers" purpose is Cloud lane L4-E, so until it lands every answer is the fixed "answers are not set up here yet" outcome (pass `model` here when it does).
+          // Lead 4 J3 + L4-HC: the web start box's path suggestion. Any live role on the project asks (the setup run's standing). The classifier is ONE small call through the same answers gateway path as the
+          // answers (same purpose, same company binding, the company's own key): `answersModel()` is undefined without the gateway (or a Bedrock-only model, or no task-token key), and then every suggestion says
+          // the classifier is unavailable (small talk is still answered, free). The hourly counter is stored per company, project and person.
+          startSuggest: {
+            standing: setupRunStanding,
+            route: (companyId, scope) => {
+              const model = answersModel()?.(companyId);
+              return model === undefined ? undefined : createModelStartRouter({ model, companyId, project: scope.project, personId: scope.personId });
+            },
+          },
+          // Lead 4 J1: the smart Just answer. Any live role on the project asks (the setup run's standing); the code is the project's own repositories on the company's code host. The model is the gateway's
+          // "answers" purpose (Cloud lane L4-E; L4-AG): the company's own key, its own monthly limit, a fresh answers token per call. No gateway configured (or a Bedrock-only agent model, or no task-token key):
+          // every answer is the fixed "answers are not set up here yet" outcome.
           answers: {
+            model: answersModel(),
             standing: setupRunStanding,
             repositories: async (companyId, project) => {
               if (companyId !== runtime.companyId) return undefined;

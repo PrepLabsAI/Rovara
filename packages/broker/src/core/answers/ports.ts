@@ -3,8 +3,11 @@ import type { CitationFileReader } from "../citations/citation-check.js";
 
 // ---- The model ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-/** Why a model could not be used: `not_set_up` (no model or no key here, or the hosted gateway's answers purpose is not wired yet), `over_budget` (a spending limit), `unavailable` (a fault). Fixed words only. */
-export type AnswerModelRefusal = "not_set_up" | "over_budget" | "unavailable";
+/**
+ * Why a model could not be used: `not_set_up` (no model or no key here, or the hosted gateway's answers purpose is not wired yet), `over_budget` (this answer's own ceiling), `paused` (the company's monthly
+ * answers limit or budget has no room: the gateway's `answers_paused`), `unavailable` (a fault). Fixed words only.
+ */
+export type AnswerModelRefusal = "not_set_up" | "over_budget" | "paused" | "unavailable";
 export class AnswerModelRefused extends Error {
   constructor(readonly reason: AnswerModelRefusal) {
     super(reason);

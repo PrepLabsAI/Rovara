@@ -125,6 +125,40 @@ describe("outcomes", () => {
     expect(await refusal(w.service({ model: scriptedModel([new Error("provider said: sk-secret")]) }).ask({ personId: ADA, project: "alpha", body: body() }))).toEqual({ code: "RUNTIME_UNAVAILABLE", message: ANSWER_WORDS.unavailable });
   });
 
+  it("the gateway's monthly pause is a fixed 429 in its own words, whether it comes when the answer opens or on its first turn, and the place is given back", async () => {
+    const w = ready();
+    const opened = w.service({ model: scriptedModel([], { openRefusal: new AnswerModelRefused("paused") }), over: { perPersonPerHour: 1 } });
+    for (let n = 0; n < 3; n += 1) expect(await refusal(opened.ask({ personId: ADA, project: "alpha", body: body() }))).toEqual({ code: "TOO_MANY_REQUESTS", message: ANSWER_WORDS.paused });
+    expect(ANSWER_WORDS.paused).toBe("Answers are paused for this month.");
+    // The gateway holds the money per call, so a pause usually comes on the first turn (nothing was opened against a limit).
+    const first = w.service({ model: scriptedModel([new AnswerModelRefused("paused")]), over: { perPersonPerHour: 1 } });
+    for (let n = 0; n < 3; n += 1) expect(await refusal(first.ask({ personId: ADA, project: "alpha", body: body() }))).toEqual({ code: "TOO_MANY_REQUESTS", message: ANSWER_WORDS.paused });
+    // A company with no connected key reads as "not set up" on the first turn too (a fixed outcome, nothing recorded, no button).
+    const none = scriptedModel([new AnswerModelRefused("not_set_up")]);
+    const before = (await rows(w.store)).length;
+    const answered = await w.service({ model: none, over: { perPersonPerHour: 1 } }).ask({ personId: ADA, project: "alpha", body: body() });
+    expect(answered).toMatchObject({ outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, sources: [] });
+    expect(answered.action).toBeUndefined();
+    expect((await rows(w.store)).length).toBe(before);
+    expect(none.finished).toHaveLength(1);
+    // The same ask again still reaches the model: the place was given back, so the hourly limit of 1 never filled.
+    const again = await w.service({ model: scriptedModel([new AnswerModelRefused("not_set_up")]), over: { perPersonPerHour: 1 } }).ask({ personId: ADA, project: "alpha", body: body() });
+    expect(again.outcome).toBe("not_set_up");
+    // The place is given back once, not twice: after refused asks, exactly one real answer fits an hourly limit of 1.
+    const real = w.service({ model: scriptedModel([answer([goodSentence])]), over: { perPersonPerHour: 1 } });
+    expect((await real.ask({ personId: ADA, project: "alpha", body: body() })).outcome).toBe("answered");
+    expect((await refusal(real.ask({ personId: ADA, project: "alpha", body: body() }))).message).toBe(ANSWER_WORDS.rate);
+  });
+
+  it("a pause after the first turn ends the answer like the answer's own ceiling: what was found so far is checked and returned", async () => {
+    const w = ready();
+    const model = scriptedModel((_turn, n) => { if (n >= 1) throw new AnswerModelRefused("paused"); return tool({ tool: "wiki_search", query: "refund" }); });
+    const result = await w.service({ model }).ask({ personId: ADA, project: "alpha", body: body() });
+    expect(model.turns).toHaveLength(2);
+    expect(result).toMatchObject({ outcome: "not_found", honesty: ANSWER_WORDS.ranOut });
+    expect(model.finished).toHaveLength(1);
+  });
+
   it("a repeat of the same request id is the same answer: no model, no count", async () => {
     const w = ready();
     const model = scriptedModel([answer([goodSentence])]);
