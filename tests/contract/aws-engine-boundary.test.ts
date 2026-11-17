@@ -570,3 +570,53 @@ describe("a task's start on the AWS developer route (lane E2 step 6)", () => {
     else expect(theirs.status).toBeLessThan(500);
   });
 });
+
+describe("a Stop on the AWS developer route `POST /v1/dev/tasks/{id}/cancel` (S1, the switch-on gate)", () => {
+  it("with the company's owner rule wired, the owner stops a core task through the core: the old route's status and { task }, the core step cancelled, no AWS reader touches its workspace", async () => {
+    const { dev, task, world, workspaceReads } = await coreWorld({ actions: true });
+    const workspace = (await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: "META" }))!;
+    const operationId = workspace["activeOperationId"] as string;
+    const answer = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/cancel`, { requestId: randomUUID() });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({ task: { taskId: task.taskId } });
+    expect((await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: `OPERATION#${operationId}` }))?.["status"]).toBe("CANCELLED");
+    expect(workspaceReads()).toEqual([]);
+  });
+
+  it("another company's caller is answered exactly like a task id that does not exist, for every body; nothing is stopped", async () => {
+    const { dev, task, world } = await coreWorld({ actions: true });
+    const workspace = (await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: "META" }))!;
+    const operationId = workspace["activeOperationId"] as string;
+    for (const body of [{ requestId: randomUUID() }, {}, [1], null, undefined]) {
+      const missingId = randomUUID();
+      const theirs = await dev(OMAR, "POST", `/v1/dev/tasks/${task.taskId}/cancel`, body);
+      const missing = await dev(OMAR, "POST", `/v1/dev/tasks/${missingId}/cancel`, body);
+      expect(theirs.status, JSON.stringify(body)).toBe(missing.status);
+      expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), JSON.stringify(body)).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
+    }
+    expect((await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: `OPERATION#${operationId}` }))?.["status"]).not.toBe("CANCELLED");
+  });
+
+  it("golden: an unstamped (workflow) task's cancel answers and writes exactly as with no core entry on the install", async () => {
+    const legacyCancel = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {
+      const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
+      const taskId = (started.body.task as { taskId: string }).taskId;
+      const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
+      const writes: string[] = [];
+      const stop = harness.db.onWrite((change) => writes.push(Object.keys(change).join()));
+      const first = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: "11111111-1111-4111-8111-111111111111" });
+      const again = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: "11111111-1111-4111-8111-111111111111" });
+      stop();
+      // The broker stamps each answer with its own request id (coreWorld's `dev` drops it); everything else is compared.
+      const scrub = (value: { status: number; body: Record<string, unknown> }) => [taskId, workspaceId].reduce((text, id) => text.replaceAll(id, "<id>"), JSON.stringify({ status: value.status, body: { ...value.body, requestId: undefined } }))
+        .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/gu, "<time>");
+      return { first: scrub(first), again: scrub(again), writes };
+    };
+    const without = await legacyCancel(await createDeveloperTaskBroker());
+    const withCore = await legacyCancel(await coreWorld({ actions: true, newTasksOnWorkflow: true }));
+    expect(withCore.first).toBe(without.first);
+    expect(withCore.again).toBe(without.again);
+    expect(withCore.writes).toEqual(without.writes);
+    expect(JSON.parse(without.first)).toMatchObject({ status: 200 });
+  });
+});

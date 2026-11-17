@@ -94,7 +94,7 @@ export function orgLearningSettingsKey(orgId: OrgId): OrgKey {
   return { pk: orgPk(orgId), sk: "LEARNING_SETTINGS" };
 }
 
-export type OrgSettingName = "WORKSPACE_LIMITS" | "MODEL_SELECTION_POLICY" | "REVIEW_DEFAULT_NOTICE" | "PROJECT_CATALOG_INDEX";
+export type OrgSettingName = "WORKSPACE_LIMITS" | "MODEL_SELECTION_POLICY" | "REVIEW_DEFAULT_NOTICE" | "PROJECT_CATALOG_INDEX" | "ENGINE_MODEL";
 
 export function orgSettingsKey(orgId: OrgId, name: OrgSettingName): OrgKey {
   return { pk: orgScoped(orgId, "SETTINGS"), sk: name };
@@ -1016,4 +1016,12 @@ export function intakeOwnWriteKey(orgId: OrgId, ticketItemId: string, kind: Inta
 /** TE-H1 browser evidence, slice 3: the project's recipe as its owner saved it on the recipe page (which pages to photograph, the app's start command, the sign-in's form). One row per project in one company; holds no secret. */
 export function projectBrowserEvidenceRecipeKey(orgId: OrgId, name: string): OrgKey {
   return { pk: projectPk(orgId, name), sk: "BROWSER_EVIDENCE_RECIPE" };
+}
+
+/**
+ * Guided onboarding L2-1 (DEC 254o a): a company's claim on a project NAME it chose, beside the project's globally unique id. Only the company's
+ * own partition is ever read or written for a name, so whether another company uses the same name is never asked.
+ */
+export function orgProjectNameClaimKey(orgId: OrgId, name: string): OrgKey {
+  return { pk: orgScoped(orgId, "PROJECT_NAME"), sk: `NAME#${name}` };
 }
