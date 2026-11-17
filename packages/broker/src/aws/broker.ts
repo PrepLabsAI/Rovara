@@ -1051,7 +1051,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     // Guided onboarding PR 4: the Slack ingress's verified app_uninstalled / tokens_revoked. IAM protects the direct invoke; the company comes from the team's binding.
     if (isSlackWorkspaceRemovedEvent(event)) {
       const parsed = SlackWorkspaceRemovedEventSchema.safeParse(event);
-      if (!parsed.success || dependencies.slackInstall === undefined) return json({ outcome: "refused" }, "slack-workspace", 404);
+      if (!parsed.success || dependencies.slackInstall === undefined) return parsed.success ? json({ outcome: "ignored" }, "slack-workspace") : json({ outcome: "refused" }, "slack-workspace", 404); // not wired (COMPANY_SIGNIN off): a well-formed removal is acknowledged, nothing read or written, so Slack does not retry
       try { return json(await handleSlackWorkspaceRemoved({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, wiring: dependencies.slackInstall }, parsed.data), "slack-workspace"); }
       catch { return json({ outcome: "failed" }, "slack-workspace", 500); }
     }
