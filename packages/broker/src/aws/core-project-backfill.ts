@@ -70,7 +70,7 @@ function matchingRevision(row: Row, source: Row, company: string) {
 }
 /** The broker appends these writes to its legacy transaction. Backfill supplies the explicit operator company.
  * Forward writes follow D1 when the legacy source has no explicit company. */
-export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string, backfillRunId?: string): Promise<{ status: "ready" | "existing"; writes: Write[] }> {
+export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string, backfillRunId?: string): Promise<{ status: "ready" | "existing" | "unknown_company"; writes: Write[] }> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw conflict();
   const source = value as Row;
   // Forward registration keeps the pre-catalog behavior until the implicit
@@ -78,7 +78,7 @@ export async function planCoreProjectWrites(deps: State, value: unknown, mappedC
   // and continues to use D1 attribution without consulting this rollout flag.
   if (mappedCompany === undefined && source["companyId"] === undefined) {
     const flag = await get(deps, orgSettingsKey(IMPLICIT_COMPANY_ID, "PROJECT_CATALOG_INDEX"));
-    if (flag === undefined) return { status: "existing", writes: [] };
+    if (flag === undefined) return { status: "unknown_company", writes: [] };
     if (!z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) }).safeParse(flag).success) throw conflict();
   }
   // D1: legacy projects without an explicit company belong to the implicit company.

@@ -2267,7 +2267,7 @@ async function registerProject(
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
       corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
-      if (record.companyId === undefined && corePlan.writes.length === 0) console.log(JSON.stringify({ component: "broker", event: "core.project_copy_skipped", reason: "unknown_company" }));
+      if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
@@ -2377,6 +2377,7 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
       corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+    if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
     const repairLegacy = snapshot.catalog?.latestRevision !== targetRevision;
     if (!repairLegacy && corePlan.status !== "ready") return;
     const key = projectCatalogKey(projectName);
