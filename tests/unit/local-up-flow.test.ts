@@ -2451,7 +2451,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
     const publish = await h.nextJob(workspaceId, seen);
     const body = (publish.payload as { body?: string }).body ?? "";
-    expect(body).toContain("## Browser evidence");
+    expect(body).toContain("<summary>Screenshots: 1 page on the task page</summary>");
     expect(body).toContain("Browser evidence: Run by Rovara in its sandbox. Visual evidence only: it does not count as change proof.");
     expect(body).toContain("`/checkout`: before and after screenshots (on the task page, behind sign-in)");
     expect(body).not.toContain(shot("a").sha256);
@@ -2878,17 +2878,19 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     // The worker reports one harmless file; the commit also changes a CI workflow.
     const { taskId, cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n", ".github/workflows/ci.yml": "name: ci\n" }, diffOf("src/health.ts"));
     // At opening nothing is verified: the description cannot list the files, and the risk is HIGH and says why (the worker's list is not believed).
-    expect(openingBody).toContain("couldn't list the changed files");
-    expect(openingBody).toContain("## Risk: High");
+    expect(openingBody).toContain("The changed files have not been read yet.");
+    expect(openingBody).toContain("Risk not judged yet (treated as high)");
     expect(openingBody).toContain("Rovara has not yet checked which files changed against the code host.");
-    expect(openingBody).toContain("## Lessons used");
+    // Silent when fine (design 2.1 rule 5): no "None" section about lessons.
+    expect(openingBody).not.toContain("Lessons used");
     expect(((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level).toBe("high");
     // The next tracking pass reads the files from the code host: the description now lists BOTH files and the risk names the CI workflow.
     await h.runtime.tick();
-    expect(cr.body).toContain("2 files changed");
+    expect(cr.body).toContain("**Changed** 2 files, +");
     expect(cr.body).toContain(".github/workflows/ci.yml");
-    expect(cr.body).toContain("- src/health.ts");
-    expect(cr.body).toContain("## Risk: High");
+    // The per-file list is GitHub's own "Files changed" tab (design decision 4); only the count and the flagged files are said.
+    expect(cr.body).not.toContain("- src/health.ts");
+    expect(cr.body).toContain("High risk");
     expect(cr.body).toContain("Changes sensitive paths: .github/workflows/ci.yml");
     // The proof page shows the worker's list only as unchecked.
     const link = await h.browse(`/proof/${taskId}`);
@@ -2987,12 +2989,15 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     const fresh = await launch({ host: true, now: clock.now });
     const on = await published(fresh, { "src/health.ts": "export const health = 200;\n" }, undefined);
     await fresh.runtime.tick();
-    expect(on.cr.body).toContain("None used yet. Lessons are on:");
+    // The description is silent about lessons when none were used: no "None" section.
+    expect(on.cr.body).not.toContain("None used yet");
+    expect(on.cr.body).not.toContain("Lessons used");
     const off = await launch({ host: true, now: clock.now, environment: { ROVARA_LESSONS: "0" } });
     const stopped = await published(off, { "src/health.ts": "export const health = 200;\n" }, undefined);
     await off.runtime.tick();
-    expect(stopped.cr.body).toContain("None. Lessons are switched off on this install.");
+    expect(stopped.cr.body).not.toContain("Lessons are switched off");
     expect(stopped.cr.body).not.toContain("None used yet");
+    expect(stopped.cr.body).not.toContain("Lessons used");
   });
 
   it("N2: a description a person edited is left as they left it, though the files are verified and the risk is judged", async () => {
@@ -3017,7 +3022,7 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });
     const { taskId, cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
-    expect(openingBody).toContain("## Risk: High");
+    expect(openingBody).toContain("Risk not judged yet (treated as high)");
     // A host that cannot list the files now leaves the risk high; the next pass tries again.
     const original = h.host.changedFiles.bind(h.host);
     h.host.changedFiles = async () => { throw new Error("the host is down"); };
@@ -3028,11 +3033,10 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     await h.runtime.tick();
     const risk = ((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level;
     expect(risk).not.toBe("high");
-    expect(cr.body).toContain("1 file changed");
-    expect(cr.body).toContain("- src/health.ts (+2 -0)");
-    expect(cr.body).not.toContain("## Risk: High");
-    // A description a person edited is left as they left it.
-    expect(cr.body).toContain("None used yet. Lessons are on:");
+    expect(cr.body).toContain("**Changed** 1 file, +2 -0");
+    expect(cr.body).not.toContain("- src/health.ts");
+    expect(cr.body).not.toContain("High risk");
+    expect(cr.body).not.toContain("treated as high");
   });
 
   it("backs off when the code host says slow down, pauses every row until the time it names, and goes on after", async () => {
@@ -3361,7 +3365,8 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: Number(cr.id), url: h.model.crUrl(cr.id), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
     expect((await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workflow"]).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(cr.draft).toBe(true);
-    expect(String(payload["body"])).toContain("## Lessons used");
+    expect(String(payload["body"])).toContain("<!-- rovara:checks-and-reviews -->");
+    expect(String(payload["body"])).not.toContain("Lessons used");
 
     // The timer: checks pass, the draft is taken out of draft; then CI goes red and Rovara fixes it by itself.
     h.model.setChecks(commit, [passingCheck()]);
@@ -3395,6 +3400,10 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     expect(events).toContain("Rovara marked demo pull request " + cr.id + " ready for review.");
     expect(events.some((line) => line.startsWith("CI is failing on unit-tests, so Rovara is fixing it"))).toBe(true);
     expect(events.some((line) => line.startsWith("Approved by dana. Ready to merge"))).toBe(true);
+    // L4-C B5: the pull request was out of draft when CI went red, so the fix round is told on it once (a reviewer's earlier read may be stale); nothing else is: the passing checks and the approval are silent.
+    const posted = cr.comments.map((comment) => comment.body);
+    expect(posted.filter((body) => body.startsWith("Rovara is fixing failing CI (round 1 of 3): unit-tests"))).toHaveLength(1);
+    expect(posted.filter((body) => /passed|ready to merge/iu.test(body))).toEqual([]);
     expect(cr.state).toBe("open");
     const listed = await listSessions(store, IMPLICIT_COMPANY_ID, developerIdOf(localOwnerPrincipal()));
     expect(listed.sessions[0]).toMatchObject({ summary: { step: "Ready to merge", display: { state: "ready_to_merge" } } });
@@ -4281,7 +4290,7 @@ describe("rovara up: the second review on the pull request", () => {
     expect(openingBody).toContain("Second review did not run");
     await h.runtime.tick();
     // The description was rewritten with the files read from the host, and still says so.
-    expect(cr.body).toContain("1 file changed");
+    expect(cr.body).toContain("**Changed** 1 file, +");
     expect(cr.body).toContain("Second review did not run");
   });
 
@@ -4295,7 +4304,7 @@ describe("rovara up: the second review on the pull request", () => {
     expect(openingBody).toContain("Fixes ENG-142");
     await h.runtime.tick();
     // The rewrite from the host's own list of changed files keeps the line (a rewrite that forgot it would stop Linear closing the issue).
-    expect(cr.body).toContain("1 file changed");
+    expect(cr.body).toContain("**Changed** 1 file, +");
     expect(cr.body).toContain("Fixes ENG-142");
   });
 

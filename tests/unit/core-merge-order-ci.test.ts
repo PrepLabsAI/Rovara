@@ -116,7 +116,9 @@ describe("the description", () => {
   it("carries the CI words under the Merge order section and breaks up the pull request numbers", () => {
     const status = (lines: readonly string[]) => rovaraStatusLines({ definitionVersion: "1.1.0", stage: "PULL_REQUEST", state: "READY" } as never, { mergeOrderLines: lines }, () => ["- no findings"]);
     const text = status(["Merge order: payments-lib #12 first, then app #40.", "Tested together in Rovara; your CI tests each repository alone and may fail until payments-lib #12 merges."]).join("\n");
-    expect(text).toContain("## Merge order");
+    // L4-C: the merge order is one of the things to check, above the first drawer, with the CI words under it.
+    expect(text).toContain("**The order of merging matters.**");
+    expect(text.indexOf("**The order of merging matters.**")).toBeLessThan(text.indexOf("<details>"));
     expect(text).toContain("Tested together in Rovara; your CI tests each repository alone and may fail until payments-lib #‍12 merges.");
   });
 });

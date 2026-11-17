@@ -11,7 +11,7 @@
 // Without a `SummaryCheckSource` (the `summaryCheck` gate off) nothing here runs.
 import { createHash } from "node:crypto";
 import {
-  companyScoped, rovaraCheckOf, type ChangeRequestStatus, type CodeHost, type DocumentStore, type HostScope, type OrgId, type ReadBudget, type RovaraCheckFullSuite, type RovaraCheckInput, type RovaraCheckPayload, type RovaraCheckProblem,
+  companyScoped, rovaraCheckOf, type ChangeRequestStatus, type CodeHost, type DocumentStore, type HostScope, type OrgId, type ReadBudget, type RovaraCheckFullSuite, type RovaraCheckInput, type RovaraCheckPayload, type RovaraCheckProblem, type RovaraCheckVerdict,
 } from "@agentx/contracts";
 import { plain } from "./store.js";
 import { readProofHold } from "./proof-hold.js";
@@ -23,12 +23,19 @@ export interface SummaryCheckSource {
   enabled(task: MergeTask): Promise<boolean> | boolean;
   /** What the evidence says for the head beyond the proof: a Rovara problem, checks that did not run, the full suite after the draft. Undefined: nothing more is known. */
   facts?(input: { task: MergeTask; repositoryId: string; number: number; headSha: string }): Promise<{ problem?: RovaraCheckProblem | undefined; fullSuite?: RovaraCheckFullSuite | undefined } | undefined>;
+  /**
+   * L4-C B4: the verdict of the head's code, rendered by the host from the same `prVerdictOf` object the pull request's description is written from (`resultKind`, the heading, and the body's lines: the six lines and the list
+   * of things to check, already inert). The Check then says the same words as the description. Undefined, or a read that fails: the Check is what it was. It never changes the conclusion.
+   */
+  verdict?(input: { task: MergeTask; repositoryId: string; number: number; headSha: string }): Promise<RovaraCheckVerdict | undefined>;
   /** The name of a person as Rovara shows it (the override's actor). Undefined: "a person". */
   personName?(orgId: OrgId, personId: string): Promise<string | undefined>;
   /** Where the Check's "Details" opens: the task's signed-in page. Only an https address is used. */
   detailsUrl?(task: MergeTask): string | undefined;
 }
 
+/** The longest the verdict source may take: the Check is written without it after this. */
+export const VERDICT_READ_MAX_MS = 2_000;
 export const SUMMARY_CHECK_ENTITY = "ROVARA_CHECK";
 /** How long after a refused write (no Check permission) the write is tried again. */
 export const SUMMARY_CHECK_PERMISSION_RETRY_MS = 3_600_000;
@@ -163,8 +170,15 @@ export async function syncSummaryCheck(deps: SummaryCheckDependencies, pass: Sum
     const { proof } = read;
     const override = "override" in read ? read.override : undefined;
     const problem = unreadable ? "rovara_problem" : facts?.problem ?? (pass.headByRovara ? undefined : "not_run");
+    // The verdict is only words: a source that cannot give it leaves the Check as it was (never a different conclusion, never a problem of its own).
+    // At most two seconds: the Check must never wait on words.
+    let timer: NodeJS.Timeout | undefined;
+    const verdict = await Promise.race([
+      (async () => deps.source.verdict?.({ task: pass.task, repositoryId: pass.pullRequest.repositoryId, number: pass.pullRequest.number, headSha: head }))().catch(() => undefined),
+      new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), VERDICT_READ_MAX_MS); }),
+    ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
     const payload = rovaraCheckOf({
-      proof, ...(override === undefined ? {} : { override }), ...(problem === undefined ? {} : { problem }),
+      proof, ...(override === undefined ? {} : { override }), ...(problem === undefined ? {} : { problem }), ...(verdict === undefined ? {} : { verdict }),
       ci: pass.ci, ciMode: pass.ciMode, fullSuite: facts?.fullSuite ?? "not_needed", firstSeenAtMs, nowMs: now,
     });
     const detailsUrl = httpsOnly(deps.source.detailsUrl?.(pass.task));
