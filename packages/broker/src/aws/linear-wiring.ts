@@ -1,5 +1,7 @@
 // Guided onboarding PR 7: how the hosted broker builds the Linear connection pieces from its environment. Only where all of these are given:
-//   - LINEAR_CONNECTION_KEY_ARN  the KMS key that seals each company's Linear tokens (infra/lib/control-plane.ts LinearConnectionKey; only the broker encrypts and decrypts)
+//   - CHATGPT_CONNECTION_KEY_ARN  the broker's existing token-sealing KMS key (infra/lib/control-plane.ts ChatGptConnectionKey: only the broker may encrypt and decrypt with it).
+//                                Reused, not a new key: the broker's environment is at its 4 KB size pin (tests/contract/lambda-environment-size.test.ts). Every Linear value is sealed
+//                                under its own encryption context (purpose linear-connection / linear-connect, company, workspace, field), so it never opens as a ChatGPT value or another company's
 //   - the app's settings secret  `<connector secret prefix>linear-oauth-app` (JSON { clientId, clientSecret, webhookSecret, redirectUri }), which the broker's existing
 //                                connector-secret read grant already covers; absent or unreadable: connect says "isn't set up" and the webhook answers 503
 // The company's tokens are only ever read for the company asking (`linearCompanyApiAccess`), so another company's token is never used for its projects.
@@ -50,7 +52,7 @@ export function linearCompanyWiring(input: {
   env: NodeJS.ProcessEnv; documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; kms: Pick<KMSClient, "send">; secrets: Pick<SecretsManagerClient, "send">;
   connectorSecretPrefix: string; fetch?: typeof fetch; log: (entry: Record<string, unknown>) => void;
 }): LinearCompanyWiring | undefined {
-  const keyArn = input.env.LINEAR_CONNECTION_KEY_ARN;
+  const keyArn = input.env.CHATGPT_CONNECTION_KEY_ARN;
   if (keyArn === undefined || keyArn === "") return undefined;
   const fetchImpl = input.fetch ?? fetch;
   const app = linearAppSettingsReader(input.secrets, linearAppSecretName(input.connectorSecretPrefix));

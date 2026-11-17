@@ -817,7 +817,7 @@ export class ControlPlaneStack extends Stack {
       authorizationType: "NONE",
     });
     // Guided onboarding PR 7: the Linear OAuth app signs its webhook bodies itself; the broker verifies the HMAC, the timestamp and the workspace's binding. Named environments only.
-    if (props?.naming !== undefined) new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
+    if (naming.env !== undefined) new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
       apiId: api.ref,
       routeKey: "POST /v1/linear/webhooks",
       target: `integrations/${integration.ref}`,
@@ -982,22 +982,6 @@ export class ControlPlaneStack extends Stack {
         }));
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
-      // Guided onboarding PR 7: seals each company's Linear OAuth tokens in the State table, the same way (only the broker encrypts and decrypts, always under an encryption
-      // context naming the company, the Linear workspace and the field). Named environments only: Linear by OAuth exists only beside company sign-in. Deleting it only leaves
-      // connections to redo.
-      if (naming.env !== undefined) {
-        const linearConnectionKey = new kms.Key(this, "LinearConnectionKey", {
-          description: "AgentX: seals companies' Linear OAuth tokens",
-          enableKeyRotation: true,
-          pendingWindow: Duration.days(7),
-          removalPolicy: RemovalPolicy.DESTROY,
-        });
-        linearConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
-          principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
-          actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
-        }));
-        addBrokerName(broker, naming, "linearConnectionKey", linearConnectionKey.keyId, linearConnectionKey.keyArn);
-      }
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).

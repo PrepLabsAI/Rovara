@@ -15273,7 +15273,7 @@ const repositoryGrants = new RepositoryGrantService(
 );
 
 const lambdaClient = new LambdaClient(awsClientConfiguration);
-// Guided onboarding PR 7: Linear by OAuth as the app, only where infra gives the token key (LINEAR_CONNECTION_KEY_ARN); the app's settings come from its connector secret.
+// Guided onboarding PR 7: Linear by OAuth as the app, only where infra gives the token key (CHATGPT_CONNECTION_KEY_ARN); the app's settings come from its connector secret.
 const linear = linearCompanyWiring({ env: process.env, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), kms: new KMSClient(awsClientConfiguration), secrets: secretsManager,
   connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine });
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */

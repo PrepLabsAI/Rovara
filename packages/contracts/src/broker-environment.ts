@@ -96,7 +96,6 @@ export const BROKER_NAMES = {
   slackOrchestratorRole: { code: "so", variable: "SLACK_ORCHESTRATOR_ROLE_ARN", kind: "roleArn" },
   companySecretsRole: { code: "cs", variable: "COMPANY_SECRETS_ROLE_ARN", kind: "roleArn" },
   chatGptConnectionKey: { code: "ck", variable: "CHATGPT_CONNECTION_KEY_ARN", kind: "kmsKeyArn" },
-  linearConnectionKey: { code: "lk", variable: "LINEAR_CONNECTION_KEY_ARN", kind: "kmsKeyArn" },
   taskTokenKey: { code: "kt", variable: "TASK_TOKEN_KEY_ARN", kind: "kmsKeyArn" },
   policyHookKey: { code: "kp", variable: "POLICY_HOOK_KEY_ARN", kind: "kmsKeyArn" },
   provisionerStateMachine: { code: "pv", variable: "PROVISIONER_ARN", kind: "stateMachineArn" },
