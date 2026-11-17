@@ -559,7 +559,7 @@ describe("the rule inside the decision (the subject's own, read again after the 
     expect(await approval2.approve({ personId: "mia", stepUp: STEP(w2), project: "payments", approval: w2.bodyFor(medium) })).toMatchObject({ ok: true });
   });
 
-  it("an approver the point names in another company is refused by the rule, whatever the person's live role here", async () => {
+  it("an approver the point names in another company is refused whatever the person's live role here (the gate refuses first, wrong_company; the rule's own company check is defence in depth and an equivalent mutant)", async () => {
     const w = await world();
     const seen = await w.seed(A, "payments");
     w.person("ann", A, "admin");
