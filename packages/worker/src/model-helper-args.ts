@@ -3,12 +3,13 @@
 // helper parses the same line with `parseModelHelperArgs`. Numbers, addresses, enum words and file paths only: no secret, no URL, no host name (a project id is a plain Google id, never a secret).
 //
 //   SERVE      --listen <ipv4> --port <n> [--meta-port <n>] --caller <ipv4> --mode scripted|replay|record|real --rows <file> --replies <file> --digest <64 hex> --ledger <file>
-//              --block-state by_name|not_blocked_here [--project-id <id>] [--record-escapes]
+//              --block-state by_name|not_blocked_here [--project-id <id>] [--record-escapes] [--bridge-socket /rovara/models/<name>]
 //   SUMMARIZE  --summarize --ledger <file>
 //
 // `--digest` pins the reply bundle the worker wrote (the helper serves nothing that does not hash to it). `--block-state` says whether model hosts are blocked by name in the sandbox the helper serves (`by_name`, hosted) or
 // not blocked at all (`not_blocked_here`, the laptop): the worker decides it, never the request. `--record-escapes` binds ports 443 and 80 on the listen address to record the NAME of a client that ignored its redirect
-// (F1-b's recorder does the reading; model-helper-http.ts). Port 0 (an ephemeral port) is allowed only on a loopback address (the laptop). PURE: no I/O.
+// (F1-b's recorder does the reading; model-helper-http.ts). Port 0 (an ephemeral port) is allowed only on a loopback address (the laptop). `--bridge-socket` (TE-B1, the fresh eval sandbox) names the worker's bridge socket
+// inside the helper's one read-only mount: allowed only with `--mode real` and only as a file directly in `/rovara/models`; with it the program wires its `real` backend over that socket (model-helper-bridge-backend.ts). PURE: no I/O.
 import { isIP } from "node:net";
 
 export const MODEL_HELPER_MODES = ["scripted", "replay", "record", "real"] as const;
@@ -55,6 +56,8 @@ export interface ModelHelperServeArgs {
   readonly blockState: ModelBlockState;
   readonly projectId: string | undefined;
   readonly recordEscapes: boolean;
+  /** The worker's bridge socket in the helper's one mount (TE-B1). Only with mode `real`; absent: no backend, real calls are "not run". */
+  readonly bridgeSocket?: string | undefined;
 }
 export interface ModelHelperSummarizeArgs {
   readonly ledger: string;
@@ -64,6 +67,13 @@ const isLoopback = (address: string): boolean => /^127\./u.test(address);
 const port = (value: number, allowZero: boolean): number => (Number.isInteger(value) && value >= (allowZero ? 0 : 1) && value <= 65_535 ? value : refuse());
 const ipv4 = (value: string): string => (isIP(value) === 4 ? value : refuse());
 const filePath = (value: string): string => (FILE_PATH.test(value) && !value.split("/").includes("..") ? value : refuse());
+/** A file directly in the helper's one mount, and only for the `real` mode (the one mode the bridge backend serves). */
+const BRIDGE_SOCKET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/u;
+const bridgeSocketPath = (value: string, mode: string): string => {
+  if (mode !== "real" || typeof value !== "string" || !value.startsWith(`${MODEL_HELPER_RUN_DIR}/`)) refuse();
+  const name = value.slice(MODEL_HELPER_RUN_DIR.length + 1);
+  return BRIDGE_SOCKET_NAME.test(name) && name !== "rows.json" && name !== "replies.json" ? value : refuse();
+};
 
 function validate(args: ModelHelperServeArgs): ModelHelperServeArgs {
   const listen = ipv4(args.listen);
@@ -82,6 +92,7 @@ function validate(args: ModelHelperServeArgs): ModelHelperServeArgs {
     blockState: (MODEL_BLOCK_STATES as readonly string[]).includes(args.blockState) ? args.blockState : refuse(),
     projectId: args.projectId === undefined ? undefined : PROJECT_ID.test(args.projectId) ? args.projectId : refuse(),
     recordEscapes: args.recordEscapes === true,
+    bridgeSocket: args.bridgeSocket === undefined ? undefined : bridgeSocketPath(args.bridgeSocket, args.mode),
   };
   // The metadata port and the main port are two listeners: on a fixed port pair they must differ.
   if (checked.metaPort !== undefined && checked.metaPort === checked.port && checked.port !== 0) refuse();
@@ -104,6 +115,7 @@ export function modelHelperArgs(input: ModelHelperServeArgs): string[] {
     "--block-state", args.blockState,
     ...(args.projectId === undefined ? [] : ["--project-id", args.projectId]),
     ...(args.recordEscapes ? ["--record-escapes"] : []),
+    ...(args.bridgeSocket === undefined ? [] : ["--bridge-socket", args.bridgeSocket]),
   ];
 }
 
@@ -134,7 +146,7 @@ const wholeNumber = (text: string): number => (/^\d{1,5}$/u.test(text) ? Number(
 
 /** Strict: an unknown flag, a repeated one, a flag with no value, a name instead of an address, a wildcard listen address or a path with `..` is refused. */
 export function parseModelHelperArgs(argv: readonly string[]): ModelHelperServeArgs {
-  const flags = new Set(["listen", "port", "meta-port", "caller", "mode", "rows", "replies", "digest", "ledger", "block-state", "project-id", "record-escapes"]);
+  const flags = new Set(["listen", "port", "meta-port", "caller", "mode", "rows", "replies", "digest", "ledger", "block-state", "project-id", "record-escapes", "bridge-socket"]);
   const valueFlags = new Set([...flags].filter((flag) => flag !== "record-escapes"));
   for (let at = 0; at < argv.length; at += 1) {
     const token = argv[at] as string;
@@ -161,6 +173,7 @@ export function parseModelHelperArgs(argv: readonly string[]): ModelHelperServeA
     blockState: one(argv, "block-state") as ModelBlockState,
     projectId: optionalOne(argv, "project-id"),
     recordEscapes: records === 1,
+    bridgeSocket: optionalOne(argv, "bridge-socket"),
   });
 }
 

@@ -16,6 +16,8 @@ export const EvalSpendPlanSchema = z.object({
   inputs: EvalSpendInputsSchema,
   estimate: EstimateSchema,
   budget: z.object({ usual: EstimateSchema, maximum: EstimateSchema }).strict(),
+  /** DEC 253j(1): the digest of the EVAL_PLAN proposed with this item (`evalPlanDigest`). Set only by the broker's proposal, so this item's digest, the one approved, covers the plan. Absent: no plan. */
+  evalPlanDigest: hash.optional(),
 }).strict().refine(p => p.estimate.calls <= p.budget.maximum.calls && p.estimate.costMicros <= p.budget.maximum.costMicros && p.budget.usual.calls <= p.budget.maximum.calls && p.budget.usual.costMicros <= p.budget.maximum.costMicros, "estimate and usual spend must fit the maximum");
 export type EvalSpendPlan = z.infer<typeof EvalSpendPlanSchema>;
 export const EvalSpendRoleSchema = z.enum(["owner", "admin", "maintainer"]);

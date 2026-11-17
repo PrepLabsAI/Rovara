@@ -613,7 +613,9 @@ describe("task-token key and membership IAM", () => {
     // #722 re-pins the COMBINED stacked baseline (#689's hosted wiring and R2 step 4 together; each PR pinned only its own base). No template change of #722's own; the IAM
     // tuples are checked exactly against the reviewed lists below. Same value as L1a (#731) measured before its own edits.
     // ENV-ROOM (pr/broker-env-diet): re-pinned for the packed broker environment (the broker's Variables only; no IAM change).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("09b0aea7d2e84ef8cf6206f7b474f0086fdfbcf8f5747f12a2e90c6e32cc5be4");
+    // Switch-over incident 2026-11-16: re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA, as staging holds it);
+    // the remainder is otherwise identical (only the resource and DependsOn order move with the new ID).
+    expect(createHash("sha256").update(text).digest("hex")).toBe("5d90ff9de5cab07ffbbf60b8460f259c0fb96f999892da79d536a60d12e9a89a");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {

@@ -16,7 +16,9 @@ import { APP_NODE_IMAGE, EXECUTOR_IMAGE } from "../support/linux-runtime.js";
 //   - shows the app gets labelled answers from the fake over the run network, and only the app does (a second container on the same network is closed unread and counted);
 //   - shows the container is what the design says: one internal network, every capability dropped, no privilege, a read-only root, one read-only mount, bounded memory, cpus and pids, no environment of the worker's,
 //     no way out of the network, no way to write the set;
-//   - shows stop() leaves nothing behind (no container, no network, the sandbox back on its own network, the run files gone).
+//   - shows stop() leaves nothing behind (no container, no network, the sandbox back on its own network, the run files gone);
+//   - shows two live tenants (two companies, two tasks, two helpers) are independent: stopping one leaves the other running, attached and answering (FAKES-2B-MEDIUMS);
+//   - shows the helper container has a deadline of its own: with a short lifetime and no stop() call at all, the container stops by itself, and a later stop() still cleans up.
 // Every claim has a control: the same container can write where it is meant to, and the app does get an answer.
 const REPO = resolve(import.meta.dirname, "../..");
 const PREFIX = `rovara-gf-linux-${String(process.pid)}`;
@@ -41,6 +43,7 @@ interface Inspected {
   HostConfig: { Privileged: boolean; CapDrop: string[] | null; CapAdd: string[] | null; SecurityOpt: string[] | null; ReadonlyRootfs: boolean; Memory: number; MemorySwap: number; NanoCpus: number; PidsLimit: number; Dns: string[] | null; PortBindings: object | null; NetworkMode: string; PidMode: string | null; Devices: unknown[] | null; Binds: string[] | null; Tmpfs: Record<string, string> | null };
   Mounts: { Type: string; Destination: string; RW: boolean }[];
   Config: { User: string; Env: string[]; Labels: Record<string, string> };
+  State: { Running: boolean; ExitCode: number };
   NetworkSettings: { Networks: Record<string, { IPAddress: string }> };
   Internal?: boolean;
   Options?: Record<string, string>;
@@ -231,5 +234,99 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // Idempotent, and the helper cannot be read any more (a closed round answers nothing).
     await started!.stop();
     expect(await started!.drain()).toBeUndefined();
+  }, 120_000);
+
+  // ---- two live tenants, and the helper's own deadline (FAKES-2B-MEDIUMS). The image built above is still here; each tenant has a workspace key, a task, a sandbox and a scratch folder of its own.
+  const TENANT_A = { key: "aaaaaaaaaaaaaaaa", workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c1a", operationId: "7c1f0d3a-2b8e-4a55-8f3b-9a1c2d3e4f5a", sandbox: `${PREFIX}-sandbox-a` };
+  const TENANT_B = { key: "bbbbbbbbbbbbbbbb", workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c1b", operationId: "7c1f0d3a-2b8e-4a55-8f3b-9a1c2d3e4f5b", sandbox: `${PREFIX}-sandbox-b` };
+  const TENANT_C = { key: "cccccccccccccccc", workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c1c", operationId: "7c1f0d3a-2b8e-4a55-8f3b-9a1c2d3e4f5c", sandbox: `${PREFIX}-sandbox-c` };
+  type Tenant = typeof TENANT_A;
+  const filterOf = (tenant: Tenant): string => `label=rovara.run-network.workspace=${tenant.key}`;
+  const namesOf = async (kind: "ps" | "network", tenant: Tenant): Promise<string[]> => {
+    const listed = kind === "ps" ? await docker("ps", "--all", "--filter", filterOf(tenant), "--format", "{{.Names}}") : await docker("network", "ls", "--filter", filterOf(tenant), "--format", "{{.Name}}");
+    return listed.stdout.split("\n").filter((name) => name.length > 0);
+  };
+  const addSandbox = async (tenant: Tenant): Promise<void> => {
+    const sandbox = await docker("run", "--detach", "--pull=never", "--name", tenant.sandbox, "--network", `${PREFIX}-task`, "--user", "1000:1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "sleep", APP_NODE_IMAGE, "infinity");
+    expect(sandbox.code, sandbox.stderr).toBe(0);
+  };
+  const startTenant = async (tenant: Tenant, extra: { helperLifetimeMs?: number } = {}): Promise<{ run: Awaited<ReturnType<typeof startGeneralFakesHelper>>; parent: string }> => {
+    const parent = await mkdtemp(join(tmpdir(), "rovara-gf-tenant-"));
+    folders.push(parent);
+    const run = await startGeneralFakesHelper({
+      docker: cli, image: imageId, workspaceKey: tenant.key, workspaceId: tenant.workspaceId, operationId: tenant.operationId, round: 1, sandboxName: tenant.sandbox, fakes, variables: ["PETS_API_URL"], scratchParent: parent, roundBudgetMs: 600_000,
+      environment: { AGENTX_GENERAL_FAKES_HELPER: "1", AGENTX_WORKER_IMAGE: imageId, AGENTX_TEST_SERVICES_RUN_DIR: parent, AGENTX_TEST_SERVICES_BOOT_FACTS: FACTS }, ...extra,
+    });
+    return { run, parent };
+  };
+  const live: Array<Awaited<ReturnType<typeof startGeneralFakesHelper>>> = [];
+
+  it("two live tenants are independent: stopping one leaves the other's helper running, its network, its sandbox attached and its answers intact (control: the stopped one is gone)", async () => {
+    await addSandbox(TENANT_A);
+    await addSandbox(TENANT_B);
+    const a = await startTenant(TENANT_A);
+    live.push(a.run);
+    const b = await startTenant(TENANT_B);
+    live.push(b.run);
+    const [helperA] = await namesOf("ps", TENANT_A);
+    const [helperB] = await namesOf("ps", TENANT_B);
+    expect(helperA).toMatch(/^rovara-svc-[0-9a-f]{12}-fakes$/u);
+    expect(helperB).toMatch(/^rovara-svc-[0-9a-f]{12}-fakes$/u);
+    expect(helperA).not.toBe(helperB);
+    // Both answer, each to its own sandbox, and each helper counts only its own calls.
+    expect(await callFromApp(TENANT_A.sandbox, a.run.environment.PETS_API_URL!, "/pets/4")).toMatchObject({ status: 200, label: "madeByRovara" });
+    expect(await callFromApp(TENANT_B.sandbox, b.run.environment.PETS_API_URL!, "/pets/4")).toMatchObject({ status: 200, label: "madeByRovara" });
+    expect(await callFromApp(TENANT_B.sandbox, b.run.environment.PETS_API_URL!, "/pets/4")).toMatchObject({ status: 200 });
+    // Isolation: tenant B's sandbox is not on tenant A's network, so A's helper address is unreachable from it (control: A's own sandbox reaches it, above).
+    expect((await callFromApp(TENANT_B.sandbox, a.run.environment.PETS_API_URL!, "/pets/4")).status).toBeUndefined();
+    // Tenant A's round ends.
+    await a.run.stop();
+    expect(await namesOf("ps", TENANT_A)).toEqual([]);
+    expect(await namesOf("network", TENANT_A)).toEqual([]);
+    expect(await readdir(a.parent)).toEqual([]);
+    expect(Object.keys((await inspect(TENANT_A.sandbox)).NetworkSettings.Networks)).toEqual([`${PREFIX}-task`]);
+    // Tenant B is untouched: the same container still running, its network and mount in place, its sandbox attached, and it answers.
+    expect(await namesOf("ps", TENANT_B)).toEqual([helperB]);
+    expect((await inspect(helperB!)).State.Running).toBe(true);
+    const networksB = await namesOf("network", TENANT_B);
+    expect(networksB).toHaveLength(1);
+    expect(Object.keys((await inspect(TENANT_B.sandbox)).NetworkSettings.Networks).sort()).toEqual([`${PREFIX}-task`, networksB[0]!].sort());
+    expect((await readdir(b.parent)).length).toBe(1);
+    expect(await callFromApp(TENANT_B.sandbox, b.run.environment.PETS_API_URL!, "/pets/4")).toMatchObject({ status: 200, label: "madeByRovara" });
+    expect(await b.run.drain()).toMatchObject({ served: 3, foreign: 0 });
+    await b.run.stop();
+    expect(await namesOf("ps", TENANT_B)).toEqual([]);
+    expect(await namesOf("network", TENANT_B)).toEqual([]);
+  }, 300_000);
+
+  it("the helper container stops by itself at its own deadline, with no stop() call at all (control: before the deadline it is running; a later stop() still cleans up)", async () => {
+    await addSandbox(TENANT_C);
+    const c = await startTenant(TENANT_C, { helperLifetimeMs: 30_000 });
+    live.push(c.run);
+    const [helperC] = await namesOf("ps", TENANT_C);
+    expect(helperC).toBeDefined();
+    const args = (await inspect(helperC!)) as Inspected & { Args: string[] };
+    expect(args.Args.slice(args.Args.indexOf("--lifetime-ms"), args.Args.indexOf("--lifetime-ms") + 2)).toEqual(["--lifetime-ms", "30000"]);
+    expect(await callFromApp(TENANT_C.sandbox, c.run.environment.PETS_API_URL!, "/pets/4")).toMatchObject({ status: 200 });
+    let state = (await inspect(helperC!)).State;
+    // Poll for the helper to end on its own (the deadline is 30 seconds from its start, plus Docker's own bookkeeping).
+    for (let attempt = 0; attempt < 120 && state.Running; attempt += 1) {
+      await new Promise((resolve) => { setTimeout(resolve, 1_000); });
+      state = (await inspect(helperC!)).State;
+    }
+    expect(state.Running).toBe(false);
+    expect(state.ExitCode).toBe(0);
+    // A helper that has ended answers nothing, and the worker reads that as "unknown", never "no calls".
+    expect((await callFromApp(TENANT_C.sandbox, c.run.environment.PETS_API_URL!, "/pets/4")).status).toBeUndefined();
+    expect(await c.run.drain()).toBeUndefined();
+    await c.run.stop();
+    expect(await namesOf("ps", TENANT_C)).toEqual([]);
+    expect(await namesOf("network", TENANT_C)).toEqual([]);
+    expect(await readdir(c.parent)).toEqual([]);
+  }, 300_000);
+
+  afterAll(async () => {
+    await Promise.all(live.splice(0).map((run) => run.stop()));
+    await docker("rm", "--force", TENANT_A.sandbox, TENANT_B.sandbox, TENANT_C.sandbox);
   }, 120_000);
 });

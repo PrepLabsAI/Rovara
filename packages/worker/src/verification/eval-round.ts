@@ -2,7 +2,7 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
+  captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, hiddenEvalSetFor, isEvalBaseAttestation,
   type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
@@ -10,10 +10,12 @@ import { readReportPartsFile } from "./report-file.js";
 // DEC 203: eval-only defaults; general task pacing remains 200 calls / $2.
 import { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS } from "@agentx/contracts";
 export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS } from "@agentx/contracts";
+import { evalSettingsFingerprintOf } from "@agentx/contracts";
 
 /** Shared by setup measurement, refresh and task comparison; preserve the existing key encoding. */
 export function evalSettingsFingerprint(settings: EvalRoundInput["settings"], judgePin: string): string {
-  return evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: settings.imageDigest, route: settings.route, judgePin }));
+  // One formula with the broker's (DEC 253n: it builds the confirmed plan's inputs with `evalSettingsFingerprintOf`).
+  return evalSettingsFingerprintOf(settings, judgePin);
 }
 
 /** The shape of F4's `PromptChangeDecision`: whether an eval is needed, and why. */

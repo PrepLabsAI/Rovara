@@ -65,35 +65,61 @@ export function identifyProcess(proc: ProcReader, pid: number): { owner: Exclude
   return { owner: "other", exe };
 }
 
-/** The report: one row per listening port, and a violation for every listener nobody here owns or a program that is not one of the three owns. */
-export function listenerReport(proc: ProcReader = nodeProcReader()): DeviceListenerReport {
+/** How hard to look again before a listener is called unowned (see `listenerReport`). `sleep` is a parameter so a test does not wait. */
+export type Resample = Readonly<{ attempts: number; delayMs: number; sleep(ms: number): void }>;
+const sleepSync = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+/** Four looks 100 ms apart: far longer than a process takes to finish an exec or open its sockets, short enough that a real stray still reads unowned well inside a run. */
+export const DEVICE_LISTENER_RESAMPLE: Resample = { attempts: 4, delayMs: 100, sleep: sleepSync };
+
+/** One look: the listening table FIRST, then who holds each socket. In that order a socket opened after the table was read is simply not in this look, rather than listed with no holder yet. */
+function look(proc: ProcReader): Array<DeviceListenerRow & { inode: string }> {
+  const sockets = listeningSockets(proc);
   const holders = socketHolders(proc);
-  const rows: DeviceListenerRow[] = [];
-  for (const { port, inode } of listeningSockets(proc)) {
+  const rows: Array<DeviceListenerRow & { inode: string }> = [];
+  for (const { port, inode } of sockets) {
     const pids = holders.get(inode) ?? [];
-    if (pids.length === 0) { rows.push({ port, owner: "unowned", exe: "" }); continue; }
+    if (pids.length === 0) { rows.push({ port, inode, owner: "unowned", exe: "" }); continue; }
     const who = pids.map((pid) => identifyProcess(proc, pid));
     const bad = who.find((row) => row.owner === "other");
-    rows.push(bad !== undefined ? { port, owner: "other", exe: bad.exe } : { port, owner: who[0]!.owner, exe: who[0]!.exe });
+    rows.push(bad !== undefined ? { port, inode, owner: "other", exe: bad.exe } : { port, inode, owner: who[0]!.owner, exe: who[0]!.exe });
   }
+  return rows;
+}
+
+/**
+ * The report: one row per listening port, and a violation for every listener nobody here owns or a program that is not one of the three owns.
+ * /proc is not read atomically (the listening table, the process list and each process's descriptors are three separate reads), so a process that is
+ * mid-exec or has just opened its sockets can read as holding nothing for a moment: the emulator's own ports 5554, 5555 and 42311 read "unowned" once in CI.
+ * So a listener that reads unowned is looked at again, up to `attempts` looks `delayMs` apart, and is unowned only if no look finds a holder. A later look only ever
+ * replaces "unowned" with what it found (an owner, or "other", which is a violation too): who counts as an owner is not widened, and a stray that no process here holds stays unowned.
+ */
+export function listenerReport(proc: ProcReader = nodeProcReader(), resample: Resample = DEVICE_LISTENER_RESAMPLE): DeviceListenerReport {
+  let seen = look(proc);
+  for (let attempt = 1; attempt < resample.attempts && seen.some((row) => row.owner === "unowned"); attempt += 1) {
+    resample.sleep(resample.delayMs);
+    // Matched by socket (port AND inode): the same port in the IPv4 and IPv6 tables is two sockets, and one's owner says nothing about the other.
+    const again = new Map(look(proc).map((row) => [`${String(row.port)}:${row.inode}`, row]));
+    seen = seen.map((row) => { const found = row.owner === "unowned" ? again.get(`${String(row.port)}:${row.inode}`) : undefined; return found !== undefined && found.owner !== "unowned" ? found : row; });
+  }
+  const rows: DeviceListenerRow[] = seen.map(({ port, owner, exe }) => ({ port, owner, exe }));
   return { rows, violations: rows.filter((row) => row.owner === "unowned" || row.owner === "other").map((row) => `${String(row.port)} ${row.owner} ${row.exe}`.trim()) };
 }
 
 /** Looks every `everyMs` until stopped and keeps every listener it ever saw (a port that appears later with a worse owner replaces the earlier row). */
-export function watchDeviceListeners(everyMs: number, proc: ProcReader = nodeProcReader()): { stop(): DeviceListenerReport } {
+export function watchDeviceListeners(everyMs: number, proc: ProcReader = nodeProcReader(), resample: Resample = DEVICE_LISTENER_RESAMPLE): { stop(): DeviceListenerReport } {
   const seen = new Map<number, DeviceListenerRow>();
-  const look = () => {
-    for (const row of listenerReport(proc).rows) {
+  const lookNow = () => {
+    for (const row of listenerReport(proc, resample).rows) {
       const before = seen.get(row.port);
       if (before === undefined || before.owner === row.owner || row.owner === "unowned" || row.owner === "other") seen.set(row.port, row);
     }
   };
-  look();
-  const timer = setInterval(look, everyMs);
+  lookNow();
+  const timer = setInterval(lookNow, everyMs);
   return {
     stop() {
       clearInterval(timer);
-      look();
+      lookNow();
       const rows = [...seen.values()].sort((a, b) => a.port - b.port);
       return { rows, violations: rows.filter((row) => row.owner === "unowned" || row.owner === "other").map((row) => `${String(row.port)} ${row.owner} ${row.exe}`.trim()) };
     },

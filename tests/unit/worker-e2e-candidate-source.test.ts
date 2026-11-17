@@ -63,6 +63,29 @@ describe("candidate git", () => {
     expect((await lstat(join(destination, "bin/run.sh"))).mode & 0o777).toBe(0o755);
   });
 
+  it("TE-B1: refuses a planted object that answers for a blob's or a tree's id with other bytes (the agent can write the objects it borrows), and writes nothing of it", async () => {
+    const { deflateSync } = await import("node:zlib");
+    const raw = (cwd: string, type: string, id: string) => execFileSync("git", ["-C", cwd, "cat-file", type, id], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+    const plant = async (root: string, id: string, type: string, bytes: Buffer) => {
+      const file = join(root, ".git", "objects", id.slice(0, 2), id.slice(2));
+      await chmod(file, 0o644);
+      await writeFile(file, deflateSync(Buffer.concat([Buffer.from(`${type} ${String(bytes.byteLength)}\0`), bytes])));
+    };
+    // a blob: the base's file id now answers with the agent's bytes
+    const blobRepo = await repository({ "src/a.js": "base()" });
+    await plant(blobRepo.root, git(blobRepo.root, "rev-parse", "HEAD:src/a.js"), "blob", Buffer.from("evil()"));
+    await expect((await processGit()).materializeInto(blobRepo.root, blobRepo.commit, await temp("candidate-stage-"), new AbortController().signal)).rejects.toThrow(/does not match its git object id/u);
+    // a tree: the base's `src` tree id now answers with the agent's tree (whose own blobs are genuine objects)
+    const treeRepo = await repository({ "src/a.js": "base()" });
+    const baseSrc = git(treeRepo.root, "rev-parse", "HEAD:src");
+    await writeFile(join(treeRepo.root, "src/a.js"), "evil()");
+    git(treeRepo.root, "commit", "-q", "-am", "agent");
+    await plant(treeRepo.root, baseSrc, "tree", raw(treeRepo.root, "tree", git(treeRepo.root, "rev-parse", "HEAD:src")));
+    const destination = await temp("candidate-stage-");
+    await expect((await processGit()).materializeInto(treeRepo.root, treeRepo.commit, destination, new AbortController().signal)).rejects.toThrow(/does not match its git object id/u);
+    expect(await readdir(destination)).toEqual([]);
+  });
+
   it("rejects a commit the repository does not have and a non-hex answer", async () => {
     const repo = await repository({ "package.json": "{}" });
     const candidate = (await processGit());

@@ -39,6 +39,27 @@ it("registers a company-less project into the implicit catalog", async () => {
   expect(h.db.get(projectRevisionKey(IMPLICIT_COMPANY_ID, "payments", 2).pk, "REV#000000000002")).toBeDefined();
   expect(h.db.get(orgProjectCatalogKey("org_aaaaaaaaaaaaaaaaaaaa", "payments").pk, "PROJECT#payments")).toBeUndefined();
 });
+it("keeps company-less registrations unindexed until the implicit catalog is flagged", async () => {
+  const h = await createAdminReadBroker();
+  const row = h.db.get("PROJECT#payments", projectKey("payments", 1).sk)!;
+  const before = [...h.db.items];
+  const answer = await h.admin("POST", "/v1/admin/projects", { body: { definition: row.definition, runtimeBinding: row.runtimeBinding } });
+  expect(answer.status).toBe(201);
+  expect(answer.body.duplicate).toBe(true);
+  expect([...h.db.items]).toEqual(before);
+  expect(h.db.get(projectRevisionKey(IMPLICIT_COMPANY_ID, "payments", 1).pk, "REV#000000000001")).toBeUndefined();
+  expect(h.db.get(orgProjectCatalogKey(IMPLICIT_COMPANY_ID, "payments").pk, "PROJECT#payments")).toBeUndefined();
+});
+it("does not attribute a company-less project to flagged company A", async () => {
+  const h = await createAdminReadBroker();
+  const row = h.db.get("PROJECT#payments", projectKey("payments", 1).sk)!;
+  h.db.set({ ...orgSettingsKey(A, "PROJECT_CATALOG_INDEX"), verifiedAt: new Date().toISOString(), count: 0, runId: "catalog-test" });
+  await registerRevision(h.handler, 2, {});
+  expect(h.db.get(orgProjectCatalogKey(A, "payments").pk, "PROJECT#payments")).toBeUndefined();
+  expect(h.db.get(orgProjectCatalogKey(IMPLICIT_COMPANY_ID, "payments").pk, "PROJECT#payments")).toBeUndefined();
+  expect(h.db.get(projectKey("payments", 2).pk, projectKey("payments", 2).sk)?.companyId).toBeUndefined();
+  expect(row.companyId).toBeUndefined();
+});
 it("a conflicting core row refuses the entire legacy registration transaction", async () => {
   const h = await createAdminReadBroker();
   const key = projectKey("payments", 1);
@@ -61,14 +82,14 @@ it("fences stored ownership if it changes while the new revision commits", async
   expect(h.db.get(key.pk, key.sk)?.companyId).toBe(B);
 });
 
-it("does not log a skipped core copy for a company-less registration", async () => {
-  const h = await createAdminReadBroker();
-  const row = h.db.get("PROJECT#payments", projectKey("payments", 1).sk)!;
+it("logs the skipped core copy for an unflagged company-less registration", async () => {
   const logger = vi.spyOn(console, "log").mockImplementation(() => undefined);
   try {
+    const h = await createAdminReadBroker();
+    const row = h.db.get("PROJECT#payments", projectKey("payments", 1).sk)!;
     const answer = await h.admin("POST", "/v1/admin/projects", { body: { definition: row.definition, runtimeBinding: row.runtimeBinding } });
     expect(answer.status).toBe(201);
-    expect(logger).not.toHaveBeenCalledWith(JSON.stringify({ component: "broker", event: "core.project_copy_skipped", reason: "unknown_company" }));
+    expect(logger).toHaveBeenCalledWith(JSON.stringify({ component: "broker", event: "core.project_copy_skipped", reason: "unknown_company" }));
     expect(JSON.stringify(logger.mock.calls)).not.toContain("payments");
   } finally { logger.mockRestore(); }
 });

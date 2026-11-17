@@ -93,6 +93,8 @@ describe("the socket", () => {
     const r = await rig();
     expect((await raw(r.socket, { body: envelope(), path: "/other" })).status).toBe(404);
     expect(r.stub.calls).toHaveLength(0);
+    // EVAL-WIRE-BRIDGE-UNLOGGED-DROPS: never a silent end
+    expect(r.logs).toContainEqual({ event: "dropped", reason: "not_call" });
   });
   it("refuses a socket path too long for the system, rather than listen on a cut one", async () => {
     const r = await rig();
@@ -243,6 +245,7 @@ describe("the bridge checks every frame again; it never trusts the helper", () =
     });
     expect(closed).toBe(true);
     expect(r.stub.calls).toHaveLength(0);
+    expect(r.logs).toContainEqual({ event: "dropped", reason: "header_time" });
   });
   it("closes a connection that sends a body too slowly (the body idle limit is shorter than the header read)", async () => {
     const r = await rig({ limits: { bodyIdleMs: 150 } });
@@ -255,6 +258,19 @@ describe("the bridge checks every frame again; it never trusts the helper", () =
     });
     expect(closed).toBe(true);
     expect(r.stub.calls).toHaveLength(0);
+    expect(r.logs).toContainEqual({ event: "dropped", reason: "slow" });
+  });
+  it("logs a body that goes away before it is whole (a drop is never silent)", async () => {
+    const r = await rig();
+    await new Promise<void>((resolve) => {
+      const socket = net.connect(r.socket);
+      socket.on("connect", () => socket.write("POST /call HTTP/1.1\r\nhost: bridge\r\nx-rovara-mode: real\r\ncontent-length: 100000\r\n\r\n{\"row\"", () => setTimeout(() => socket.destroy(), 50)));
+      socket.on("close", () => resolve());
+      socket.on("error", () => undefined);
+    });
+    for (let waited = 0; waited < 2_000 && !r.logs.some((line) => line["event"] === "dropped"); waited += 25) await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(r.logs).toContainEqual({ event: "dropped", reason: "gone" });
+    expect(r.stub.calls).toHaveLength(0);
   });
   it("refuses headers over 16 KB", async () => {
     const r = await rig();
@@ -265,6 +281,7 @@ describe("the bridge checks every frame again; it never trusts the helper", () =
     });
     expect([431, "closed"]).toContain(status);
     expect(r.stub.calls).toHaveLength(0);
+    expect(r.logs).toContainEqual({ event: "dropped", reason: "header" });
   });
 });
 
@@ -512,6 +529,7 @@ describe("the socket's own limits (L2)", () => {
     const sockets = [0, 1, 2].map((index) => { const socket = net.connect(r.socket); socket.on("close", () => { closed[index] = true; }); socket.on("error", () => undefined); return socket; });
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(closed.filter(Boolean)).toHaveLength(1);
+    expect(r.logs.filter((line) => line["event"] === "dropped" && line["reason"] === "connections")).toHaveLength(1);
     sockets.forEach((socket) => socket.destroy());
   });
   it("ends a call whose reader stops taking the answer, and tells the port to abort", async () => {

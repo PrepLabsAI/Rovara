@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { IMPLICIT_COMPANY_ID, orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { listProjectMembers, projectMemberKey } from "../../packages/broker/src/aws/admin-actions.js";
 import { backfillCorePage, checkCorePeople, planCoreProjectWrites } from "../../packages/broker/src/aws/core-project-backfill.js";
@@ -128,6 +128,7 @@ it("uses the existing binding writer and never steals an installation", async ()
 });
 it("forward planning attributes missing companies to IMPLICIT and copies in the caller transaction", async () => {
   const { db, deps, commands } = setup();
+  db.set({ ...orgSettingsKey(IMPLICIT_COMPANY_ID, "PROJECT_CATALOG_INDEX"), verifiedAt: at, count: 0, runId: "catalog-test" });
   for (const companyId of [IMPLICIT_COMPANY_ID, A, B]) {
     const source = legacy(1, companyId === IMPLICIT_COMPANY_ID ? undefined : companyId);
     const plan = await planCoreProjectWrites(deps, source);

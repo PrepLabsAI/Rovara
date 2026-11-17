@@ -1,4 +1,4 @@
-import { workspaceKeys } from "../core/task-flow/workspace-location.js";
+import { locateWorkspace, workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The callback endpoints a worker posts to (`/v1/internal/workspaces/<w>/operations/<o>/<action>`), for the three every job has: its events, its artifacts and
 // its terminal result. The capability the flow issued at delivery (HMAC, one workspace, one operation, one fence, a list of actions) is checked first; the ids in the address must be the
 // capability's own. Every other callback the worker can make (a model fallback, the model budget of the browser checks, ...) answers "not available" until its lane is wired; the worker
@@ -8,7 +8,7 @@ import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentXError, DESIGN_REVIEW_ARTIFACT, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
+  AgentXError, DESIGN_REVIEW_ARTIFACT, EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
 } from "@agentx/contracts";
 import { CallbackCapabilities, type CallbackAction } from "../callbacks.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -18,6 +18,7 @@ import { handleCodingRunUpload, isCodingRunUpload } from "./candidate-export.js"
 import { handleE2EEvidenceUpload, readE2EAdmissionChunk, type RoundRecordReaders } from "../core/e2e/callbacks.js";
 import { handleBrowserEvidenceUpload } from "../core/proof/browser-evidence-upload.js";
 import { handleBrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in-callback.js";
+import { handleEvalPlanDelivery, type EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import type { BrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in.js";
 import type { UploadStores } from "../core/e2e/uploads-chunks.js";
 import { openPullRequest } from "../core/build-step/publish.js";
@@ -90,6 +91,8 @@ export interface CallbackDeps {
   bookUsage?: ((operation: OperationRecord, events: ReadonlyArray<{ type: string; timestamp: string; payload: unknown }>) => Promise<unknown>) | undefined;
   /** TE-H1 browser evidence, slice 3: the company's saved sign-ins (a laptop's secret files). Absent: `browser-evidence-sign-in` is answered "not available" (Cloud has no browser evidence yet). */
   browserEvidenceSignIn?: Pick<BrowserEvidenceSignIn, "read"> | undefined;
+  /** EVAL-WIRE-SOURCES (DEC 253c): the trusted eval plan, spend approval and base-score cache, answered to a CHECKS run the broker asked for an eval. Absent: `eval-plan` is answered "not available". */
+  evalPlan?: EvalPlanSources | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -108,7 +111,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent"]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", EVAL_PLAN_DELIVERY_ACTION]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -304,7 +307,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)) {
+      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)
+        || (action === EVAL_PLAN_DELIVERY_ACTION && deps.evalPlan === undefined)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
         throw agentXError("NOT_FOUND", "this callback is not available on this install");
@@ -313,6 +317,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       // ended. Cloud's rule: once an operation has ended, only its result is taken; late output (a pull request opened from an interrupted publication, a rewritten record) could undo what the workflow read.
       const capability = capabilities.verify(token, action as CallbackAction);
       if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
+      // The eval plan's request is bounded before any store read (the capability is already checked).
+      if (action === EVAL_PLAN_DELIVERY_ACTION && request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval plan request is too large");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
       if (action !== "result" && isTerminalStatus(operation.status)) {
@@ -338,11 +344,26 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         } }, operation);
         return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
       }
+      if (action === EVAL_PLAN_DELIVERY_ACTION) {
+        // The run's own company and task project, never the request's: the body is bounded and must be an object, and no field of it is read. The answer is for this one ask; no cache keeps it.
+        bodyOf(request);
+        const answer = await handleEvalPlanDelivery({ sources: deps.evalPlan!, companyId: deps.flow.companyId, log: (event) => deps.flow.log?.({ component: "callbacks", event }), async projectOf() {
+          // T1: the workspace is located in the run's own company (the operation record's), and only then is its task pointer read from that workspace's own keys.
+          const located = await locateWorkspace({ store: deps.flow.store, companyId: operation.companyId }, operation.workspaceId);
+          if (located === undefined) return undefined;
+          const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get((await workspaceKeys(deps.flow, operation.workspaceId)).taskPointerKey()));
+          const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
+          // The pointer's task must be this company's AND this operation's workspace's own.
+          return task !== undefined && task.companyId === deps.flow.companyId && task.workspaceId === operation.workspaceId ? task.project : undefined;
+        } }, operation);
+        return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
+      }
       if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "setup-agent") {
         const run = deps.setupAgent!;
-        return json(200, await handleSetupAgentCallback({ ...run, store: deps.flow.store, companyId: deps.flow.companyId, now: () => (deps.flow.now?.() ?? new Date()).getTime() }, operation, bodyOf(request)));
+        return json(200, await handleSetupAgentCallback({ ...run, store: deps.flow.store, companyId: deps.flow.companyId, now: () => (deps.flow.now?.() ?? new Date()).getTime(),
+          log: (entry) => deps.flow.log?.({ component: "setup-agent", ...entry }) }, operation, bodyOf(request)));
       }
       const body = bodyOf(request);
       if (action === "events") {

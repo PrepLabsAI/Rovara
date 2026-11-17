@@ -106,10 +106,22 @@ describe("cancel-only callback verification (#201 Release A)", () => {
     expect(fixture.db.get(`WORKSPACE#${fixture.workspaceId}`, `OPERATION#${fixture.targetOperationId}`)).toMatchObject({ status: "SUCCEEDED" });
   });
 
-  it.each(["events", "artifacts", "pull-request", "pull-request-update", "codebuild"])("rejects child authority on %s even when its claims ask for it", async (action) => {
+  it.each(["events", "artifacts", "pull-request", "pull-request-update", "codebuild", "eval-plan"])("rejects child authority on %s even when its claims ask for it", async (action) => {
     const fixture = await cancellation();
     await denied(fixture, token(fixture.claims), action);
     await denied(fixture, token({ ...fixture.claims, actions: [action] }), action);
+  });
+
+  it("refuses eval-plan on this host even with a root capability that names it, before any read (DEC 253c: only the core callback layer serves it)", async () => {
+    const fixture = await cancellation();
+    const body = Buffer.from(JSON.stringify({ workspaceId: fixture.workspaceId, operationId: fixture.operationId, fence: fixture.invocation.fence, actions: ["eval-plan"], expiresAt: Math.floor(Date.now() / 1000) + 60 })).toString("base64url");
+    const root = `${body}.${createHmac("sha256", ROOT).update(body).digest("base64url")}`;
+    const before = structuredClone([...fixture.db.items]);
+    const answer = await callback(fixture, root, "eval-plan");
+    expect(answer).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+    expect([...fixture.db.items]).toEqual(before);
+    // Without the action in the capability: the capability refusal, as for every action.
+    await denied(fixture, fixture.invocation.callbackCapability, "eval-plan");
   });
 
   it.each([

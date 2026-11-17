@@ -256,7 +256,7 @@ import {
   WorkerInvocationSchema,
   workflowPublicationContext,
   workflowPublicationContextDigest,
-  cutEvidenceReason,
+  cutEvidenceReason, EVAL_PLAN_DELIVERY_ACTION,
 } from "@agentx/contracts";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
@@ -1286,7 +1286,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (answer !== undefined) return answer;
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|browser-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|browser-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status|eval-plan)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -2267,6 +2267,7 @@ async function registerProject(
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
       corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
+      if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
@@ -2376,6 +2377,7 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
       corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+    if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
     const repairLegacy = snapshot.catalog?.latestRevision !== targetRevision;
     if (!repairLegacy && corePlan.status !== "ready") return;
     const key = projectCatalogKey(projectName);
@@ -6894,7 +6896,7 @@ async function handleCallback(
   const claims = cancelClaims ?? verifyCapability(dependencies, token, action as CallbackClaims["actions"][number]);
   if (claims.workspaceId !== workspaceId || claims.operationId !== operationId) {
     throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
-  }
+  } if (action === EVAL_PLAN_DELIVERY_ACTION) throw agentXError("NOT_FOUND", "this callback is not available on this install"); // DEC 253c: only the core callback layer holds the eval sources; refused after the capability check, before any read
   const operation = await requireOperation(dependencies, workspaceId, operationId);
   if (cancelClaims !== undefined) {
     if (operation.kind !== "cancel" || operation.id !== operationId || operation.workspaceId !== workspaceId

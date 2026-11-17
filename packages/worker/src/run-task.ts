@@ -1,9 +1,11 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
 import { withEvalChangedPromptClassifier } from "./verification/eval-changed-prompt.js";
+import { withEvalPinnedCandidate } from "./verification/eval-plan-source.js";
 import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact, type BrowserEvidenceSignInAnswer } from "@agentx/contracts";
-import { readFile, realpath } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, TEST_PROOF_ARTIFACT, UNDERSTAND_ARTIFACT_NAME, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, groundingScenarioIds, parsePlanDocument, asksForPlanParts, planAnswerMissingParts, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type SpecDraft, type SpecReviewResult, type SetupProposal, type SetupRunSummary, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef, AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE } from "@agentx/contracts";
 import { readSetupProposalAnswer, setupProposalInstructions, setupProposalRetryPrompt } from "./setup-draft.js";
 import { testEnvDraftResult } from "./test-env-detect.js";
@@ -704,17 +706,37 @@ async function runTask(
         if (remaining <= 0) stop.abort();
         const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
         let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
+        // DEC 253n(2): the fresh check sandbox's own folder for this eval (checkouts, env files, report copies), removed when the eval is over.
+        let evalScratch: string | undefined;
         try {
-          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
+          // One plan read serves both the eval and the changed-prompt classifier, so they share one base commit.
+          const ports = dependencies.evalFinalCheck;
+          let planning: ReturnType<EvalFinalCheckPorts["plan"]> | undefined;
+          const plan = ports === undefined ? undefined : () => (planning ??= (async () => ports.plan())());
+          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : Object.create(ports, { plan: { value: plan } }) as EvalFinalCheckPorts, {
             status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
           });
-          const running = (dependencies.evalFinalCheck === undefined || status !== "verified" ? evaluate()
-            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, evaluate))
+          // DEC 253n(2): the fresh check sandbox's scratch folder and round for the pinned candidate.
+          const pinned = async <T>(run: () => Promise<T>): Promise<T> => {
+            evalScratch = await mkdtemp(join(tmpdir(), "rve-"));
+            const round = { workingSandbox: sandbox?.name ?? null, roundBudgetMs: Math.max(1, roundBudgetMs - (Date.now() - roundStarted)), scratchDir: evalScratch };
+            return await withEvalPinnedCandidate(repositories, candidateBefore, stop.signal, run, round);
+          };
+          // Only a fresh check round reads the plan; a working round refuses first, so the classifier has nothing to classify.
+          const fresh = ports?.roundKind === "check_sealed" || ports?.roundKind === "check_unsealed";
+          // DEC 253j(1): the trusted plan's per-task hashes come from this same pinned candidate. The pin wraps the classifier too,
+          // because the one shared plan read (made first by the classifier) must happen inside it.
+          const running = (ports === undefined || status !== "verified" ? evaluate()
+            : pinned(() => !fresh || stop.signal.aborted ? evaluate()
+              : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate)))
             .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
         } catch (error) {
           if (isWorkspaceUnsafe(error) || !stop.signal.aborted) throw error;
-        } finally { clearTimeout(deadline); }
+        } finally {
+          clearTimeout(deadline);
+          if (evalScratch !== undefined) await rm(evalScratch, { recursive: true, force: true }).catch(() => undefined);
+        }
         assertWorkspaceSafe();
         const afterEval = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterEval).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterEval;
