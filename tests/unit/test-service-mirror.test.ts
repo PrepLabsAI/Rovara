@@ -15,7 +15,7 @@ describe("the starter copies in the contracts", () => {
     expect(entries).toHaveLength(OWNER_STARTER_IMAGES.length);
     entries.forEach((entry, index) => {
       const starter = OWNER_STARTER_IMAGES[index]!;
-      expect(entry.reference.startsWith(`${REGISTRY}/agentx-staging/test-services/`)).toBe(true);
+      expect(entry.reference.startsWith(`${REGISTRY}/agentx-staging-test-services/`)).toBe(true);
       expect(digestOf(entry.reference)).toBe(digestOf(starter.reference));
       expect(entry).toEqual({ reference: entry.reference, family: starter.family, version: starter.version });
       expect(OwnerListEntrySchema.safeParse(entry).success).toBe(true);
@@ -80,7 +80,7 @@ describe("the copy script", () => {
     expect(() => mirrorPlan("docker.io", "staging")).toThrow();
   });
 
-  const index = JSON.stringify({ manifests: [{ platform: { os: "linux", architecture: "arm64" } }, { platform: { os: "linux", architecture: "amd64" } }] });
+  const index = JSON.stringify({ manifests: [{ digest: `sha256:${"a".repeat(64)}`, platform: { os: "linux", architecture: "arm64" } }, { digest: `sha256:${"b".repeat(64)}`, platform: { os: "linux", architecture: "amd64" } }] });
   const good: MirrorRegistry = { digest: (reference) => `sha256:${reference.includes("@sha256:") ? digestOf(reference) : steps.find((step) => step.target === reference)!.digest.slice(7)}\n`, manifest: () => index };
   it("verifies only when every copy answers by its pinned digest, its tag points there, and its index lists arm64 and amd64", () => {
     const passed = verifyMirror(steps, good);
@@ -93,6 +93,7 @@ describe("the copy script", () => {
     ["a copy that answers another digest", { ...good, digest: (reference: string) => (reference.includes("redis") && reference.includes("@") ? `sha256:${"0".repeat(64)}` : good.digest(reference)) }],
     ["an index without arm64", { ...good, manifest: () => JSON.stringify({ manifests: [{ platform: { os: "linux", architecture: "amd64" } }] }) }],
     ["an unreadable index", { ...good, manifest: () => "not json" }],
+    ["a platform image missing from the copy", { ...good, digest: (reference: string) => { if (reference.endsWith(`@sha256:${"a".repeat(64)}`)) throw new Error("manifest unknown"); return good.digest(reference); } }],
   ])("fails on %s", (_name, registry) => {
     const result = verifyMirror(steps, registry);
     expect(result.ok).toBe(false);

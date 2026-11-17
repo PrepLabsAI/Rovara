@@ -18,7 +18,7 @@ import type { TestEnvDeps } from "../core/test-env/deps.js";
 import { TEST_ENVIRONMENT_KIND, testEnvironmentSubjectId } from "../core/test-env/environment.js";
 import { testEnvironmentView } from "../core/test-env/local-view.js";
 import { testEnvironmentEnabled } from "../core/test-env/switch.js";
-import type { DeployedPeople } from "./deployed-decisions.js";
+import { liveGrant, liveMemberRole, type DeployedPeople } from "./deployed-decisions.js";
 
 /** The approval kind the test environment subject asks the approvers point about (environment.ts: `kind: "setting"`). */
 export const TEST_ENVIRONMENT_APPROVAL_KIND = "setting";
@@ -84,17 +84,11 @@ export function createHostedTestEnvironmentDecision(options: HostedTestEnvironme
         || typeof approval.requestId !== "string" || !REQUEST_ID.test(approval.requestId) || !Number.isSafeInteger(approval.revision) || approval.revision < 1) return refuse("not_found");
       // The step-up is the route's check; without one nothing is issued.
       if (input.stepUp === undefined) return refuse("not_allowed");
-      // Who, live: the company membership (this company's) and the project grant. A read that fails decides nothing.
-      let companyRole: OrgRole | undefined;
-      let projectRole: "developer" | "administrator" | undefined;
-      try {
-        const membership = await people.membershipOf(input.personId);
-        companyRole = membership?.companyId === companyId ? membership.role : undefined;
-        projectRole = companyRole === undefined ? undefined : await people.projectGrantRole(input.personId, project);
-      } catch {
-        return refuse("not_allowed");
-      }
+      // Who, live, with the deployed decisions' own readers: this company's membership (a well-formed person id, a known role; another company's, revoked or a failed read is none) and the project grant
+      // (a failed read is no grant).
+      const companyRole = await liveMemberRole(people, companyId, input.personId);
       if (companyRole === undefined) return refuse("not_found");
+      const projectRole = await liveGrant(people, input.personId, project);
       // What: the proposal that waits now, as stored. Only a proved proposal with the digest and revision the person saw can be approved.
       let proposal;
       try {

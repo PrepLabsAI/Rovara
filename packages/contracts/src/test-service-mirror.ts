@@ -20,7 +20,10 @@ export const ECR_REGISTRY_PATTERN = /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}(?:-[a-z]+)+-
 export interface TestServiceMirrorRepository {
   /** The starter image (its pinned Docker Hub reference and digest). */
   readonly starter: OwnerStarterImage;
-  /** The ECR repository name, `agentx-<env>/test-services/<image>-<major>/<image>`: the last part is the image's own name, so the family is read from it exactly as from the Docker Hub name. */
+  /**
+   * The ECR repository name, `agentx-<env>-test-services/<image>-<major>/<image>`: the last part is the image's own name, so the family is read from it exactly as from the Docker Hub name. The first part is NOT
+   * `agentx-<env>/`: that is the environment's ECR pull-through prefix (public.ecr.aws), where the worker role may import and create repositories; the copies stay outside it.
+   */
   readonly repositoryName: string;
   /** The starter's 64 hex digest (the copy's digest). */
   readonly digest: string;
@@ -35,7 +38,7 @@ export function testServiceMirrorRepositories(env: string): TestServiceMirrorRep
     const parsed = parseImageReference(starter.reference);
     if (parsed?.digest === undefined) throw new Error("a starter image is not pinned by digest");
     const image = parsed.repository.split("/").at(-1)!;
-    return { starter, repositoryName: `agentx-${env}/test-services/${image}-${starter.version}/${image}`, digest: parsed.digest, tag: `${starter.version}-${parsed.digest.slice(0, 12)}` };
+    return { starter, repositoryName: `agentx-${env}-test-services/${image}-${starter.version}/${image}`, digest: parsed.digest, tag: `${starter.version}-${parsed.digest.slice(0, 12)}` };
   });
 }
 

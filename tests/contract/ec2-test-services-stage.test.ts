@@ -29,7 +29,7 @@ interface Host {
 }
 
 /** A fake host: iptables with a rules file, mounts as marker files, docker answering the stage's calls. Options turn single steps into failures. */
-function host(options: { failPull?: RegExp; failAllPulls?: boolean; failLogin?: boolean; failIp6Insert?: boolean; noMetadataBlock?: boolean; refs?: string[]; list?: string } = {}): Host {
+function host(options: { failDockerRestart?: boolean; failPull?: RegExp; failAllPulls?: boolean; failLogin?: boolean; failIp6Insert?: boolean; noMetadataBlock?: boolean; refs?: string[]; list?: string } = {}): Host {
   const dir = mkdtempSync(join(tmpdir(), "ts-stage-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
@@ -45,6 +45,8 @@ function host(options: { failPull?: RegExp; failAllPulls?: boolean; failLogin?: 
   writeFileSync(join(dir, "refs"), `${(options.refs ?? references).join("\n")}\n`);
   writeFileSync(join(dir, "list"), `${options.list ?? JSON.stringify(mirroredStarterEntries(REGISTRY, "staging"))}\n`);
   writeFileSync(join(dir, "firewall"), "exit 0\n");
+  // boot.sh's ensure_docker wrote this before the stage runs.
+  writeFileSync(h.daemon, '{"data-root": "/mnt/workspace/.docker"}\n');
   const fake = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/bash\nprintf '%s %s\\n' "${name}" "$*" >>"${h.calls}"\n${body}\n`); chmodSync(join(bin, name), 0o755); };
   const table = (file: string, failInsert: boolean) => `case "$1" in
   -C) shift; grep -qxF -- "$*" "${file}" ;;
@@ -59,7 +61,8 @@ esac`;
   fake("mount", 'for last; do :; done; touch "$last/.mounted"');
   fake("umount", 'rm -f "$1/.mounted"');
   fake("mountpoint", 'test -e "$2/.mounted"');
-  fake("systemctl", "exit 0");
+  // With failDockerRestart, Docker does not come back on the stage's daemon.json (it does on the original one).
+  fake("systemctl", options.failDockerRestart === true ? `[[ "$*" == "restart docker.service" ]] && grep -q default-address-pools "${h.daemon}" && exit 1; exit 0` : "exit 0");
   fake("aws", "printf 'password\\n'");
   const failPull = options.failAllPulls === true ? "1" : options.failPull === undefined ? "" : options.failPull.source;
   fake("docker", `case "$1" in
@@ -172,6 +175,16 @@ describe("the test-services stage on a worker", () => {
     expect(mounted(h)).toBe(false);
   });
 
+  it("Docker not coming back on the new address pools: the original daemon.json is put back and Docker restarted on it (the worker still needs Docker), and test services are withheld", () => {
+    const h = host({ failDockerRestart: true });
+    expect(runStage(h).status).not.toBe(0);
+    expect(readFileSync(h.daemon, "utf8")).toBe('{"data-root": "/mnt/workspace/.docker"}\n');
+    expect(existsSync(`${h.daemon}.before-test-services`)).toBe(false);
+    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(2);
+    expect(envLines(h)).toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
+    expect(calls(h).some((line) => line.startsWith("docker pull"))).toBe(false);
+  });
+
   it("withholds test services, pulling nothing, when the metadata block is not in place after Docker's restart", () => {
     const h = host({ noMetadataBlock: true });
     expect(runStage(h).status).not.toBe(0);
@@ -180,11 +193,18 @@ describe("the test-services stage on a worker", () => {
   });
 
   it("takes only references of the fixed form for THIS registry and environment, and with none it changes nothing on the host", () => {
-    const h = host({ refs: [`docker.io/library/postgres@sha256:${"1".repeat(64)}`, `${REGISTRY}/agentx-prod/test-services/postgres-16/postgres@sha256:${"2".repeat(64)}`, `${REGISTRY}/agentx-staging/test-services/postgres-16/postgres:16`, `999988887777.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/test-services/postgres-16/postgres@sha256:${"3".repeat(64)}`] });
+    const h = host({ refs: [`docker.io/library/postgres@sha256:${"1".repeat(64)}`, `${REGISTRY}/agentx-prod-test-services/postgres-16/postgres@sha256:${"2".repeat(64)}`, `${REGISTRY}/agentx-staging-test-services/postgres-16/postgres:16`, `999988887777.dkr.ecr.us-west-2.amazonaws.com/agentx-staging-test-services/postgres-16/postgres@sha256:${"3".repeat(64)}`] });
     expect(runStage(h).status).not.toBe(0);
     expect(envLines(h)).toEqual(["AWS_REGION=us-west-2", "AGENTX_SANDBOX_IMAGE=x"]);
-    expect(existsSync(h.daemon)).toBe(false);
+    expect(readFileSync(h.daemon, "utf8")).toBe('{"data-root": "/mnt/workspace/.docker"}\n');
     expect(calls(h).some((line) => line.startsWith("docker pull") || line.startsWith("systemctl"))).toBe(false);
+  });
+
+  it("takes at most eight references, whatever the worker image prints", () => {
+    const many = Array.from({ length: 12 }, (_, index) => `${REGISTRY}/agentx-staging-test-services/postgres-${String(index + 10)}/postgres@sha256:${String(index % 10).repeat(64)}`);
+    const h = host({ refs: many });
+    expect(runStage(h).status).toBe(0);
+    expect(readFileSync(h.pulled, "utf8").trim().split("\n")).toHaveLength(8);
   });
 
   it("pulls only the references that passed, when the worker image names some others too", () => {

@@ -2,7 +2,7 @@
 // Root runs it ONCE per boot from the worker image it pulled by digest, with no network, no capability and a read-only root:
 //
 //   node /opt/agentx/packages/worker/dist/test-services-mirror-cli.js refs <registry> <environment>
-//     one pinned reference per line: the install's copy of each starter image (`<registry>/agentx-<env>/test-services/<image>-<major>/<image>@sha256:<the starter's digest>`)
+//     one pinned reference per line: the install's copy of each starter image (`<registry>/agentx-<env>-test-services/<image>-<major>/<image>@sha256:<the starter's digest>`)
 //   node /opt/agentx/packages/worker/dist/test-services-mirror-cli.js list <registry> <environment> <reference>...
 //     one line: the owner list (JSON) of exactly those references that are copies of starters (anything else named is left out), for AGENTX_TEST_SERVICES_OWNER_IMAGES
 //

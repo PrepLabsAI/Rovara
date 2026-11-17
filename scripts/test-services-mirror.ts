@@ -8,7 +8,8 @@
 //      byte for byte, so the copy's index digest IS the pinned digest. The tag is a label (immutable, unique per digest); the digest is the identity.
 //   4. Check (the gate before `agentx config set testServices.images mirrored`):
 //        npx tsx scripts/test-services-mirror.ts --registry <registry> --env <environment> --verify
-//      For every starter: the copy answers by the pinned digest, its tag points at that same digest, and its index lists linux/arm64 (Code's workers) and linux/amd64. Exit 0 only when all five pass.
+//      For every starter: the copy answers by the pinned digest, its tag points at that same digest, and its index lists linux/arm64 (Code's workers) and linux/amd64, each of which answers by its own digest in
+//      the copy. Exit 0 only when all five pass. Run --copy once per environment (the tags are immutable); if a copy stopped midway, --verify names what is missing.
 //   5. Log out: crane auth logout <registry>
 //
 // The repositories, names, tags and digests come from @agentx/contracts (test-service-mirror.ts over owner-starter-images.ts), the same functions the infrastructure and the worker's boot stage use.
@@ -59,9 +60,16 @@ export function verifyMirror(steps: readonly MirrorStep[], registry: MirrorRegis
       if (registry.digest(step.target).trim() !== step.digest) problems.push("the tag points at another digest");
     } catch { problems.push("no copy by its tag"); }
     try {
-      const index = JSON.parse(registry.manifest(step.pinned)) as { manifests?: Array<{ platform?: { os?: string; architecture?: string } }> };
-      const platforms = new Set((index.manifests ?? []).map((entry) => `${entry.platform?.os ?? ""}/${entry.platform?.architecture ?? ""}`));
-      if (!platforms.has("linux/arm64") || !platforms.has("linux/amd64")) problems.push("the copy's index does not list linux/arm64 and linux/amd64");
+      const index = JSON.parse(registry.manifest(step.pinned)) as { manifests?: Array<{ digest?: string; platform?: { os?: string; architecture?: string } }> };
+      const repository = step.pinned.slice(0, step.pinned.indexOf("@"));
+      for (const platform of ["linux/arm64", "linux/amd64"]) {
+        const child = (index.manifests ?? []).find((entry) => `${entry.platform?.os ?? ""}/${entry.platform?.architecture ?? ""}` === platform);
+        if (child === undefined || typeof child.digest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(child.digest)) { problems.push(`the copy's index does not list ${platform}`); continue; }
+        // The platform image itself must be in the copy (a partial copy would pass the index check and fail at the worker's pull).
+        try {
+          if (registry.digest(`${repository}@${child.digest}`).trim() !== child.digest) problems.push(`the ${platform} image is not in the copy`);
+        } catch { problems.push(`the ${platform} image is not in the copy`); }
+      }
     } catch { problems.push("the copy's index could not be read"); }
     if (problems.length > 0) ok = false;
     lines.push(`${problems.length === 0 ? "OK  " : "FAIL"} ${step.requested} ${step.pinned}${problems.length === 0 ? "" : `: ${problems.join("; ")}`}`);

@@ -98,10 +98,14 @@ describe("approving a project's test environment on AWS", () => {
     expect(await s.decider.approve({ personId: "p1", stepUp: undefined, project: s.b.project, approval: s.approval })).toMatchObject({ ok: false, reason: "not_allowed" });
     const failing: DeployedPeople = { membershipOf: async () => { throw new Error("read failed"); }, projectGrantRole: async () => "administrator" };
     const f = await setup(sandbox(), failing);
-    expect(await f.decider.approve({ personId: "p1", stepUp: STEP_UP, project: f.b.project, approval: f.approval })).toMatchObject({ ok: false, reason: "not_allowed" });
+    expect(await f.decider.approve({ personId: "p1", stepUp: STEP_UP, project: f.b.project, approval: f.approval })).toMatchObject({ ok: false, reason: "not_found" });
+    // A malformed person id or an unknown role is nobody (the deployed decisions' own membership reader).
+    expect(await s.decider.approve({ personId: "p#1", stepUp: STEP_UP, project: s.b.project, approval: s.approval })).toMatchObject({ ok: false, reason: "not_found" });
+    const oddRole = await setup(sandbox(), people({ role: "superuser" as OrgRole }, "administrator"));
+    expect(await oddRole.decider.approve({ personId: "p1", stepUp: STEP_UP, project: oddRole.b.project, approval: oddRole.approval })).toMatchObject({ ok: false, reason: "not_found" });
     const revoked = await setup(sandbox(), people(undefined, "administrator"));
     expect(await revoked.decider.approve({ personId: "p1", stepUp: STEP_UP, project: revoked.b.project, approval: revoked.approval })).toMatchObject({ ok: false, reason: "not_found" });
-    expect([...s.issued, ...f.issued, ...revoked.issued]).toEqual([]);
+    expect([...s.issued, ...f.issued, ...revoked.issued, ...oddRole.issued]).toEqual([]);
   });
 
   it("binds the proposal the person saw: another digest, another revision, an unproved proposal or another project is refused before any proof", async () => {

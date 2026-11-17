@@ -1,14 +1,14 @@
 // DEC 254zm: the install's own copies of the test-service starter images (infra/lib/test-service-mirror.ts), on the synthesised foundation template of a named environment.
 // What must hold:
 //   1. exactly five ECR repositories, one per starter image, named from the contracts (the same names the worker's boot stage and the copy script use); immutable tags, scan on push, AES256;
-//      a lifecycle rule on tagged copies only; kept on a stack delete (RetainExceptOnCreate in a named environment);
+//      no lifecycle rule; outside the pull-through prefix; kept on a stack delete (RetainExceptOnCreate in a named environment);
 //   2. the worker role reads exactly those five repositories with exactly three ECR read actions, in one statement; no push, delete, pull-through or create;
 //   3. the deploy role and the default boundary allow everything CloudFormation does for these resources (checked against the policy documents; template diffs miss the boundary);
 //   4. the legacy deployment gets none of it.
 import { Stack, type App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { defaultBoundaryStatements, mirroredStarterEntries, OWNER_STARTER_IMAGES, serviceRoleStatements, testServiceMirrorRepositories, type PolicyStatementJson } from "@agentx/contracts";
+import { defaultBoundaryStatements, environmentPullThroughPrefix, mirroredStarterEntries, OWNER_STARTER_IMAGES, serviceRoleStatements, testServiceMirrorRepositories, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { TEST_SERVICE_MIRROR_READ_ACTIONS } from "../../infra/lib/test-service-mirror.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -43,16 +43,18 @@ describe("the test service starter copies (DEC 254zm)", () => {
   it("names five repositories, one per starter, from the starter list's own digests", () => {
     const mirrors = testServiceMirrorRepositories("staging");
     expect(mirrors.map((mirror) => mirror.repositoryName)).toEqual([
-      "agentx-staging/test-services/postgres-16/postgres", "agentx-staging/test-services/postgres-17/postgres", "agentx-staging/test-services/mysql-8/mysql",
-      "agentx-staging/test-services/redis-7/redis", "agentx-staging/test-services/mongo-7/mongo",
+      "agentx-staging-test-services/postgres-16/postgres", "agentx-staging-test-services/postgres-17/postgres", "agentx-staging-test-services/mysql-8/mysql",
+      "agentx-staging-test-services/redis-7/redis", "agentx-staging-test-services/mongo-7/mongo",
     ]);
     expect(mirrors.map((mirror) => `sha256:${mirror.digest}`)).toEqual(OWNER_STARTER_IMAGES.map((image) => image.reference.slice(image.reference.indexOf("@") + 1)));
     expect(mirrors.map((mirror) => mirror.tag)).toEqual(OWNER_STARTER_IMAGES.map((image) => `${image.version}-${image.reference.slice(image.reference.indexOf("@sha256:") + 8, image.reference.indexOf("@sha256:") + 20)}`));
+    // Outside the environment's ECR pull-through prefix (`agentx-<env>/`), which the worker role may import into and create repositories under.
+    for (const mirror of mirrors) expect(mirror.repositoryName.startsWith(`${environmentPullThroughPrefix("staging")}/`)).toBe(false);
     expect(() => testServiceMirrorRepositories("Staging")).toThrow();
     expect(() => testServiceMirrorRepositories("")).toThrow();
   });
 
-  it("creates exactly those five repositories: immutable tags, scan on push, AES256, a lifecycle on tagged copies only, kept on delete", () => {
+  it("creates exactly those five repositories: immutable tags, scan on push, AES256, no lifecycle, kept on delete", () => {
     const repositories = ofType(foundation, "AWS::ECR::Repository");
     expect(repositories.map(([, resource]) => resource.Properties.RepositoryName)).toEqual(testServiceMirrorRepositories("staging").map((mirror) => mirror.repositoryName));
     for (const [, resource] of repositories) {
@@ -61,10 +63,8 @@ describe("the test service starter copies (DEC 254zm)", () => {
       expect(resource.Properties.EncryptionConfiguration).toEqual({ EncryptionType: "AES256" });
       expect(resource.Properties).not.toHaveProperty("RepositoryPolicyText");
       expect(resource.DeletionPolicy).toBe("RetainExceptOnCreate");
-      const rules = (JSON.parse((resource.Properties.LifecyclePolicy as { LifecyclePolicyText: string }).LifecyclePolicyText) as { rules: Array<{ selection: Record<string, unknown>; action: unknown }> }).rules;
-      expect(rules).toHaveLength(1);
-      expect(rules[0]!.selection).toMatchObject({ tagStatus: "tagged", countType: "imageCountMoreThan", countNumber: 3 });
-      expect(rules[0]!.selection.tagPrefixList).toHaveLength(1);
+      // No lifecycle: nothing may expire a pinned copy or the platform images of one.
+      expect(resource.Properties).not.toHaveProperty("LifecyclePolicy");
     }
   });
 
@@ -81,6 +81,10 @@ describe("the test service starter copies (DEC 254zm)", () => {
     // No other statement names a copy, and no write action touches the test-services repositories anywhere in the stack.
     const others = statements.filter((statement) => statement.Sid !== "TestServiceImageRead" && JSON.stringify(statement.Resource).includes("test-services"));
     expect(others).toEqual([]);
+    // The worker's pull-through statement (import, create) names repositories under the prefix only, so it does not reach the copies.
+    const pullThrough = statements.find((statement) => statement.Sid === "EcrPullThroughCache")!;
+    expect(JSON.stringify(pullThrough.Resource)).toContain(`:repository/${environmentPullThroughPrefix("staging")}/*`);
+    for (const mirror of testServiceMirrorRepositories("staging")) expect(mirror.repositoryName.startsWith(`${environmentPullThroughPrefix("staging")}/`)).toBe(false);
     // ECR's login token is the worker's existing statement (ECR requires *).
     expect(statements.find((statement) => statement.Sid === "EcrTokenAccess")).toMatchObject({ Action: "ecr:GetAuthorizationToken", Resource: "*" });
   });
