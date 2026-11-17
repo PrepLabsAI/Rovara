@@ -46,7 +46,7 @@ import type { SessionMembers } from "../core/sessions/access.js";
 import { answerTaskOnRequest } from "../core/task-flow/answer-request.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
-import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
+import { createScriptToken, listScriptTokens, readScriptToken, scriptTokenStatus, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer, inboxOwns } from "./inbox-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
@@ -61,6 +61,7 @@ import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
 import type { AgentModelChoice } from "./gateway-model-selection.js";
 import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
 import { isWikiMapPath, routeHostedWikiMap, type HostedWikiMapWiring } from "./wiki-map-routes.js";
+import { scriptTokenRoute } from "../core/script-tokens/authenticate.js";
 import { isWikiPath, routeHostedWiki, type HostedWikiWiring } from "./wiki-routes.js";
 import { isWikiCorrectionPath, routeHostedWikiCorrections, type HostedWikiCorrectionsWiring } from "./wiki-corrections-routes.js";
 import type { HostedTestEnvironmentDecider } from "./hosted-test-environment-decision.js";
@@ -104,7 +105,7 @@ export const INVOLVED_UNAVAILABLE = "Your involved tasks could not be listed rig
 export interface DeployedCaller {
   principal: Principal;
   client?: string | undefined;
-  /** Set by the broker's sign-in when the request carries a script token (never from a body). Such a caller reaches only a task's read here. */
+  /** Set by the broker's sign-in when the request carries a script token (never from a body). Such a caller reaches task reads and explicitly scoped wiki reads here. */
   scriptToken?: { tokenId: string } | undefined;
   /**
    * Lane ID part 2: the person's last step-up as the VERIFIED access token states it (`stepUpOf` over its `step_up_at` and `step_up_amr`), set by the broker's sign-in and never from a
@@ -335,10 +336,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       if (starting && options.app.engineForNewTask(companyId) !== "core") return undefined;
       // Answering the agent is never a script token's either, and reads like a missing task for the same reason.
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      // A script token reaches only a task's read here (its closed list: its own projects' tasks); never sessions, decisions, playbooks or tokens.
+      // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
       if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path))) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      if (caller.scriptToken !== undefined && !TASK_READ.test(path)) return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
+      if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       let target: Mounted;
       try {
         target = await mount(companyId);
@@ -452,6 +453,18 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         }
         if (isWikiPath(path, request.method)) {
           // Lead 4 W2: the member company's own store; the caller's live standing on the project is read inside (any project role reads).
+          if (caller.scriptToken !== undefined) {
+            // Re-read scope in the live member company's store: a verified token id alone grants no wiki access.
+            const route = scriptTokenRoute(request.method, path);
+            const token = await readScriptToken({ store: target.runtime.flow.deps.store }, companyId, caller.scriptToken.tokenId);
+            if (target.wiring.scriptTokens === undefined || !(target.wiring.scriptTokens.enabled ?? scriptTokensEnabled)()
+              || route?.permission !== "wiki" || route.project !== "path"
+              || token === undefined || scriptTokenStatus(token, nowOf(target)) !== "active"
+              || (token.personId !== undefined && token.personId !== caller.principal.personId) || token.developerId !== developerIdOf(caller.principal)
+              || token.createdRole !== membership.role || !token.permissions.includes("wiki") || !token.projects.includes(route.name)) {
+              throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+            }
+          }
           if (target.wiring.wiki === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target) });
         }

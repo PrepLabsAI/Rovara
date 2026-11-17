@@ -315,7 +315,7 @@ export function renderProof(context: PageContext, view: ProofReportView): string
 // ---- script tokens
 
 const TOKEN_STATUS_CLASS = { active: "ok", expired: "warn", revoked: "bad" } as const;
-const PERMISSION_WORDS: Record<string, string> = { read: "read your tasks on these projects", start: "start tasks on these projects", lessons: "read the team lessons of these projects" };
+const PERMISSION_WORDS: Record<string, string> = { read: "read your tasks on these projects", start: "start tasks on these projects", lessons: "read the team lessons of these projects", wiki: "read the project wiki of these projects (hosted)" };
 
 /**
  * The script tokens page: the tokens (names, hints and states, never a secret), a form to make one when this page session is fresh enough, and a Revoke button for each live token. A token reaches only

@@ -10,6 +10,7 @@ import {
   type AuditEvent, type AuditSink,
 } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderScriptTokens } from "../../packages/broker/src/core/local-pages/pages.js";
 import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createScriptToken, listScriptTokens, noteScriptTokenUse, readScriptToken, revokeScriptToken, ScriptTokenRecordSchema, type ScriptTokenDependencies } from "../../packages/broker/src/core/script-tokens/store.js";
@@ -193,13 +194,21 @@ describe("the stored tokens (document store port)", () => {
     await expect(createScriptToken(w.deps, owner, { ...body(1), permissions: ["admin"] }, anyProject)).rejects.toThrow(/permissions/);
   });
 
-  it("the lessons permission is one of the three a token may have, and it is kept as asked: a token made without it has no lessons permission", async () => {
-    expect(SCRIPT_TOKEN_PERMISSIONS).toEqual(["read", "start", "lessons"]);
+  it("labels wiki as hosted on the laptop form and created-token line", async () => {
+    const w = world();
+    const created = await createScriptToken(w.deps, owner, body(1, { permissions: ["wiki"] }), anyProject);
+    const html = renderScriptTokens({ base: "/s/test", nonce: "test", sessionId: "test", formToken: () => "test" }, { tokens: [], projects: ["payments"] }, { canMake: true, created });
+    expect(html.match(/read the project wiki of these projects \(hosted\)/gu)).toHaveLength(2);
+  });
+
+  it("the lessons permission is one of the four a token may have, and it is kept as asked: a token made without it has no lessons permission", async () => {
+    expect(SCRIPT_TOKEN_PERMISSIONS).toEqual(["read", "start", "lessons", "wiki"]);
     const asked = { requestId: REQUEST(1), name: "tool", projects: ["payments"] };
     expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons"] }).success).toBe(true);
     expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["read", "start", "lessons"] }).success).toBe(true);
     expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "lessons"] }).success).toBe(false);
     expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "read", "start", "lessons"] }).success).toBe(false);
+    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "read", "start", "wiki", "lessons"] }).success).toBe(false);
     const w = world();
     const withLessons = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, owner, body(1, { permissions: ["lessons", "read"] }), anyProject));
     expect(withLessons.token.permissions).toEqual(["read", "lessons"]);

@@ -1,4 +1,4 @@
-import type { AgentXError, WorkOrigin } from "@agentx/contracts";
+import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
 import type { MoneyStop } from "./money-stop.js";
@@ -59,7 +59,7 @@ export interface TaskCaller {
    * Set only by the script token check: the request is a script token's, scoped to these projects and permissions. The start gives such a task the fixed client "Script token", whatever
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
    */
-  scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
+  scriptToken?: { tokenId: string; name: string; permissions: readonly ScriptTokenPermission[]; projects: readonly string[] } | undefined;
   /**
    * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
    * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
