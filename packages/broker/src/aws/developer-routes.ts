@@ -19,7 +19,7 @@ import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import {
   AgentXNameSchema, AgentXError,
-  IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type OrgRole,
+  IMPLICIT_COMPANY_ID, OrgIdSchema,
   scopesOf,
   AGENTX_CLI_CLIENT_ID,
   CLIENT_SCOPES,
@@ -97,8 +97,6 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
 import { applyAccessRules, type AccessCheckContext, type AccessCheckRule } from "../developer/access-rules.js";
 import { CompanyIssuerRecord, companyIssuerKey } from "../developer/company-issuer.js";
-import { CompanyRecord, companyKey } from "../developer/company-membership.js";
-import { INSTALL_COMPANY_PROJECTS_MAX, InstallCompanyRefused, installCompanyBindings, installCompanyCatalog, installCompanyGrants, installCompanyLatestDefinition, installCompanyOf, installUsesCompanyLayout, mergeSurvivor } from "./install-company.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -925,23 +923,10 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     sessionFacts = { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator };
   }
   const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
-  let access: Awaited<ReturnType<typeof projectsAPersonUses>>;
-  let company: Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName"> = {};
-  if (deps.companies === undefined) {
-    // DEC 254: with Code's company layer off, the install's own company records (and a merged sign-in's survivor) decide; none: exactly the legacy read.
-    const install = await installCompanyAccess(deps, developerId);
-    if (install === "refused") throw refused();
-    access = install === undefined ? await projectsAPersonUses(deps, developerId) : install.access;
-    if (install?.company !== undefined) company = install.company;
-  } else {
-    access = await projectsAPersonUses({ ...deps, documentClient: scope!.client }, developerId, companyId);
-    // DEC 253z: the company, its role and its name, from live membership read on this call.
-    if (companyId === undefined) throw refused();
-    company = await codeCompanyOf(deps, scope!.client, developerId, companyId);
-  }
+  const access = await projectsAPersonUses(scope === undefined ? deps : { ...deps, documentClient: scope.client }, developerId, companyId);
   scope?.check();
   if (access === undefined) throw refused();
-  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company };
+  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices };
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
   if (ruled === undefined) throw refused();
@@ -949,76 +934,6 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const checked = AccessCheckResponseSchema.safeParse(ruled);
   if (!checked.success) throw refused();
   return checked.data;
-}
-
-/** DEC 253z: the person's company from Code's own company layer: live membership (with its role) and the company's stored profile. Any doubt refuses. */
-async function codeCompanyOf(deps: DeveloperRouteDependencies, client: { send(command: unknown): Promise<unknown> }, developerId: string, companyId: string): Promise<Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName">> {
-  const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-  let membership: { companyId: string; role: OrgRole } | undefined;
-  try { membership = await deps.companies?.membershipOf?.(developerId); } catch { throw refused(); }
-  if (membership === undefined || membership.companyId !== companyId || !OrgRoleSchema.safeParse(membership.role).success) throw refused();
-  const key = companyKey(companyId);
-  const stored = (await client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> }).Item;
-  // The name is display only: no stored profile (the built-in company until an operator writes one) answers no name. A stored profile that does not
-  // read, is not active, or names another company refuses.
-  if (stored === undefined) return { companyId, companyRole: membership.role };
-  const record = CompanyRecord.safeParse(stored);
-  if (!record.success || record.data.companyId !== companyId || stored.pk !== key.pk || stored.sk !== key.sk) throw refused();
-  return { companyId, companyRole: membership.role, companyName: record.data.name };
-}
-
-/**
- * DEC 254: the access answer from the install's company-scoped records (install-company.ts), for a Code whose own company layer is off. The signed-in id is
- * followed through account merges to its survivor first. Undefined: the person has no company there and was never merged, so the caller reads exactly the
- * legacy keys as before. "refused": the one fixed refusal (a merge loop, a removed or banned member, an unreadable record, a read limit).
- */
-async function installCompanyAccess(deps: DeveloperRouteDependencies, developerId: string): Promise<undefined | "refused" | { access: Awaited<ReturnType<typeof projectsAPersonUses>>; company?: Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName"> }> {
-  const budget = boundedCompanyReads(deps.documentClient, deps.now);
-  const scoped: DeveloperRouteDependencies = { ...deps, documentClient: budget.client };
-  try {
-    const walk = await mergeSurvivor((id) => getSignIn(scoped, `DEVELOPER#${id}`), developerId);
-    const company = await installCompanyOf(budget.client, deps.tableName, walk.survivorId);
-    if (company === undefined) {
-      // A company-layout install: no pointer means removed or never joined, never "read the legacy keys".
-      if (await installUsesCompanyLayout(budget.client, deps.tableName, deps.developer.slackTeamId)) return "refused";
-      if (walk.survivorId === developerId) return undefined;
-      // A merged sign-in on a legacy install: the survivor's legacy grants.
-      const access = await projectsAPersonUses(scoped, walk.survivorId);
-      budget.check();
-      return access === undefined ? "refused" : { access };
-    }
-    if (typeof walk.survivor.displayName !== "string") return "refused";
-    const { companyId, role } = company;
-    const grants = await installCompanyGrants(budget.client, deps.tableName, companyId, walk.survivorId, mayUseProject);
-    const catalog = role === "owner" || role === "admin" ? await installCompanyCatalog(budget.client, deps.tableName, companyId) : [];
-    const teamId = deps.developer.slackTeamId;
-    const bindings = teamId === undefined ? [] : await installCompanyBindings(budget.client, deps.tableName, companyId, teamId);
-    const names = [...new Set([...grants, ...catalog, ...bindings.map((binding) => binding.projectName)])].sort();
-    if (names.length > INSTALL_COMPANY_PROJECTS_MAX) return "refused";
-    const definitions = await mapLimit(names, REVISION_READS_AT_ONCE, (name) => installCompanyLatestDefinition(budget.client, deps.tableName, companyId, name));
-    const policies = new Map<string, DeveloperTaskPolicy>();
-    names.forEach((name, index) => { const definition = definitions[index]; if (definition !== undefined) policies.set(name, developerTaskPolicy(definition)); });
-    const slackUserId = walk.survivor.slackUserId ?? walk.signedIn.slackUserId;
-    const resolved = await resolveDeveloperAccess({
-      grants: [...grants, ...catalog].filter((name) => policies.has(name)),
-      bindings: bindings.filter((binding) => policies.has(binding.projectName)),
-      ...(slackUserId === undefined ? {} : { slackUserId }),
-      channelMembersMayUse: (project) => policies.get(project)?.channelMembersMayUse === true,
-      channelMembers: safeChannelMembers(deps),
-    });
-    budget.check();
-    return {
-      access: {
-        displayName: walk.survivor.displayName, nameChosen: walk.survivor.displayNameChosen === true,
-        projects: [...resolved.projects].filter(([name]) => policies.has(name)).map(([name, entry]) => ({ name, access: entry.access })),
-        notices: resolved.slackUnavailable ? ["slack_unavailable"] : [],
-      },
-      company: { companyId, companyRole: role, ...(company.name === undefined ? {} : { companyName: company.name }) },
-    };
-  } catch (error) {
-    if (error instanceof InstallCompanyRefused || error instanceof AgentXError || error instanceof z.ZodError) return "refused";
-    throw error;
-  }
 }
 
 /**

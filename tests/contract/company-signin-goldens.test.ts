@@ -111,15 +111,7 @@ async function captureRaw(name: typeof GOLDEN_NAMES[number], enabled = false): P
       broker.db.set({ pk: `COMPANY_MEMBER#${PERSON}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId: IMPLICIT_COMPANY_ID, role: "member", joinedAt: new Date(T0).toISOString(), joinedVia: "legacy" });
       broker.deps.companies = companyMembershipFromDynamo(broker.db, "SignIn");
     }
-    const answered = await broker.read("/v1/dev/access", { method: "POST", headers: { authorization: name === "access-id" ? `Basic ${Buffer.from(`${client.clientId}:${secret}`).toString("base64")}` : `Bearer ${Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url")}.${Buffer.from(JSON.stringify(broker.claims)).toString("base64url")}.c2ln` }, body: JSON.stringify(name === "access-id" ? { developerId: PERSON } : {}) });
-    if (enabled) {
-      // DEC 253z: company mode adds exactly the live company and role (the built-in company has no stored name). Everything else stays byte-identical.
-      const body = JSON.parse(answered.body) as Record<string, unknown>;
-      expect([body.companyId, body.companyRole, "companyName" in body]).toEqual([IMPLICIT_COMPANY_ID, "member", false]);
-      delete body.companyId; delete body.companyRole;
-      answered.body = JSON.stringify(body);
-    }
-    responses.push(answered);
+    responses.push(await broker.read("/v1/dev/access", { method: "POST", headers: { authorization: name === "access-id" ? `Basic ${Buffer.from(`${client.clientId}:${secret}`).toString("base64")}` : `Bearer ${Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url")}.${Buffer.from(JSON.stringify(broker.claims)).toString("base64url")}.c2ln` }, body: JSON.stringify(name === "access-id" ? { developerId: PERSON } : {}) }));
     expect(broker.db.find((row) => row.entityType === "COMPANY_MEMBERSHIP")).toHaveLength(enabled ? 1 : 0);
     return { responses, items: canonical([...broker.db.items.values()].filter((row) => row.entityType !== "COMPANY_MEMBERSHIP").sort((a, b) => `${String(a.pk)}/${String(a.sk)}`.localeCompare(`${String(b.pk)}/${String(b.sk)}`))) };
   } else if (name === "browser") {

@@ -2,7 +2,7 @@
 // audience), which Rovara's own API never accepts unless the client has full access (spec 066), and may ask Rovara what
 // a signed-in person can do.
 import { z } from "zod";
-import { OrgIdSchema, OrgRoleSchema } from "./company-scope.js";
+import { OrgIdSchema } from "./company-scope.js";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE } from "./developer.js";
 import { publicHttpsUrlProblem } from "./mcp-connector.js";
 
@@ -117,15 +117,7 @@ export const AccessCheckResponseSchema = z.object({
   /** `administrator` (spec 065): a project the person administers, which task access alone does not list. */
   projects: z.array(z.object({ name: z.string().min(1), access: z.enum(["granted", "channel", "administrator"]) }).strict()),
   notices: z.array(z.string()),
-  /**
-   * DEC 253z/254: the person's company and company role, read from LIVE membership on this call (never a token claim or anything the caller sent), and the
-   * company's name when it has a stored profile. All absent on a Code with no company records. `companyRole` is the company role (owner, admin, member),
-   * not `administrator` (install administrator).
-   */
-  companyId: OrgIdSchema.optional(),
-  companyRole: OrgRoleSchema.optional(),
-  companyName: z.string().min(1).max(80).optional(),
-}).strict().refine((answer) => (answer.companyId === undefined) === (answer.companyRole === undefined) && (answer.companyName === undefined || answer.companyId !== undefined), "a company comes with its role, and a name only with a company");
+}).strict();
 export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;
 
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----

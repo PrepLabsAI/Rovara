@@ -137,7 +137,7 @@ it("install-level client signs in each company's verified member", async () => {
   Object.assign(h.claims, { azp: "web-app", aud: "web-app" });
   const token = `${Buffer.from('{"alg":"RS256"}').toString("base64url")}.${Buffer.from(JSON.stringify(h.claims)).toString("base64url")}.c2ln`;
   const options = { method: "POST", headers: { authorization: via === "token" ? `Bearer ${token}` : `Basic ${Buffer.from(`web-app:${secret}`).toString("base64")}` }, body: JSON.stringify(via === "id" ? { developerId: PERSON } : {}) };
-  h.deps.companies = { companyOf: async () => A, membershipOf: async () => ({ companyId: A, role: "member" as const }) };
+  h.deps.companies = { companyOf: async () => A };
   if (via === "token") {
     h.deps.developer.clientRoutes = true;
     expect((await h.read("/v1/dev/client/projects/shared-project", { headers: options.headers })).statusCode).toBe(200);
