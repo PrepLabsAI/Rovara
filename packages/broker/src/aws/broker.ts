@@ -15275,7 +15275,9 @@ const repositoryGrants = new RepositoryGrantService(
 const lambdaClient = new LambdaClient(awsClientConfiguration);
 // Guided onboarding PR 7: Linear by OAuth as the app, only where infra gives the token key (CHATGPT_CONNECTION_KEY_ARN); the app's settings come from its connector secret.
 const linear = linearCompanyWiring({ env: process.env, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), kms: new KMSClient(awsClientConfiguration), secrets: secretsManager,
-  connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine });
+  connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine,
+  // L2-4: each company's tracker intake from the core root (built below; asked only at delivery time).
+  intakeFor: async (companyId) => await coreRoot.intake?.intakeFor(companyId) });
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
 function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
   return createDeveloperApiConfiguration(process.env, (issuer, functionName) => ({
@@ -15355,6 +15357,8 @@ const coreRoot = createBrokerCoreRoot({
   policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
   origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
   log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
+  // L2-4: the tracker intake and ticket write-back over the company's own Linear connection, where Linear is wired.
+  ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections } }),
 });
 // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
 const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);

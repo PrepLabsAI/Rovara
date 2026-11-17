@@ -7,7 +7,7 @@
 // The company's tokens are only ever read for the company asking (`linearCompanyApiAccess`), so another company's token is never used for its projects.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DecryptCommand, EncryptCommand, type KMSClient } from "@aws-sdk/client-kms";
-import { linearAppIntakeDeliver } from "./linear-app-intake.js";
+import { linearAppIntakeDeliver, type LinearAppIntakeWiring } from "./linear-app-intake.js";
 import { LinearAppSettingsSchema, LinearConnections, linearAppSecretName, type LinearAppSettings, type LinearSealer } from "./linear-connections.js";
 import type { LinearConnectWiring } from "./linear-connect-routes.js";
 import type { LinearWebhookWiring } from "./linear-app-webhook.js";
@@ -51,6 +51,8 @@ export interface LinearCompanyWiring { connect: LinearConnectWiring; webhook: Li
 export function linearCompanyWiring(input: {
   env: NodeJS.ProcessEnv; documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; kms: Pick<KMSClient, "send">; secrets: Pick<SecretsManagerClient, "send">;
   connectorSecretPrefix: string; fetch?: typeof fetch; log: (entry: Record<string, unknown>) => void;
+  /** L2-4: each company's tracker intake (the core root's `intake.intakeFor`), asked at delivery time. Absent: every routed event logs `linear.intake_not_wired`. */
+  intakeFor?: LinearAppIntakeWiring["intakeFor"];
 }): LinearCompanyWiring | undefined {
   const keyArn = input.env.CHATGPT_CONNECTION_KEY_ARN;
   if (keyArn === undefined || keyArn === "") return undefined;
@@ -60,7 +62,7 @@ export function linearCompanyWiring(input: {
   return {
     connections,
     connect: { connections, app, fetch: fetchImpl, log: input.log },
-    webhook: { connections, app, now: Date.now, log: input.log, deliver: linearAppIntakeDeliver({ connections, app, fetch: fetchImpl, log: input.log }) },
+    webhook: { connections, app, now: Date.now, log: input.log, deliver: linearAppIntakeDeliver({ connections, app, fetch: fetchImpl, log: input.log, ...(input.intakeFor === undefined ? {} : { intakeFor: input.intakeFor }) }) },
   };
 }
 

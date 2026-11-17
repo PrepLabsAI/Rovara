@@ -15,6 +15,8 @@ import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
+import { routeHostedIntake } from "./hosted-intake-routes.js";
+import type { HostedIntake } from "./hosted-intake.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
@@ -164,6 +166,8 @@ export interface DeveloperApiConfiguration {
   companyMembers?: CompanyMemberActions;
   /** Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts). Absent (or no company layer): those routes are unknown. */
   linearConnect?: LinearConnectWiring;
+  /** L2-4: a project's waiting tickets on the core (hosted-intake-routes.ts), set only while the core switch serves and Linear is wired. Absent (or no company layer): those routes are unknown. */
+  coreIntake?: HostedIntake;
   /**
    * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
    * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
@@ -1633,9 +1637,30 @@ async function linearConnectRoute(deps: DeveloperRouteDependencies, request: Ada
   }, caller, companyId, request, url, stepUp);
 }
 
+/** L2-4: a project's waiting tickets (hosted-intake-routes.ts parses what this matched). */
+export const HOSTED_INTAKE_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/intake(?:\/([^/]+)\/(start|dismiss))?$/u;
+
+/** L2-4: the waiting-ticket routes. Unknown, before anyone is authenticated, without the company layer or the core's intake. */
+async function hostedIntakeRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL, match: RegExpExecArray): Promise<unknown> {
+  const intake = deps.developer.coreIntake;
+  if (deps.companies === undefined || intake === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  const { caller } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeHostedIntake({
+    documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, intake,
+    projectInCompany: async (project, company) => (await projectsWithPolicy(deps, [project], company)).has(project),
+    projectRole: async (project, personId, company) => (await projectGrant(memberActions(deps), project, personId, company))?.role,
+  }, caller, companyId, request, { project: match[1]!, itemId: match[2], act: match[3] });
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isLinearConnectPath(url.pathname)) return linearConnectRoute(deps, request, url);
+  const intakeMatch = HOSTED_INTAKE_ROUTES.exec(url.pathname);
+  if (intakeMatch !== null) return hostedIntakeRoute(deps, request, url, intakeMatch);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
   if (url.pathname.startsWith("/review/link/")) {

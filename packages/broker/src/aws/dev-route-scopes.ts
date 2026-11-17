@@ -125,6 +125,10 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  // L2-4: a project's waiting tickets (Linear app intake on the core); full access only (the route also checks the company owner/admin or the project's admin, live).
+  { method: "GET", path: "/v1/dev/projects/{project}/intake", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/start", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/dismiss", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },

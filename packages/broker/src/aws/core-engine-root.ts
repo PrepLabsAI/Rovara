@@ -83,6 +83,8 @@ import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
 import { handleCoreContextTools } from "../core-host/context-tools.js";
+import { createHostedIntake, hostedTicketUpdatesHandler, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
+import type { LinearConnections } from "./linear-connections.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
@@ -147,6 +149,11 @@ export interface BrokerCoreRootInputs {
   log: (entry: Record<string, unknown>) => void;
   now?: () => Date;
   wrapStorage?: (store: DocumentStore) => DocumentStore;
+  /**
+   * L2-4: the Linear OAuth connections (aws/linear-wiring.ts), where Linear is wired. With them, while the switch serves: the tracker intake per company (`intake`), Linear account links
+   * read under the company, and the ticket write-back through the company's own connection on its milestones. Absent: no intake (the Linear app webhook logs `linear.intake_not_wired`).
+   */
+  linearIntake?: { connections: Pick<LinearConnections, "connection" | "accessToken">; fetch?: typeof fetch };
 }
 
 export interface BrokerCoreRoot {
@@ -164,6 +171,8 @@ export interface BrokerCoreRoot {
    */
   readonly lessons: LessonsApi | undefined;
   readonly policyHook?: ProjectSettingsHook;
+  /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
+  readonly intake: HostedIntake | undefined;
   /**
    * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` while the
    * switch is off or for any other path. The broker's HTTP API reaches it through `coreApp` (lane L12).
@@ -425,7 +434,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const fallback = { member: Number(env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"), organization: Number(env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20") };
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
-      }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
+      }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)),
+      // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
+      ...(inputs.linearIntake === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId) }),
+      moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
@@ -459,6 +471,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             },
           });
           if (lessons !== undefined) {
+            // L2-4: the ticket write-back rides on the company's milestones, through the company's own Linear connection only.
+            if (inputs.linearIntake !== undefined) {
+              lessons.milestones.register(hostedTicketUpdatesHandler({ companyId, store: registry.require("storage"), connections: inputs.linearIntake.connections, fetch: inputs.linearIntake.fetch, now: () => now().getTime(), log }));
+            }
             lessons.attach();
             lessonsByCompany.set(companyId, lessons);
             // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
@@ -550,6 +566,22 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     }
   }
 
+  // L2-4: the tracker intake, from each company's own runtime (only a company whose new tasks start on the core).
+  const linearIntake = inputs.linearIntake;
+  const intake = settingsBlocked || !app.serving || linearIntake === undefined ? undefined : createHostedIntake({
+    connections: linearIntake.connections, fenceKey: intakeFenceKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log,
+    companyFor: async (companyId) => {
+      if (app.engineForNewTask(companyId) !== "core") return undefined;
+      const runtime = await app.runtimeFor(companyId);
+      const registry = await app.registry();
+      const milestones = lessonsByCompany.get(companyId)?.milestones;
+      return {
+        store: registry.require("storage"), access: runtime.flow.deps.access, flow: runtime.flow, identity: registry.require("identity"), audit: registry.require("audit-sink"),
+        ...(milestones === undefined ? {} : { milestones }),
+      };
+    },
+  });
+
   const table = { documentClient: inputs.documentClient, tableName: inputs.stateTableName };
   let capabilities: CallbackCapabilities | undefined;
   /** The workspace of a GET /v1/internal/model-access whose capability verifies (signature, expiry, the `model-access` action); undefined for anything else. */
@@ -624,6 +656,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreTasks,
     coreApp,
     lessons,
+    intake,
     ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {
       get settings() {
         if (hookSettings === undefined) throw new Error("the policy hook settings are not readable");
@@ -682,9 +715,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
  * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): while the switch serves, the task routes' core entry and the /v1/app/* routes; off (neither is
  * built), the configuration exactly as given, so the developer API is byte-identical.
  */
-export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry }) {
+export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook"> & { intake?: HostedIntake | undefined }): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry; coreIntake?: HostedIntake }) {
   if (root.coreTasks === undefined) return config;
-  return { ...config, ...(root.policyHook === undefined ? {} : { policyHook: root.policyHook }), coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }) };
+  return {
+    ...config, ...(root.policyHook === undefined ? {} : { policyHook: root.policyHook }), coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }),
+    ...(root.intake === undefined ? {} : { coreIntake: root.intake }),
+  };
 }
 
 /** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */

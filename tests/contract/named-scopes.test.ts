@@ -200,6 +200,8 @@ async function setUp(mode: "linking" | "developer") {
     companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
     // Guided onboarding PR 7: the Linear connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
     linearConnect: { connections: {} as never, app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
+    // L2-4: the waiting-ticket routes need the core's intake to exist; this one holds no tickets, so only the route table's answer is tested here.
+    coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), dismiss: async () => false },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
