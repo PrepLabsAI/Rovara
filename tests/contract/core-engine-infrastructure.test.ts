@@ -548,7 +548,8 @@ describe("L1a broker environment derivation", () => {
     // Machine size stack (#877 + #887 + DEC 254zr): re-pinned. Measured against code/next a38f1ab0d, the legacy template differs in exactly three places: (1) the provisioner's RunInstances
     // condition gains StringEquals ec2:InstanceType (ten types); (2) ResolveWorkerAmi's Resource becomes the arm64 parameter plus the public x86_64 AL2023 parameter; (3) the provisioner state
     // machine's definition (new states SizeChosen, the *Sized and X86 launches, SizedLaunchFailed, SizeUnavailable; Start, LaunchConfiguration, RunInstance*, RecordInstance carry the size).
-    expect(digest(legacy.toJSON())).toBe("df258584a9995cd8989583240155bd85fbf0e875351adf46847d450f5a5eb670");
+    // Batch 14: measured on the combined tree (batch 13 + the machine size stack); the legacy synth differs from batch 13's head only in the three machine size places above.
+    expect(digest(legacy.toJSON())).toBe("526f64287f2cb4fe8cdcc71b776e813fffb0ad4f9145a0234d8fd1500a552cf5");
   });
 });
 import { createHash } from "node:crypto";

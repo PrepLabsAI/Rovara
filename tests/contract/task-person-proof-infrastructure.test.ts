@@ -235,24 +235,28 @@ describe("the named TEST proof-only installation gate", () => {
     // (infra/lib/session-lifecycle.ts, session-lifecycle-infrastructure.test.ts pins it exactly): six types in #877/#887, ten with DEC 254zr. Verified: removing only the four types m6g.4xlarge,
     // m6g.8xlarge, m6i.4xlarge and m6i.8xlarge from every ec2:InstanceType list gives the #887 head's digests (named 69aa57be..., foreign 3c33651d..., legacy f9e67a89...; the same without the route),
     // so DEC 254zr moves these pins by exactly those four strings. The older pins below this note did not hold at the #887 head either (its six types moved them first).
+    // Batch 14 (DEC 254zr/zv/zz machine sizes, DEC 254u dispatcher read, DEC 254zx email): all six re-pinned on the combined tree. A full synth of every stack (legacy, named staging,
+    // foreign) against batch 13's head 84be8d7b7 differs ONLY in: the provisioner's ec2:InstanceType allow-list (10 types), the x86_64 AL2023 AMI parameter in ResolveWorkerAmi, the provisioner
+    // state machine definition (#877/#887/#901); the attention email's 3 parameters, condition, rule and 5 conditional resources plus `ae` in AGENTX_SETTINGS (#907, off by default); and, in the
+    // proof install, the dispatcher's one GetItem COMPANY_MEMBER#* statement (#875, DEC 254u) and the proof function's CurrentVersion id (its code changed). Nothing else moved.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "bfaeec0be69165a797add99c89111629b3b0461600c39a5f4800391756ab83b2",
-        withoutRoute: "bdf5fe0ee2b1f890357d82e40d33cefc0040b86f2b82f82eb694b4c72546910c",
+        withRoute: "0a875559c892825e45000fa600a1ee1a40492677a55a59e057a587a40fee5f1e",
+        withoutRoute: "d1b4ac5798cbd980a7e98fbcbb18f1baf7b146e653d14103e55485e68ad216ef",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "c1e861032104271daeb6f062e953c509c9ad87378b0a01b6cfe8d23293314c12",
-        withoutRoute: "5b025719156499cad762121451e545c5df08161f67419cc78f74a649e6310e99",
+        withRoute: "97be2a5fc8d7b81bb3fa198546f38f43acea16c4241f7d3837991e0fbeda5bd6",
+        withoutRoute: "bbac71e6236364b80bc27996e85799d56b1960b66b5a79aee949103325a5fa8d",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "4f2ed4957fd06301c6f9875da12ed59f4a53c3a641be42c8728eaedfc2173e43",
-        withoutRoute: "f7dbb84a614daa78c400aa943fa7dd97ab738ae75da0a5f8013e9be15e7f157b",
+        withRoute: "fc5271f6edfbbe24ca24965cd06a17c952eb90f9892499f23982352967d79523",
+        withoutRoute: "0757ab45466760b0c22c9e43c1d0e114168e9aba7e290c50d579875e2e840da5",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
