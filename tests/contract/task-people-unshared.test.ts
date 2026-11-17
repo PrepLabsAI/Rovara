@@ -11,8 +11,9 @@ import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-ro
 import { TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES, withTaskPersonMembershipRead, type TaskPersonRuntimePorts } from "../../packages/broker/src/aws/task-person-runtime.js";
 import { checkTaskPersonIdentity, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../../packages/broker/src/developer/task-person-identity.js";
 import {
-  getTaskPeople, getTaskPeopleCapabilities, resolveTaskDispatchPeople, resolveTaskPeopleAccess, takeTaskOwnership, type TaskPeopleDependencies,
+  changeTaskPeople, getTaskPeople, getTaskPeopleCapabilities, resolveTaskDispatchPeople, resolveTaskPeopleAccess, takeTaskOwnership, type TaskPeopleDependencies,
 } from "../../packages/broker/src/developer/task-people.js";
+import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
 import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -137,6 +138,31 @@ describe("PEOPLE for a task with no Slack share", () => {
     expect(h.proof).not.toHaveBeenCalled();
   });
 
+  it("writes no list when the task is shared while its creator is being proved (the write's condition fails)", async () => {
+    const h = harness();
+    const check = h.peopleDeps.checkTaskPerson!;
+    h.peopleDeps.checkTaskPerson = async (task, developerId) => {
+      const result = await check(task, developerId);
+      h.db.set({ ...(webTask() as unknown as Record<string, unknown>), shared: true, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081", mode: "view", sharedReason: "requested", sharedAt: CREATED } });
+      return result;
+    };
+    await expect(getTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(h.people()).toBeUndefined();
+  });
+
+  it("answers a missing task, a shared task and a refused person with the same words when there are no Slack display reads", async () => {
+    const missing = harness();
+    const shared = harness({ task: webTask({ shared: true, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081", mode: "view", sharedReason: "requested", sharedAt: CREATED } }) });
+    const refused = harness({ grants: { [GALE_ID]: false } });
+    const answers = await Promise.all([
+      errorOf(getTaskPeople(missing.peopleDeps, GALE_CALLER, "55555555-0000-4000-8000-000000000000")),
+      errorOf(getTaskPeople(shared.peopleDeps, GALE_CALLER, TASK_A)),
+      errorOf(getTaskPeople(refused.peopleDeps, GALE_CALLER, TASK_A)),
+    ]);
+    expect(new Set(answers.map((error) => `${error.code}|${error.message}`)).size).toBe(1);
+    expect(answers[0]!.code).toBe("RUNTIME_UNAVAILABLE");
+  });
+
   it("makes an unshared task's list only while the task is still unshared", async () => {
     const h = harness();
     await getTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A);
@@ -152,7 +178,7 @@ describe("PEOPLE for a task with no Slack share", () => {
     ["has a revoked sign-in", { revoked: [GALE_ID] }],
   ])("writes no People list when the web creator %s", async (_label, world) => {
     const h = harness(world);
-    expect((await errorOf(getTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A))).code).toBe("TASK_ACCESS_DENIED");
+    expect((await errorOf(getTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A))).code).toBe("RUNTIME_UNAVAILABLE");
     expect(h.people()).toBeUndefined();
     expect(h.db.find((item) => String(item.sk).startsWith("PERSON"))).toEqual([]);
   });
@@ -219,7 +245,7 @@ describe("a web identity holds only a role someone gave it", () => {
     const h = harness();
     h.seed(galeRow(), subjectRow(P_GALE, GALE_ID), wrenRow(), subjectRow(P_WREN, WREN_ID), peopleRow([GALE("owner")]));
     expect((await errorOf(resolveTaskPeopleAccess(h.peopleDeps, webTask(), WREN_ID))).code).toBe("TASK_ACCESS_DENIED");
-    expect((await errorOf(getTaskPeople(h.peopleDeps, WREN_CALLER, TASK_A))).code).toBe("TASK_ACCESS_DENIED");
+    expect((await errorOf(getTaskPeople(h.peopleDeps, WREN_CALLER, TASK_A))).code).toBe("RUNTIME_UNAVAILABLE");
     // The owner's view lists only people with a role.
     const view = await getTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A);
     expect(view.people.map((person) => person.name)).toEqual(["Gale GitHub"]);
@@ -246,7 +272,7 @@ describe("no channel on an unshared task: nobody is present without a role", () 
   it("lets only the creator start an unshared task's People list: another present person's read writes nothing", async () => {
     const h = harness();
     h.seed(wrenRow(), subjectRow(P_WREN, WREN_ID));
-    expect((await errorOf(getTaskPeople(h.peopleDeps, WREN_CALLER, TASK_A))).code).toBe("TASK_ACCESS_DENIED");
+    expect((await errorOf(getTaskPeople(h.peopleDeps, WREN_CALLER, TASK_A))).code).toBe("RUNTIME_UNAVAILABLE");
     expect(h.people()).toBeUndefined();
   });
 });
@@ -264,6 +290,40 @@ describe("Slack identities on a Slack-shared task keep needing the channel to ow
     const h = harness({ task: sharedSlackTask(), outOfChannel: [SAM] });
     h.seed(samRow(), subjectRow(P_SAM, SAM_ID), peopleRow([SAM_ENTRY("owner")]));
     await expect(resolveTaskDispatchPeople(h.peopleDeps, sharedSlackTask())).resolves.toStrictEqual({ peopleRevision: 3, ownerActorIds: [], status: "OWNERLESS" });
+  });
+
+  /** Display reads for a Slack-shared task: an admission that never runs out and an empty directory. */
+  const withDisplay = (deps: TaskPeopleDependencies): TaskPeopleDependencies => ({
+    ...deps,
+    createTaskPeopleDisplayAdmission: () => ({
+      assertOpen: () => undefined, admitIdentity: () => undefined, noteNativeIdentity: () => undefined, close: () => undefined,
+      proof: async () => { throw new Error("not used"); }, directory: async () => { throw new Error("not used"); },
+    }) as TaskPeopleDisplayAdmission,
+    listTaskPeople: async () => [],
+  });
+
+  it("never lets another channel member start the People list while the creator is out of the channel", async () => {
+    const h = harness({ task: sharedSlackTask(), outOfChannel: [SAM] });
+    h.seed(samRow(), subjectRow(P_SAM, SAM_ID), bayRow(), subjectRow(P_BAY, BAY_ID));
+    expect((await errorOf(getTaskPeople(withDisplay(h.peopleDeps), caller(BAY_ID, "Bay Slack", "slack", BAY), TASK_A))).code).toBe("TASK_ACCESS_DENIED");
+    expect(h.people()).toBeUndefined();
+  });
+
+  it("never lets a person outside the channel start the People list, even with the creator present", async () => {
+    const h = harness({ task: sharedSlackTask(), outOfChannel: [BAY] });
+    h.seed(samRow(), subjectRow(P_SAM, SAM_ID), bayRow(), subjectRow(P_BAY, BAY_ID));
+    expect((await errorOf(getTaskPeople(withDisplay(h.peopleDeps), caller(BAY_ID, "Bay Slack", "slack", BAY), TASK_A))).code).toBe("TASK_ACCESS_DENIED");
+    expect(h.people()).toBeUndefined();
+  });
+
+  it("refuses to make a Slack person outside the channel an owner, and writes nothing", async () => {
+    const h = harness({ task: sharedSlackTask(), outOfChannel: [BAY] });
+    h.seed(samRow(), subjectRow(P_SAM, SAM_ID), bayRow(), subjectRow(P_BAY, BAY_ID), peopleRow([SAM_ENTRY("owner"), BAY_ENTRY("commenter")]));
+    const before = JSON.stringify(h.people());
+    expect((await errorOf(changeTaskPeople(h.peopleDeps, caller(SAM_ID, "Sam Slack", "slack", SAM), TASK_A, {
+      requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", expectedPeopleRevision: 3, targetDeveloperId: BAY_ID, role: "owner",
+    }))).code).toBe("TASK_ACCESS_DENIED");
+    expect(JSON.stringify(h.people())).toBe(before);
   });
 
   it("never lets a Slack commenter outside the channel take ownership of an orphaned task", async () => {

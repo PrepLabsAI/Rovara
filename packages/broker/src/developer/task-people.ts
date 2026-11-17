@@ -526,8 +526,10 @@ async function commitMutation(
     } },
     { ConditionCheck: {
       TableName: deps.tableName, Key: taskKey(task.taskId),
-      ConditionExpression: "#developerId = :developerId AND workflow.#revision = :taskRevision AND workflow.#stage = :taskStage AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#developerId": "developerId", "#revision": "revision", "#stage": "stage" },
+      // C3: a change proved on an unshared task (no channel) is written only while the task is still unshared.
+      ConditionExpression: "#developerId = :developerId AND workflow.#revision = :taskRevision AND workflow.#stage = :taskStage AND attribute_not_exists(closedAt)"
+        + (task.share === undefined ? " AND attribute_not_exists(#share)" : ""),
+      ExpressionAttributeNames: { "#developerId": "developerId", "#revision": "revision", "#stage": "stage", ...(task.share === undefined ? { "#share": "share" } : {}) },
       ExpressionAttributeValues: { ":developerId": task.developerId, ":taskRevision": task.workflow.revision, ":taskStage": task.workflow.stage },
     } },
     { Put: { TableName: deps.tableName, Item: event, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -628,11 +630,17 @@ export async function getTaskPeople(deps: TaskPeopleDependencies, caller: Develo
  * needs the admission and its complete channel directory, exactly as before.
  */
 async function getUnsharedTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {
-  const task = await loadTask(deps, taskId);
-  if (task.share !== undefined) return unavailable();
-  const people = await currentPeopleForCaller(deps, task, caller, false);
-  await authorizedRead(deps, task, people, caller);
-  return viewOf(deps, task, people, caller, []);
+  // One answer for every refusal here (a missing task, a shared one, a person without access), exactly the answer before C3, so it tells
+  // nobody whether a task exists or is shared.
+  try {
+    const task = await loadTask(deps, taskId);
+    if (task.share !== undefined) return unavailable();
+    const people = await currentPeopleForCaller(deps, task, caller, false);
+    await authorizedRead(deps, task, people, caller);
+    return await viewOf(deps, task, people, caller, []);
+  } catch {
+    return unavailable();
+  }
 }
 
 /** A polling-safe capability read: it checks only META, PEOPLE and the caller's current proof. */
