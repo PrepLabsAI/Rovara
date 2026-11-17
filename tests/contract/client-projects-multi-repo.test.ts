@@ -163,11 +163,12 @@ describe("one project from several repositories", () => {
     let skew = 0;
     const now = vi.spyOn(Date, "now").mockImplementation(() => real() + skew);
     try {
-      h.clientProjects.repositoryDefaults.mockImplementation(async (url: string) => { skew = 16_000; const [, owner, name] = /^https:\/\/github\.com\/([^/]+)\/(.+)\.git$/.exec(url)!; return { owner: owner!, name: name!, defaultBranch: "main" }; });
+      // Slow just before registration (after every budgeted read): only the request's own limit stops it.
+      const binding = h.clientProjects.workerBinding;
+      h.clientProjects.workerBinding = async () => { skew += 16_000; return binding(); };
       const late = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-a/api"] });
       expect(late.statusCode).toBe(503);
       expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
-      skew = 0;
       expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/web"] })).results).toEqual([{ repository: "acme-a/web", outcome: "refused", reason: "unavailable" }]);
       expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
     } finally { now.mockRestore(); }
