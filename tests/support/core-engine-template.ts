@@ -14,7 +14,7 @@ type Resource = { Type: string; Properties: Record<string, unknown> };
 export function withoutCoreEngine(template: unknown): unknown {
   const synthesized = template as { Parameters: Record<string, unknown>; Conditions: Record<string, unknown>; Resources: Record<string, Resource> };
   expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
-  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons"]) delete synthesized.Parameters[name];
+  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreModelGatewayHost", "CoreAgentModel"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
   expect(conditions).toHaveLength(1);
   delete synthesized.Conditions[conditions[0]!];
@@ -34,7 +34,7 @@ export function withoutCoreEngine(template: unknown): unknown {
     expect(dispatcherVariables, name).toHaveProperty(name);
     delete dispatcherVariables[name];
   }
-  removePackedPieces(dispatcherVariables, "AGENTX_SETTINGS", ["ac", "cd", "cl", "ct"]);
+  removePackedPieces(dispatcherVariables, "AGENTX_SETTINGS", ["ac", "am", "cd", "cl", "ct", "gw"]);
   delete dispatcherVariables.ROVARA_POLICY_HOOK;
   delete dispatcherVariables.ROVARA_CORE_ALLOWED_COMPANIES;
   const dispatcherPolicy = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DispatcherServiceRoleDefaultPolicy") && resource.Type === "AWS::IAM::Policy")!;
@@ -78,10 +78,12 @@ export function withoutCoreEngine(template: unknown): unknown {
   const brokers = Object.entries(synthesized.Resources).filter(([id, resource]) => id.startsWith("Broker") && resource.Type === "AWS::Lambda::Function");
   expect(brokers).toHaveLength(1);
   const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  expect(variables.ROVARA_CORE_ENGINE).toStrictEqual({ Ref: "CoreEngine" });
-  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "cd", "cl", "ct"]);
+  // Core switch-on blocker (2026-11-17): the switch and the gateway settings are packed in the broker's settings.
+  const settingsJoin = JSON.stringify(variables.AGENTX_SETTINGS);
+  for (const [code, parameter] of [["sw", "CoreEngine"], ["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "am", "cd", "cl", "ct", "gw", "sw"]);
   delete variables.ROVARA_POLICY_HOOK;
   delete variables.ROVARA_CORE_ALLOWED_COMPANIES;
-  delete variables.ROVARA_CORE_ENGINE;
+
   return template;
 }

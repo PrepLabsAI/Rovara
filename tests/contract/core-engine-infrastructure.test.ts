@@ -13,7 +13,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   SERVICE_ROLE_SERVICES, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -52,6 +52,54 @@ const dispatcherRoleId = ((dispatcher[1].Properties.Role as { "Fn::GetAtt": [str
 const ORG_A = `org_${"a1".repeat(10)}`;
 const ORG_B = `org_${"z9".repeat(10)}`;
 
+/** A packed AGENTX_SETTINGS (Fn::Join of `code=` and value pieces) as code -> piece. */
+function packedSettings(variables: Record<string, unknown>): Map<string, unknown> {
+  const parts = (variables.AGENTX_SETTINGS as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1];
+  const pieces = new Map<string, unknown>();
+  for (let index = 0; index < parts.length; index += 2) pieces.set(/^,?([a-z]{2})=$/u.exec(String(parts[index]))![1]!, parts[index + 1]);
+  return pieces;
+}
+
+// Core switch-on blocker (2026-11-17): the model gateway's host and the agent model, kept across upgrades (tests/contract/core-gateway-settings.test.ts has the CLI and the broker's read).
+describe("the model gateway settings (stack parameters CoreModelGatewayHost and CoreAgentModel)", () => {
+  it("are declared empty by default, with the contracts' pattern and length", () => {
+    expect(json.Parameters.CoreModelGatewayHost).toMatchObject({ Default: "", AllowedPattern: CORE_MODEL_GATEWAY_HOST_PATTERN, MaxLength: CORE_MODEL_GATEWAY_HOST_MAX_LENGTH });
+    expect(json.Parameters.CoreAgentModel).toMatchObject({ Default: "", AllowedPattern: CORE_AGENT_MODEL_PATTERN, MaxLength: CORE_AGENT_MODEL_MAX_LENGTH });
+  });
+
+  it("are packed for BOTH the broker and the dispatcher (gw, am), never as variables of their own", () => {
+    for (const [name, variables] of [["broker", brokerVariables], ["dispatcher", dispatcherVariables]] as const) {
+      const pieces = packedSettings(variables);
+      expect(pieces.get("gw"), name).toStrictEqual({ Ref: "CoreModelGatewayHost" });
+      expect(pieces.get("am"), name).toStrictEqual({ Ref: "CoreAgentModel" });
+      expect(variables, name).not.toHaveProperty(CORE_MODEL_GATEWAY_URL_VARIABLE);
+      expect(variables, name).not.toHaveProperty(CORE_AGENT_MODEL_VARIABLE);
+    }
+  });
+
+  it("make room in the broker: its switch is packed (sw) and the channel adapters' secret prefix is derived; the dispatcher keeps its own switch variable", () => {
+    expect(packedSettings(brokerVariables).get("sw")).toStrictEqual({ Ref: "CoreEngine" });
+    expect(brokerVariables).not.toHaveProperty("CHANNEL_ADAPTER_SECRET_PREFIX");
+    expect(dispatcherVariables[CORE_ENGINE_VARIABLE]).toStrictEqual({ Ref: "CoreEngine" });
+    expect(packedSettings(dispatcherVariables).has("sw")).toBe(false);
+  });
+
+  it("are used by nothing else (no IAM, no other function), in the named and the app's template alike", () => {
+    for (const template of [json, inApp]) {
+      const users = Object.entries(template.Resources).filter(([, resource]) => /"Ref":"Core(ModelGatewayHost|AgentModel)"/u.test(JSON.stringify(resource))).map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""));
+      expect(users.sort()).toEqual(["Broker", "Dispatcher"]);
+    }
+  });
+
+  it("are absent from the legacy (production) template, whose broker is still given the secret prefix whole", () => {
+    const legacyJson = legacy.toJSON() as Json;
+    expect(legacyJson.Parameters).not.toHaveProperty("CoreModelGatewayHost");
+    expect(legacyJson.Parameters).not.toHaveProperty("CoreAgentModel");
+    const legacyBroker = Object.entries(legacyJson.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
+    expect((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
+  });
+});
+
 describe("the switch (stack parameter CoreEngine)", () => {
   const parameter = json.Parameters.CoreEngine!;
 
@@ -76,8 +124,9 @@ describe("the switch (stack parameter CoreEngine)", () => {
     expect(readCoreEngineFlags({ [CORE_ENGINE_VARIABLE]: `on:${ORG_A}:${ORG_B}` }).combined).toEqual({ mode: "on-for", companies: [ORG_A, ORG_B] });
   });
 
-  it("reaches the broker as a plain variable", () => {
-    expect(brokerVariables[CORE_ENGINE_VARIABLE]).toEqual({ Ref: "CoreEngine" });
+  it("reaches the broker packed in its settings (sw; core switch-on blocker 2026-11-17: room for the gateway settings)", () => {
+    expect(brokerVariables).not.toHaveProperty(CORE_ENGINE_VARIABLE);
+    expect(JSON.stringify(brokerVariables.AGENTX_SETTINGS)).toMatch(/sw=",\{"Ref":"CoreEngine"\}/u);
   });
 
   it("is missing from the legacy (production) template, which has no parameter, queue or schedule for it", () => {

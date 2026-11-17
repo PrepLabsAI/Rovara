@@ -1,26 +1,39 @@
 // Operator entrypoint: one bounded page, default preview. Run only through the staging operator guard.
+import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
 import { constants } from "node:fs";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, type GetCommand } from "@aws-sdk/lib-dynamodb";
+import { catalogBackfill } from "./project-catalog-backfill.js";
 import { backfillCorePage, checkCorePeople } from "./core-project-backfill.js";
 
 export function parseCoreBackfillArguments(args: string[]) {
-  const values = new Map<string, string>(); let dryRun = true, peopleCheck = false;
+  const values = new Map<string, string>(); let dryRun = true, peopleCheck = false, action: "discover" | "verify" | "unmark" | "undo-run" | undefined, mark = false;
   const refused = () => new Error("core backfill arguments refused");
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
+    if (flag === "--mark") { if (mark) throw refused(); mark = true; continue; }
+    if (["--discover", "--verify", "--unmark", "--undo-run"].includes(flag)) {
+      if (action !== undefined) throw refused();
+      action = flag.slice(2) as "discover" | "verify" | "unmark" | "undo-run";
+      if (action === "unmark" || action === "undo-run") {
+        if (values.has("--run-id")) throw refused();
+        const runId = args[++index]; if (runId === undefined || !/^[A-Za-z0-9_-]{1,100}$/.test(runId)) throw refused(); values.set("--run-id", runId);
+      }
+      continue;
+    }
     if (flag === "--apply") { if (!dryRun) throw refused(); dryRun = false; continue; }
     if (flag === "--people-check") { if (peopleCheck) throw refused(); peopleCheck = true; continue; }
-    if (!["--state-table", "--signin-table", "--input", "--continuation"].includes(flag) || values.has(flag)) throw refused();
+    if (!["--state-table", "--signin-table", "--input", "--continuation", "--run-id"].includes(flag) || values.has(flag)) throw refused();
     const value = args[++index];
     if (value === undefined || value.startsWith("--") || value.length > 2048) throw refused();
     values.set(flag, value);
   }
   const tableName = values.get("--state-table"), signInTableName = values.get("--signin-table"), file = values.get("--input");
-  if (!tableName || !signInTableName || !file || !/^[A-Za-z0-9_.-]{3,255}$/.test(tableName) || !/^[A-Za-z0-9_.-]{3,255}$/.test(signInTableName) || (peopleCheck && !dryRun)) throw refused();
-  return { tableName, signInTableName, file, dryRun, peopleCheck, continuation: values.get("--continuation") };
+  if (!tableName || !signInTableName || !file || !/^[A-Za-z0-9_.-]{3,255}$/.test(tableName) || !/^[A-Za-z0-9_.-]{3,255}$/.test(signInTableName) || (peopleCheck && (!dryRun || action !== undefined || mark)) || (mark && action !== "verify") || (action === "discover" && !dryRun) || (values.has("--run-id") && !/^[A-Za-z0-9_-]{1,100}$/.test(values.get("--run-id")!))) throw refused();
+  return { tableName, signInTableName, file, dryRun, peopleCheck, continuation: values.get("--continuation"), action, mark, runId: values.get("--run-id") };
 }
 export async function readCoreMappingFile(path: string): Promise<Record<string, unknown>> {
   let file: Awaited<ReturnType<typeof open>> | undefined;
@@ -46,10 +59,17 @@ async function main() {
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: "us-west-2", maxAttempts: 1 }));
   const deps = { tableName: args.tableName, signInTableName: args.signInTableName, documentClient: { send: (command: unknown) => client.send(command as GetCommand, { abortSignal: signal }) } };
   try {
-    const result = args.peopleCheck ? await checkCorePeople(deps, mapping)
-      : await backfillCorePage(deps, { ...mapping, dryRun: args.dryRun, ...(args.continuation === undefined ? {} : { continuation: args.continuation }) });
+    const result = args.action !== undefined ? await catalogBackfill(deps, { ...mapping, action: args.action, mark: args.mark, dryRun: args.dryRun,
+      ...(args.runId === undefined ? {} : { runId: args.runId }), ...(args.continuation === undefined ? {} : { continuation: args.continuation }) }) : args.peopleCheck ? await checkCorePeople(deps, mapping)
+      : await backfillCorePage(deps, { ...mapping, dryRun: args.dryRun, ...(args.runId === undefined ? {} : { runId: args.runId }), ...(args.continuation === undefined ? {} : { continuation: args.continuation }) });
+    if (args.action === "discover" && "mappings" in result && result.ok) {
+      for (const [index, input] of (result.mappings ?? []).entries()) {
+        const output = await open(join(dirname(args.file), `catalog-${input.companyId}-${createHash("sha256").update(`${args.tableName}/${args.continuation ?? "start"}`).digest("hex").slice(0, 16)}-${index}.json`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+        try { await output.writeFile(`${JSON.stringify(input)}\n`); } finally { await output.close(); }
+      }
+    }
     process.stdout.write(`${JSON.stringify(result)}\n`);
-    if (result.refused !== undefined || result.failed) process.exitCode = 1;
+    if (("ok" in result && !result.ok) || ("refused" in result && result.refused !== undefined) || ("failed" in result && result.failed)) process.exitCode = 1;
   } finally { client.destroy(); }
 }
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {

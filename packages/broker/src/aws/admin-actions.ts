@@ -2,6 +2,7 @@
 // Spec 025 E8, E9, E19: the admin actions 25e's change tools apply that no admin command had. Each
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
 import type { CompanyInviteRegistry, SignInClientRegistry } from "./developer-routes.js";
+import type { CompanyImportRegistry } from "./company-import-forwarding.js";
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
@@ -25,6 +26,8 @@ export interface AdminActionDependencies {
   companies?: CompanyMembershipReader;
   /** DEC 254a: the install's invite codes and self-serve switch, through the sign-in Lambda; absent without the company layer. */
   companyInvites?: CompanyInviteRegistry;
+  /** DEC 254b (b): the operator's company import from the install's old layout, through the sign-in Lambda; with the company layer on or off. */
+  companyImport?: CompanyImportRegistry;
   now(): number;
 }
 export interface ResolvedDeveloper {

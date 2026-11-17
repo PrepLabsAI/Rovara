@@ -1,3 +1,4 @@
+import ts from "typescript";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -8,6 +9,9 @@ import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-c
 import { mergeWorld } from "../support/merge-world.js";
 import { summaryCheckKey, summaryCheckRecordOf } from "../../packages/broker/src/core/merge/summary-check.js";
 
+let cachedSources: ReturnType<typeof loadCompanySources> | undefined;
+const companySources = () => cachedSources ??= loadCompanySources(resolve("."));
+
 const source = (text: string, path = "packages/broker/src/aws/broker.ts") => ({ path, text });
 const markdown = (count = "1 record kinds: 0 company-scoped, 0 install-wide, 1 needs-company. 1 routes: 0 company-scoped, 0 install-wide, 1 needs-company.") => `${count}\n\n| kind | identity | class | table | checked | methods | reason |\n|---|---|---|---|---|---|---|\n| record | entity:TASK | needs-company | State table | no | - | T1 |\n| route | /v1/dev/tasks | needs-company | State table | no | GET | T2 |\n`;
 const basic = () => scanCompanySources([source('const item = { entityType: "TASK" }; const route = "/v1/dev/tasks";')]);
@@ -15,7 +19,7 @@ const basic = () => scanCompanySources([source('const item = { entityType: "TASK
 describe("company inventory", () => {
   it("classifies every source identity and recomputes the count", () => {
     const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
-    const inventory = scanCompanySources(loadCompanySources(resolve(".")), {}, forwardingCoverage(markdown));
+    const inventory = scanCompanySources(companySources(), {}, forwardingCoverage(markdown));
     validateCompanyInventory(inventory, markdown, COMPANY_CHECKED_ROUTES);
   });
   it("accepts the unchanged classified control", () => expect(() => validateCompanyInventory(basic(), markdown(), [])).not.toThrow());
@@ -207,4 +211,49 @@ it("classifies the M4a S3 compliance route as a company-scoped, full-access, rea
   const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
   expect(markdown).toContain("| route | /v1/dev/company/settings-compliance | company-scoped | State table | yes | GET |");
   expect(COMPANY_CHECKED_ROUTES).toContain("GET /v1/dev/company/settings-compliance");
+});
+
+it("pins S3 migration text and every catalog constructor caller, including all writers", () => {
+  const inventory = readFileSync("docs/architecture/company-inventory.md", "utf8");
+  for (const text of ["PROJECT_CATALOG_INDEX", "canonical company-bound cursor v2", "no shared fallback", "Unflagged companies retain v1", "project_catalog.index_drift", "Future move contract"]) expect(inventory).toContain(text);
+  // Counts pin every constructor call, not just files. Adding a writer (including to a current reader) requires review here.
+  const expected: Record<string, number[]> = {
+    "packages/broker/src/aws/broker.ts": [5, 0], // registration + repair dual-write corePlan in the legacy transaction; other calls read/check
+    "packages/broker/src/aws/core-project-backfill.ts": [0, 1], // fenced L4 planner, appended atomically by registration/repair
+    "packages/broker/src/aws/developer-tasks.ts": [1, 0], // legacy task ConditionCheck
+    "packages/broker/src/aws/project-catalog-backfill.ts": [0, 3], // operator reads + fenced mark/undo
+    "packages/broker/src/aws/project-settings.ts": [1, 2], // v1 read and v2 existence/start-key reads
+    "packages/broker/src/core-host/lessons.ts": [0, 1],
+    "packages/broker/src/core/e2e/local-authority.ts": [0, 1],
+    "packages/broker/src/core/setup-agent/apply.ts": [0, 2], // core-only approval: condition + fenced latestRevision update
+    "packages/broker/src/core/task-flow/project-source.ts": [0, 1],
+    "packages/broker/src/local/app/lessons-repos.ts": [0, 1],
+    "packages/broker/src/local/app/lessons.ts": [0, 1],
+    "packages/broker/src/local/app/projects.ts": [0, 2], // local-only company writer + read (no AWS legacy transaction)
+  };
+  const found: Record<string, number[]> = {};
+  for (const input of companySources().filter(s => s.path.startsWith("packages/broker/src/"))) {
+    const file = ts.createSourceFile(input.path, input.text, ts.ScriptTarget.Latest, true);
+    const aliases = new Map([["projectCatalogKey", 0], ["orgProjectCatalogKey", 1]]);
+    for (const statement of file.statements) if (ts.isImportDeclaration(statement) && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)) {
+      for (const imported of statement.importClause.namedBindings.elements) {
+        const kind = aliases.get(imported.propertyName?.text ?? imported.name.text);
+        if (kind !== undefined) aliases.set(imported.name.text, kind);
+      }
+    }
+    const counts = [0, 0];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node)) {
+        const name = ts.isIdentifier(node.expression) ? node.expression.text : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : undefined;
+        const kind = name === undefined ? undefined : aliases.get(name);
+        if (kind !== undefined) counts[kind] = counts[kind]! + 1;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file); if (counts.some(n => n > 0)) found[input.path] = counts;
+  }
+  expect(found).toEqual(expected);
+  const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
+  expect(broker.match(/\.\.\.corePlan\.writes/g)).toHaveLength(2); // registration and catalog repair
+  expect(readFileSync("packages/broker/src/core/setup-agent/apply.ts", "utf8")).toContain('condition: when.eq("latestRevision", row.baseRevision)');
 });

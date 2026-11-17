@@ -118,6 +118,7 @@ import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 import type { CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js";
+import type { CompanyImportRegistry } from "./company-import-forwarding.js";
 
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
@@ -169,6 +170,8 @@ export interface DeveloperApiConfiguration {
   companySelfCreate?: (request: CompanySelfCreateRequest) => Promise<CompanySelfCreateAnswer>;
   /** DEC 254a: the install's invite codes and self-serve switch, through the sign-in Lambda (companyInvitesThroughLambda), for an install administrator's changes and list. */
   companyInvites?: CompanyInviteRegistry;
+  /** DEC 254b (b): an install administrator's import of the install's old company layout, and its undo, through the sign-in Lambda (companyImportThroughLambda). With the company layer on or off. */
+  companyImport?: CompanyImportRegistry;
   /** Lane W part 4: T3b's member helper (companyMemberActionsThroughLambda), the only way the admin routes list, remove or change a member. Absent: those routes are unknown. */
   companyMembers?: CompanyMemberActions;
   /**

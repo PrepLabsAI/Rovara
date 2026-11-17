@@ -81,6 +81,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreEngine",
     // Migration plan v3.2 lane E2: retain every core setting the operator may tune across upgrades.
     "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons",
+    // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
+    "CoreModelGatewayHost", "CoreAgentModel",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
     "StepUpEmailSender"],
   slack: ["SlowTurnMinutes", "ModelFallback"],

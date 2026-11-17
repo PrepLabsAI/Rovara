@@ -619,7 +619,8 @@ describe("task-token key and membership IAM", () => {
     // ENV-ROOM (pr/broker-env-diet): re-pinned for the packed broker environment (the broker's Variables only; no IAM change).
     // Switch-over incident 2026-11-16: re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA, as staging holds it);
     // the remainder is otherwise identical (only the resource and DependsOn order move with the new ID).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("5d90ff9de5cab07ffbbf60b8460f259c0fb96f999892da79d536a60d12e9a89a");
+    // Core gateway settings (2026-11-17): re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker's Variables; no IAM change).
+    expect(createHash("sha256").update(text).digest("hex")).toBe("0e2ae750ca2c9deb83b4dc7be4a5ca828ac89269e02538dc053e4a2c6c70fe90");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {

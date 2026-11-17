@@ -69,7 +69,9 @@ describe("the broker entry module reads no packed name before it unpacks them", 
       const broker = functions.find((entry) => entry.logicalId.startsWith("Broker"))!;
       const environment: Record<string, string | undefined> = { ...saved };
       for (const name of names) delete environment[name];
-      Object.assign(environment, broker.variables, { AWS_REGION: RESOLVER_REGION, ROVARA_CORE_ENGINE: "off" });
+      Object.assign(environment, broker.variables, { AWS_REGION: RESOLVER_REGION });
+      // The switch is packed (sw, core switch-on blocker 2026-11-17): off, as before, so the entry module builds no core.
+      environment.AGENTX_SETTINGS = environment.AGENTX_SETTINGS!.replace(/(^|,)sw=[^,]*/u, "$1sw=off");
       const record = (key: string | symbol): void => {
         if (typeof key !== "string" || !names.has(key)) return;
         if (!hydration.started) readsBefore.push(key);

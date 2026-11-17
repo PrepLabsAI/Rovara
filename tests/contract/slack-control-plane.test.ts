@@ -27,9 +27,10 @@ const bob = "U0456789012";
 const carol = "U0789012345";
 
 
+// Loading the broker takes ~4 s on a Mac but went past the default 10 s hook budget on CI's 2-vCPU runners (batch 8, rovaracli 44011631599; DEFERRED-CHECKS 0517-REPIN-WEB-DIST-FOR-INFRA-TESTS).
 beforeAll(async () => {
   await loadSlackBroker();
-});
+}, 60_000);
 
 const admin = { subject: "admin-subject", admin: true };
 

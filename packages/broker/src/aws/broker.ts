@@ -322,6 +322,7 @@ import {
 import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
+import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -368,7 +369,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -384,6 +385,8 @@ import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from ".
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { companyInvitesThroughLambda, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
+import { companyImportThroughLambda } from "./company-import-forwarding.js";
+import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -641,6 +644,11 @@ interface AwsBrokerDependencies {
   linking?: DeveloperApiConfiguration;
   /** Sign in with ChatGPT (#338): each developer's ChatGPT connection; absent without its key. */
   chatgpt?: ChatGptConnections;
+  /**
+   * DEC 254g: what the model gateway offers one company's agents (core-host/offered-models-http.ts `adminOfferedModelsFromEnvironment`), for an administrator's
+   * `agentx config set coreEngine.agentModel`; absent without the gateway's origin.
+   */
+  coreOfferedModels?: (companyId: string) => Promise<OfferedAgentModels>;
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<ScopeDiscovery>;
   credentialRegistry?: CredentialRegistry;
@@ -805,6 +813,7 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
       ...(signIn?.signInClients === undefined ? {} : { signInClients: signIn.signInClients }),
       ...(signIn?.companies === undefined ? {} : { companies: signIn.companies }),
       ...(developer?.companyInvites === undefined ? {} : { companyInvites: developer.companyInvites }),
+      ...(developer?.companyImport === undefined ? {} : { companyImport: developer.companyImport }),
       now: Date.now,
     },
     handlers: adminChangeHandlers(dependencies),
@@ -1620,11 +1629,32 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (invites === undefined) throw agentXError("NOT_FOUND", "company sign-up is not set up in this deployment");
         return json(await invites.list(), request.requestId);
       }
+      // DEC 254b (b): the preview of an import of the install's old company layout into Code's company records (or of its undo). Reads only; ids, never emails.
+      if (request.method === "GET" && url.pathname === "/v1/admin/company-import") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const developer = dependencies.developer;
+        if (developer?.companyImport === undefined) throw agentXError("NOT_FOUND", "company import is not set up in this deployment");
+        const companyId = OrgIdSchema.safeParse(url.searchParams.get("companyId"));
+        const mode = url.searchParams.get("mode") ?? "import";
+        if (!companyId.success || (mode !== "import" && mode !== "undo")) throw agentXError("CONFIG_INVALID", "give the install's company id (org_ and 20 letters or digits), and the mode import or undo");
+        const reads = { documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName: developer.signInTableName };
+        return json((mode === "undo" ? await planCompanyImportUndo(reads, companyId.data) : await planCompanyImport(reads, companyId.data)).preview, request.requestId);
+      }
       // #343: Sign in with ChatGPT, for rovara doctor.
       if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
         if (!dependencies.chatgpt) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
         return json(await dependencies.chatgpt.health(), request.requestId);
+      }
+      // DEC 254g: the models the model gateway offers the administrator's company now, which agentx config set checks coreEngine.agentModel against (fail closed). Read only; fixed words on failure.
+      if (request.method === "GET" && url.pathname === CORE_OFFERED_MODELS_ADMIN_PATH) {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (dependencies.coreOfferedModels === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
+        const company = await resolveCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey);
+        if (company === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
+        let offered: OfferedAgentModels;
+        try { offered = await dependencies.coreOfferedModels(company); } catch { throw agentXError("RUNTIME_UNAVAILABLE", OFFERED_MODELS_READ_FAILED); }
+        return json(offered, request.requestId);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/turns") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
@@ -2178,7 +2208,7 @@ async function registerProject(
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
-    if (project.companyId === undefined && !duplicate) brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+
     return {
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
@@ -2275,9 +2305,11 @@ async function registerProject(
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
       corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
+      if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+
     // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
     if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
     try {
@@ -15291,6 +15323,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
       companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // DEC 254b (b): the operator's company import runs BEFORE COMPANY_SIGNIN is switched on, so it is wired with the company layer on or off.
+    companyImport: companyImportThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
     channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -15354,6 +15388,10 @@ const coreRoot = createBrokerCoreRoot({
 // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
 const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
 
+// DEC 254g: the gateway's offered models for an administrator's config set; set only where the gateway's origin is.
+const offeredModelsKms = new KMSClient(awsClientConfiguration);
+const coreOfferedModels = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, offeredModelsKms));
+
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;
 const chatgpt = chatGptKeyArn === undefined || chatGptKeyArn === "" ? undefined : chatGptConnections({
@@ -15369,6 +15407,7 @@ const sqs = new SQSClient(awsClientConfiguration);
 
 export const handler = createAwsBrokerHandler({
   core: coreRoot,
+  ...(coreOfferedModels === undefined ? {} : { coreOfferedModels }),
   ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
   documentClient,
   s3,

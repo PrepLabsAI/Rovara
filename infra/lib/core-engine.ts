@@ -2,7 +2,7 @@
 // construct; the switch is a stack parameter of its own and a plain broker variable (Code's broker does not pack its settings).
 //
 // What is here:
-//   - the `CoreEngine` stack parameter (default `off`), passed to the broker as ROVARA_CORE_ENGINE;
+//   - the `CoreEngine` stack parameter (default `off`), packed for the broker (AGENTX_SETTINGS `sw`, read as ROVARA_CORE_ENGINE) and given to the dispatcher whole;
 //   - the core dispatch queue and its dead-letter queue, with a redrive limit above the core's own retry budget (CORE_DISPATCH_MAX_RECEIVES). Fixed per-environment names, so the broker can build
 //     both URLs. The broker may send to, receive from, delete from and change the visibility of both (the core's `queue` point runs inside the broker; the queue adapter reads and re-sends dead letters itself),
 //     by the queues' own resource policies;
@@ -11,7 +11,9 @@
 //     `off`: switching the schedules on or off changes a state, never creates or deletes one. (Step 4's dispatcher policy under `CoreEngineIsOn` IS added on switch-on and removed on
 //     switch-off: a switch-on change set shows that one IAM policy Add, the dispatcher's environment Modify and the mapping's Enabled flag. Its grant may take a few seconds to apply
 //     after the mapping is enabled; a first core batch that meets AccessDenied on the deleter comes back and is retried.)
-//   - an alarm on the dead-letter queue.
+//   - an alarm on the dead-letter queue;
+//   - the `CoreModelGatewayHost` and `CoreAgentModel` parameters (default empty), packed for the broker and the dispatcher, which read them as ROVARA_CORE_MODEL_GATEWAY_URL
+//     (`https://<host>`) and ROVARA_CORE_AGENT_MODEL.
 //
 //   - (step 4, `connectDispatcher`) the dispatcher as the queue's consumer: an event source mapping of its own, ENABLED only while `CoreEngine` is not `off`, so a core message never reaches
 //     the spec 056 dispatch code; its reads of this queue; and, only while the switch is not off, the deleter start (the core ends an orphan machine) and the
@@ -21,6 +23,7 @@
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
+  CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
 } from "@agentx/contracts";
@@ -59,6 +62,8 @@ export class CoreEngine extends Construct {
   private readonly companyDayCap: CfnParameter;
   private readonly policyHook: CfnParameter;
   private readonly lessons: CfnParameter;
+  private readonly modelGatewayHost: CfnParameter;
+  private readonly agentModel: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
@@ -96,6 +101,15 @@ export class CoreEngine extends Construct {
     addPackedSetting(dispatcher, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     broker.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
     dispatcher.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
+    // Core switch-on blocker (2026-11-17): the model gateway's host and the agent model, for both functions (core-host/gateway-model-access.ts). Stack parameters, so an upgrade keeps them
+    // (OPERATOR_PARAMETERS); packed, because the broker's 4 KB has no room for two more variables (a host has no separator; the broker reads `https://<host>`). Both empty (the
+    // default): the core refuses the switch by name, as before.
+    this.modelGatewayHost = new CfnParameter(stack, "CoreModelGatewayHost", { type: "String", default: "", maxLength: CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, allowedPattern: CORE_MODEL_GATEWAY_HOST_PATTERN, description: "Core engine model gateway host, reached over https (no scheme, path or credentials); empty (the default) leaves the core refused" });
+    this.agentModel = new CfnParameter(stack, "CoreAgentModel", { type: "String", default: "", maxLength: CORE_AGENT_MODEL_MAX_LENGTH, allowedPattern: CORE_AGENT_MODEL_PATTERN, description: "Core engine agent model, any model the model gateway offers by its exact id, such as claude-sonnet-4-6 or zai.glm-5; empty (the default) leaves the core refused" });
+    for (const [key, value] of [["coreModelGateway", this.modelGatewayHost.valueAsString], ["coreAgentModel", this.agentModel.valueAsString]] as const) {
+      addBrokerSetting(broker, props.naming, key, value);
+      addPackedSetting(dispatcher, key, value);
+    }
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).
@@ -113,7 +127,8 @@ export class CoreEngine extends Construct {
       visibilityTimeout: CORE_DISPATCH_VISIBILITY_TIMEOUT,
       enforceSSL: true,
     });
-    broker.addEnvironment(CORE_ENGINE_VARIABLE, this.parameter.valueAsString);
+    // Packed (core switch-on blocker, 2026-11-17: room for the gateway settings); the dispatcher keeps its own variable (connectDispatcher).
+    addBrokerSetting(broker, props.naming, "coreEngine", this.parameter.valueAsString);
     // Exactly these two queues, granted on each queue's own resource policy, not on the broker's role: the broker role's inline policy is at IAM's size limit (one more statement there makes
     // CDK split it into a managed policy, which the deploy role may not create). Same account, so the queue policy alone grants it; the permissions boundary still bounds the role (it allows sqs).
     for (const queue of [this.queue, this.deadLetters]) {

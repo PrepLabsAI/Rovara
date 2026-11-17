@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import type { AdminChangeInput, EndDeveloperSessionsRequest, ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
 import type { CompanyInviteRegistry, SignInClientRegistry } from "../../packages/broker/src/aws/developer-routes.js";
+import type { CompanyImportRegistry } from "../../packages/broker/src/aws/company-import-forwarding.js";
 import { createAdminReadBroker } from "./admin-read-broker.js";
 import { SLACK_TEAM, issuer } from "./slack-broker.js";
 
@@ -45,6 +46,8 @@ export async function createAdminChangeBroker(options: {
   linkingOnly?: boolean;
   /** DEC 254a: the install's invite codes, through DeveloperIdentity. */
   companyInvites?: CompanyInviteRegistry;
+  /** DEC 254b (b): the company import, through DeveloperIdentity. */
+  companyImport?: CompanyImportRegistry;
 } = {}): Promise<AdminChangeHarness> {
   let now = Date.now();
   const clock = { now: () => now, advance: (ms: number) => { now += ms; } };
@@ -68,6 +71,7 @@ export async function createAdminChangeBroker(options: {
       channelByName: async ({ name }) => (channelLookup.down ? { ok: false, error: "slack_unavailable" } : name === "ledger-dev" ? { ok: true, channel: { channelId: "C0LEDGER01", name } } : { ok: true }),
       ...(options.signInClients === undefined ? {} : { signInClients: options.signInClients }),
       ...(options.companyInvites === undefined ? {} : { companyInvites: options.companyInvites }),
+      ...(options.companyImport === undefined ? {} : { companyImport: options.companyImport }),
     },
     brokerExtra: {
       ...(options.connectorTypes === undefined ? {} : { connectorTypes: options.connectorTypes }),
