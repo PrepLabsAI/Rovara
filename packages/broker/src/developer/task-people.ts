@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import { SlackThreadSchema, SlackUserIdSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
+import { SlackThreadSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { ProjectAccessSubject, TaskPersonIdentity } from "./task-person-identity.js";
 import type { TaskPeopleDisplayAdmission } from "./task-people-display-budget.js";
+import {
+  isSlackTaskPerson, parseTaskPeopleEntry, parseTaskPersonIdentity, taskPeopleEntryOf, taskPersonIdentitySuffix, taskPersonKindOf,
+  taskPersonNameFallback, taskPersonRowKeys, type TaskPeopleEntry,
+} from "./task-person-rows.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
 
 export type TaskRole = "owner" | "commenter" | "viewer";
@@ -14,7 +18,8 @@ export interface TaskPeople {
   schemaVersion: 1;
   revision: number;
   orphaned: boolean;
-  people: Array<{ developerId: string; slackUserId: string; name: string; role: StoredTaskRole }>;
+  /** C1: an entry is `slack` (the pre-C1 { developerId, slackUserId, name, role }) or `web` ({ developerId, name, role, method }). */
+  people: TaskPeopleEntry[];
 }
 
 export interface TaskPeopleConfiguration { peopleChangesEnabled: boolean }
@@ -59,7 +64,7 @@ export interface ChangeTaskPeopleInput {
 export interface TakeTaskOwnershipInput { requestId: string; expectedPeopleRevision: number }
 
 type TransactItem = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
-type PersonEntry = TaskPeople["people"][number];
+type PersonEntry = TaskPeopleEntry;
 type PersonRecord = TaskPersonIdentity & { pk: string; sk: string; schemaVersion: 1; personId: string; createdAt: string };
 type SubjectRecord = { pk: string; sk: string; schemaVersion: 1; personId: string; developerId: string; createdAt: string };
 
@@ -88,13 +93,7 @@ const enabled = (deps: TaskPeopleDependencies) => deps.taskPeopleConfiguration?.
 const open = (task: DeveloperTaskRecord) => task.closedAt === undefined && task.workflow?.stage !== "CLOSED" && task.workflow?.stage !== "MERGED";
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 
-function validEntry(value: unknown): value is PersonEntry {
-  if (!isRecord(value) || !exactKeys(value, ["developerId", "slackUserId", "name", "role"])) return false;
-  return typeof value.developerId === "string" && HEX64.test(value.developerId)
-    && SlackUserIdSchema.safeParse(value.slackUserId).success
-    && typeof value.name === "string" && safeName(value.name, String(value.slackUserId)) === value.name
-    && (value.role === "owner" || value.role === "commenter" || value.role === "viewer" || value.role === "denied");
-}
+const validEntry = (value: unknown): value is PersonEntry => parseTaskPeopleEntry(value) !== undefined;
 
 function parsePeople(value: unknown): TaskPeople | undefined {
   if (!isRecord(value) || !exactKeys(value, ["pk", "sk", "schemaVersion", "revision", "orphaned", "people"])
@@ -106,16 +105,7 @@ function parsePeople(value: unknown): TaskPeople | undefined {
   return { schemaVersion: 1, revision: Number(value.revision), orphaned: value.orphaned, people };
 }
 
-function parseIdentity(value: Record<string, unknown>): TaskPersonIdentity | undefined {
-  if (!HEX64.test(String(value.developerId)) || !SlackUserIdSchema.safeParse(value.slackUserId).success
-    || typeof value.name !== "string" || safeName(value.name, String(value.slackUserId)) !== value.name
-    || (value.method !== "slack" && value.method !== "oidc") || typeof value.issuer !== "string" || value.issuer.length === 0 || value.issuer.length > 2048
-    || typeof value.subject !== "string" || value.subject.length === 0 || value.subject.length > 512) return undefined;
-  return {
-    developerId: String(value.developerId), slackUserId: String(value.slackUserId), name: value.name,
-    method: value.method, issuer: value.issuer, subject: value.subject,
-  };
-}
+const parseIdentity = parseTaskPersonIdentity;
 
 function samePrincipal(left: TaskPersonIdentity, right: TaskPersonIdentity): boolean {
   return left.developerId === right.developerId && left.slackUserId === right.slackUserId && left.method === right.method
@@ -151,7 +141,7 @@ async function personByDeveloper(deps: TaskPeopleDependencies, taskId: string, d
     || reverse.developerId !== developerId || typeof reverse.personId !== "string" || !UUID.test(reverse.personId)
     || typeof reverse.createdAt !== "string" || !Number.isFinite(Date.parse(reverse.createdAt))) return denied();
   const person = await get(deps, personKey(taskId, reverse.personId));
-  if (person === undefined || !exactKeys(person, ["pk", "sk", "schemaVersion", "personId", "developerId", "slackUserId", "name", "method", "issuer", "subject", "createdAt"])
+  if (person === undefined || !exactKeys(person, taskPersonRowKeys(person))
     || person.pk !== taskPk(taskId) || person.sk !== personKey(taskId, reverse.personId).sk || person.schemaVersion !== 1
     || person.personId !== reverse.personId || person.createdAt !== reverse.createdAt) return denied();
   const identity = parseIdentity(person);
@@ -198,8 +188,9 @@ async function checkedFresh(deps: Pick<TaskPeopleDependencies, "checkTaskPerson"
   const result = await deps.checkTaskPerson(task, developerId, admission);
   admission?.assertOpen();
   const identity = result.identity;
+  // C1: only a `slack` identity passes a proof result today; a `web` one is refused here too until C2 adds its proof (D1).
   if (result.subject.developerId !== developerId || result.subject.slackUserId !== identity.slackUserId
-    || identity.developerId !== developerId || !SlackUserIdSchema.safeParse(identity.slackUserId).success
+    || identity.developerId !== developerId || !isSlackTaskPerson(identity)
     || typeof identity.name !== "string" || safeName(identity.name, identity.slackUserId) !== identity.name
     || typeof result.eligible !== "boolean" || typeof result.channelMember !== "boolean") return denied();
   admission?.noteNativeIdentity(identity.developerId, identity.slackUserId);
@@ -236,7 +227,7 @@ async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecor
   const personId = existing?.personId ?? randomUUID();
   const people: TaskPeople = {
     schemaVersion: 1, revision: 1, orphaned: false,
-    people: [{ developerId: proof.identity.developerId, slackUserId: proof.identity.slackUserId, name: safeName(proof.identity.name, proof.identity.slackUserId), role: "owner" }],
+    people: [taskPeopleEntryOf(proof.identity, "owner")],
   };
   const items: TransactItem[] = [
     { Put: { TableName: deps.tableName, Item: { ...peopleKey(task.taskId), ...people }, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -248,7 +239,7 @@ async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecor
     } },
   ];
   if (existing === undefined) {
-    const identity = { ...proof.identity, name: safeName(proof.identity.name, proof.identity.slackUserId) };
+    const identity = { ...proof.identity, name: safeName(proof.identity.name, taskPersonNameFallback(proof.identity)) };
     const person: PersonRecord = { ...personKey(task.taskId, personId), schemaVersion: 1, personId, ...identity, createdAt };
     const reverse: SubjectRecord = { ...subjectKey(task.taskId, identity.developerId), schemaVersion: 1, personId, developerId: identity.developerId, createdAt };
     items.push(
@@ -358,8 +349,16 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
     const explicit = people.people.find((person) => person.developerId === mapping.identity.developerId);
     candidates.set(mapping.identity.developerId, { ...mapping, ...(explicit === undefined ? {} : { explicit }) });
   }
+  // D4 (no account linking): two identities of one Slack user, or (once a `web` identity is on the task) of one name, are told apart by method.
   const sameSlack = new Map<string, number>();
-  for (const candidate of candidates.values()) sameSlack.set(candidate.identity.slackUserId, (sameSlack.get(candidate.identity.slackUserId) ?? 0) + 1);
+  const sameName = new Map<string, number>();
+  const anyWeb = [...candidates.values()].some((candidate) => taskPersonKindOf(candidate.identity) === "web");
+  for (const candidate of candidates.values()) {
+    const slackUserId = candidate.identity.slackUserId;
+    if (slackUserId !== undefined) sameSlack.set(slackUserId, (sameSlack.get(slackUserId) ?? 0) + 1);
+    const baseName = candidate.explicit?.name ?? candidate.identity.name;
+    if (anyWeb) sameName.set(baseName, (sameName.get(baseName) ?? 0) + 1);
+  }
   const rendered: TaskPeopleView["people"] = [];
   const displayByDeveloper = new Map(displayChecks.map((proof) => [proof.identity.developerId, proof]));
   for (const candidate of candidates.values()) {
@@ -369,12 +368,14 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
       ? effectiveRoleFromProof(candidate.explicit, display)
       : await effectiveRole(deps, task, people, candidate.identity.developerId, admission);
     if (candidate.explicit === undefined && effective !== "commenter") continue;
-    const suffix = (sameSlack.get(candidate.identity.slackUserId) ?? 0) > 1 ? (candidate.identity.method === "slack" ? " (Slack identity)" : " (OIDC identity)") : "";
     const baseName = candidate.explicit?.name ?? candidate.identity.name;
+    const slackUserId = candidate.identity.slackUserId;
+    const twin = (slackUserId !== undefined && (sameSlack.get(slackUserId) ?? 0) > 1) || (sameName.get(baseName) ?? 0) > 1;
+    const suffix = twin ? taskPersonIdentitySuffix(candidate.identity.method) : "";
     const labeledName = suffix === "" ? baseName : `${redactAndCap(baseName, 80 - suffix.length).text}${suffix}`;
     rendered.push({
       personId: candidate.personId,
-      name: safeName(labeledName, candidate.identity.slackUserId),
+      name: safeName(labeledName, taskPersonNameFallback(candidate.identity)),
       role, you: candidate.identity.developerId === caller.developerId, effectiveRole: effective,
     });
   }
@@ -679,12 +680,12 @@ export async function changeTaskPeople(
   if (existing?.role === "owner" && input.role !== "owner" && people.people.filter((person) => person.role === "owner").length === 1) {
     throw agentXError("CONFIG_INVALID", "a task must retain an effective owner");
   }
-  const entry: PersonEntry = { developerId: mapping.identity.developerId, slackUserId: mapping.identity.slackUserId, name: safeName(proof.identity.name, proof.identity.slackUserId), role: input.role };
+  const entry: PersonEntry = taskPeopleEntryOf({ ...mapping.identity, name: proof.identity.name }, input.role);
   const nextEntries = existing === undefined ? [...people.people, entry] : people.people.map((person) => person.developerId === input.targetDeveloperId ? entry : person);
   const next: TaskPeople = { schemaVersion: 1, revision: people.revision + 1, orphaned: !nextEntries.some((person) => person.role === "owner"), people: nextEntries };
   preflight([{ Put: { TableName: deps.tableName, Item: { ...peopleKey(taskId), ...next } } }]);
   return commitMutation(deps, task, caller, people, next, input.requestId, "change", payload, beforeRole, input.role, input.targetDeveloperId,
-    !proof.channelMember && input.role !== "denied" ? { slackUserId: proof.identity.slackUserId, role: input.role } : undefined);
+    !proof.channelMember && input.role !== "denied" && proof.identity.slackUserId !== undefined ? { slackUserId: proof.identity.slackUserId, role: input.role } : undefined);
 }
 
 export async function takeTaskOwnership(
@@ -710,7 +711,7 @@ export async function takeTaskOwnership(
   const existing = people.people.find((person) => person.developerId === caller.developerId);
   if (existing?.role === "denied") return denied();
   const beforeRole = existing?.role ?? "commenter";
-  const owner: PersonEntry = { developerId: mapping.identity.developerId, slackUserId: mapping.identity.slackUserId, name: safeName(proof.identity.name, proof.identity.slackUserId), role: "owner" };
+  const owner: PersonEntry = taskPeopleEntryOf({ ...mapping.identity, name: proof.identity.name }, "owner");
   const nextEntries = existing === undefined ? [...people.people, owner] : people.people.map((person) => person.developerId === caller.developerId ? owner : person);
   const next: TaskPeople = { schemaVersion: 1, revision: people.revision + 1, orphaned: false, people: nextEntries };
   return commitMutation(deps, task, caller, people, next, input.requestId, "takeOwnership", payload, beforeRole, "owner", caller.developerId);

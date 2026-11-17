@@ -130,6 +130,43 @@ function fixture(overrides: Partial<TaskPersonInviteHandlerPorts> = {}) {
   return { request, rows, receipts, authorityRows, actorAuthority, targetAuthority, ports, send, setNow(value: number) { clock = value; } };
 }
 
+describe("Task Person invite handler with identity kinds (web task channel C1)", () => {
+  const webId = "c".repeat(64);
+
+  it("accepts a PEOPLE list that holds a web entry beside the Slack owner", async () => {
+    const f = fixture();
+    const people = f.rows.get("PEOPLE")!;
+    f.rows.set("PEOPLE", { ...people, people: [...(people.people as unknown[]), { developerId: webId, name: "Gale GitHub", role: "commenter", method: "github" }] });
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result).toMatchObject({ status: "accepted" });
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["slack method without a Slack id", { developerId: webId, name: "Gale", role: "commenter", method: "slack" }],
+    ["an unknown method", { developerId: webId, name: "Gale", role: "commenter", method: "google" }],
+    ["both a Slack id and a method", { developerId: webId, slackUserId: "U0GALE0001", name: "Gale", role: "commenter", method: "github" }],
+    ["neither a Slack id nor a method", { developerId: webId, name: "Gale", role: "commenter" }],
+    ["an invalid Slack id", { developerId: webId, slackUserId: "not-slack", name: "Gale", role: "commenter" }],
+  ])("refuses a PEOPLE list with %s before any Slack call", async (_label, entry) => {
+    const f = fixture();
+    const people = f.rows.get("PEOPLE")!;
+    f.rows.set("PEOPLE", { ...people, people: [...(people.people as unknown[]), entry] });
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result).toMatchObject({ status: "failed", reason: "claim_refused" });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("never sends a Slack invite for a web owner", async () => {
+    const f = fixture();
+    const people = f.rows.get("PEOPLE")!;
+    f.rows.set("PEOPLE", { ...people, people: [{ developerId: actorId, name: "Owner", role: "owner", method: "github" }] });
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result).toMatchObject({ status: "failed", reason: "authorization_refused" });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+});
+
 describe("Task Person invite handler", () => {
   it("validates the persisted claim and records one receipt before one bounded invite", async () => {
     const f = fixture();
