@@ -416,7 +416,8 @@ export class SessionManager {
     const pick = this.dependencies.pickMachine === undefined ? undefined : await this.dependencies.pickMachine(session.workspaceId).catch((): MachinePick => ({}));
     // A choice the install cannot run is recorded on the generation now, so the task is told; a launch-time fallback is recorded by the provisioner.
     if (pick?.fallback !== undefined) {
-      await this.conditional(this.update(session.workspaceId, { set: { machineFallback: pick.fallback }, when: { state: "PROVISIONING", generation: session.generation } }));
+      // Only the note depends on it: a write that fails never stops the worker from starting (review B1 L1).
+      await this.conditional(this.update(session.workspaceId, { set: { machineFallback: pick.fallback }, when: { state: "PROVISIONING", generation: session.generation } })).catch(() => false);
     }
     const input: ProvisioningInput = {
       workspaceId: session.workspaceId,

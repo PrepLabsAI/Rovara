@@ -648,7 +648,8 @@ const deliverEc2 = createEc2Delivery({
       onceKey: `session-wait#${record.id}`,
       event: { type: "progress", timestamp: new Date().toISOString(), payload: { message } },
     });
-  },  async machineNote(record, message) {
+  },
+  async machineNote(record, message) {
     await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
       workspaceId: record.workspaceId,
       operationId: record.operationId,

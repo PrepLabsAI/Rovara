@@ -20,7 +20,7 @@ function world(env: NodeJS.ProcessEnv = ON) {
     return id;
   };
   const choose = (companyId: string, project: string, rowId: unknown, extra: Record<string, unknown> = {}) => {
-    db.set({ ...testEnvMachineChoiceKey(companyId as never, project), entityType: "TEST_ENV_MACHINE_CHOICE", orgId: companyId, project, rowId, chosenAt: "2026-11-17T00:00:00.000Z", ...extra });
+    db.set({ ...testEnvMachineChoiceKey(companyId, project), entityType: "TEST_ENV_MACHINE_CHOICE", orgId: companyId, project, rowId, chosenAt: "2026-11-17T00:00:00.000Z", ...extra });
   };
   const pick = machineSizePicker({ documentClient: db, tableName: "state", env, now: () => Date.parse("2026-11-17T12:00:00.000Z"), log });
   return { db, log, workspace, choose, pick };
@@ -31,7 +31,7 @@ describe("machine size pick: the switch", () => {
     [{}, false], [{ ROVARA_MACHINE_SIZE_RUN: "1" }, false], [{ ROVARA_MACHINE_SIZE: "1" }, false], [{ ...ON, ROVARA_MACHINE_SIZE_RUN: "true" }, false],
     [{ ...ON, ROVARA_MACHINE_SIZE_RUN: " 1" }, false], [{ ...ON, ROVARA_TEST_ENVIRONMENT: "0" }, false], [ON, true],
   ])("is on only with exactly \"1\" and the choice switch on: %j -> %s", (env, on) => {
-    expect(machineSizeRunEnabled(env as NodeJS.ProcessEnv)).toBe(on);
+    expect(machineSizeRunEnabled(env)).toBe(on);
   });
 
   it("gives no picker while off, so nothing is read and the launch is today's", () => {
