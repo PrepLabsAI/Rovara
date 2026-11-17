@@ -298,10 +298,15 @@ export function renderProof(context: PageContext, view: ProofReportView): string
     + ((evidence.videos ?? []).length === 0 ? "" : `<h3>Video of a failed page</h3><p class="muted">A video is the page as it loaded and is not masked the way the pictures are: Rovara records one only when this project says its app shows test data only. It is kept for a short time.</p><ul>`
       + (evidence.videos ?? []).map((video) => `<li><code>${esc(video.route)}</code> <a href="${esc(context.base)}/proof/${esc(view.taskId)}/evidence-video/${esc(video.sha256)}" download>Download the video</a></li>`).join("") + "</ul>")
     + (evidence.notes.length === 0 ? "" : `<ul>${evidence.notes.map((note) => `<li>${esc(note)}</li>`).join("")}</ul>`) + "</section>";
+  // TE-A6 (DEC 254zzf): the failing tests of a failed check and the change that most likely broke each, or unknown. Plain text only; nothing here is a link.
+  const failing = view.failures === undefined ? "" : `<section class="panel" id="failing-tests"><h2>Failing tests</h2><p class="muted">Rovara names a change only when the failure itself points at it; otherwise it says unknown.</p>`
+    + view.failures.checks.map((check) => `<h3>${untrusted(check.check)}</h3><ul>${check.tests.map((test) => `<li><code>${untrusted(test.test)}</code>: ${untrusted(test.cause)}</li>`).join("")}</ul>`).join("")
+    + (view.failures.more > 0 ? `<p class="muted">and ${esc(view.failures.more)} more failing ${view.failures.more === 1 ? "test" : "tests"} with a cause not listed</p>` : "") + "</section>";
   return layout({
     title: `Proof: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">Proof report · revision ${esc(view.revision)}${view.cost === undefined ? "" : ` · ${untrusted(view.cost)}`}</p><p>${untrusted(view.summary)}</p>${prs}`
       + `${rows.length === 0 ? "<p class=\"muted\">No claims to prove yet.</p>" : `<table><thead><tr><th>Claim</th><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>${rows.join("")}</tbody></table>`}`
+      + failing
       + browser
       + `<p><a href="${esc(context.base)}/plan/${esc(view.taskId)}">Back to the plan</a></p>`,
   });

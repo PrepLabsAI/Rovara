@@ -188,6 +188,15 @@ export interface ProofRowView {
   detail?: string;
 }
 
+/** One failing test line: its id and the words for its cause, both already plain text. */
+export interface ProofFailureView { test: string; cause: string }
+export interface ProofFailuresView {
+  /** The failed checks that have causes, in the pack's order, each with its failing tests (ten tests across all checks). */
+  checks: Array<{ check: string; tests: ProofFailureView[] }>;
+  /** Failing tests with a cause that are not listed, over all checks. */
+  more: number;
+}
+
 export interface ProofReportView {
   taskId: string;
   title: string;
@@ -196,6 +205,11 @@ export interface ProofReportView {
   rows: ProofRowView[];
   /** TE-H1: the before and after screenshots of the changed pages (visual evidence only), each picture served by `readEvidenceImage` behind the page session. Absent: none were taken for this code. */
   browserEvidence?: BrowserEvidencePanel;
+  /**
+   * TE-A6 (DEC 254zzf): the failing tests of the failed checks, each with the change that most likely broke it or "unknown" (the evidence pack's `failureCauses`, made plain text by the broker). At most ten tests in all, the rest counted
+   * in `more`. Absent when no failed check carries causes: the report and the page are then exactly what they were.
+   */
+  failures?: ProofFailuresView;
   /** One line: what the task cost, when the metering seam knows. */
   cost?: string;
   pullRequests: Array<{ url: string; number: number; state: string }>;
