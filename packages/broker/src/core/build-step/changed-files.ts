@@ -24,7 +24,7 @@ import { taskKey } from "../task-flow/keys.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { iso, log } from "../task-flow/support.js";
 import { approvedCodingPlan } from "./plan-input.js";
-import { flagUnplannedMocks, mockPrLines, type MockSourceFacts } from "../setup-agent/plan-setup.js";
+import { flagUnplannedMocks, mockFactsOf, mockPrLines } from "../setup-agent/plan-setup.js";
 import { pullRequestRecordKey, pullRequestRecordOf } from "./records.js";
 
 export const WORKSPACE_DIFF_ARTIFACT = "workspace.diff";
@@ -143,8 +143,7 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   }
   // L4-SC (DEC 254z c): the coding agent never writes its own mock. A mock source the approved plan did not name is marked here, from the plan the broker read back by digest and the project's fakes, so the risk below is high.
   const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
-  const mockFacts: MockSourceFacts = { setting: project?.definition.generalFakes, changes: plan?.setupChanges, repositoryPaths: Object.fromEntries((project?.definition.repositories ?? []).map((entry) => [entry.name, entry.path])) };
-  const read: ChangedFilesRead = { files: flagUnplannedMocks(all, mockFacts), complete };
+  const read: ChangedFilesRead = { files: flagUnplannedMocks(all, mockFactsOf(project?.definition, plan?.setupChanges)), complete };
   const judged = riskFromFiles(workflow, read);
   // The tier of the code the host shows, bound to the head commits Rovara checked and the base they were built on. It only goes up, and the growth after the build is recorded.
   const at = iso(deps);

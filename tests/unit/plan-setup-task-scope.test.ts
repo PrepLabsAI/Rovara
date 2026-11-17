@@ -3,13 +3,14 @@
 //   - the plan's items count only with a person's APPROVE recorded for that plan's digest (`approvedCodingPlan`);
 //   - `flagUnplannedMocks` marks a mock source (OpenAPI description) the approved plan did not name, only where mocks are in play; the risk rule makes it high; the pull request carries one line per task-only mock.
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   GENERAL_FAKES_MAX_SERVICES, canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, generalFakesPayloadOf, setupMockPrLine,
   type GeneralFakesSetting, type PlanSetupChangeItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { approvedCodingPlan } from "../../packages/broker/src/core/build-step/plan-input.js";
-import { fakesFor, flagUnplannedMocks, isUnplannedMock, mockPrLines, mocksInPlay, plannedMocksOf, type MockSourceFacts } from "../../packages/broker/src/core/setup-agent/plan-setup.js";
+import { fakesFor, flagUnplannedMocks, isUnplannedMock, mockFactsOf, mockPrLines, mocksInPlay, plannedMocksOf, type MockSourceFacts } from "../../packages/broker/src/core/setup-agent/plan-setup.js";
 import { assessRisk, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
 import { rovaraStatusLines, setupChangeSection } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { planDocument } from "../support/plan-documents.js";
@@ -93,7 +94,7 @@ describe("the coding agent never writes its own mock", () => {
   });
 
   it("marks an OpenAPI or Swagger description the agent adds, changes or removes when the project's fakes are on", () => {
-    for (const path of ["openapi.yaml", "api/openapi.json", "docs/swagger.yml", "payments.openapi.yaml", "Swagger.JSON"]) expect(isUnplannedMock(file(path), facts()), path).toBe(true);
+    for (const path of ["openapi.yaml", "api/openapi.json", "docs/swagger.yml", "payments.openapi.yaml", "Swagger.JSON", ".openapi.yaml", "api/.openapi.json"]) expect(isUnplannedMock(file(path), facts()), path).toBe(true);
     for (const path of ["openapi.yaml.txt", "docs/openapi-notes.md", "openapi-payments.yaml", "src/openapi_client.ts", "swaggerish.yaml.bak", "src/refund.ts"]) expect(isUnplannedMock(file(path), facts()), path).toBe(false);
     const [flagged] = flagUnplannedMocks([file("api/openapi.yaml")], facts());
     expect(flagged).toEqual({ repository: "demo", path: "api/openapi.yaml", mockUnplanned: true });
@@ -125,6 +126,16 @@ describe("the coding agent never writes its own mock", () => {
     expect(isUnplannedMock(file("api/new.openapi.yaml", { renamedFrom: "api/openapi.yaml" }), planned)).toBe(true);
     expect(isUnplannedMock(file("docs/readme.md", { renamedFrom: "api/openapi.yaml" }), planned)).toBe(false);
     expect(isUnplannedMock(file("api/openapi.yaml", { renamedFrom: "docs/readme.md" }), planned)).toBe(false);
+  });
+
+  it("reads its facts from the task's project revision and the approved plan, and the verified-changes step uses them", () => {
+    const definition = { generalFakes: setting(), repositories: [{ name: "demo", path: "repo/demo" }, { name: "__proto__", path: "repo/proto" }] };
+    expect(mockFactsOf(definition, [mock()])).toEqual({ setting: setting(), changes: [mock()], repositoryPaths: { demo: "repo/demo", ["__proto__"]: "repo/proto" } });
+    expect(mockFactsOf(undefined, undefined)).toEqual({ setting: undefined, changes: undefined, repositoryPaths: {} });
+    // The wiring: the step that reads the host's file list marks mock sources from these facts before the risk is judged (a pin, because that step needs a whole task to run).
+    const source = readFileSync("packages/broker/src/core/build-step/changed-files.ts", "utf8");
+    expect(source).toContain("flagUnplannedMocks(all, mockFactsOf(project?.definition, plan?.setupChanges))");
+    expect(source.indexOf("flagUnplannedMocks(")).toBeLessThan(source.indexOf("riskFromFiles(workflow, read)"));
   });
 
   it("raises the risk to high with a fixed sentence, in an ordinary change and in a fix, and a file the plan named does not", () => {

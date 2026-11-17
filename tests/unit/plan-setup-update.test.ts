@@ -277,6 +277,12 @@ describe("Update setup on the hosted routes", () => {
     expect(candidate["candidate"]).toBe(true);
     expect((candidate["definition"] as { generalFakes?: unknown }).generalFakes).toEqual({ enabled: true, services: [{ variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] });
     expect(await world.store.get(setupUpdateKey(FAKE_COMPANY, "payments", TASK))).toMatchObject({ state: "offered" });
+    // the approver is shown the fakes the candidate sets, and the digest they approve is bound to them (not the commands alone)
+    const stored = (await applyRow(world, FAKE_COMPANY))!;
+    const defn = (candidate["definition"] as { setup: never[]; readiness: never[] });
+    expect(stored["digest"]).not.toBe(setupApplyDigest(defn.setup, defn.readiness));
+    expect(stored["digest"]).toBe(setupApplyDigest(defn.setup, defn.readiness, { generalFakes: { enabled: true, services: [{ variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] } }));
+    expect((await call(get(RUN), maintainer)).body["apply"]).toMatchObject({ fakes: { enabled: true, services: [{ variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] } });
     // the card and the offers: one waiting proposal at a time, and no second offer on top of it
     const view = await call(get(RUN), maintainer);
     expect(view.body["apply"]).toMatchObject({ candidateRevision: 2, risk: "medium", approver: "maintainer", changes: [{ area: "test_commands", risk: "low" }, { area: "test_mocks", risk: "medium" }] });

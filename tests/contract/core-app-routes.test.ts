@@ -67,6 +67,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
     // L4-D: confirm, discard and decide a setup candidate.
     ["POST", "/v1/app/projects/payments/setup-agent/confirm", "full"], ["POST", "/v1/app/projects/payments/setup-agent/discard", "full"], ["POST", "/v1/app/projects/payments/setup-agent/decide", "full"],
+    // L4-SC: the Update setup offers, making a candidate from one, and "Not now".
+    ["GET", "/v1/app/projects/payments/setup-agent/updates", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/prepare", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/dismiss", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);

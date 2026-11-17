@@ -114,7 +114,7 @@ export function commandsFromProposal(
 }
 
 /** What the owner approves: the commands, as a digest. The candidate check ran exactly these, and the approval names this digest. */
-export const setupApplyDigest = (setup: readonly ProjectCommand[], readiness: readonly ProjectCommand[]): string => createHash("sha256").update(canonicalJson({ setup, readiness })).digest("hex");
+export const setupApplyDigest = (setup: readonly ProjectCommand[], readiness: readonly ProjectCommand[], extra: Record<string, unknown> = {}): string => createHash("sha256").update(canonicalJson({ setup, readiness, ...extra })).digest("hex");
 
 export interface SetupApplyDeps extends SetupAgentDeps { flow: TaskFlowDeps }
 
@@ -167,6 +167,8 @@ export interface StoreCandidateInput {
   replyExtra: Record<string, unknown>;
   /** Items written in the same transaction (a setup update offer marked prepared, say). */
   alsoTransact: readonly TransactItem[];
+  /** More of the candidate the approval must be bound to (L4-SC: the fakes a plan's mock adds), folded into the digest the approver sees and approves. Absent: the digest is of the commands only, as before. */
+  digestExtra?: Record<string, unknown>;
 }
 
 /**
@@ -180,7 +182,7 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
   const candidateRevision = candidate.revision;
   // The approver reads every command whole: one too long to show is refused, never cut.
   if ([...candidate.setup, ...candidate.readiness].some((command) => formatCommandLine(command).length > SETUP_COMMAND_SHOWN_MAX)) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.tooLong);
-  const digest = setupApplyDigest(candidate.setup, candidate.readiness);
+  const digest = setupApplyDigest(candidate.setup, candidate.readiness, input.digestExtra);
   const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId, candidate: true });
   const reply = { digest, ...input.replyExtra, candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
@@ -200,7 +202,7 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
 }
 
 /** What the page shows of the waiting proposal: the commands, and where the check on them stands. */
-export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[] }) | undefined> {
+export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[]; fakes?: unknown }) | undefined> {
   const raw = await deps.store.get(setupApplyKey(deps.companyId, project));
   if (raw === undefined || raw["entityType"] !== "SETUP_APPLY") return undefined;
   const row = raw as unknown as SetupApplyRow;
@@ -210,7 +212,7 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
   const checkState = await setupStateOfCheck(deps.flow, row.check, definition.data);
   // Each command as the person would type it (quoted where it needs it) and whole: the approver must see all of what will run.
   const text = (commands: readonly ProjectCommand[]): string[] => commands.map((command) => formatCommandLine(command));
-  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness) };
+  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), fakes: definition.data.generalFakes };
 }
 
 /** The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. */

@@ -171,3 +171,19 @@ describe("the plan's risk goes up one level (DEC 254z c)", () => {
     expect(cardOfItem({ ...item, setupChange: undefined })!.card.evidence.map((chip) => chip.label)).not.toContain("Setup");
   });
 });
+
+describe("a plan with a setup change is never skipped as small", () => {
+  it("keeps the plan approval for a plan the lighter flow would skip, and only because of the setup change", async () => {
+    const { smallPlanRoute } = await import("../../packages/broker/src/core/task-flow/stage-selection.js");
+    const { WorkflowSnapshotSchema, createWorkflowSnapshot } = await import("@agentx/contracts");
+    const submitted = WorkflowSnapshotSchema.parse({
+      ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }),
+      stage: "PLAN_REVIEW", state: "WAITING", path: "QUICK",
+    });
+    const input = (plan: PlanDocument) => ({ submitted, plan, requestText: "Fix the typo in docs/guide/intro.md", noChangeNeeded: false, at: "2026-11-13T12:00:00.000Z", planText: "Fix docs/guide/intro.md", costHighUsd: 1 });
+    const small = planDocument({ claims: [{ id: "1", text: "Fix the typo in docs/guide/intro.md." }] });
+    const plain = smallPlanRoute(input(small));
+    expect(plain?.skipped.length ?? 0).toBeGreaterThan(0);
+    expect(smallPlanRoute(input({ ...small, setupChanges: [command()] }))).toBeUndefined();
+  });
+});

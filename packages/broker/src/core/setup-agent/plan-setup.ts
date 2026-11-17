@@ -33,7 +33,7 @@ export function fakesFor(project: unknown, changes: PlanSetupChanges | undefined
 }
 
 /** An OpenAPI or Swagger description by its file name, the same names the worker's discovery picks up (`worker/src/general-fakes-round.ts`): what a Rovara-made fake is built from when the setting names no file. */
-const SPEC_NAME = /(?:^|\/)(?:(?:openapi|swagger)\.(?:ya?ml|json)|[^/]+\.openapi\.(?:ya?ml|json))$/iu;
+const SPEC_NAME = /(?:^|\/)(?:(?:openapi|swagger)\.(?:ya?ml|json)|[^/]*\.openapi\.(?:ya?ml|json))$/iu;
 const normal = (path: string): string => path.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
 
 export interface MockSourceFacts {
@@ -43,6 +43,11 @@ export interface MockSourceFacts {
   changes: PlanSetupChanges | undefined;
   /** Each repository's folder in the workspace, by name: a spec is named relative to the workspace, a changed file relative to its repository. */
   repositoryPaths?: Readonly<Record<string, string>> | undefined;
+}
+
+/** The facts the guard reads, from the task's project revision (its fakes setting and its repositories' folders) and the approved plan's setup changes. */
+export function mockFactsOf(definition: { generalFakes?: GeneralFakesSetting | undefined; repositories: ReadonlyArray<{ name: string; path: string }> } | undefined, changes: PlanSetupChanges | undefined): MockSourceFacts {
+  return { setting: definition?.generalFakes, changes, repositoryPaths: Object.fromEntries((definition?.repositories ?? []).map((entry) => [entry.name, entry.path])) };
 }
 
 /** Whether mocks are in play for this task: the project's fakes are on, or the approved plan approved a mock. Otherwise nothing is flagged. */

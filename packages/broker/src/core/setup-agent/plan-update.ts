@@ -10,7 +10,7 @@
 //   - nothing is approved: this file writes no decision and moves no project to a revision (the catalog row is only CHECKED, as for every candidate); a mock in a plan was approved for ONE task, and an update of the
 //     project's setup is a different act, by a person, on a different card;
 //   - nothing starts by itself: the offer waits for a maintainer's press (the unattended start is a separate decision: Question 1 of the PR);
-//   - nothing is taken from the offer's words at press time: the items are re-read and re-validated, and their digest must still be the one recorded;
+//   - nothing is taken from the offer's words at press time: the items are re-read and re-validated, and their digest must still be the one recorded in the row (a row rewritten with its digest is a store-write attack, outside this check);
 //   - no model, no network.
 // The offer holds only what the approved plan held (names, spec file names, commands) and the pull requests' own addresses; never a secret value (a variable is a name, and not carried).
 import {
@@ -44,7 +44,6 @@ export interface SetupUpdateOffer {
   planDigest: string; itemsDigest: string; items: PlanSetupChangeItem[];
   pullRequests: Array<{ repository: string; number: number; url: string }>;
   state: SetupUpdateState; offeredAt: string; decidedAt?: string; decidedBy?: string;
-  [INDEX_EXPIRY_ATTRIBUTE]?: number;
 }
 
 export const setupUpdateKey = (orgId: OrgId, project: string, taskId: string): DocumentKey => ({ pk: setupPartition(orgId, project), sk: `UPDATE#${taskId}` });
@@ -69,9 +68,10 @@ export async function setupUpdateOfferItems(
   const offer: SetupUpdateOffer = {
     entityType: "SETUP_UPDATE_OFFER", orgId: task.orgId, project: task.project, taskId: task.taskId, planDigest: plan.sha256, itemsDigest: setupChangesDigest(items), items: [...items],
     pullRequests: merged.map((pullRequest) => ({ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url })),
-    state: "offered", offeredAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + SETUP_UPDATE_KEEP_SECONDS,
+    state: "offered", offeredAt: now,
   };
-  return [{ kind: "put", item: { ...setupUpdateKey(task.orgId, task.project, task.taskId), ...(JSON.parse(JSON.stringify(offer)) as Record<string, never>) } }];
+  const expires = Object.fromEntries([[INDEX_EXPIRY_ATTRIBUTE, Math.floor(Date.parse(now) / 1000) + SETUP_UPDATE_KEEP_SECONDS]]);
+  return [{ kind: "put", item: { ...setupUpdateKey(task.orgId, task.project, task.taskId), ...(JSON.parse(JSON.stringify(offer)) as Record<string, never>), ...expires } }];
 }
 
 /** An offer row read back: only a row of this company and project with a state this code knows and items that still check. Anything else is not an offer. */
@@ -178,6 +178,7 @@ export async function prepareSetupUpdate(deps: SetupApplyDeps, project: string, 
   if (!parsed.success) throw agentXError("CONFIG_INVALID", SETUP_UPDATE_WORDS.nothing);
   return storeSetupCandidate(deps, {
     project, by, requestId: act.requestId, taskId: act.taskId, baseRevision: latest.definition.revision, candidate: parsed.data,
+    digestExtra: parsed.data.generalFakes === undefined ? {} : { generalFakes: parsed.data.generalFakes },
     replyExtra: { used: built.used, left: built.left, fromPlan: { taskId: act.taskId, changes: offer.items.length } },
     // The offer is only CHECKED: its row is not changed by making a candidate (see the file comment).
     alsoTransact: [{ kind: "check", key: setupUpdateKey(orgId, project, act.taskId), condition: when.eq("state", "offered") }],

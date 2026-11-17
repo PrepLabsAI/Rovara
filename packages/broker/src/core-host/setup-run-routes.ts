@@ -168,6 +168,8 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
   const ready = apply.checkState.status === "ready";
   return {
     candidateRevision: apply.candidateRevision, baseRevision: apply.baseRevision, setup: apply.setup, readiness: apply.readiness,
+    // L4-SC: the fakes the candidate sets (the approver sees which variable is redirected and from which spec), bound into the digest the approval names.
+    ...(apply.fakes === undefined ? {} : { fakes: apply.fakes }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
     canApprove: ready && setupApproverAllows(who, risk, "approve"), canReject: ready && setupApproverAllows(who, risk, "reject"),
