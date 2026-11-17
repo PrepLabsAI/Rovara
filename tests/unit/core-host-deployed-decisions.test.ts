@@ -600,6 +600,22 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     }
   });
 
+  it("the workflow subject refuses a decision whose live owner rule throws, whatever the host", async () => {
+    const t = await peopleWorld();
+    const { createWorkflowDocumentSubject } = await import("../../packages/broker/src/core/decisions/workflow-subject.js");
+    const workflow = await t.stored(t.taskId);
+    const decide = async (ownerActing: NonNullable<Parameters<typeof createWorkflowDocumentSubject>[0]["ownerActing"]>) => {
+      const subject = createWorkflowDocumentSubject({ store: t.world.store, ownerActing });
+      const loaded = (await subject.load(ORG, t.taskId))!;
+      return await subject.apply(loaded, { requestId: randomUUID(), outcome: "approve", seen: { revision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256 } } as never, [principalOf(PB)], new Date(t.world.clock.now).toISOString());
+    };
+    await expect(decide(async () => { throw new Error("people down zzq"); })).rejects.toMatchObject({ code: "not_the_approver" });
+    await expect(decide(async () => undefined)).rejects.toMatchObject({ code: "not_the_approver" });
+    // The same rule answering yes decides, as the co-owner, under the authority it names.
+    const decided = await decide(async (_approver, task) => ({ actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PA, t.taskId), taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 3 } }] }));
+    expect(decided.extra).toEqual([expect.objectContaining({ kind: "check" })]);
+  });
+
   it("fences the decision on the People revision it was proved at: a list that changed in between refuses it, nothing decided", async () => {
     const t = await peopleWorld();
     const access = t.runtime.flow.deps.access;
@@ -739,6 +755,11 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     await expect(loadReadableTask(plain as never, { principal: principalOf(PB) }, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     await expect(loadReadableTask(t.runtime.flow.deps, { principal: principalOf(PA) }, foreign)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     await expect(loadReadableTask(t.runtime.flow.deps, { principal: principalOf(PX, OTHER) }, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    // The company checks hold even under a host that says yes to every read: another company's person, or another company's task, reads as missing.
+    const yes = { ...t.runtime.flow.deps, access: { ...t.runtime.flow.deps.access, canRead: async () => true, canAct: async () => true } };
+    expect((await loadReadableTask(yes as never, { principal: principalOf(PA) }, taskId)).taskId).toBe(taskId);
+    await expect(loadReadableTask(yes as never, { principal: principalOf(PA, OTHER) }, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    await expect(loadReadableTask(yes as never, { principal: principalOf(PA) }, foreign)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 });
 
