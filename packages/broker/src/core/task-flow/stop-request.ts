@@ -12,7 +12,7 @@
 // transaction BEFORE the stop runs, so a
 // repeat (or a race of two) stops nothing more and answers the task as it is now; the same id used for another action on the task is refused.
 import { DeveloperTaskActionRequestSchema, agentXError, when, type OrgRole, type TransactItem } from "@agentx/contracts";
-import { recordAudit, stageAudit } from "./admission.js";
+import { stageAudit } from "./admission.js";
 import { taskNotFound } from "./access.js";
 import { cancelTask } from "./cancel.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
@@ -20,14 +20,12 @@ import { parseBody } from "./owner-round.js";
 import { readTask } from "./reads.js";
 import type { TaskRecord } from "./records.js";
 import { readWorkspace } from "./stage-machine.js";
-import { hashJson, newId } from "./support.js";
-import { locateWorkspace, workspaceKeys } from "./workspace-location.js";
+import { hashJson } from "./support.js";
+import { workspaceKeys } from "./workspace-location.js";
 
 export const STOP_NOT_YOURS = "Only the task's owner or a company admin can stop this task.";
 /** The legacy cancel's own words for a closed task (aws/developer-tasks.ts CLOSED_TASK), so the route answers as it always has. */
 export const LEGACY_CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
-/** The admin cancel's answer for a workspace that is not this company's core task's: the legacy route's own words for a missing workspace. */
-export const WORKSPACE_NOT_FOUND = "workspace not found";
 export const STOP_REQUEST_REUSED = "this request_id was already used for another action on this task; use a new request_id";
 /** The legacy cancel's own hash of its payload, so the same request id names the same action on either engine. */
 const CANCEL_PAYLOAD_HASH = hashJson({ action: "cancel" });
@@ -113,23 +111,4 @@ export async function stopTaskOnRequest(deps: TaskFlowDeps, caller: StopCaller, 
   // A stop that throws after its claim keeps its id (the claim and its audit line are one record): the same request then finishes it (`answerRepeat`), and so does a new request id.
   const answer = await cancelTask(deps, task.taskId);
   return { task: await now(), repeated: false, nothingRunning: answer.nothingRunning, authority };
-}
-
-/**
- * S2: the install administrator's cancel of a workspace (`POST /v1/admin/workspaces/{id}/cancel`) when the workspace is a core task's. The host has checked the administrator claim; `authorize`
- * is the route's own project check (an administrator grant on the task's project), asked with the project read HERE from the task this company's runtime holds, never a caller's word.
- * A workspace that is not this company's core task's answers like a missing workspace (fixed words). The stop is the core's own `cancelTask`; an audit line names the administrator.
- */
-export async function stopWorkspaceAsAdministrator(deps: TaskFlowDeps, workspaceId: string, administrator: { id: string }, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }> {
-  const location = await locateWorkspace(deps, workspaceId);
-  const pointer = location === undefined ? undefined : await deps.store.get(location.taskPointerKey());
-  const taskId = pointer?.["taskId"];
-  const task = typeof taskId === "string" ? await readTask(deps, taskId) : undefined;
-  // The task must be this company's and must hold this workspace: a pointer alone never names a task of another company.
-  if (task === undefined || task.companyId !== deps.companyId || task.workspaceId !== workspaceId) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
-  await authorize(task.project);
-  if (task.closedAt !== undefined) return { taskId: task.taskId, nothingRunning: true };
-  await recordAudit(deps, { eventId: `task.stop_requested:${task.taskId}:admin:${newId(deps)}`, actor: { type: "person", id: administrator.id }, action: "task.stop_requested", subject: { type: "task", id: task.taskId }, details: { project: task.project, by: "install-admin" } });
-  const answer = await cancelTask(deps, task.taskId);
-  return { taskId: task.taskId, nothingRunning: answer.nothingRunning };
 }
