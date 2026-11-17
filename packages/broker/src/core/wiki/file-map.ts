@@ -101,7 +101,7 @@ async function measureActivity(host: FileMapHost, repo: FileMapRepository, commi
   if (host.commitActivity === undefined) return { status: "unavailable", reason: "This code host cannot count commits yet." };
   const since = new Date(deps.now() - WIKI_MAP_ACTIVITY_DAYS * 86_400_000).toISOString();
   const targets = areas.filter((area) => area.kind === "source" && area.path !== ".");
-  let spent = 0, measured = 0, failed = 0, slowDown = false, stopped: "budget" | "time" | undefined;
+  let spent = 0, measured = 0, slowDown = false, stopped: "budget" | "time" | undefined;
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < targets.length && !slowDown) {
@@ -118,7 +118,7 @@ async function measureActivity(host: FileMapHost, repo: FileMapRepository, commi
         if (read.latestAt !== undefined) area.lastChangeAt = read.latestAt;
         measured += 1;
       } catch (error) {
-        if (hostRateLimitRetryAt(error) !== undefined) slowDown = true; else failed += 1;
+        if (hostRateLimitRetryAt(error) !== undefined) slowDown = true;
       }
     }
   };

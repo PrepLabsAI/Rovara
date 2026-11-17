@@ -130,7 +130,7 @@ export class FakeCodeHost implements CodeHost {
   }
 
   /** Wiki W0: every entry at a revision (directories derived from the paths). A tree marked incomplete answers only the first half of its entries, as a host that cut its listing would. */
-  async repositoryTree(repository: RepositoryRef, revision: string, scope: HostScope, _options?: { timeoutMs?: number }): Promise<RepositoryTreeRead> {
+  async repositoryTree(repository: RepositoryRef, revision: string, scope: HostScope): Promise<RepositoryTreeRead> {
     this.checkScope(scope);
     const model = this.registered(repository);
     const at = model.revision(revision);
@@ -146,7 +146,7 @@ export class FakeCodeHost implements CodeHost {
   }
 
   /** Wiki W0: the direct children of a directory at a revision. */
-  async directoryEntries(repository: RepositoryRef, path: string, revision: string, scope: HostScope, _options?: { timeoutMs?: number }): Promise<DirectoryRead> {
+  async directoryEntries(repository: RepositoryRef, path: string, revision: string, scope: HostScope): Promise<DirectoryRead> {
     this.checkScope(scope);
     const at = this.registered(repository).revision(revision);
     const prefix = path === "" ? "" : `${path}/`;

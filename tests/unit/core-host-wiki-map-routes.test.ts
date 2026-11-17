@@ -127,7 +127,7 @@ describe("hosted file map: who may do what", () => {
     await call(post(MAP("payments")), admin);
     const read = await call(get(MAP("payments")), reader);
     expect(read.body).toMatchObject({ status: "ready", canManage: false });
-    expect(read.body.map.repositories[0].files).toBe(3);
+    expect(read.body.map.repositories[0]!.files).toBe(3);
   });
 
   it("answers a member with no grant, another company's person and a missing or malformed project with one identical 404", async () => {
@@ -159,12 +159,12 @@ describe("hosted file map: who may do what", () => {
     }
     // The reader of B sees B's map, never A's.
     const b = await call(get(MAP("ledger")), readerOfB);
-    expect(b.body.map.repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["ledger-core"]);
+    expect(b.body.map.repositories[0]!.areas.map((a: { path: string }) => a.path)).toEqual(["ledger-core"]);
     expect(b.raw).not.toContain("payments-core");
     expect((await call(get(MAP("payments")), readerOfB)).status).toBe(404);
     // Each project's own kept map is its own.
     const a = await call(get(MAP("payments")), adminOfA);
-    expect(a.body.map.repositories[0].areas.map((x: { path: string }) => x.path)).toEqual(["payments-core"]);
+    expect(a.body.map.repositories[0]!.areas.map((x: { path: string }) => x.path)).toEqual(["payments-core"]);
   });
 
   it("keeps two companies apart: the same project name in another company has its own map and its own cache", async () => {
@@ -175,10 +175,10 @@ describe("hosted file map: who may do what", () => {
     // The other company has made nothing yet: it never sees ours.
     expect((await call(get(MAP("payments")), theirs)).body).toEqual({ status: "none", canManage: true });
     const made = await call(post(MAP("payments")), theirs);
-    expect(made.body.map.repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["rival-core"]);
+    expect(made.body.map.repositories[0]!.areas.map((a: { path: string }) => a.path)).toEqual(["rival-core"]);
     expect(made.raw).not.toContain("payments-core");
     const back = await call(get(MAP("payments")), ours);
-    expect(back.body.map.repositories[0].areas.map((a: { path: string }) => a.path)).toEqual(["payments-core"]);
+    expect(back.body.map.repositories[0]!.areas.map((a: { path: string }) => a.path)).toEqual(["payments-core"]);
     expect(back.raw).not.toContain("rival-core");
   });
 
@@ -205,7 +205,7 @@ describe("hosted file map: who may do what", () => {
     // The branch the project now names does not exist at the host: the repository is unavailable in the map, the request still answers 200.
     const made = await call(post(MAP("payments")), admin);
     expect(made.status).toBe(200);
-    expect(made.body.map.repositories[0].status).toBe("unavailable");
+    expect(made.body.map.repositories[0]!.status).toBe("unavailable");
   });
 
   it("answers 200 with an unavailable repository when the company has no code host registered for it", async () => {
