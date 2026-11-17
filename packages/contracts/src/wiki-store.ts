@@ -441,7 +441,7 @@ export interface WikiStore {
   /** An answer record, or undefined when there is none or it has expired. */
   readAnswer(project: string, answerId: string): Promise<WikiAnswerRecord | undefined>;
   /**
-   * The project's newest answer records that have not expired (J5: the gap list is read from them), at most `scanMax` read; `more` is true when there were more rows than that. Records carry their asker's id:
+   * The project's answer records that have not expired, in key order (J5: the gap list is read from them), at most `scanMax` of them; `more` is true when there were more rows than that. Records carry their asker's id:
    * the caller must never show it.
    */
   listAnswers(project: string, scanMax: number): Promise<{ records: WikiAnswerRecord[]; more: boolean }>;
