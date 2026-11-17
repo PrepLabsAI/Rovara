@@ -121,6 +121,12 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/company/slack/install/complete", requires: "full" },
   { method: "POST", path: "/v1/dev/company/slack/disconnect", requires: "full" },
   { method: "GET", path: "/v1/dev/company/slack", requires: "full" },
+  // Guided onboarding PR 5: a project's Slack channel (live owner/admin or the project's admin to link, unlink and pick; any member to read).
+  { method: "GET", path: "/v1/dev/company/slack/channels", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/slack/projects/{project}/channel/check", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },

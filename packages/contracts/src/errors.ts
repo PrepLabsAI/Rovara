@@ -117,6 +117,11 @@ export const AgentXErrorCodeSchema = z.enum([
   // Guided onboarding PR 4 (409): the Slack workspace is another Rovara company's; this company already holds a different Slack workspace.
   "SLACK_WORKSPACE_TAKEN",
   "SLACK_COMPANY_HAS_WORKSPACE",
+  // Guided onboarding PR 5 (409): the company has no connected Slack workspace (or Rovara holds no token for it); the channel is another project's; the channel can't be
+  // linked (shared with another organization, or archived).
+  "SLACK_NOT_CONNECTED",
+  "SLACK_CHANNEL_TAKEN",
+  "SLACK_CHANNEL_REFUSED",
 ]);
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";

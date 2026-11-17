@@ -7,6 +7,8 @@ import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
 import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
 import { slackInstallThroughLambda } from "./slack-install-identity.js";
+import type { SlackChannelWiring } from "./slack-channel-link.js";
+import { handleSlackRovara, isSlackRovaraEvent, SlackRovaraEventSchema, slackSignInUrlOf } from "./slack-rovara-command.js";
 import { isSlackWorkspaceRemovedEvent, SlackWorkspaceRemovedEventSchema } from "./slack-workspace-removal.js";
 import { refuseBrowserEvidenceOnCloud } from "./browser-evidence-seam.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
@@ -583,6 +585,10 @@ interface AwsBrokerDependencies {
   slackWorkspaceLegacyTeamId?: string;
   /** Guided onboarding PR 4: Add to Slack's wiring (named environments with the company layer); absent, a Slack removal event is refused. */
   slackInstall?: SlackInstallWiring;
+  /** Guided onboarding PR 5: channel links and /rovara (named environments with the company layer); absent, /rovara answers "not set up". */
+  slackChannels?: SlackChannelWiring;
+  /** Guided onboarding PR 5: where /rovara's "Sign in to Rovara first" links to; only an https address is used. */
+  slackSignInUrl?: string;
   documentClient: DynamoDBDocumentClient;
   s3: S3Client;
   /** Starts deleting an ec2-ebs workspace's instance and volume (#84). */
@@ -1032,6 +1038,19 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (!parsed.success || dependencies.slackInstall === undefined) return json({ outcome: "refused" }, "slack-workspace", 404);
       try { return json(await handleSlackWorkspaceRemoved({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, wiring: dependencies.slackInstall }, parsed.data), "slack-workspace"); }
       catch { return json({ outcome: "failed" }, "slack-workspace", 500); }
+    }
+    // Guided onboarding PR 5: a /rovara command or press from the Slack Lambda, after Slack's signature check there. IAM protects the direct invoke; company and person come
+    // from the team's binding and the person's own sign-in, never from the event.
+    if (isSlackRovaraEvent(event)) {
+      const parsed = SlackRovaraEventSchema.safeParse(event);
+      if (!parsed.success) return json({ error: "invalid_request" }, "slack-rovara", 400);
+      const signInTableName = dependencies.developer?.signInTableName;
+      const context = dependencies.slackChannels === undefined || signInTableName === undefined ? undefined : {
+        documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName, now: Date.now, wiring: dependencies.slackChannels,
+        ...(dependencies.slackWorkspaceLegacyTeamId === undefined ? {} : { installTeamId: dependencies.slackWorkspaceLegacyTeamId }),
+        ...(slackSignInUrlOf(dependencies.slackSignInUrl) === undefined ? {} : { signInUrl: slackSignInUrlOf(dependencies.slackSignInUrl)! }),
+      };
+      return json(await handleSlackRovara(context, parsed.data), "slack-rovara");
     }
     if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-claim") {
       try {
@@ -15268,10 +15287,11 @@ const ec2Sessions = new SessionManager({
 const github = createGitHubAppCredentials(secretsManager);
 /** Guided onboarding PR 4: Add to Slack (slack-company-install.ts), with the company layer only. Slack's side (the app's client secret, the code exchange, the token store's
  * writer) runs in DeveloperIdentity (slack-install-identity.ts), which this broker already invokes; the broker never reads the Slack app secret. */
-const slackInstallWiring: SlackInstallWiring | undefined = process.env.COMPANY_SIGNIN !== "enabled" || !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined : {
-  slack: slackInstallThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: process.env.DEVELOPER_IDENTITY_FUNCTION_ARN, Payload: payload }))),
-  log: brokerLogLine,
-};
+const slackInstallSlack = process.env.COMPANY_SIGNIN !== "enabled" || !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined
+  : slackInstallThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: process.env.DEVELOPER_IDENTITY_FUNCTION_ARN, Payload: payload })));
+const slackInstallWiring: SlackInstallWiring | undefined = slackInstallSlack === undefined ? undefined : { slack: slackInstallSlack, log: brokerLogLine };
+/** Guided onboarding PR 5: channel links (slack-channel-link.ts) and /rovara (slack-rovara-command.ts), through the same sign-in Lambda calls (the company's own token stays there). */
+const slackChannelWiring: SlackChannelWiring | undefined = slackInstallSlack === undefined ? undefined : { slack: slackInstallSlack, log: brokerLogLine };
 const githubCredentials = github.provider;
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
   .update("agentx:repository-grants:v3")
@@ -15300,7 +15320,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
       companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
       // Guided onboarding PR 4: Add to Slack (slack-company-install.ts).
-      ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }) } : {}),
+      ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
+      ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
@@ -15382,6 +15403,8 @@ export const handler = createAwsBrokerHandler({
   core: coreRoot,
   ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
   ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
+  ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
+  ...(process.env.ROVARA_SIGNIN_URL === undefined ? {} : { slackSignInUrl: process.env.ROVARA_SIGNIN_URL }),
   documentClient,
   s3,
   tableName: requiredEnvironment("STATE_TABLE_NAME"),
