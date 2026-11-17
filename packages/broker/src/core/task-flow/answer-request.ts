@@ -27,6 +27,8 @@ import { workspaceKeys } from "./workspace-location.js";
 export const ANSWER_NOT_YOURS = "Only the task's owner can answer its questions.";
 export const ANSWER_REQUEST_REUSED = "this request_id was already used for other answers or another action on this task; use a new request_id";
 export const ANSWERS_BODY_INVALID = "Answers need a request ID (a UUID), the round you were asked (a whole number), and 1 to 3 answers: each names its question (q1 to q3) and picks an option (a to d), says something (1 to 2,000 characters), or both.";
+/** The prefix of an answer's request key. */
+export const ANSWERS_REQUEST_NAMESPACE = "task-answers:";
 export const ANSWERS_TASK_CHANGED = "The task changed while you were answering. Read it again.";
 
 /** The body, checked at runtime before anything is read for it. Nothing else is taken. */
@@ -77,7 +79,8 @@ export async function answerTaskOnRequest(deps: TaskFlowDeps, caller: TaskCaller
   const payloadHash = hashJson({ action: "answers", round: request.round, answers: request.answers });
   const workspace = await readWorkspace(deps, task.workspaceId);
   const location = await workspaceKeys({ store: deps.store, companyId: task.companyId }, task.workspaceId);
-  const requestKey = location.operationRequestKey(workspace?.ownerKey ?? task.ownerKey, request.requestId);
+  // Answers keep their request ids in a namespace of their own, so an owner's id can never take the place of a step's own request id (which would stop that step from starting).
+  const requestKey = location.operationRequestKey(workspace?.ownerKey ?? task.ownerKey, `${ANSWERS_REQUEST_NAMESPACE}${request.requestId}`);
   const repeat = async (): Promise<boolean> => {
     const earlier = await deps.store.get(requestKey);
     if (earlier === undefined) return false;

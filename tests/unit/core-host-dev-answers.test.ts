@@ -32,6 +32,7 @@ const QUESTIONS = [
   { id: "q1", text: "Which endpoint path?", options: [{ id: "a", label: "/health" }, { id: "b", label: "/healthz" }], recommended: "a" },
   { id: "q2", text: "Anything else to check?" },
 ];
+const NOT_JSON = Symbol("not json");
 const ANSWERS = [{ questionId: "q1", optionId: "a" }, { questionId: "q2", text: "Return the version too" }];
 
 /**
@@ -171,13 +172,14 @@ describe("POST /v1/dev/tasks/{id}/answers on a core task", () => {
   });
 
   it("two companies: an owner, admin or member of company B cannot answer company A's core task, and is answered exactly like a task id that does not exist, for every body", async () => {
-    const { answer, person, routes, rows, workflow } = await waiting();
+    const { person, routes, rows, workflow, task } = await waiting();
     for (const role of ["owner", "admin", "member"] as const) {
       const theirs = person(`person-b-${role}-000000001`, OTHER, role);
-      for (const body of [{ requestId: randomUUID(), round: 1, answers: ANSWERS }, {}, [1], null, "nope"]) {
+      for (const body of [{ requestId: randomUUID(), round: 1, answers: ANSWERS }, {}, [1], null, "nope", NOT_JSON]) {
         const before = await rows();
-        const reply = await answer(theirs, body);
-        const missing = await routes.route(post(`/v1/dev/tasks/${randomUUID()}/answers`, body), theirs);
+        const raw = (path: string) => (body === NOT_JSON ? { method: "POST", path, headers: {}, body: "{not json" } : post(path, body));
+        const reply = await routes.route(raw(`/v1/dev/tasks/${task.taskId}/answers`), theirs);
+        const missing = await routes.route(raw(`/v1/dev/tasks/${randomUUID()}/answers`), theirs);
         expect(reply?.statusCode, role).toBe(404);
         expect(reply?.body, role).toBe(missing?.body);
         expect(reply?.body, role).not.toContain(FAKE_COMPANY);
@@ -226,10 +228,12 @@ describe("POST /v1/dev/tasks/{id}/answers on a core task", () => {
   });
 
   it("is idempotent by request id: a repeat answers the same task and answers nothing twice; the same id with other answers is refused", async () => {
-    const { answer, owner, workflow, world, task } = await waiting();
+    const { answer, owner, workflow, world, task, rows } = await waiting();
     const requestId = randomUUID();
     const first = await answer(owner, { requestId, round: 1, answers: ANSWERS });
     expect(first?.statusCode).toBe(200);
+    // The request id is kept in the answers' own namespace, never as a step's request id.
+    expect(await rows()).toContain(`task-answers:${requestId}`);
     const revision = (await workflow()).revision;
     const again = await answer(owner, { requestId, round: 1, answers: ANSWERS });
     expect(again?.statusCode).toBe(200);
@@ -312,6 +316,16 @@ describe("POST /v1/dev/tasks/{id}/answers on a core task", () => {
     const three = await answer(owner, { requestId: randomUUID(), round: 1, answers: [{ questionId: "q1", optionId: "a" }, { questionId: "q2", text: "z" }, { questionId: "q3", text: "w" }] });
     // Three answers pass the body check; the workflow refuses an answer for a question it did not ask (round 1 is answered already, so it is a stale form now).
     expect(parsed(three).error?.code).toBe("INTENT_NOT_WAITING");
+  });
+
+  it("the core function itself refuses a script token caller and a runtime without the company's owner rule (a missing task's answer), whatever a host passes", async () => {
+    const { owner, deps, task, workflow } = await waiting();
+    const body = () => ({ requestId: randomUUID(), round: 1, answers: ANSWERS });
+    await expect(answerTaskOnRequest(deps, { principal: owner.principal, scriptToken: { tokenId: "tok_1", name: "t", permissions: ["read", "start"], projects: ["payments"] } }, task.taskId, body)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    const laptop = await waiting({ access: "laptop" });
+    await expect(answerTaskOnRequest(laptop.deps, { principal: laptop.owner.principal }, laptop.task.taskId, body)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect((await workflow()).intent?.answers).toHaveLength(0);
+    expect((await laptop.workflow()).intent?.answers).toHaveLength(0);
   });
 
   it("is not served without the company's owner rule (Code's laptop rule never decides on a hosted company): the boundary decides what to say", async () => {
