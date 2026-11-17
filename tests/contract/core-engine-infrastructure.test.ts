@@ -342,9 +342,12 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(core[0]![1].Condition).toBe(isOn);
     expect(core[0]![1].Properties.Roles).toEqual([{ Ref: dispatcherRoleId }]);
     const statements = (core[0]![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
-    expect(statements).toHaveLength(1);
+    // The deleter's start, and the one secret that holds the callback signing key (read by name; exactly that secret's ARN), both only while the switch is not off.
+    expect(statements).toHaveLength(2);
     expect(statements[0]).toMatchObject({ Sid: "CoreStartSessionDeleter", Effect: "Allow", Action: "states:StartExecution" });
     expect(JSON.stringify(statements[0]!.Resource)).toContain("Deleter");
+    const secretId = resources(named, "AWS::SecretsManager::Secret").find(([, secret]) => secret.Properties.Name === "agentx/staging/callback-key")![0];
+    expect(statements[1]).toEqual({ Sid: "ReadCallbackSigningKey", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: secretId } });
     for (const [, policy] of resources(named, "AWS::IAM::Policy").filter(([, p]) => JSON.stringify(p.Properties.Roles).includes(dispatcherRoleId))) {
       expect(JSON.stringify(policy.Properties.PolicyDocument)).not.toContain("ec2:TerminateInstances");
     }
@@ -355,7 +358,9 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(dispatcherVariables[CORE_DISPATCH_QUEUE_ARN_VARIABLE]).toEqual({ "Fn::GetAtt": [queueId, "Arn"] });
     expect(dispatcherVariables[CORE_DISPATCH_QUEUE_URL_VARIABLE]).toEqual({ Ref: queueId });
     expect(dispatcherVariables[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE]).toEqual({ Ref: deadId });
-    expect(dispatcherVariables.CALLBACK_SIGNING_KEY).toEqual({ "Fn::If": [isOn, { Ref: "CallbackSigningKey" }, ""] });
+    // The key itself is never an environment value: only the name of its secret, and only while the switch is not off.
+    expect(dispatcherVariables.CALLBACK_SIGNING_KEY_SECRET_ID).toEqual({ "Fn::If": [isOn, "agentx/staging/callback-key", ""] });
+    expect(dispatcherVariables).not.toHaveProperty("CALLBACK_SIGNING_KEY");
     // The install's own workers place a core workspace's worker: the same values the broker places a sign-in client's project with.
     expect(dispatcherVariables.EC2_WORKER_SUBNETS).toEqual({ Ref: "Ec2WorkerSubnets" });
     expect(dispatcherVariables.EC2_WORKER_LAUNCH_TEMPLATE_ID).toEqual({ Ref: "Ec2WorkerLaunchTemplateId" });
@@ -375,7 +380,7 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect((resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("EC2_WORKER_SUBNETS");
     for (const word of [CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, "DispatcherCorePolicy", "DispatcherMapping", OUTBOX_PENDING_INDEX.name, CORE_ENGINE_VARIABLE]) expect(text).not.toContain(word);
     const legacyDispatcher = resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))!;
-    expect((legacyDispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("CALLBACK_SIGNING_KEY");
+    expect((legacyDispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("CALLBACK_SIGNING_KEY_SECRET_ID");
   });
 });
 
@@ -458,8 +463,9 @@ describe("L1a broker environment derivation", () => {
     expect(Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy")).toHaveLength(Object.values(json.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy").length);
   });
 
+  // DEC 254za: re-pinned for the callback signing key's secret (the legacy template carries it too).
   it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
-    expect(digest(legacy.toJSON())).toBe("9a7942afbd5561cef0077003fe43e470ef6b83993bef9ca72068f9e475247b06");
+    expect(digest(legacy.toJSON())).toBe("df258584a9995cd8989583240155bd85fbf0e875351adf46847d450f5a5eb670");
   });
 });
 import { createHash } from "node:crypto";

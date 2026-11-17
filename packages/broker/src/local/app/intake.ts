@@ -84,7 +84,8 @@ export function sourceViewOf(record: IntakeSourceRecord): IntakeSourceView {
   };
 }
 
-function waitingViewOf(record: IntakeItemRecord): IntakeWaitingItem {
+/** A waiting ticket as a member sees it (shared with the hosted intake, aws/hosted-intake.ts). */
+export function waitingViewOf(record: IntakeItemRecord): IntakeWaitingItem {
   return {
     itemId: record.itemId, channel: record.channel, system: record.system, id: record.id, url: record.url, title: record.title,
     requester: { display: record.requester.display, standing: record.requester.standing },

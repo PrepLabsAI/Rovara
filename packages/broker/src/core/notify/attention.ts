@@ -24,7 +24,7 @@ import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
 import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
 import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
-import { digestSlotDay, holdOf } from "./schedule.js";
+import { digestSlotDay, holdOf } from "./schedule.js"; import { putInboxRow } from "./inbox-rows.js";
 import { tenantIsCompanys, type ChannelCompanyOf } from "../channel/company.js";
 
 type Log = (entry: Record<string, unknown>) => void;
@@ -122,7 +122,7 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
     for (const developerId of people) {
       await deps.store.put({
         item: { ...pendingKey(change.orgId, developerId, change.sessionId, kind), entityType: "NOTIFY_PENDING", orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
-      });
+      }); await putInboxRow(deps.store, deps.log, { orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }, INDEX_EXPIRY_ATTRIBUTE);
     }
     await publishAttentionChanged(deps.realtime, change.orgId, people, change.sessionId, kind);
     return people.length;
@@ -181,7 +181,7 @@ export interface AttentionDeliveryDependencies {
 
 interface Line { title: string; status: string; link?: string | undefined; kind: AttentionKind }
 
-const oneLine = (text: string, max: number): string => {
+export const oneLine = (text: string, max: number): string => {
   const flat = text.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim();
   const chars = [...flat];
   return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("")}…`;

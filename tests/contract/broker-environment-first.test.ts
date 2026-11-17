@@ -8,6 +8,8 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BROKER_NAMES, BROKER_SETTINGS, DERIVED_BROKER_VARIABLES } from "@agentx/contracts";
 import type * as BrokerEnvironment from "../../packages/broker/src/aws/broker-environment.js";
+import { loadBrokerNamesParameter } from "../../packages/broker/src/aws/broker-names-parameter.js";
+import { brokerNamesParameterOf } from "../support/broker-environment-template.js";
 import { RESOLVER_REGION, controlPlaneOf } from "../support/lambda-environment-size.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -52,6 +54,18 @@ describe("the broker entry module reads no packed name before it unpacks them", 
     expect(imports[0]).toBe("./broker-environment-init.js");
   });
 
+  // ENV-ROOM 2: the Lambda's entry is broker-handler.ts, which reads the names from their SSM parameter before broker.ts loads. It must load nothing of the broker before that:
+  // its only static imports are the SDK's SSM client and the reader, which imports only the contracts (and a type).
+  it("enters through broker-handler.ts, which loads broker.ts only after it has read the names", () => {
+    const handler = readFileSync(new URL("../../packages/broker/src/aws/broker-handler.ts", import.meta.url), "utf8");
+    expect([...handler.matchAll(/^import\s(?!type\s)[^;]*?["']([^"']+)["'];/gmu)].map((match) => match[1])).toEqual(["@aws-sdk/client-ssm", "./broker-names-parameter.js"]);
+    expect([...handler.matchAll(/import\(\s*["']([^"']+)["']\s*\)/gu)].map((match) => match[1])).toEqual(["./broker.js"]);
+    const reader = readFileSync(new URL("../../packages/broker/src/aws/broker-names-parameter.ts", import.meta.url), "utf8");
+    expect([...reader.matchAll(/^import\s(?!type\s)[^;]*?["']([^"']+)["'];/gmu)].map((match) => match[1])).toEqual(["@agentx/contracts"]);
+    const infra = readFileSync(new URL("../../infra/lib/control-plane.ts", import.meta.url), "utf8");
+    expect(infra).toContain('packagedFunction(this, "Broker", "packages/broker/src/aws/broker-handler.ts"');
+  });
+
   it("hydrates the packed settings before the dispatcher's first import can read them", () => {
     const source = readFileSync(new URL("../../packages/broker/src/aws/dispatcher.ts", import.meta.url), "utf8");
     const imports = [...source.matchAll(/^import\s[^;]*?["']([^"']+)["'];/gmu)].map((match) => match[1]);
@@ -64,9 +78,12 @@ describe("the broker entry module reads no packed name before it unpacks them", 
     const readsBefore: string[] = [];
     let readsAfter = 0;
 
+    let parameterValue = "";
     beforeAll(() => {
-      const { functions } = controlPlaneOf("staging", synthesized("staging"));
+      const { functions, template, resolver } = controlPlaneOf("staging", synthesized("staging"));
       const broker = functions.find((entry) => entry.logicalId.startsWith("Broker"))!;
+      const parameter = brokerNamesParameterOf(template, broker.variables.AGENTX_NAMES_PARAMETER!);
+      parameterValue = resolver.text((template.Resources[parameter.id]!.Properties as { Value: unknown }).Value);
       const environment: Record<string, string | undefined> = { ...saved };
       for (const name of names) delete environment[name];
       Object.assign(environment, broker.variables, { AWS_REGION: RESOLVER_REGION });
@@ -92,7 +109,7 @@ describe("the broker entry module reads no packed name before it unpacks them", 
       process.env = saved;
     });
 
-    it("starts from an environment that has the names only packed", () => {
+    it("starts from an environment that has the names only packed (in their parameter)", () => {
       expect(Object.keys(process.env).filter((key) => names.has(key))).toEqual([]);
       readsAfter = 0;
       readsBefore.length = 0;
@@ -103,6 +120,8 @@ describe("the broker entry module reads no packed name before it unpacks them", 
       hydration.started = false;
       hydration.finished = false;
       hydration.runs = 0;
+      // As broker-handler.ts does: the names from their parameter, then broker.ts.
+      await loadBrokerNamesParameter(process.env, async () => ({ type: "String", value: parameterValue }));
       await import("../../packages/broker/src/aws/broker.js");
       expect(hydration.runs).toBe(1);
       expect(hydration.finished).toBe(true);
