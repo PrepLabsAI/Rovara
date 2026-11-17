@@ -26,7 +26,7 @@ import type { ProjectSettingsHook } from "./project-settings.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, WIKI_BUILD_WORDS, isContextSourceStage,
   when, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -346,9 +346,11 @@ export function hostedTaskAccess(inputs: {
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
       if (inputs.setupRunStanding !== undefined && inputs.storage !== undefined) {
         const stored = await (await inputs.storage()).get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
-        if (stored?.["purpose"] === "setup_agent") {
+        if (stored?.["purpose"] === "setup_agent" || stored?.["purpose"] === "wiki_build") {
           if (stored["companyId"] !== inputs.companyId) return { allowed: false, message: NOT_A_MEMBER_HERE };
-          return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: SETUP_RUN_NOT_ALLOWED };
+          // A wiki build (W3b) runs on the same rule: the person it runs for must still manage the project (company owner or admin, or the project's administrator), read now.
+          const denied = stored["purpose"] === "wiki_build" ? WIKI_BUILD_WORDS.notAllowed : SETUP_RUN_NOT_ALLOWED;
+          return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: denied };
         }
       }
       return (await inputs.projectGrant(task.developerId, task.project)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };

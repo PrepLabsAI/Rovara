@@ -19,6 +19,12 @@ const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
 /** The task purpose of a wiki build run. */
 export const WIKI_BUILD_PURPOSE = "wiki_build" as const;
+/** The operation mode of a build run's own step. */
+export const WIKI_BUILD_WORKFLOW_MODE = "WIKI_BUILD" as const;
+/** A worker that lists this runs a wiki build (`workflowMode: "WIKI_BUILD"`); the broker sends one only to such a worker. */
+export const WIKI_BUILD_FEATURE = "task.wikiBuild.v1" as const;
+/** The tools a build run's model session has: read-only file tools. No shell, no write, no network tool (the worker enforces it; a test names this list). */
+export const WIKI_BUILD_TOOLS = ["read", "grep", "find", "ls"] as const;
 /** Who pays: the project (its monthly limit), never the person who pressed Build. */
 export const WIKI_BUILD_PAYER_KIND = "project" as const;
 
@@ -217,3 +223,10 @@ export type WikiBuildSummary = z.infer<typeof WikiBuildSummarySchema>;
 export const WikiBuildPinsSchema = z.array(z.object({ repo: line(100), commit: z.string().regex(COMMIT) }).strict()).min(1).max(32)
   .refine((pins) => new Set(pins.map((pin) => pin.repo)).size === pins.length, "pinned repositories must be unique");
 export type WikiBuildPins = z.infer<typeof WikiBuildPinsSchema>;
+
+/**
+ * What the broker tells the worker about a wiki build: the limits the run started with and, as a cross-check only, the commit each repository was pinned at (the preparation carries the same pins and
+ * refuses any difference). The company, the project and the task are NEVER in it: the worker's callback is scoped by the operation. Nothing here adds or changes what the run reads.
+ */
+export const WikiBuildWireSchema = z.object({ limits: WikiBuildLimitsSchema, pins: WikiBuildPinsSchema }).strict();
+export type WikiBuildWire = z.infer<typeof WikiBuildWireSchema>;

@@ -265,7 +265,7 @@ async function hasRealTask(input: SetupStatusInput, client: Client, companyId: O
       const taskId = pointer?.["taskId"];
       if (typeof taskId !== "string") continue;
       const task = asRecord((await client.send(new GetCommand({ TableName: input.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: unknown }).Item);
-      if (task !== undefined && recordInCompany(task, companyId) && (typeof task["orgId"] !== "string" || task["orgId"] === companyId) && task["project"] === input.project && task["purpose"] !== "setup_agent") return true;
+      if (task !== undefined && recordInCompany(task, companyId) && (typeof task["orgId"] !== "string" || task["orgId"] === companyId) && task["project"] === input.project && task["purpose"] !== "setup_agent" && task["purpose"] !== "wiki_build") return true;
     }
   }
   return false;

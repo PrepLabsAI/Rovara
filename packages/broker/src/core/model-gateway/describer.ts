@@ -23,7 +23,10 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps): TaskTokenDescriber
       // assigner facts remain unavailable; never infer them from the session.
       let payer;
       try {
-        if (origin.data === undefined) {
+        // A wiki build (W3b) is paid by the PROJECT (its monthly limit), never the person who pressed Build, whatever surface started it (DEC 254zh review fix 3). The task record's purpose, written by the start, decides.
+        if (task.purpose === "wiki_build") {
+          payer = { kind: "project" as const, project: workspace.projectName };
+        } else if (origin.data === undefined) {
           // Old records have no origin. The checked starter pays; do not infer or persist a start surface.
           if (person === undefined) throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED);
           payer = { kind: "member" as const, developerId: person };
