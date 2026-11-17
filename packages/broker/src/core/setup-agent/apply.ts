@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, setupItemsOf, when,
-  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type SetupVerification, type TransactItem,
+  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type SetupVerification, type TransactItem,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "../decisions/approval-gate.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -154,20 +154,45 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
     origins: { ...(full.definition.origins ?? {}), ...(made.setup === undefined ? {} : { setup: "agent" }), ...(made.readiness === undefined ? {} : { readiness: "agent" }) },
   });
   if (!candidate.success) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.invalid);
+  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: made.used, unchecked: made.unchecked, left: made.left }, alsoTransact: [] });
+}
+
+export interface StoreCandidateInput {
+  project: string; by: string; requestId: string; taskId: string;
+  /** The project's current approved revision the candidate was made from. */
+  baseRevision: number;
+  /** The candidate definition (already parsed, with the next revision number). */
+  candidate: ProjectDefinition;
+  /** Fields the reply carries between the digest and the candidate revision (what was used, left out, and so on). */
+  replyExtra: Record<string, unknown>;
+  /** Items written in the same transaction (a setup update offer marked prepared, say). */
+  alsoTransact: readonly TransactItem[];
+}
+
+/**
+ * The shared tail of every way a setup CANDIDATE is made (a setup run's `confirmSetupAgent`, a merged plan's "Update setup", plan-update.ts): refuse a command too long to show whole, store the candidate as the next
+ * revision (written, not the project's latest), start its check on a NEW workspace, and keep the one proposal row; all in one transaction that also requires the project to still be at `baseRevision` and no other
+ * proposal to be waiting. Nothing is applied and nothing is approved: only the approval (`createSetupProposalSubject`) makes a candidate the project's latest.
+ */
+export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCandidateInput): Promise<Record<string, unknown>> {
+  const { project, by, requestId, taskId, baseRevision, candidate } = input;
+  const orgId = deps.companyId;
+  const candidateRevision = candidate.revision;
   // The approver reads every command whole: one too long to show is refused, never cut.
-  if ([...candidate.data.setup, ...candidate.data.readiness].some((command) => formatCommandLine(command).length > SETUP_COMMAND_SHOWN_MAX)) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.tooLong);
-  const digest = setupApplyDigest(candidate.data.setup, candidate.data.readiness);
-  const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId: body.requestId, candidate: true });
-  const reply = { digest, used: made.used, unchecked: made.unchecked, left: made.left, candidateRevision, proved: false, next: "check" };
+  if ([...candidate.setup, ...candidate.readiness].some((command) => formatCommandLine(command).length > SETUP_COMMAND_SHOWN_MAX)) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.tooLong);
+  const digest = setupApplyDigest(candidate.setup, candidate.readiness);
+  const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId, candidate: true });
+  const reply = { digest, ...input.replyExtra, candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId: view.taskId ?? "", requestId: body.requestId, by, digest, baseRevision: full.definition.revision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now };
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
-    { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate.data)) as never }, condition: when.absent() },
+    { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never }, condition: when.absent() },
     // The proposal row replaces a finished one, never a waiting one; the project must still be at the revision the person looked at.
     { kind: "put", item: { ...setupApplyKey(orgId, project), ...(JSON.parse(JSON.stringify(row)) as Record<string, never>) }, condition: when.or(when.absent(), when.not(when.eq("state", "checking"))) },
-    { kind: "check", key: orgProjectCatalogKey(orgId, project), condition: when.eq("latestRevision", full.definition.revision) },
+    { kind: "check", key: orgProjectCatalogKey(orgId, project), condition: when.eq("latestRevision", baseRevision) },
     ...started.items,
+    ...input.alsoTransact,
   ] satisfies TransactItem[]);
   if (!result.applied) throw agentXError("WORKSPACE_BUSY", SETUP_CONFIRM_WORDS.waiting);
   await relayCheck(deps.flow, started);

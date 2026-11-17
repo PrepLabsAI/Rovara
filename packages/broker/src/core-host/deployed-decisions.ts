@@ -16,7 +16,7 @@ import {
   OrgRoleSchema,
   type AdapterRegistry, type OrgId, type OrgRole, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { WorkflowSnapshotSchema } from "@agentx/contracts";
+import { SETUP_CHANGE_CARD_WORDS, WorkflowSnapshotSchema, setupChangeLines } from "@agentx/contracts";
 import { createDecisionService } from "../services/decisions.js";
 import type { Credential, DecisionOutcome } from "../core/decisions/approval-gate.js";
 import { WORKFLOW_DOCUMENT_CARD_KINDS, createDecisionPerformer, workflowDocumentHandler, type KindHandler, type ProvingCaller } from "../core/decisions/performer.js";
@@ -213,7 +213,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       const estimate = (task as { runEstimate?: { highUsd?: unknown } }).runEstimate?.highUsd;
       return {
         ...base, kind: "approve_plan", path: workflow.path === "FULL" ? "full" : "quick", files: facts.files, claims, untestedClaims: facts.untestedClaims,
-        ...(facts.unread ? { unread: true } : {}), ...(typeof estimate === "number" && Number.isFinite(estimate) && estimate >= 0 ? { cost: { highUsd: estimate } } : {}),
+        ...(facts.unread ? { unread: true } : {}), ...(facts.setupChange === true && loaded?.format === "structured" && loaded.plan.setupChanges !== undefined ? { setupChange: true, details: [{ title: `Setup change (${String(loaded.plan.setupChanges.length)})`, lines: [...setupChangeLines(loaded.plan.setupChanges), SETUP_CHANGE_CARD_WORDS] }] } : {}), ...(typeof estimate === "number" && Number.isFinite(estimate) && estimate >= 0 ? { cost: { highUsd: estimate } } : {}),
       };
     }
     if (type === "requirements") return { ...base, kind: "approve_requirements", claims };
