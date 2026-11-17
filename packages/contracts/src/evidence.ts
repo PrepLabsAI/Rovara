@@ -306,6 +306,8 @@ export const EvidenceDependencySchema = z
     fixtureRevision: z.number().int().min(0).optional(),
     /** When a recorded fake's answers were recorded. */
     recordedAt: z.string().datetime().optional(),
+    /** When the recorded fixture set was approved. Older evidence may not have this. */
+    approvedAt: z.string().datetime().optional(),
     /** Requests a fake answered without a recording: counted, never hidden. */
     madeUpAnswers: CountSchema.optional(),
     /** Tests that did not run because nothing backed this dependency. */
@@ -323,6 +325,7 @@ export const EvidenceDependencySchema = z
     if (entry.label === "company_approved" && entry.imageDigest === undefined) problem("imageDigest", "a company-approved image states the digest it ran");
     if (entry.label === "recorded_fake" && entry.recordedAt === undefined) problem("recordedAt", "a recorded fake states when it was recorded");
     if (entry.label !== "recorded_fake" && entry.recordedAt !== undefined) problem("recordedAt", "only a recorded fake was recorded");
+    if (entry.label !== "recorded_fake" && entry.approvedAt !== undefined) problem("approvedAt", "only a recorded fake has an approval date");
     if (!fake && entry.fixtureRevision !== undefined) problem("fixtureRevision", "only a fake has a fixture revision");
     if (!fake && entry.madeUpAnswers !== undefined) problem("madeUpAnswers", "only a fake makes up answers");
     if (entry.label !== "not_available" && entry.testsNotRun !== undefined) problem("testsNotRun", "only a dependency that was not available has tests that did not run");
