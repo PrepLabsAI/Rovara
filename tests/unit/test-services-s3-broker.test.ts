@@ -299,7 +299,7 @@ describe("what the evidence says about a fake", () => {
     const digest = await approvedSet(store, recordedSet());
     const h = await approvedWith(body([payments(digest)]), store);
     const chosen = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
-    expect(chosen.dependencies).toEqual([{ id: "payments", name: "Payments API", backing: "fake", fake: { origin: "recorded", revision: 5, recordedAt: "2026-10-20T08:00:00.000Z" } }]);
+    expect(chosen.dependencies).toEqual([{ id: "payments", name: "Payments API", backing: "fake", fake: { origin: "recorded", revision: 5, recordedAt: "2026-10-20T08:00:00.000Z", approvedAt: "2026-11-03T10:00:00.000Z" } }]);
     // Another company's task sees nothing of it.
     const elsewhere = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: OTHER_ORG, project: PROJECT, taskId: "t1" }, ON);
     expect(elsewhere.dependencies).toBeUndefined();

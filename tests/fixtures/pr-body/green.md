@@ -5,7 +5,7 @@
 
 **Changed** 4 files, +86 -12. 2 tests added.
 **Proven** 1 of 3 requirements proven.
-**Tested against** Postgres (real, the project's image). Stripe (recorded fake, 34 days old).
+**Tested against** Postgres (real, the project's image). Stripe (recorded fake, recorded 34 days ago).
 **Reviews** Code review and security review passed. The second review found no blocking finding.
 **Risk** Low. A small change with no sensitive paths, dependency changes or open concerns.
 **Needs you** The item below, then the normal code review.
@@ -61,7 +61,7 @@ Checks: 4 (4 passed)
 </details>
 
 <details>
-<summary>Test setup: sandbox, 1 real service, 1 recorded fake</summary>
+<summary>Test setup: sandbox, 1 real service, 1 recorded fake, Stripe recorded fake, recorded 34 days ago</summary>
 
 - Environment: sandbox, approved test environment revision 7. Test data: synthetic.
 - Integration tests ran against: Postgres (real, company-approved image), Stripe (recorded fake, rev 3).

@@ -22,12 +22,13 @@ export interface EvidenceEnvironmentChoice {
  * What the pack says about a fake: the store's facts about the set (recorded or hand-written, which revision, when it was recorded) and, from the approved backing's own provenance, whether Rovara made it (TE-A3). A fake Rovara made
  * is never shown as a recording, whatever the store says: the approved backing is the broker's, so this is the one place that says it.
  */
-export function pinnedFakeOf(backing: Extract<TestEnvDependency["backing"], { kind: "fake" }>, set: { origin: string; revision: number; recordedAt?: string | undefined } | undefined): NonNullable<PinnedDependency["fake"]> {
+export function pinnedFakeOf(backing: Extract<TestEnvDependency["backing"], { kind: "fake" }>, set: { origin: string; revision: number; recordedAt?: string | undefined; approvedAt?: string | undefined } | undefined): NonNullable<PinnedDependency["fake"]> {
   const madeByRovara = backing.provenance?.origin === "rovara_setup" || backing.provenance?.origin === "rovara_task";
   return {
     origin: set?.origin === "recorded" && !madeByRovara ? "recorded" : "hand_written",
     ...(set === undefined ? {} : { revision: set.revision }),
     ...(set?.origin === "recorded" && !madeByRovara && set.recordedAt !== undefined ? { recordedAt: set.recordedAt } : {}),
+    ...(set?.origin === "recorded" && !madeByRovara && set.approvedAt !== undefined ? { approvedAt: set.approvedAt } : {}),
     ...(madeByRovara ? { madeByRovara: true } : {}),
     // A fake that may make up answers: its row is Made by Rovara unless its ledger counted none (`evidenceDependencyTrustClass`, review 2 M2).
     ...(backing.unmatched === "schema_synth" ? { makesUpAnswers: true } : {}),
@@ -52,7 +53,7 @@ export async function evidenceEnvironmentOf(deps: TestEnvDeps, task: { orgId?: O
         // what the evidence says about a fake (recorded or hand-written, which revision, when it was recorded) is the STORE's, read for THIS organisation by the pinned digest; the worker's words never set it. A set the store
         // cannot give (no store, withdrawn since) is shown as the less trusted word, hand-written, without a revision.
         const read = await Promise.resolve(deps.fixtureStore?.(() => Promise.resolve(body.prodDeny)).readApproved(task.orgId, task.project, dependency.backing.fixtureSetRef)).catch(() => undefined);
-        const set = read?.ok === true ? read.set : undefined;
+        const set = read?.ok === true ? { ...read.set, approvedAt: read.decidedAt } : undefined;
         dependencies.push({ id: dependency.id, name: dependency.name, backing: "fake", fake: pinnedFakeOf(dependency.backing, set) });
       }
     }

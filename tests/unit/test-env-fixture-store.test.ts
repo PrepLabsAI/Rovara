@@ -270,6 +270,7 @@ describe("approving and delivering", () => {
     expect(await store.deliverById(ORG_A, PROJ, record.storeId)).toEqual(delivery);
     const read = await store.readApproved(ORG_A, PROJ, record.digest);
     expect(read.ok && fixtureSetDigest(read.set)).toBe(record.digest);
+    expect(read.ok && read.decidedAt).toBe(NOW.toISOString());
   });
   it("does not deliver a rejected set, and a decision is made once", async () => {
     const { store } = setup();

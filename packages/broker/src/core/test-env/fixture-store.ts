@@ -306,7 +306,7 @@ export interface FixtureStore {
   /** The same, from a store id (the task plan names one): the id's org and project must be the caller's. */
   deliverById(callerOrgId: string, callerProject: string, storeId: string): ReturnType<FixtureStore["deliver"]>;
   /** The approved set itself, with the stored bytes checked against the digest. */
-  readApproved(orgId: string, project: string, digest: string): Promise<{ ok: true; set: FixtureSet } | { ok: false; reason: DeliverRefusal }>;
+  readApproved(orgId: string, project: string, digest: string): Promise<{ ok: true; set: FixtureSet; decidedAt?: string } | { ok: false; reason: DeliverRefusal }>;
 }
 
 export function createFixtureStore(deps: FixtureStoreDependencies): FixtureStore {
@@ -461,7 +461,7 @@ export function createFixtureStore(deps: FixtureStoreDependencies): FixtureStore
       const loaded = await load(orgId, project, digest);
       if (loaded === undefined) return { ok: false, reason: "not_found" };
       if (loaded === "mismatch") return { ok: false, reason: "digest_mismatch" };
-      return (await scanNow(orgId, project, loaded.set)) ? { ok: true, set: loaded.set } : { ok: false, reason: "data_guard" };
+      return (await scanNow(orgId, project, loaded.set)) ? { ok: true, set: loaded.set, ...(row.decidedAt === undefined ? {} : { decidedAt: row.decidedAt }) } : { ok: false, reason: "data_guard" };
     },
   };
 }
