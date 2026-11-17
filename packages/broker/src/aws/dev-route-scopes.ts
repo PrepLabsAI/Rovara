@@ -125,6 +125,17 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/github", requires: "full" },
   // Guided onboarding PR 3: disconnect one installation (live owner, fresh step-up, refused while the company's projects use it).
   { method: "DELETE", path: "/v1/dev/company/github/{installationId}", requires: "full" },
+  // Guided onboarding PR 4: Add to Slack (live owner/admin; disconnect owner + step-up) and the company's Slack connection (any member).
+  { method: "POST", path: "/v1/dev/company/slack/install", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/slack/install/complete", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/slack/disconnect", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/slack", requires: "full" },
+  // Guided onboarding PR 5: a project's Slack channel (live owner/admin or the project's admin to link, unlink and pick; any member to read).
+  { method: "GET", path: "/v1/dev/company/slack/channels", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/slack/projects/{project}/channel/check", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },

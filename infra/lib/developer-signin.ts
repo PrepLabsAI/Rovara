@@ -298,6 +298,15 @@ export class DeveloperSignIn extends Construct {
       }));
     }
     props.slackSecret.grantRead(fn);
+    // Guided onboarding PR 4 (slack-install-identity.ts): Add to Slack's code exchange runs here, beside the Slack app's client secret; the bot token it gets is stored, read
+    // (to revoke) and dropped under agentx/<env>/slack-workspaces/<company>/<team>, the family slack-workspace-tokens.ts reads. Creates carry no tags (no TagResource) and
+    // nothing deletes: a dropped token is overwritten with a value holding none. Named environments only, beside the company layer.
+    if (named) {
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue"],
+        resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.naming.env}/slack-workspaces/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      }));
+    }
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
       // Secrets Manager appends "-" and six characters to a secret's name in its ARN.

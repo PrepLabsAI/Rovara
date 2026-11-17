@@ -112,7 +112,7 @@ function expandRegex(source: string): string[] {
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
   // The company reads' paths are constants of their contract (#649), which the router imports.
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/github-connect-routes.ts"]) {
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/github-connect-routes.ts", "packages/broker/src/aws/slack-company-install.ts", "packages/broker/src/aws/slack-channel-link.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
@@ -200,6 +200,10 @@ async function setUp(mode: "linking" | "developer") {
     companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
     // Guided onboarding PR 1: the GitHub connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
     githubConnect: { bindings: { claimPerson: async () => "taken", companyInstallations: async () => [], ownersOf: async () => [], disconnect: async () => ({ outcome: "not_found" }) }, github: { appSlug: async () => "app", oauthClient: async () => undefined, userControlledInstallations: async () => { throw new Error("none"); } }, log: () => undefined },
+    // Guided onboarding PR 4: the Add to Slack routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
+    slackInstall: { slack: { clientId: async () => undefined, exchange: async () => "not_set_up" as const, revoke: async () => false, store: async () => undefined, revokeStored: async () => undefined, drop: async () => undefined }, log: () => undefined },
+    // Guided onboarding PR 5: a project's Slack channel routes need their wiring to exist; this one sees no channel, so only the route table's answer is tested here.
+    slackChannels: { slack: { channels: async () => ({ channels: [] }), channel: async () => "not_found" as const, join: async () => false }, log: () => undefined },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
