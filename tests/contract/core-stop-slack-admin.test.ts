@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, sharedTaskKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
-import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
+import { taskKey, taskPointerKey, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../../packages/broker/src/core/task-flow/stop-request.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
@@ -14,6 +14,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { createCoreHostApp, engineStampKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { coreTaskEntryFrom, stopCoreTaskAs, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
+import { coreAdminStop } from "../../packages/broker/src/aws/core-stop-entry.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, loadSlackBroker } from "../support/slack-broker.js";
@@ -211,12 +212,33 @@ describe("the administrator's workspace cancel on a core task's workspace", () =
 
 describe("the core's administrator stop (stopWorkspaceAsAdministrator)", () => {
   it("asks the route's project check with the task's own project, and stops nothing when it refuses", async () => {
-    const { app, task, status } = await coreWorld();
+    const { app, world, task, status } = await coreWorld();
     const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    // The project comes from the stored task, whatever it is named.
+    const record = (await world.store.get(taskKey(task.taskId)))!;
+    await world.store.put({ item: { ...record, project: "ledger" } });
     const asked: string[] = [];
     await expect(stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin" }, async (project) => { asked.push(project); throw new Error("no grant"); })).rejects.toThrow("no grant");
-    expect(asked).toEqual(["payments"]);
+    expect(asked).toEqual(["ledger"]);
     expect(await status()).not.toBe("CANCELLED");
+  });
+
+  it("a closed task: the project check still comes first (no grant reads its refusal); with the grant, nothing runs and nothing is stopped", async () => {
+    const { app, world, task, status } = await coreWorld();
+    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    const record = (await world.store.get(taskKey(task.taskId)))!;
+    await world.store.put({ item: { ...record, closedAt: "2026-11-15T10:00:00.000Z" } });
+    await expect(stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin" }, async () => { throw new Error("no grant"); })).rejects.toThrow("no grant");
+    expect(await stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin" }, async () => undefined)).toEqual({ taskId: task.taskId, nothingRunning: true });
+    expect(await status()).not.toBe("CANCELLED");
+    expect(world.audit.filter((event) => event.action === "task.stop_requested")).toEqual([]);
+  });
+
+  it("an administrator's stop leaves a task.stop_requested audit line naming the administrator", async () => {
+    const { app, world, task } = await coreWorld();
+    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    await stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin-owner-key" }, async () => undefined);
+    expect(world.audit.filter((event) => event.action === "task.stop_requested").map((event) => ({ actor: event.actor, details: event.details }))).toEqual([{ actor: { type: "person", id: "admin-owner-key" }, details: { project: "payments", by: "install-admin" } }]);
   });
 
   it("two companies: another company's runtime never stops this company's workspace (a missing workspace's words), and an unknown workspace reads the same", async () => {
@@ -227,6 +249,58 @@ describe("the core's administrator stop (stopWorkspaceAsAdministrator)", () => {
     await expect(stopWorkspaceAsAdministrator(other, randomUUID(), { id: "admin" }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND", message: `NOT_FOUND: ${WORKSPACE_NOT_FOUND}` });
     expect(authorize).not.toHaveBeenCalled();
     expect(await status()).not.toBe("CANCELLED");
+  });
+});
+
+describe("pointers that name a task they do not hold", () => {
+  it("a workspace of company B whose pointer names company A's task, and a workspace of company A whose pointer names a task of another workspace, both read as missing; nothing is stopped", async () => {
+    const { app, world, task, status } = await coreWorld();
+    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    const authorize = vi.fn(async () => undefined);
+    const foreign = randomUUID();
+    await world.store.put({ item: { ...workspaceKey(OTHER, foreign), entityType: "WORKSPACE", id: foreign, companyId: OTHER, ownerKey: "k", status: "READY", activeOperationId: null } as never });
+    await world.store.put({ item: { ...taskPointerKey(OTHER, foreign), taskId: task.taskId } });
+    await expect(stopWorkspaceAsAdministrator({ ...deps, companyId: OTHER }, foreign, { id: "admin" }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const stray = randomUUID();
+    await world.store.put({ item: { ...workspaceKey(FAKE_COMPANY, stray), entityType: "WORKSPACE", id: stray, companyId: FAKE_COMPANY, ownerKey: "k", status: "READY", activeOperationId: null } as never });
+    await world.store.put({ item: { ...taskPointerKey(FAKE_COMPANY, stray), taskId: task.taskId } });
+    await expect(stopWorkspaceAsAdministrator(deps, stray, { id: "admin" }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(await status()).not.toBe("CANCELLED");
+  });
+});
+
+describe("coreAdminStop", () => {
+  it("refuses a caller without the administrator claim before the core is asked, even when the project check would pass", async () => {
+    const { harness, coreTasks, task, status } = await coreWorld();
+    const stop = vi.spyOn(coreTasks, "stopWorkspaceForAdmin");
+    await expect(coreAdminStop({ documentClient: harness.db, tableName: harness.brokerInput.tableName }, coreTasks, { isAdministrator: false, ownerKey: "k" }, task.workspaceId, async () => undefined)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(stop).not.toHaveBeenCalled();
+    expect(await status()).not.toBe("CANCELLED");
+  });
+});
+
+describe("a plain close (no Stop) on a core task", () => {
+  it("is not the core's stop: it falls to the workflow's close, which refuses a core task; nothing is stopped", async () => {
+    const { harness, task, status, coreTasks } = await coreWorld();
+    const route = vi.spyOn(coreTasks, "route");
+    const response = await harness.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId: task.taskId, userId: SLACK.owner, thread: THREAD, requestId: randomUUID() } as never);
+    expect(JSON.parse(response.body)).toMatchObject({ refused: true });
+    expect(route).not.toHaveBeenCalledWith(expect.objectContaining({ path: `/v1/dev/tasks/${task.taskId}/cancel` }), expect.anything());
+    expect(await status()).not.toBe("CANCELLED");
+  });
+});
+
+describe("the Stop button on a workflow (unstamped) task", () => {
+  it("never asks the core (the workflow's own Stop runs as before)", async () => {
+    const { harness, coreTasks } = await coreWorld();
+    const route = vi.spyOn(coreTasks, "route");
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    route.mockClear();
+    await harness.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId, userId: SLACK.owner, thread: THREAD, requestId: randomUUID(), stop: true } as never);
+    await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: THREAD, userId: SLACK.owner } as never);
+    expect(route).not.toHaveBeenCalled();
   });
 });
 

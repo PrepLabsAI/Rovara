@@ -3,6 +3,8 @@
 //     core's (the task's owner, or a live owner/admin of the task's company), never weaker. A refusal reads as the workflow's own "not the owner" answer, whatever the reason;
 //   - the administrator's workspace cancel: the route's own checks (the administrator claim here, an administrator grant on the task's project in the core's call), in the runtime of
 //     the workspace's own company, then the core's `cancelTask`.
+// On purpose, the Slack paths do not add the workflow's thread checks (this task's own thread, a view-only share): who may stop a core task is the core's rule alone, which is never weaker
+// than those checks, and a refusal never says which check failed.
 // Every function answers `undefined` for anything that is not the core's (an unstamped task or workspace, or an install without the core's entry): the broker then runs exactly what it ran
 // before. Kept out of broker.ts so its call sites there stay one line each.
 import { agentXError, type SharedTaskRecord, type SlackChannelBinding } from "@agentx/contracts";
