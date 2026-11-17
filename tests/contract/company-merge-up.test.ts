@@ -20,19 +20,21 @@ function harness(companyId?: string) {
   h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", installLevel: true, clientId: "web-app", name: "Web", audience: "web-app", redirectUris: ["https://web.example.test/callback"], loopback: false, scopes: ["projects:create", "projects:members"], createdAt: TIME, updatedAt: TIME, updatedBy: "test" });
   const bearer = `Bearer ${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify({ azp: "web-app" })).toString('base64url')}.test`;
   const companyOf = vi.fn(async () => companyId);
-  if (companyId !== undefined) h.deps.companies = { companyOf };
+  // DEC 253z: the access check also reads the live role; this reader's membership agrees with its company.
+  const membershipOf = async () => companyId === undefined ? undefined : { companyId, role: "member" as const };
+  if (companyId !== undefined) h.deps.companies = { companyOf, membershipOf };
   // Native task fixtures use Slack, preserving the pinned T2 writer gaps. The
   // registered OIDC fixture supplies the live company policy now required by T3.
   h.db.set({ ...h.db.get("SESSION#session", "META")!, pk: "SESSION#native", clientId: undefined, amr: "slack" });
   const signInAs = (company: string) => {
-    h.deps.companies = { companyOf: vi.fn(async () => company) };
+    h.deps.companies = { companyOf: vi.fn(async () => company), membershipOf: async () => ({ companyId: company, role: "member" as const }) };
     const issuer = `https://${company}.identity.example.test`;
     h.db.set({ ...h.db.get("SESSION#session", "META")!, sessionId: "11111111-1111-4111-8111-111111111111", companyId: company });
     h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, provider: "oidc", issuer, revoked: false });
     h.db.set({ pk: companyScoped(company, "SIGNIN_ISSUER"), sk: "OIDC", entityType: "COMPANY_SIGNIN_ISSUER", issuer,
       clientId: "test-company-client", displayName: "Company", requiredValues: [], enabled: true, enabledSince: Date.parse(TIME) / 1000 });
   };
-  if (companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) { signInAs(companyId); h.deps.companies = { companyOf }; }
+  if (companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) { signInAs(companyId); h.deps.companies = { companyOf, membershipOf }; }
   const call = (path = projectPath, method = "GET", body?: unknown) => {
     const native = path.startsWith("/v1/dev/tasks/");
     if (native) { h.claims.sid = "native"; h.claims.amr = "slack"; delete h.claims.azp; }
@@ -142,7 +144,9 @@ describe("merge-up membership-resolved reads", () => {
     for (const company of [undefined, IMPLICIT_COMPANY_ID]) {
       const h = harness(company); h.project(); h.task();
       expect((await h.call()).body).toBe('{"name":"shared-project","latestRevision":1,"access":"granted","repositories":[{"name":"api","url":"https://github.com/example/api.git","defaultBranch":"main","fullName":"example/api"}],"requestId":"company-test"}');
-      expect((await h.call("/v1/dev/access", "POST")).body).toBe(`{"developerId":"${PERSON}","displayName":"Test Person","nameChosen":false,"administrator":true,"projects":[{"name":"shared-project","access":"granted"}],"notices":[],"requestId":"company-test"}`);
+      // DEC 253z: with the company layer on, the answer adds exactly the live company and role (the built-in company has no stored name); off, the legacy bytes.
+      const company_ = company === undefined ? "" : `,"companyId":"${company}","companyRole":"member"`;
+      expect((await h.call("/v1/dev/access", "POST")).body).toBe(`{"developerId":"${PERSON}","displayName":"Test Person","nameChosen":false,"administrator":true,"projects":[{"name":"shared-project","access":"granted"}],"notices":[]${company_},"requestId":"company-test"}`);
       expect((await h.call(taskPaths[0])).body).toBe('{"messages":[],"requestId":"company-test"}');
       expect((await h.call(taskPaths[1])).body).toBe('{"comments":[],"requestId":"company-test"}');
     }
