@@ -375,6 +375,9 @@ export * from "./lessons-local-tools.js";
 export * from "./lesson-keys.js";
 // Lead 4 W2: the project wiki store contract (rows keyed by company AND project).
 export * from "./wiki-store.js";
+// Lead 4 J1: the smart Just answer service (limits, request, answer object, fixed words).
+export * from "./answers.js";
+export * from "./answer-keys.js";
 export * from "./spec-target.js";
 
 // Setup and test health: saved environments (SH3).
