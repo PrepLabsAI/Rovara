@@ -289,7 +289,7 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -642,6 +642,11 @@ interface AwsBrokerDependencies {
     /** The repositories the GitHub App can reach, for GET /v1/dev/client/repositories. */
     repositories(): Promise<ClientRepositoriesResponse["installations"]>;
     workerBinding(): Promise<Ec2RuntimeBinding>;
+    /**
+     * Guided onboarding PR 6: which installation serves a repository and whether it is suspended, read from GitHub now (no cache). Every create
+     * checks it against the company's bindings; absent while bindings are on, the multi-repository and bulk creates refuse every repository.
+     */
+    repositoryInstallation?(url: string): Promise<LiveRepositoryInstallation>;
   };
   /**
    * Lanes AU and EV: the company audit and event reads for a company administrator (`/v1/dev/client/company/*`): the company's document store, the host's company
@@ -14524,10 +14529,56 @@ function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: 
 /** What a chat agent is told about a project a sign-in client created; the project's administrators refine it later. */
 const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
 
-/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. */
-function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "clientRepositories" | "companyReads"> {
+/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. Guided onboarding PR 6: or from several, or one per repository. */
+function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyReads"> {
   const clientProjects = dependencies.clientProjects;
   if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
+  const rules = { ...(dependencies.githubBindings === undefined ? {} : { bindings: dependencies.githubBindings }),
+    ...(clientProjects.repositoryInstallation === undefined ? {} : { live: (url: string) => clientProjects.repositoryInstallation!(url) }) };
+  const projectExists = async (name: string) => ((await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] }).Items ?? []).length > 0;
+  /**
+   * Guided onboarding PR 6: one project from `repositories`, for `companyId` (the caller's, from membership). Every repository is checked against the
+   * company's bindings with GitHub's live answer before any token is made for any of them; one that fails refuses the whole create, in one fixed answer.
+   */
+  const createFromRepositories = async (developerId: string, companyId: string | undefined, repositories: readonly string[], options: { name?: string; setupCommands?: string[]; testCommands?: string[] }, commitBy: number) => {
+    const urls = repositories.map((repository) => `https://github.com/${repository}.git`);
+    const budget = boundedCompanyReads(dependencies.documentClient);
+    if (!await onCompanyInstallations(rules, companyId, urls, budget)) throw notAvailable();
+    let found: Array<{ name: string; defaultBranch: string }>;
+    try {
+      found = await eachLimited(urls, LOOKUP_CONCURRENCY, (url) => companyId === undefined ? clientProjects.repositoryDefaults(url) : budget.read(() => clientProjects.repositoryDefaults(url)));
+    } catch (error) {
+      throw (error as { code?: unknown }).code === "NOT_FOUND" ? notAvailable() : unavailable();
+    }
+    const repositoryNames = uniqueRepositoryNames(found.map((entry) => entry.name));
+    const name = options.name ?? repositoryNames[0]!;
+    if (await projectExists(name)) throw nameTaken(name);
+    const cwd = `repo/${repositoryNames[0]!}`;
+    // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted. They run in the first repository.
+    const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
+    const definition = ProjectDefinitionSchema.parse({
+      name, revision: 1,
+      repositories: urls.map((url, index) => ({ name: repositoryNames[index]!, url, path: `repo/${repositoryNames[index]!}`, defaultBranch: found[index]!.defaultBranch, credentialRef: clientProjects.credentialRef })),
+      setup: (options.setupCommands ?? []).map(command), readiness: (options.testCommands ?? []).map(command),
+      orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
+    });
+    const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
+    const runtimeBinding = await clientProjects.workerBinding();
+    // One wall-clock limit for the whole request: too late to register safely before the gateway gives up, so nothing is written.
+    if (Date.now() > commitBy) throw unavailable();
+    try {
+      // Registration checks every repository's binding once more (its own budget), in the transaction's company.
+      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) } });
+    } catch (error) {
+      if (await projectExists(name).catch(() => false)) throw nameTaken(name);
+      if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
+      throw error;
+    }
+    return { name, latestRevision: 1 };
+  };
   return {
     ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }),
     async clientRepositories(developerId) {
@@ -14539,19 +14590,35 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
         return await filterInstallationsFor(companyId!, listed, dependencies.githubBindings, budget);
       } catch { throw githubBindingRefusal(); }
     },
+    async clientRepositoryChoices(developerId, query) {
+      const budget = boundedCompanyReads(dependencies.documentClient);
+      const companyId = await githubCallerCompany(dependencies, developerId, budget);
+      let installations: ClientRepositoriesResponse["installations"];
+      if (dependencies.githubBindings === undefined) installations = await clientProjects.repositories();
+      else {
+        try {
+          installations = await filterInstallationsFor(companyId!, await budget.read(() => clientProjects.repositories()), dependencies.githubBindings, budget);
+        } catch { throw githubBindingRefusal(); }
+      }
+      let marks: Map<string, string[]>;
+      try { marks = await projectsByRepository(dependencies.documentClient, dependencies.tableName, companyId, boundedCompanyReads(dependencies.documentClient)); }
+      catch { throw agentXError("RUNTIME_UNAVAILABLE", REPOSITORY_CHOICES_UNAVAILABLE); }
+      return repositoryChoices(installations, marks, query);
+    },
     async createClientProject(developerId, input) {
       const url = `https://github.com/${input.repository}.git`;
       const budget = boundedCompanyReads(dependencies.documentClient);
       const companyId = await githubCallerCompany(dependencies, developerId, budget);
       await checkCompanyRepository(dependencies, companyId, url, budget);
+      // Guided onboarding PR 6: where the live lookup is wired, a suspended installation is refused too, in the same words.
+      if (rules.live !== undefined && !await onCompanyInstallations(rules, companyId, [url], budget)) {
+        const repository = parseGitHubRepository(url);
+        throw agentXError("CONFIG_INVALID", `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`);
+      }
       const found = companyId === undefined ? await clientProjects.repositoryDefaults(url) : await budget.read(() => clientProjects.repositoryDefaults(url));
-      const repositoryName = found.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/^([^a-z])/, "r-$1").slice(0, 63) || "repository";
+      const repositoryName = projectRepositoryName(found.name);
       const name = input.name ?? repositoryName;
-      const existing = await dependencies.documentClient.send(new QueryCommand({
-        TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-        ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
-      })) as { Items?: unknown[] };
-      if ((existing.Items ?? []).length > 0) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
+      if (await projectExists(name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
       const cwd = `repo/${repositoryName}`;
       // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
       const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
@@ -14565,6 +14632,22 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
       await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget } });
       return { name, latestRevision: 1 };
+    },
+    async createClientProjects(developerId, input) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
+      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
+      return createFromRepositories(developerId, companyId, input.repositories, {
+        ...(input.name === undefined ? {} : { name: input.name }), ...(input.setupCommands === undefined ? {} : { setupCommands: input.setupCommands }),
+        ...(input.testCommands === undefined ? {} : { testCommands: input.testCommands }),
+      }, commitBy);
+    },
+    async createClientProjectsBulk(developerId, input) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
+      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
+      return bulkCreate(input.repositories, {
+        now: Date.now, nameOf: (repository) => projectRepositoryName(repository.split("/")[1]!),
+        create: async (repository) => (await createFromRepositories(developerId, companyId, [repository], {}, commitBy)).name,
+      });
     },
   };
 }
@@ -15486,6 +15569,7 @@ export const handler = createAwsBrokerHandler({
     credentialRef: githubCredentials.credentialRef,
     repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
     repositories: () => githubCredentials.installedRepositories(),
+    repositoryInstallation: (url: string) => githubCredentials.repositoryInstallation(url),
     workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
   } } : {}),
   projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
