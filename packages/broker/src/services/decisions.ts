@@ -11,7 +11,7 @@ import { WorkflowArtifactSchema, type Approvers, type AuditSink, type DocumentSt
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createDecisionGate, type DecisionGate, type DecisionGatePolicy, type DecisionSubject } from "../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../core/decisions/local-actions.js";
-import { createWorkflowDocumentSubject, currentDocumentType, type WorkflowSubjectOptions } from "../core/decisions/workflow-subject.js";
+import { WORKFLOW_DOCUMENT_KIND, createWorkflowDocumentSubject, currentDocumentType, type WorkflowSubjectOptions } from "../core/decisions/workflow-subject.js";
 import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } from "../core/design-review/decision.js";
 import { loadPlanDocument, planFactsOf } from "../core/plan/document.js";
 import { dispatchRowItem } from "../core/task-flow/dispatch-rows.js";
@@ -81,11 +81,20 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
       ];
     },
   });
-  const gate = createDecisionGate({
+  const innerGate = createDecisionGate({
     store, approvers: options.approvers, audit: options.audit, subjects: [...(options.subjects ?? []), workflowSubject],
     ...(options.policy === undefined ? {} : { policy: options.policy }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
+  // A decision on a task's document wrote its entry in the task log in its own transaction; the surfaces that draw the log are told once it is committed (a repeat of a decision writes nothing, so tells nothing).
+  const gate: DecisionGate = flow.taskLog === undefined ? innerGate : {
+    ...innerGate,
+    async decide(attempt) {
+      const result = await innerGate.decide(attempt);
+      if (result.status === "decided" && attempt.kind === WORKFLOW_DOCUMENT_KIND) await flow.taskLog?.changed(attempt.subjectId);
+      return result;
+    },
+  };
   return { gate, actions: createDecisionActions({ gate, companyId: options.companyId }) };
 }

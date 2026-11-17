@@ -93,7 +93,7 @@ describe("the Linear adapter over the owner's key", () => {
       if (query.includes("comment(id")) return { body: { data: { comment: { id: (call.body as { variables: { id: string } }).variables.id, issue: { identifier: "ENG-1" } } } } };
       return { body: { data: { issue: ISSUE } } };
     });
-    await expect(linearTracker(access(impl)).comment!({ tracker: "linear", id: "ENG-1", url: ISSUE.url }, "x", SCOPE, { key: "k" })).resolves.toBeUndefined();
+    await expect(linearTracker(access(impl)).comment!({ tracker: "linear", id: "ENG-1", url: ISSUE.url }, "x", SCOPE, { key: "k" })).resolves.toEqual({ commentId: linearCommentIdFor("org_aaaaaaaaaaaaaaaaaaaa", "k") });
   });
 
   it("writes nothing to an issue in another workspace than the ticket's own", async () => {

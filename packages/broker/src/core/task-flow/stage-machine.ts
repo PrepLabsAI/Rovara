@@ -46,7 +46,7 @@ import { notesFedUpdate, stepNotes, type NotesForStep } from "../sessions/notes.
 import { textReaderOf } from "../build-step/plan-input.js";
 import { buildOperation, assertPromptFits } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
-import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js";
+import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js"; import { questionEntriesOf } from "../task-log/entries.js"; import { taskLogItems } from "../task-log/store.js";
 import { dispatchRowKey, taskKey } from "./keys.js";
 import { structuredPlanContextOf } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
@@ -551,7 +551,12 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
       }
       // A ready request goes on to planning with no one asking: the row commits with the transition, and is run right after.
       const toPlan = next.stage === "PLAN" && next.state === "READY";
-      const committed = await commitWorkflow(deps, task, next, toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []);
+      // Understand's questions go in the task log in the same commit (a person is asked: every surface that draws the log can say so).
+      const asked = next.stage === "UNDERSTAND" && next.state === "WAITING" && next.intent?.assessment?.kind === "questions" ? next.intent.assessment.questions : [];
+      // The log never stands in the way of the person's own change: an entry that cannot be made is left out.
+      const logged = (() => { try { return asked.length === 0 ? [] : taskLogItems({ orgId: task.companyId, taskId: task.taskId, entries: questionEntriesOf({ round: next.intent?.rounds ?? 0, at: now, questions: asked }) }); } catch { return []; } })();
+      const committed = await commitWorkflow(deps, task, next, [...(toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []), ...logged]);
+      if (committed && logged.length > 0) await deps.taskLog?.changed(task.taskId);
       if (committed && toPlan) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "PLAN" });
       return;
     }

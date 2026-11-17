@@ -175,7 +175,19 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     };
   };
 
-  const reply: LinearReplyPort["reply"] = async ({ orgId, issueKey, text, commentKey, workspace }) => {
+  /** A comment as Linear has it: whether it exists, which issue it is on, and (for a reply) its parent. Used to refuse an id that is not on the issue named. */
+  const commentOn = async (id: string): Promise<{ issue: string | undefined; parent: string | undefined } | undefined> => {
+    const read = await call("query($id: String!) { comment(id: $id) { id issue { identifier } parent { id } } }", { id });
+    if ("errors" in read) {
+      if (isNotFoundAnswer(read.errors)) return undefined;
+      throw unavailable();
+    }
+    const found = rec(read.data["comment"]);
+    if (str(found["id"]) !== id) return undefined;
+    return { issue: normalizeIssueKey(str(rec(found["issue"])["identifier"])), parent: str(rec(found["parent"])["id"]) };
+  };
+
+  const reply: LinearReplyPort["reply"] = async ({ orgId, issueKey, text, commentKey, workspace, parentId }) => {
     const key = normalizeIssueKey(issueKey);
     const body = text.trim();
     if (key === undefined || body === "") throw agentXError("CONFIG_INVALID", "A comment needs an issue and some words.");
@@ -185,13 +197,34 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     const issue = await issueOf(key);
     // An answer for another issue than the one asked about is no answer; and the issue's own link says which workspace it is in.
     if (issue === undefined || normalizeIssueKey(issue.identifier) !== key || (workspace !== undefined && workspaceOfIssueUrl(issue.url) !== workspace)) throw new TrackerWriteRefusedError("not_found");
-    const created = await call("mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }", { input: { id: commentId, issueId: issue.id, body: words } });
+    // A reply goes in the thread of a comment that is on THIS issue, never another's.
+    if (parentId !== undefined) {
+      const parent = await commentOn(parentId);
+      if (parent === undefined || parent.issue !== key || parent.parent !== undefined) throw new TrackerWriteRefusedError("not_found");
+    }
+    const created = await call("mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }", { input: { id: commentId, issueId: issue.id, body: words, ...(parentId === undefined ? {} : { parentId }) } });
     if (!("errors" in created) && rec(created.data["commentCreate"])["success"] === true) return { commentId };
     if ("errors" in created && isPermissionAnswer(created.errors)) throw new TrackerWriteRefusedError("needs_write_access");
     // Linear refused or the answer was lost: if a comment with this very id is on this very issue, it is posted (the same post again is the same comment).
     const existing = await call("query($id: String!) { comment(id: $id) { id issue { identifier } } }", { id: commentId });
     const found = "errors" in existing ? undefined : rec(existing.data["comment"]);
     if (found !== undefined && str(found["id"]) === commentId && normalizeIssueKey(str(rec(found["issue"])["identifier"])) === key) return { commentId };
+    throw unavailable();
+  };
+
+  const edit: NonNullable<LinearReplyPort["edit"]> = async ({ issueKey, commentId, text, workspace }) => {
+    const key = normalizeIssueKey(issueKey);
+    const body = text.trim();
+    if (key === undefined || body === "") throw agentXError("CONFIG_INVALID", "A comment needs an issue and some words.");
+    if (workspace !== undefined && !WORKSPACE_KEY.test(workspace)) throw agentXError("CONFIG_INVALID", "A comment needs a valid workspace.");
+    const issue = await issueOf(key);
+    if (issue === undefined || normalizeIssueKey(issue.identifier) !== key || (workspace !== undefined && workspaceOfIssueUrl(issue.url) !== workspace)) throw new TrackerWriteRefusedError("not_found");
+    // Only a comment that is on this very issue is rewritten (Linear lets the key edit its own comments only, and this says which issue they are on).
+    const found = await commentOn(commentId);
+    if (found === undefined || found.issue !== key) throw new TrackerWriteRefusedError("not_found");
+    const written = await call("mutation($id: String!, $input: CommentUpdateInput!) { commentUpdate(id: $id, input: $input) { success } }", { id: commentId, input: { body: cut(body, LINEAR_COMMENT_MAX_CHARS) } });
+    if (!("errors" in written) && rec(written.data["commentUpdate"])["success"] === true) return;
+    if ("errors" in written && isPermissionAnswer(written.errors)) throw new TrackerWriteRefusedError("needs_write_access");
     throw unavailable();
   };
 
@@ -282,5 +315,5 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     throw unavailable();
   };
 
-  return { reply: { reply }, readIssue, asked, moveIssue };
+  return { reply: { reply, edit }, readIssue, asked, moveIssue };
 }

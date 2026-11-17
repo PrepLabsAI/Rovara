@@ -1,8 +1,8 @@
 // A Tracker over an in-memory set of items. Writes are recorded so a test can see exactly what went out; reads give the text as stored (untrusted).
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
-  agentXError, HostScopeSchema, TrackerSearchError, NeutralStatusSchema, TrackerEventSchema, TrackerItemRefSchema,
-  type ChangeRequestRef, type HostScope, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCommentOptions, type NeutralStatus, type RawDelivery, type Tracker, type TrackerCapabilities, type TrackerEvent, type TrackerEvents, type TrackerItem,
+  agentXError, HostScopeSchema, TrackerSearchError, TrackerWriteRefusedError, NeutralStatusSchema, TrackerEventSchema, TrackerItemRefSchema,
+  type ChangeRequestRef, type HostScope, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCommentOptions, type TrackerCommentResult, type NeutralStatus, type RawDelivery, type Tracker, type TrackerCapabilities, type TrackerEvent, type TrackerEvents, type TrackerItem,
   type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 
@@ -32,7 +32,13 @@ export class FakeTracker implements Tracker {
   readonly events: TrackerEvents;
   readonly items = new Map<string, TrackerItem>();
   /** What Rovara wrote, in order. A comment carries its key and whether it was asked to be private. */
-  readonly writes: Array<{ kind: "comment" | "status" | "link"; item: string; value: string; key?: string | undefined; requirePrivate?: boolean | undefined }> = [];
+  readonly writes: Array<{ kind: "comment" | "status" | "link"; item: string; value: string; key?: string | undefined; requirePrivate?: boolean | undefined; parentId?: string | undefined }> = [];
+  /** The ids this fake gave the comments it recorded (`comment` answers one), each with the write it names. */
+  readonly commentIds: Array<{ commentId: string; write: FakeTracker["writes"][number] }> = [];
+  /** Rovara's rewrites of its own comments, in order (`updateComment`): the comment's id, the item and the new words. */
+  readonly edits: Array<{ commentId: string; item: string; value: string }> = [];
+  /** Test driver: set to false for a fake whose `comment` answers no id and that has no `updateComment` (an adapter without the thread methods). */
+  threads = true;
   /** Test driver: what the tracker says is asked for now (`askedFor`), or an error code the next read fails with. */
   asked: readonly TrackerAskedItem[] = [];
   askedFailure: ConstructorParameters<typeof TrackerSearchError>[0] | undefined;
@@ -73,14 +79,34 @@ export class FakeTracker implements Tracker {
     return ({ ...this.item(ref), labels: [...this.item(ref).labels] });
   }
 
-  async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<void> {
+  async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<TrackerCommentResult | void> {
     this.scope(scope);
     const item = this.item(ref);
     if (body.length === 0 || body.length > 65_536) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
     // The same key again is the same comment (a retry is never a second post).
-    if (options?.key !== undefined && this.writes.some((write) => write.kind === "comment" && write.key === options.key)) return;
-    this.writes.push({ kind: "comment", item: item.ref.id, value: body, ...(options?.key === undefined ? {} : { key: options.key }), ...(options?.requirePrivate === undefined ? {} : { requirePrivate: options.requirePrivate }) });
-    return;
+    const earlier = options?.key === undefined ? undefined : this.commentIds.find((entry) => entry.write.key === options.key);
+    if (earlier !== undefined) return this.threads ? { commentId: earlier.commentId } : undefined;
+    if (options?.parentId !== undefined && !this.commentIds.some((entry) => entry.write.item === item.ref.id && entry.commentId === options.parentId)) throw new TrackerWriteRefusedError("not_found");
+    const commentId = `c${String(this.commentIds.length + 1)}`;
+    const write: FakeTracker["writes"][number] = {
+      kind: "comment", item: item.ref.id, value: body, ...(options?.key === undefined ? {} : { key: options.key }), ...(options?.requirePrivate === undefined ? {} : { requirePrivate: options.requirePrivate }),
+      ...(options?.parentId === undefined ? {} : { parentId: options.parentId }),
+    };
+    this.writes.push(write);
+    this.commentIds.push({ commentId, write });
+    return this.threads ? { commentId } : undefined;
+  }
+
+  /** Rewrites a comment this fake recorded, in place: the comment in `writes` carries the new words (the same body again changes nothing). A comment of another item is refused. */
+  async updateComment(ref: TrackerItemRef, commentId: string, body: UntrustedText, scope: HostScope): Promise<void> {
+    this.scope(scope);
+    const item = this.item(ref);
+    if (!this.threads) throw agentXError("CONFIG_INVALID", "this tracker has no comment edits");
+    const found = this.commentIds.find((entry) => entry.write.item === item.ref.id && entry.commentId === commentId)?.write;
+    if (found === undefined) throw new TrackerWriteRefusedError("not_found");
+    if (found.value === body) return;
+    found.value = body;
+    this.edits.push({ commentId, item: item.ref.id, value: body });
   }
 
   async setStatusByName(ref: TrackerItemRef, name: string, scope: HostScope): Promise<"moved" | "no_such_status"> {

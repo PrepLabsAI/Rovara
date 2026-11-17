@@ -16,6 +16,8 @@ export const TrackerCapabilitiesSchema = z.object({
   events: z.enum(["webhook", "poll", "none"]),
   /** The tracker can be asked what is asked for now in a place (`Tracker.askedFor`), so a laptop with no webhook can start tasks from it. Absent: no. */
   intake: z.boolean().optional(),
+  /** The tracker can write a comment only people on its side of the line see (Jira Service Management's internal comment), so a task only its owner can see may be written there above `status_only`. Absent: no. */
+  internalComments: z.boolean().optional(),
 }).strict();
 export type TrackerCapabilities = z.infer<typeof TrackerCapabilitiesSchema>;
 
@@ -122,6 +124,16 @@ export class TrackerWriteRefusedError extends Error {
 export interface TrackerCommentOptions {
   key?: string | undefined;
   requirePrivate?: boolean | undefined;
+  /**
+   * The id of a comment this one replies to (a thread on the ticket). A tracker with no threads writes an ordinary comment. The id is one the adapter itself returned for a comment Rovara wrote on this item; it is
+   * never a person's text, and an adapter refuses an id that is not on the item.
+   */
+  parentId?: string | undefined;
+}
+
+/** What a comment write answers: the comment's id, so Rovara can edit it later or reply to it. An adapter that has none answers nothing, and the item stays on one-shot comments. */
+export interface TrackerCommentResult {
+  commentId: string;
 }
 
 export interface Tracker {
@@ -130,7 +142,12 @@ export interface Tracker {
   /** The item as it is now, read fresh; never stored beyond the Team record's own rules. */
   readItem(ref: TrackerItemRef, scope: HostScope): Promise<TrackerItem>;
   /** Writes go through the write gate and are audited by the caller. */
-  comment?(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<void>;
+  comment?(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<TrackerCommentResult | void>;
+  /**
+   * Optional (design B9, owner decision 254z d): rewrites a comment Rovara wrote on this item, in place (an edit notifies nobody). `commentId` is the id `comment` returned. The adapter refuses (a
+   * `TrackerWriteRefusedError`, `not_found`) an id that is not a comment on this item. The same body again changes nothing. FETCH AND WRITE ONLY: it decides nothing. A tracker without it stays on one-shot comments.
+   */
+  updateComment?(ref: TrackerItemRef, commentId: string, body: UntrustedText, scope: HostScope): Promise<void>;
   setStatus?(ref: TrackerItemRef, status: NeutralStatus, scope: HostScope): Promise<void>;
   /**
    * Optional: moves the item to the status the tracker calls `name` (a project's own words: "In Review"), matched without regard to case. "moved" when it is there now; "no_such_status" when the tracker has no such

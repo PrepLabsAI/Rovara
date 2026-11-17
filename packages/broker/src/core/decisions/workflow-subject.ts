@@ -11,11 +11,13 @@ import { createHash } from "node:crypto";
 import { LOCAL_OWNER_PROVIDER } from "../../ports/policy-defaults.js";
 import {
   IMPLICIT_COMPANY_ID, WorkflowDecisionRequestSchema, WorkflowSnapshotSchema, WorkflowTransitionError, change, decideWorkflow, when,
-  type DecisionRisk, type DocumentKey, type DocumentStore, type PolicySubject, type Principal, type TransactItem, type WorkflowArtifact, type WorkflowSnapshot,
+  type DecisionRisk, type DocumentKey, type DocumentStore, type OrgId, type PolicySubject, type Principal, type TransactItem, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
 import { workflowWriteOps } from "../task-flow/flow-guard.js";
+import { approvalEntryOf, surfaceOfMethod } from "../task-log/entries.js";
+import { taskLogItems } from "../task-log/store.js";
 
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
 /** What a refused decision says when the structured plan it names cannot be read back. */
@@ -204,9 +206,21 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       if (after.revision === workflow.revision) throw new SubjectRefusal("invalid_outcome", "The workflow already holds this decision.");
       const taskId = loaded.request.subject.id;
       const extra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
+      // The decision is in the task log in the same transaction: what was decided on (its code), who decided and from where. The approver is the one the Approvers seam verified, and the surface is the
+      // method the proof came through, never a field of the request.
+      const taskOrg = task["orgId"] ?? task["companyId"];
+      // The log never stands in the way of the decision: an entry that cannot be made is left out.
+      let logged: TransactItem[];
+      try {
+        const entry = typeof taskOrg !== "string" ? undefined : approvalEntryOf({
+          requestId: attempt.requestId, at, what: currentDocumentType(workflow), outcome: attempt.outcome === "approve" ? "approved" : attempt.outcome === "reject" ? "rejected" : "changes_requested",
+          artifactDigest: attempt.seen.artifactDigest, revision: attempt.seen.revision, by: approver.displayName ?? "A team member", surface: surfaceOfMethod(attempt.credentials[0]?.method),
+        });
+        logged = entry === undefined ? [] : taskLogItems({ orgId: taskOrg as OrgId, taskId, entries: [entry] });
+      } catch { logged = []; }
       return {
         ops: [...workflowWriteOps(workflow, after).ops, change.set("updatedAt", at)],
-        extra,
+        extra: [...extra, ...logged],
         result: { workflow: after },
       };
     },

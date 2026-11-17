@@ -2,7 +2,9 @@
 // opened), `merged` and `closed`. Write-back uses the owner's tracker sign-in, so every rule fails closed:
 //   - ONLY the ticket that started the task: a `tracker_item` binding of the task's session that intake itself recorded as started for THIS task (the intake item names the session or the task). A ticket
 //     someone linked by hand, or any other place, is never written to;
-//   - only fixed words, the task's title (made inert and cut), the status it moved to, and the link to the pull request. No plan, code, comment or summary ever leaves;
+//   - what leaves is set by the project's level (`TICKET_UPDATE_LEVELS`; owner decision 254z d replaces the old rule that nothing but fixed words ever leaves). At `status_only`, the default of every project that exists and of a
+//     laptop, it is only fixed words, the task's title (made inert and cut), the status it moved to and the link to the pull request, written by this file exactly as before. Above it, `thread.ts` keeps one root comment on
+//     the ticket, edited in place, and replies. Code, diffs, files, logs, test output, errors, secrets and money per person never leave at any level;
 //   - a task only its owner can see (every task on a laptop) is written as an internal comment where the tracker can tell, never to customers;
 //   - rate limited: at most `TICKET_UPDATES_PER_HOUR` writes per company and tracker an hour, and at most `TICKET_UPDATES_PER_TASK` per task. Over a limit the update is skipped (logged), never queued;
 //   - each update is claimed once (a conditional write in the task's partition) before it is sent, so two deliveries send it once; a fault that may pass gives the claim back and throws, so the
@@ -10,21 +12,24 @@
 // A ticket is written through the Tracker port (`comment`, `setStatusByName`), so Linear and Jira (or any tracker that registers) are the same code here.
 import { createHash } from "node:crypto";
 import {
-  AgentXError, INDEX_EXPIRY_ATTRIBUTE, TICKET_MOMENT_WORDS, TrackerWriteRefusedError, change, intakeItemIdOf, ticketUpdateCallsKey, when,
+  TICKET_MOMENT_WORDS, intakeItemIdOf, ticketUpdateCallsKey, ticketUpdateLevelOf,
   type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type HostScope, type OrgId, type Tracker, type TicketUpdateMoment,
 } from "@agentx/contracts";
 import { readIntakeItem } from "../intake/store.js";
 import { noteOwnWrite } from "../intake/own-writes.js";
+import type { TaskLogMilestoneDeps } from "../task-log/milestones.js";
 import type { CodeMilestoneHandler } from "../milestones/milestones.js";
 import { taskKey } from "../task-flow/keys.js";
 import { sessionBindingsOf } from "../sessions/bindings.js";
 import { noteWriteAccessMissing, noteWriteAccessOk, readTicketUpdates } from "./settings.js";
+import { KEPT_SECONDS, claim, countWithin, giveBack, hourOf, isFinal, refusalOf, release, settle } from "./claims.js";
+import { inertTicketTitle, plainHttpsLink } from "./text.js";
+import { effectiveLevel, refreshThreadOfTask, sendThreadMilestone, type ThreadOutcome } from "./thread.js";
+
+export { inertTicketTitle } from "./text.js";
 
 export const TICKET_UPDATES_PER_HOUR = 120;
 export const TICKET_UPDATES_PER_TASK = 12;
-const CLAIM_LEASE_MS = 60_000;
-const KEPT_SECONDS = 400 * 86_400;
-const TITLE_MAX = 120;
 
 const MOMENT_OF: Partial<Record<CodeMilestoneKind, TicketUpdateMoment>> = { started: "started", plan_ready: "plan_ready", pr_ready: "pr_opened", merged: "merged", closed: "closed" };
 
@@ -39,27 +44,18 @@ export interface TicketUpdatesDependencies {
   /** What a tracker call is scoped to (the install's company). */
   scope: HostScope;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
+  /**
+   * Whether more than the task's owner can see this task (the project's members, a shared task). Absent, a failure, or false: only the owner can, which is every task on a laptop. A task only its owner can see is never
+   * written above `status_only` to a tracker that cannot make an internal comment (design B5): fail closed.
+   */
+  taskShared?: ((orgId: OrgId, taskId: string) => Promise<boolean>) | undefined;
+  /** The task's page on the web, when the host has an https address for it. Absent: the thread has no "Full detail" line. */
+  taskUrl?: ((taskId: string) => string | undefined) | undefined;
+  /** The summary of the plan waiting for review, for the task log's `plan_summary` (`core/task-log`). Absent: no plan summary is logged, so none is written to a ticket. */
+  planSummaryOf?: TaskLogMilestoneDeps["planSummaryOf"];
 }
 
 type Item = Record<string, unknown>;
-const hourOf = (now: number): string => new Date(now).toISOString().slice(0, 13);
-
-/** A title made safe to post: no controls, no mention or markup characters (nobody is pinged, nothing becomes a link), one line, cut. */
-export function inertTicketTitle(title: string): string {
-  const plain = title.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/:\/\//gu, ": ").replace(/[@<>[\]()`*_~#|!]/gu, " ").replace(/\s+/gu, " ").trim();
-  const cut = [...plain].slice(0, TITLE_MAX).join("").trimEnd();
-  return cut === "" ? "(no title)" : cut;
-}
-
-/** A pull request's address when it is a plain https address (no sign-in data), else nothing: only an address Rovara can vouch for is put in a ticket. */
-function plainHttpsLink(link: string): string | undefined {
-  try {
-    const url = new URL(link);
-    return url.protocol === "https:" && url.username === "" && url.password === "" ? url.toString() : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /** The words of one update: the moment, the title, the status it moved to, the pull request's link. Nothing else. */
 export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined }): string {
@@ -72,7 +68,10 @@ export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: str
 }
 
 /** The ticket intake started this task from, verified against the intake item; undefined when the task did not start from a ticket Rovara writes to. */
-export async function originTicketOf(deps: Pick<TicketUpdatesDependencies, "store" | "now">, input: { orgId: OrgId; project: string; taskId: string; sessionId: string }): Promise<TicketRef | undefined> {
+export async function originTicketOf(
+  deps: Pick<TicketUpdatesDependencies, "store" | "now">, input: { orgId: OrgId; project: string; taskId: string; sessionId: string },
+  options: { strict?: boolean } = {},
+): Promise<TicketRef | undefined> {
   const bindings = await sessionBindingsOf(deps.store, input.orgId, input.sessionId);
   for (const binding of bindings) {
     if (binding.kind !== "tracker_item") continue;
@@ -80,6 +79,8 @@ export async function originTicketOf(deps: Pick<TicketUpdatesDependencies, "stor
     // Intake itself must have started THIS task from this ticket; a ticket bound any other way is not written to.
     if (item === undefined || item.state !== "started" || item.system !== binding.system || item.id !== binding.id) continue;
     if (item.sessionId !== input.sessionId && item.taskId !== input.taskId) continue;
+    // Above `status_only` (customer words leave) the item must name THIS task: an item that intake marked started for a session that was already bound to the ticket by hand (a duplicate, a raced start) names no task.
+    if (options.strict === true && item.taskId !== input.taskId) continue;
     return { tracker: binding.system, id: binding.id, url: item.url };
   }
   return undefined;
@@ -91,41 +92,6 @@ function claimKeyOf(milestone: CodeMilestone, moment: TicketUpdateMoment): strin
   if (moment === "plan_ready") return `plan_ready#${createHash("sha256").update(milestone.at).digest("hex").slice(0, 24)}`;
   return moment;
 }
-
-const claimKey = (taskId: string, key: string): DocumentKey => ({ pk: `DEVTASK#${taskId}`, sk: `TICKET_UPDATE#${key}` });
-
-async function claim(deps: TicketUpdatesDependencies, taskId: string, key: string): Promise<"claimed" | "done" | "busy"> {
-  const now = deps.now();
-  const written = await deps.store.put({
-    item: { ...claimKey(taskId, key), entityType: "TICKET_UPDATE", state: "sending", leaseUntil: now + CLAIM_LEASE_MS, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(now / 1000) + KEPT_SECONDS },
-    condition: when.or(when.absent(), when.and(when.eq("state", "sending"), when.lt("leaseUntil", now))),
-  });
-  if (written.applied) return "claimed";
-  const seen = await deps.store.get(claimKey(taskId, key));
-  return seen?.["state"] === "sending" ? "busy" : "done";
-}
-
-async function settle(deps: TicketUpdatesDependencies, taskId: string, key: string, outcome: string): Promise<void> {
-  await deps.store.update({ key: claimKey(taskId, key), ops: [change.set("state", "done"), change.set("outcome", outcome), change.remove("leaseUntil")] });
-}
-
-async function release(deps: TicketUpdatesDependencies, taskId: string, key: string): Promise<void> {
-  await deps.store.delete({ key: claimKey(taskId, key), condition: when.eq("state", "sending") }).catch(() => undefined);
-}
-
-/** Counts one write against a limit in one conditional update; false when the limit is used up. */
-async function countWithin(deps: TicketUpdatesDependencies, key: DocumentKey, max: number, expiresSeconds: number): Promise<boolean> {
-  return (await deps.store.update({ key, ops: [change.add("count", 1), change.set(INDEX_EXPIRY_ATTRIBUTE, expiresSeconds)], condition: when.or(when.notExists("count"), when.lt("count", max)) })).applied;
-}
-
-/** Gives one count back (a write that did not happen). Never below zero. */
-async function giveBack(deps: TicketUpdatesDependencies, key: DocumentKey): Promise<void> {
-  await deps.store.update({ key, ops: [change.add("count", -1)], condition: when.gt("count", 0) });
-}
-
-/** A refusal that will not pass by itself (the tracker's own "no"): the update is skipped, not tried again. A rate limit or a fault may pass and is thrown. */
-const isFinal = (error: unknown): boolean => error instanceof TrackerWriteRefusedError || (error instanceof AgentXError && error.statusCode < 500 && error.code !== "TOO_MANY_REQUESTS");
-const refusalOf = (error: unknown): string => (error instanceof TrackerWriteRefusedError ? error.reason : "refused");
 
 /** One milestone: the update it calls for, sent once to the ticket the task started from. Never throws for a ticket that cannot be written; throws a fault that may pass. */
 export async function sendTicketUpdate(deps: TicketUpdatesDependencies, milestone: CodeMilestone): Promise<string> {
@@ -140,11 +106,18 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
   const project = task["project"];
   const ticket = await originTicketOf(deps, { orgId, project, taskId: milestone.taskId, sessionId });
   if (ticket === undefined) return "no_ticket";
-  const { settings } = await readTicketUpdates(deps, orgId, project);
+  const { settings, at: settingsAt } = await readTicketUpdates(deps, orgId, project);
   const status = settings.changeStatus ? settings.statuses[moment] : undefined;
   if (!settings.comments && status === undefined) return "off";
   const tracker = deps.trackerFor(ticket.tracker);
   if (tracker === undefined || (tracker.comment === undefined && tracker.setStatusByName === undefined)) return "not_connected";
+  // Above `status_only` the ticket gets one thread (a root comment edited in place, and replies) from the task log instead of the five one-shot comments; the level is what this project chose, narrowed to what this tracker and this
+  // task allow (`effectiveLevel`). At `status_only` nothing below changes: it is the code that was here before the levels.
+  if (settings.comments) {
+    let level = await effectiveLevel(deps, { tracker, orgId, taskId: milestone.taskId, level: ticketUpdateLevelOf(settings) });
+    if (level !== "status_only" && await originTicketOf(deps, { orgId, project, taskId: milestone.taskId, sessionId }, { strict: true }) === undefined) level = "status_only";
+    if (level !== "status_only") return sendThreadMilestone(deps, { milestone, moment, task, ticket, tracker, orgId, project, settings, settingsAt, level, status, key: claimKeyOf(milestone, moment) });
+  }
   const key = claimKeyOf(milestone, moment);
   const claimed = await claim(deps, milestone.taskId, key);
   if (claimed === "done") return "already_sent";
@@ -197,6 +170,21 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     await release(deps, milestone.taskId, key);
     throw error;
   }
+}
+
+/**
+ * The task log gained entries that are not a milestone (an answer, a decision, a question asked): the ticket's thread is brought up to date from the log. Reads the task, the ticket it started from and the project's level
+ * afresh, so it writes nothing for a task that did not start from a ticket Rovara writes to, and nothing at `status_only` (or a level the tracker or the task does not allow).
+ */
+export function refreshTicketThread(deps: TicketUpdatesDependencies, taskId: string): Promise<ThreadOutcome | undefined> {
+  return refreshThreadOfTask(deps, {
+    taskId,
+    originTicketOf: (task) => originTicketOf(deps, task, { strict: true }),
+    levelOf: async (orgId, project) => {
+      const read = await readTicketUpdates(deps, orgId, project);
+      return { level: ticketUpdateLevelOf(read.settings), comments: read.settings.comments, since: read.at };
+    },
+  });
 }
 
 /** The handler registered once on the milestone hook (`app.milestones.register`). */

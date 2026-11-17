@@ -14,13 +14,13 @@ export interface TicketUpdatesTable {
 const defaults = (): TicketUpdatesSettings => ({ ...DEFAULT_TICKET_UPDATES, statuses: { ...DEFAULT_TICKET_UPDATES.statuses } });
 
 /** The project's settings and the revision they were read at (0: never saved, the defaults). */
-export async function readTicketUpdates(table: TicketUpdatesTable, orgId: OrgId, project: string): Promise<{ settings: TicketUpdatesSettings; revision: number; requestId?: string }> {
+export async function readTicketUpdates(table: TicketUpdatesTable, orgId: OrgId, project: string): Promise<{ settings: TicketUpdatesSettings; revision: number; requestId?: string; at?: string }> {
   const item = await table.store.get(ticketUpdatesSettingsKey(orgId, project));
   if (item === undefined || item["orgId"] !== orgId || item["project"] !== project) return { settings: defaults(), revision: 0 };
   const parsed = TicketUpdatesSettingsSchema.safeParse(item["settings"]);
   const revision = typeof item["revision"] === "number" ? item["revision"] : 0;
   // A stored item that no longer parses is read as the safe defaults (status changes off), never as "on".
-  return { settings: parsed.success ? parsed.data : defaults(), revision, ...(typeof item["requestId"] === "string" ? { requestId: item["requestId"] } : {}) };
+  return { settings: parsed.success ? parsed.data : defaults(), revision, ...(typeof item["requestId"] === "string" ? { requestId: item["requestId"] } : {}), ...(typeof item["at"] === "string" ? { at: item["at"] } : {}) };
 }
 
 /** Saves the project's settings, conditional on the revision read. The same request id again (already saved) answers what is stored. */

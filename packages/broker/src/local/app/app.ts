@@ -98,6 +98,9 @@ import { withStartFenceExtras } from "../../core/task-flow/start-fence.js";
 import { createLocalDesignReview } from "./design-review.js";
 import { createLocalChat } from "./chat.js";
 import { createLocalIntake } from "./intake.js";
+import { createTaskLogHooks } from "../../core/task-log/hooks.js";
+import { planSummarySourceOf } from "../../core/task-log/plan-summary-source.js";
+import type { PlanSummaryFacts } from "../../core/task-log/milestones.js";
 import { sessionBindingsOf } from "../../core/sessions/bindings.js";
 import { createLocalAutomation, type LocalAutomation } from "./automation.js";
 import { createLocalAfterMerge } from "./after-merge.js";
@@ -347,6 +350,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const timeline = sessionTimeline();
   // The milestone hook: rows and session lines in the change's transaction, delivered after the commit to the handlers an adapter registered (`app.milestones.register`); none by default.
   const milestones = createLocalMilestones({ store, now: () => clock().getTime(), log: (event, fields) => log({ component: "milestones", event, ...fields }) });
+  // The task log (`core/task-log`): what the answers, the questions and the decisions write in their own transactions is told, once committed, to the surfaces that draw it (the ticket's thread).
+  const taskLog = createTaskLogHooks((event, fields) => log({ component: "task_log", event, ...fields }));
+  // The plan's summary for the log is read through the decision gate, which is made after the intake it serves: bound here, filled in when the gate exists.
+  let planSummary: ((orgId: OrgId, taskId: string) => Promise<PlanSummaryFacts | undefined>) | undefined; // eslint-disable-line prefer-const -- assigned once the decision gate exists, below
 
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
   // What the model proxy meters. A call of a task is recorded in the task's cost ledger (the Metering port prices it, the ledger keeps it once), so the ledger is what the task has spent: the next step's budget, the plan page,
@@ -472,6 +479,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // The ticket a task started from: a pull request's description says which issue it fixes.
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
+    taskLog,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
     // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
     flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
@@ -491,7 +499,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   // Tickets that ask for work (the project's intake rule, the poll, the owner's list) and the write-back to the ticket a task started from. It registers its milestone handler now, before any milestone is written.
-  const intake = createLocalIntake({ registry, flow, companyId, owner, milestones, now: () => clock().getTime(), fenceKey: deriveKey(rootKey, "intake-ticket-fence"), log });
+  const intake = createLocalIntake({ registry, flow, companyId, owner, milestones, now: () => clock().getTime(), fenceKey: deriveKey(rootKey, "intake-ticket-fence"), log, taskLog, planSummaryOf: (orgId, taskId) => (planSummary === undefined ? Promise.resolve(undefined) : planSummary(orgId, taskId)) });
 
   // The design review stage (a Full task's design is read by fresh reviewers before anyone approves it). It fills `flow.deps.designReview`; with the switch off no task enters it.
   const designReview = createLocalDesignReview({
@@ -588,6 +596,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const gate = decisions.gate;
+  planSummary = planSummarySourceOf({ store, artifacts: blobs, gate });
   const designPageActions = designReview.pageActions({ gate, owner });
   const decisionActions = decisions.actions;
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
@@ -742,6 +751,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await comments.poll().catch(logFailure("local_app.comments_failed"));
     // The tickets that ask for work are read through the trackers the registry holds; a source that is not due costs nothing.
     await intake.poll().catch(logFailure("local_app.intake_failed"));
+    // A ticket thread whose root was edited a moment before something new landed is brought up to date.
+    await intake.flushThreads().catch(logFailure("local_app.ticket_threads_failed"));
   };
   // The after-merge watcher's pass: windows that ended close, and a report that could not be sent goes out again. It reads and writes nothing for a project whose own setting is off, and has its own timer: the code host is
   // asked over the network, so neither the dispatch nor the pull request reads wait for it.
