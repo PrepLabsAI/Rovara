@@ -19,8 +19,9 @@ import { secretFromSource, type Prompter, type SecretSource } from "../init/prom
 import { alertsTopicArn, ensureSubscribed, type AlertsApi } from "../setup/alerts.js";
 import { CLI_VERSION } from "../version.js";
 import type { DeployPart } from "../deploy/parameters.js";
+import { requireGatewayOffers } from "./gateway-offered.js";
 import { CONFIG_KEYS, configKey, whereText, type ConfigKey, type ModelRole } from "./keys.js";
-import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, eligibleE2EAgentModel, isKeyedModelProvider, type ModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, eligibleE2EAgentModel, isClaudeAgentModel, isKeyedModelProvider, type ModelProvider } from "@agentx/contracts";
 
 export interface ConfigServices {
   store: ParameterStore;
@@ -91,7 +92,8 @@ async function currentValue(services: ConfigServices, env: string, settings: Env
     const others = await Promise.all(target.also.map(async (each) => (await services.stacks.describe(environmentStackName(env, each.part)))?.parameters[each.parameter] ?? entry.defaultValue ?? "unknown"));
     if (others.some((other) => other !== value)) return `${[value, ...others].map((each, index) => `${each} (${[target, ...target.also!][index]!.part})`).join(", ")}; agentx config set ${entry.key} makes them the same`;
   }
-  return target.kind === "stack-parameter" ? value : `${value} (install-time default; the control plane may hold a newer setting)`;
+  if (target.kind === "stack-parameter") return entry.shown === undefined ? value : entry.shown(value);
+  return `${value} (install-time default; the control plane may hold a newer setting)`;
 }
 
 /** One stack parameter as the stack reports it now, or the key's default when the stack reports none. */
@@ -124,6 +126,20 @@ function checkE2eAgentChoice(env: string, settings: EnvironmentSettings, value: 
   if (eligibleE2EAgentModel(provider, value, settings.region) !== null) return;
   const label = isKeyedModelProvider(provider) ? KEYED_MODEL_PROVIDERS[provider].label : "Amazon Bedrock";
   throw agentXError("CONFIG_INVALID", `models.e2eAgent must be default or a model Rovara can use with ${label} in ${settings.region}; agentx --env ${env} config set models.e2eAgent default puts the recommendation back; nothing changed`);
+}
+
+/**
+ * coreEngine.modelGatewayUrl and coreEngine.agentModel work only together (core-host/gateway-model-access.ts): with one set and the other empty the core refuses work in fixed words, as
+ * with neither. Each is set on its own, so this says, before the change is shown, what the other one still needs. Names only, never a value.
+ */
+async function notePairedCoreSetting(services: ConfigServices, env: string, entry: ConfigKey, pairedKey: string, value: string): Promise<void> {
+  const paired = configKey(pairedKey);
+  if (paired.target.kind !== "stack-parameter") return;
+  const pairedValue = await stackParameterValue(services, env, paired.target, paired.defaultValue);
+  if ((value === "") === (pairedValue === "")) return;
+  services.write(value === ""
+    ? `Note: ${paired.key} is still set; with ${entry.key} empty the core engine refuses work. To turn the gateway off fully, also run agentx --env ${env} config set ${paired.key} none`
+    : `Note: ${paired.key} is not set yet; the core engine refuses work until both ${entry.key} and ${paired.key} are set. Next: agentx --env ${env} config set ${paired.key} <value>`);
 }
 
 /** FR-049: a model key passes the same one-token test call init makes, with the environment's provider. */
@@ -304,11 +320,16 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   const settings = await installed(services, env);
   const role = entry.model;
   if (entry.e2eAgentModel === true) checkE2eAgentChoice(env, settings, value);
+  // DEC 254g: a non-Claude core agent model must be one the model gateway offers now (live, fail closed); a Claude id keeps its catalog rule.
+  if (entry.gatewayOffered === true && value !== "" && !isClaudeAgentModel(value)) {
+    await requireGatewayOffers({ key: entry.key, env, value, session: await services.adminSession?.(env), fetch: services.fetch ?? fetch });
+  }
+  if (entry.corePairedWith !== undefined) await notePairedCoreSetting(services, env, entry, entry.corePairedWith, value);
   const targets = [{ part: target.part, parameter: target.parameter }, ...(target.also ?? [])];
   const currents = await Promise.all(targets.map((where) => stackParameterValue(services, env, where, entry.defaultValue)));
   if (currents.every((current) => current === value)) {
     if (role === undefined || await modelRecorded(services, env, settings, role, value)) {
-      services.write(`${entry.key} is already ${value}; nothing to change`);
+      services.write(`${entry.key} is already ${entry.shown === undefined ? value : entry.shown(value)}; nothing to change`);
       return { changed: false };
     }
     // The stack already runs this model, but an earlier set stopped before recording it.

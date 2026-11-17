@@ -24,3 +24,13 @@ it("reads one bounded regular mapping file and refuses malformed roots, oversize
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+it("accepts explicit catalog commands but never writes on discovery or an implicit mark", () => {
+  const base = ["--state-table", "State", "--signin-table", "SignIn", "--input", "mapping.json"];
+  expect(parseCoreBackfillArguments([...base, "--discover"])).toMatchObject({ action: "discover", dryRun: true });
+  expect(parseCoreBackfillArguments([...base, "--verify", "--mark", "--run-id", "run-a", "--apply"])).toMatchObject({ action: "verify", mark: true, runId: "run-a", dryRun: false });
+  expect(parseCoreBackfillArguments([...base, "--unmark", "run-a"])).toMatchObject({ action: "unmark", dryRun: true, runId: "run-a" });
+  expect(parseCoreBackfillArguments([...base, "--undo-run", "run-a"])).toMatchObject({ action: "undo-run", dryRun: true });
+  for (const flags of [["--discover", "--apply"], ["--mark"], ["--discover", "--verify"], ["--unmark"], ["--verify", "--people-check"], ["--run-id", "bad/run"], ["--run-id", "run-a", "--unmark", "run-b"]]) {
+    expect(() => parseCoreBackfillArguments([...base, ...flags])).toThrow(/^core backfill arguments refused$/);
+  }
+});

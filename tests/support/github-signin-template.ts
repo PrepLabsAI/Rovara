@@ -1,6 +1,6 @@
 // DEC 254h: GitHub sign-in's named-environment additions to the control-plane template. Each digest or snapshot test that pins the rest of the
 // template asserts these exactly, then takes them out (in place): three parameters, four variables on the sign-in function, one read of the one
-// GitHub secret, and the broker's two packed settings.
+// GitHub secret, and the broker's two packed settings; and it puts back the two broker variables moved to make room for them (CHANNEL_ADAPTERS, COMPANY_READS).
 import { expect } from "vitest";
 import { removePackedPieces, unpackedBrokerVariables } from "./broker-environment-template.js";
 
@@ -41,8 +41,18 @@ export function withoutGithubSignIn<T>(input: T, env: string): T {
     });
   }
   expect(reads).toBe(1);
-  const broker = (template.Resources[lambdaId(template, "Broker")]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  const environment = template.Resources[lambdaId(template, "Broker")]!.Properties.Environment as { Variables: Record<string, unknown> };
+  const broker = environment.Variables;
   expect(unpackedBrokerVariables(broker)).toMatchObject({ DEVELOPER_SIGNIN_GITHUB: { Ref: "DeveloperSignInGithub" }, DEVELOPER_GITHUB_SINCE: { Ref: "DeveloperGithubSince" } });
   removePackedPieces(broker, "AGENTX_SETTINGS", ["gh", "gs"]);
+  // The room GitHub sign-in made in the broker's 4 KB (tests/contract/lambda-environment-size.test.ts): the channel adapters' switch is packed (ca) and COMPANY_READS is derived
+  // by the broker, so neither is a variable of its own. Asserted exactly, then put back as the two variables they were, where they were (a function's variables keep the order
+  // the constructs added them in: CHANNEL_ADAPTERS after AGENTX_SETTINGS, COMPANY_READS after DEVELOPER_OIDC_ISSUER), so each pin taken before GitHub sign-in still holds.
+  expect(Object.keys(broker).filter((name) => name === "CHANNEL_ADAPTERS" || name === "COMPANY_READS")).toEqual([]);
+  expect(unpackedBrokerVariables(broker)).toMatchObject({ CHANNEL_ADAPTERS: { Ref: "ChannelAdapters" }, COMPANY_READS: "enabled" });
+  removePackedPieces(broker, "AGENTX_SETTINGS", ["ca"]);
+  const after: Record<string, [string, unknown]> = { AGENTX_SETTINGS: ["CHANNEL_ADAPTERS", { Ref: "ChannelAdapters" }], DEVELOPER_OIDC_ISSUER: ["COMPANY_READS", "enabled"] };
+  expect(Object.keys(after).filter((name) => name in broker)).toEqual(Object.keys(after));
+  environment.Variables = Object.fromEntries(Object.entries(broker).flatMap((entry) => (after[entry[0]] === undefined ? [entry] : [entry, after[entry[0]]!])));
   return input;
 }

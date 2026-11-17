@@ -47,6 +47,8 @@ export const AdminChangeKindSchema = z.enum([
   "register_sign_in_client", "remove_sign_in_client",
   // DEC 254a: operator invite codes for self-serve company creation, and the self-serve switch.
   "create_company_invite", "revoke_company_invite", "set_company_self_serve",
+  // DEC 254b (b): copy one company of the install's old layout into Code's company records, and its undo.
+  "import_install_company", "undo_install_company_import",
 ]);
 export type AdminChangeKind = z.infer<typeof AdminChangeKindSchema>;
 export const ConfirmationMethodSchema = z.enum(["elicitation", "slack", "cli"]);
@@ -72,6 +74,8 @@ export const AdminChangeInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("create_company_invite"), codeHash: CompanyInviteCodeHashSchema, expiresInHours: CompanyInviteExpiryHoursSchema }).strict(),
   z.object({ kind: z.literal("revoke_company_invite"), codeId: CompanyInviteCodeIdSchema }).strict(),
   z.object({ kind: z.literal("set_company_self_serve"), open: z.boolean() }).strict(),
+  z.object({ kind: z.literal("import_install_company"), companyId: OrgIdSchema }).strict(),
+  z.object({ kind: z.literal("undo_install_company_import"), companyId: OrgIdSchema }).strict(),
 ]);
 export type AdminChangeInput = z.infer<typeof AdminChangeInputSchema>;
 

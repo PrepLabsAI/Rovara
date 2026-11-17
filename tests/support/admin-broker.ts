@@ -66,6 +66,8 @@ export async function createAdminBroker(options: {
   chatgpt?: (db: FakeDynamoDb) => ChatGptConnections;
   /** Lane E2: inject the core root for broker-level route isolation checks. */
   core?: BrokerCoreRoot;
+  /** DEC 254g: the gateway's offered models for an administrator's config set (`adminOfferedModelsFromEnvironment`). */
+  coreOfferedModels?: unknown;
   /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
   realism?: FakeDynamoDbOptions["realism"];
   /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
@@ -100,6 +102,7 @@ export async function createAdminBroker(options: {
     ...(options.companyReads === undefined ? {} : { companyReads: options.companyReads }),
     ...(options.channelAdapters ? { channelAdapters: { secretPrefix: "agentx/production/", secrets: { put: vi.fn() } } } : {}),
     ...(options.chatgpt ? { chatgpt: options.chatgpt(db) } : {}),
+    ...(options.coreOfferedModels === undefined ? {} : { coreOfferedModels: options.coreOfferedModels }),
   } as never);
   return { db, handler, registry };
 }

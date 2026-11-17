@@ -4,7 +4,7 @@ import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dyn
 import { z } from "zod";
 import {
   AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, PolicyRowsSchema, POLICY_FIELDS, PROJECT_CATALOG_PK, agentXError, projectCatalogKey, companyScoped, policyFieldPageOnly,
-  createRowsPolicySource, withPolicyHookValues, type HostedPolicyHookSettings, type PolicySource, type PolicyRows, type ResolvedPolicy,
+  canonicalJson, companyLog, orgProjectCatalogKey, orgProjectCatalogPk, orgSettingsKey, createRowsPolicySource, withPolicyHookValues, type HostedPolicyHookSettings, type PolicySource, type PolicyRows, type ResolvedPolicy,
 } from "@agentx/contracts";
 import { freshStepUp } from "../core-host/step-up.js";
 import { createPolicyHookClient, policyHookValuesAsker, type PolicyHookClientOptions } from "../core/policy-hook/index.js";
@@ -231,7 +231,7 @@ async function inBatches<T, R>(items: readonly T[], size: number, work: (item: T
   return out;
 }
 
-function complianceQuery(url: URL): { limit: number; base: string | undefined; skip: number; filter: boolean } {
+function complianceQuery(url: URL, indexed: boolean, companyId: string): { limit: number; base: string | undefined; skip: number; filter: boolean } {
   const names = new Set<string>();
   for (const key of url.searchParams.keys()) {
     if ((key !== "limit" && key !== "cursor" && key !== "filter") || names.has(key)) throw invalidCompliance();
@@ -245,14 +245,28 @@ function complianceQuery(url: URL): { limit: number; base: string | undefined; s
   const cursorText = url.searchParams.get("cursor");
   let base: string | undefined; let skip = 0;
   if (cursorText !== null) {
-    const parts = /^([a-z][a-z0-9-]{0,62})?~([0-9]{1,4})$/.exec(cursorText);
-    if (parts === null || Number(parts[2]) > COMPLIANCE_SKIP_MAX) throw invalidCompliance();
-    base = parts[1]; skip = Number(parts[2]);
+    if (indexed) {
+      try {
+        if (cursorText.length > 512 || !/^c2\.[A-Za-z0-9_-]+$/.test(cursorText)) throw invalidCompliance();
+        const encoded = cursorText.slice(3), bytes = Buffer.from(encoded, "base64url");
+        if (bytes.toString("base64url") !== encoded) throw invalidCompliance();
+        const cursor = z.object({ v: z.literal(2), companyId: OrgIdSchema, after: AgentXNameSchema }).strict().parse(JSON.parse(bytes.toString("utf8")));
+        if (cursor.companyId !== companyId || complianceCursor(cursor.companyId, cursor.after) !== cursorText) throw invalidCompliance();
+        base = cursor.after;
+      } catch { throw invalidCompliance(); }
+    } else {
+      const parts = /^([a-z][a-z0-9-]{0,62})?~([0-9]{1,4})$/.exec(cursorText);
+      if (parts === null || Number(parts[2]) > COMPLIANCE_SKIP_MAX) throw invalidCompliance();
+      base = parts[1]; skip = Number(parts[2]);
+    }
   }
   const filterText = url.searchParams.get("filter");
   if (filterText !== null && filterText !== "below_company_bound") throw invalidCompliance();
   return { limit, base, skip, filter: filterText !== null };
 }
+
+const complianceCursor = (companyId: string, after: string) => "c2." + Buffer.from(canonicalJson({ v: 2, companyId, after })).toString("base64url");
+const catalogFlag = z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) });
 
 async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, url: URL) {
   const startedAt = deps.now();
@@ -271,8 +285,17 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
   } catch { throw agentXError("AUTH_REQUIRED", "company membership required"); }
   const checkedRole = OrgRoleSchema.safeParse(role);
   if (!checkedRole.success || (checkedRole.data !== "admin" && checkedRole.data !== "owner")) throw agentXError("FORBIDDEN", "company administrator required");
-  const query = complianceQuery(url);
-  if (query.base !== undefined) {
+  const flag = await client.send(new GetCommand({ TableName: deps.tableName, Key: orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX"), ConsistentRead: true })) as { Item?: unknown };
+  const indexed = flag.Item !== undefined;
+  if (indexed && !catalogFlag.safeParse(flag.Item).success) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+  const query = complianceQuery(url, indexed, companyId);
+  if (query.base !== undefined && indexed) {
+    try {
+      const own = await client.send(new GetCommand({ TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, query.base), ConsistentRead: true })) as { Item?: unknown };
+      if (own.Item === undefined) throw invalidCompliance();
+    } catch { throw invalidCompliance(); }
+  }
+  if (query.base !== undefined && !indexed) {
     const own = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
       ExpressionAttributeValues: { ":pk": `PROJECT#${query.base}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
     if (own.Items?.[0] === undefined || !recordInCompany(own.Items[0], companyId)) throw invalidCompliance();
@@ -282,38 +305,66 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
   // The scan position (`base`, `skip`) only ever names a project of this company, or counts entries; no other company's name is returned.
   const names: string[] = [];
   let base = query.base; let skip = query.skip; let toSkip = query.skip; let examined = 0; let exhausted = false;
-  let startKey: Record<string, unknown> | undefined = base === undefined ? undefined : projectCatalogKey(base);
-  while (names.length < query.limit && examined < COMPLIANCE_EXAMINE_MAX) {
+  let nextCursor: string | null;
+  if (indexed) {
+    const drift = () => {
+      companyLog(companyId, (line) => console.warn(JSON.stringify(line)))({ event: "project_catalog.index_drift" });
+      throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+    };
     const page = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-      ExpressionAttributeValues: { ":pk": PROJECT_CATALOG_PK, ":prefix": "PROJECT#" }, ConsistentRead: true,
-      Limit: toSkip > 0 ? COMPLIANCE_CATALOG_PAGE : Math.min(COMPLIANCE_CATALOG_PAGE, COMPLIANCE_EXAMINE_MAX - examined),
-      ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }) })) as { Items?: Array<{ sk?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
-    startKey = page.LastEvaluatedKey;
-    const dropped = Math.min(toSkip, (page.Items ?? []).length);
-    toSkip -= dropped;
-    const items = (page.Items ?? []).slice(dropped);
-    // A catalog name that is not a valid project name is corrupt data: stop (fixed words) rather than skip it and cut the list silently.
-    const candidates = items.map((item) => {
-      const parsed = typeof item.sk === "string" && item.sk.startsWith("PROJECT#") ? AgentXNameSchema.safeParse(item.sk.slice("PROJECT#".length)) : undefined;
-      if (parsed?.success !== true) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
-      return parsed.data;
+      ExpressionAttributeValues: { ":pk": orgProjectCatalogPk(companyId), ":prefix": "PROJECT#" }, ConsistentRead: true, Limit: query.limit,
+      ...(query.base === undefined ? {} : { ExclusiveStartKey: orgProjectCatalogKey(companyId, query.base) }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    const candidates = (page.Items ?? []).map((item) => {
+      const name = typeof item["sk"] === "string" ? AgentXNameSchema.safeParse(item["sk"].slice("PROJECT#".length)) : undefined;
+      if (name?.success !== true || item["pk"] !== orgProjectCatalogPk(companyId) || item["sk"] !== `PROJECT#${name.data}`
+        || item["entityType"] !== "PROJECT_CATALOG" || item["companyId"] !== companyId || item["name"] !== name.data
+        || !z.number().int().positive().safeParse(item["latestRevision"]).success) return drift();
+      return name.data;
     });
-    const inCompany = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async (name) => {
+    const ownership = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async (name) => {
       const latest = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
         ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
       return latest.Items?.[0] !== undefined && recordInCompany(latest.Items[0], companyId);
     });
-    let stoppedAt: number | undefined;
-    for (let index = 0; index < candidates.length; index++) {
-      examined++;
-      if (inCompany[index]) { names.push(candidates[index]!); base = candidates[index]!; skip = 0; } else skip++;
-      if (names.length === query.limit) { stoppedAt = index; break; }
+    if (ownership.some(own => !own)) drift();
+    names.push(...candidates);
+    if (page.LastEvaluatedKey !== undefined && names.length === 0) drift();
+    nextCursor = page.LastEvaluatedKey === undefined ? null : complianceCursor(companyId, names[names.length - 1]!);
+  } else {
+    let startKey: Record<string, unknown> | undefined = base === undefined ? undefined : projectCatalogKey(base);
+    while (names.length < query.limit && examined < COMPLIANCE_EXAMINE_MAX) {
+      const page = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+        ExpressionAttributeValues: { ":pk": PROJECT_CATALOG_PK, ":prefix": "PROJECT#" }, ConsistentRead: true,
+        Limit: toSkip > 0 ? COMPLIANCE_CATALOG_PAGE : Math.min(COMPLIANCE_CATALOG_PAGE, COMPLIANCE_EXAMINE_MAX - examined),
+        ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }) })) as { Items?: Array<{ sk?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
+      startKey = page.LastEvaluatedKey;
+      const dropped = Math.min(toSkip, (page.Items ?? []).length);
+      toSkip -= dropped;
+      const items = (page.Items ?? []).slice(dropped);
+      // A catalog name that is not a valid project name is corrupt data: stop (fixed words) rather than skip it and cut the list silently.
+      const candidates = items.map((item) => {
+        const parsed = typeof item.sk === "string" && item.sk.startsWith("PROJECT#") ? AgentXNameSchema.safeParse(item.sk.slice("PROJECT#".length)) : undefined;
+        if (parsed?.success !== true) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+        return parsed.data;
+      });
+      const inCompany = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async (name) => {
+        const latest = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+          ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
+        return latest.Items?.[0] !== undefined && recordInCompany(latest.Items[0], companyId);
+      });
+      let stoppedAt: number | undefined;
+      for (let index = 0; index < candidates.length; index++) {
+        examined++;
+        if (inCompany[index]) { names.push(candidates[index]!); base = candidates[index]!; skip = 0; } else skip++;
+        if (names.length === query.limit) { stoppedAt = index; break; }
+      }
+      if (startKey === undefined && (stoppedAt === undefined || stoppedAt === candidates.length - 1)) { exhausted = true; break; }
+      budget.check();
     }
-    if (startKey === undefined && (stoppedAt === undefined || stoppedAt === candidates.length - 1)) { exhausted = true; break; }
-    budget.check();
+    if (!exhausted && skip > COMPLIANCE_SKIP_MAX) throw agentXError("CONFIG_INVALID", "company read limit exceeded");
+    nextCursor = exhausted ? null : `${base ?? ""}~${skip}`;
+
   }
-  if (!exhausted && skip > COMPLIANCE_SKIP_MAX) throw agentXError("CONFIG_INVALID", "company read limit exceeded");
-  let nextCursor: string | null = exhausted ? null : `${base ?? ""}~${skip}`;
 
   // Each row is the project page's own answer, read through the same source. A row that cannot be read or answered says so; it is never defaulted or dropped. Rows start four at a
   // time and stop starting once the time is nearly used up: the page then ends early with a cursor at the last row done.
@@ -332,7 +383,7 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
   };
   const rows: Array<Awaited<ReturnType<typeof rowOf>>> = [];
   while (rows.length < names.length) {
-    if (rows.length > 0 && deps.now() - startedAt > COMPLIANCE_ROW_DEADLINE_MS) { nextCursor = `${names[rows.length - 1]!}~0`; break; }
+    if (rows.length > 0 && deps.now() - startedAt > COMPLIANCE_ROW_DEADLINE_MS) { nextCursor = indexed ? complianceCursor(companyId, names[rows.length - 1]!) : `${names[rows.length - 1]!}~0`; break; }
     rows.push(...await Promise.all(names.slice(rows.length, rows.length + COMPLIANCE_HOOK_AT_ONCE).map(rowOf)));
   }
   budget.check();
