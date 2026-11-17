@@ -43,6 +43,7 @@ import { META_PREPARE_FEATURE, metaPrepareFor } from "../meta-repo/prepare-meta.
 import { setupAgentPointerItem } from "../setup-agent/agent.js";
 import { developerIdOf } from "../sessions/create.js";
 import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
+import { setupDriftAtStart } from "../setup-agent/recheck.js";
 import type { SetupAgentLimits } from "@agentx/contracts";
 
 export interface StartResult {
@@ -165,6 +166,9 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const ownerKey = taskOwnerKey(developerId, taskId);
   const requestText = storedRequestText(request.instructions);
   const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt, ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
+  // L4-DR (DEC 254z c): the free drift check. No model runs; the base commit's setup files are compared with the snapshot saved at the setup's approval, and a change starts the project's own setup check by itself (once per
+  // commit, under the monthly cap on automatic runs). The task is not held here: only its first coding run waits for the result. A setup run (it IS the fix) is never checked; any fault is logged and the start goes on.
+  const driftItems = run?.setupAgent === undefined ? await setupDriftAtStart(deps, { project: request.project, taskId, definition: project.definition }) : [];
   // The approved test environment the task starts with, pinned in the start's own transaction: a later approval changes the NEXT task, never this one.
   const testEnvironment = asWorkflow ? await deps.testEnvironment?.forStart({ project: request.project, taskId }) : undefined;
 
@@ -241,6 +245,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     // A task that understands first starts by understanding the request, as a dispatch row like every automatic step; it runs once the preparation has ended.
     ...(understandFirst ? [dispatchRowItem(deps, taskId, 1, "UNDERSTAND", receivedAt)] : []),
     ...(extras?.items ?? []),
+    ...driftItems,
     ...(testEnvironment?.pin === undefined ? [] : [testEnvironment.pin]),
     ...(run?.setupAgent === undefined ? [] : [setupAgentPointerItem({ orgId: deps.companyId, project: request.project, taskId, requestId: request.requestId, requestedBy: developerIdOf(principal), basedOnRevision: revision, startedAt: receivedAt, limits: run.setupAgent.limits, seenTaskId: run.setupAgent.seenTaskId })]),
   ];

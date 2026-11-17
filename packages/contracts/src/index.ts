@@ -385,6 +385,8 @@ export * from "./app-design-review-company.js";
 
 // Setup and test health: setup recipes and their fingerprint (SH4).
 export * from "./setup-recipe.js";
+// L4-DR (DEC 254z c): the setup snapshot saved at approval and the drift check at task start.
+export * from "./setup-snapshot.js";
 
 // Setup and test health: the team build runner contract R3 (SH35). Contract only; no runner is built.
 export * from "./runner.js";

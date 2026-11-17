@@ -21,6 +21,7 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { readState, verifiedView, type SetupAgentDeps } from "./agent.js";
 import { buildSetupCheck, relayCheck, setupStateOfCheck, type SetupCheckMark } from "./check.js";
 import { setupPartition } from "./keys.js";
+import { snapshotItem, takeSetupSnapshot } from "./snapshot.js";
 import { refusedCommand } from "./refused-command.js";
 import { classifySetupChange, type SetupChangeRisk, type SetupRisk } from "./setup-risk.js";
 
@@ -202,6 +203,19 @@ export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "co
 
 // ---- the approval
 
+/** The snapshot of the candidate being approved (L4-DR), or undefined when the install has no code host to read it from, it cannot be read whole, or the candidate cannot be read. Never throws. */
+async function snapshotOfApproved(flow: Pick<TaskFlowDeps, "store" | "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>, row: Pick<SetupApplyRow, "project" | "candidateRevision">, at: string): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
+  try {
+    if (flow.codeHosts === undefined) return undefined;
+    const stored = await flow.store.get(projectRevisionKey(flow.companyId, row.project, row.candidateRevision));
+    const definition = ProjectDefinitionSchema.safeParse((stored as { definition?: unknown } | undefined)?.definition);
+    if (!definition.success) return undefined;
+    return await takeSetupSnapshot({ companyId: flow.companyId, codeHosts: flow.codeHosts }, { definition: definition.data, setupRevision: row.candidateRevision, at });
+  } catch {
+    return undefined;
+  }
+}
+
 /** The laptop's words when someone other than the install's owner answers. */
 export const SETUP_OWNER_ONLY = "Only the owner approves a project's setup.";
 
@@ -229,7 +243,7 @@ export async function setupCandidateRisk(store: Pick<DocumentStore, "get">, orgI
  * Approving makes the candidate the project's latest revision (the catalog row moves from the base revision to it, and the project's own setup check mark is the check that passed) in the decision's transaction;
  * rejecting removes the candidate. The approver is the owner on the page's own session (the laptop), or whoever the host's `approval` rule allows at the candidate's risk: a repository collaborator's comment is never one.
  */
-export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "store" | "now" | "companyId">; approval?: SetupProposalApproval }): DecisionSubject {
+export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "store" | "now" | "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>; approval?: SetupProposalApproval }): DecisionSubject {
   const { flow, approval } = options;
   return {
     kind: SETUP_APPLY_KIND,
@@ -263,12 +277,16 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
       const approver = approvers[0]!;
       const orgId = row.orgId;
       if (attempt.outcome === "approve") {
+        // L4-DR (DEC 254z c): what the setup was approved against, saved in the approval's own transaction (the files that decide whether it still works, by id, and the websites it allows). Read from the code host
+        // BEFORE the transaction; one that cannot be read whole saves none, and the next re-check saves the baseline instead. It never makes the approval wait on, or fail for, the host.
+        const snapshot = await snapshotOfApproved(flow, row, at);
         return {
           ops: [change.set("state", "approved"), change.set("decidedAt", at), change.set("decidedBy", approver.personId)],
           extra: [
             // The project moves to the candidate only if it is still at the revision the owner looked at.
             { kind: "update", key: orgProjectCatalogKey(orgId, row.project), ops: [change.set("latestRevision", row.candidateRevision)], condition: when.eq("latestRevision", row.baseRevision) },
             { kind: "update", key: projectMetaKey(orgId, row.project), ops: [change.set("setupCheck", { ...row.check })], condition: when.present() },
+            ...(snapshot === undefined ? [] : [snapshotItem(orgId, row.project, snapshot)]),
           ],
           result: { project: row.project, revision: row.candidateRevision },
         };

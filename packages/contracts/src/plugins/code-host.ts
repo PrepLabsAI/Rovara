@@ -420,6 +420,8 @@ export type CommitFilesInput = z.infer<typeof CommitFilesInputSchema>;
 /** `changed` is false when every file already held the content asked for. */
 export const CommitFilesResultSchema = z.object({ revision: RevisionSchema, changed: z.boolean() }).strict();
 export type CommitFilesResult = z.infer<typeof CommitFilesResultSchema>;
+/** L4-DR: the files a tree read kept, by path and content id, and whether the list is whole. */
+export interface SetupFilesRead { files: Array<{ path: string; id: string }>; complete: boolean }
 /** What a path is at a revision: a file, a directory, a symbolic link (never written to), or nothing. */
 export type PathKind = "file" | "dir" | "symlink" | "none";
 
@@ -573,6 +575,12 @@ export interface CodeHost {
    * hears of deploys by event only; a host that cannot answer THROWS (a refused read is never "no deployments").
    */
   deploymentStatuses?(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<DeploymentStatusRead>;
+  /**
+   * L4-DR (DEC 254z c, optional, add-only, read-only): the files at `revision` (a full commit id) whose path `match` accepts, each with its CONTENT ID (the host's own object id of the file; never the content), from one tree
+   * read. `complete` is false when the host cut the listing or `max` was reached: the answer is then NOT the whole set. Directories, submodules and entries of an unknown kind are never listed. A host that cannot answer THROWS
+   * (a refused read is never an empty list). The setup snapshot and the drift check read through it; a host without it leaves drift "not checked".
+   */
+  setupFileVersions?(repository: RepositoryRef, revision: string, scope: HostScope, options: { match: (path: string) => boolean; max: number; timeoutMs?: number }): Promise<SetupFilesRead>;
   listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage>;
   /**
    * The code owners of a branch, read and understood by the host itself (the owners file's syntax and its matching rules are the host's, never the core's), or undefined when the branch has none.
