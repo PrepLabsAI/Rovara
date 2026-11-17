@@ -20,6 +20,7 @@ import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
+import { isSlackChannelLinkPath, routeSlackChannelLink, type SlackChannelWiring } from "./slack-channel-link.js";
 import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js";
 import {
   AgentXNameSchema, AgentXError,
@@ -189,6 +190,8 @@ export interface DeveloperApiConfiguration {
   githubConnect?: GithubConnectWiring;
   /** Guided onboarding PR 4: Add to Slack (slack-company-install.ts). Absent (or no company layer): those routes are unknown. */
   slackInstall?: SlackInstallWiring;
+  /** Guided onboarding PR 5: a project's Slack channel (slack-channel-link.ts). Absent (or no company layer): those routes are unknown. */
+  slackChannels?: SlackChannelWiring;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
   companyEngineModel?: CompanyEngineModelWiring;
   /**
@@ -2035,6 +2038,18 @@ async function slackInstallRoute(deps: DeveloperRouteDependencies, request: Adap
   return routeSlackInstall({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, stepUp, companyId, request, url);
 }
 
+/** Guided onboarding PR 5: a project's Slack channel. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function slackChannelLinkRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.slackChannels;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  const { caller } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeSlackChannelLink({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url);
+}
+
 /** Guided onboarding PR 14: the company engine model route. Unknown, before anyone is authenticated, without the company layer or the wiring. */
 async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const wiring = deps.developer.companyEngineModel;
@@ -2051,6 +2066,7 @@ async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
+  if (isSlackChannelLinkPath(url.pathname)) return slackChannelLinkRoute(deps, request, url);
   if (isSlackInstallPath(url.pathname)) return slackInstallRoute(deps, request, url);
   if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
