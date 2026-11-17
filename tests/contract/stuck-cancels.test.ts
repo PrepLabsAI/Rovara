@@ -620,11 +620,10 @@ describe("failures", () => {
 describe("where the retry is wired", () => {
   it("only where the reconciler holds the callback signing key (named environments), as #173's backstop", () => {
     const state = { client: new FakeDynamoDb(), tableName: "state" };
-    expect(stuckCancelRetrier({ CALLBACK_SIGNING_KEY: "k".repeat(64) }, state)).toBeTypeOf("function");
-    expect(stuckCancelRetrier({}, state)).toBeUndefined();
-    expect(stuckCancelRetrier({ CALLBACK_SIGNING_KEY: "" }, state)).toBeUndefined();
-    // The broker's name no longer turns the retry on: the reconciler never invokes the broker.
-    expect(stuckCancelRetrier({ BROKER_FUNCTION_NAME: "agentx-staging-broker" }, state)).toBeUndefined();
+    // The key is the one the reconciler read from Secrets Manager; none read (the legacy reconciler, or an unreadable secret) means no retry.
+    expect(stuckCancelRetrier("k".repeat(64), state)).toBeTypeOf("function");
+    expect(stuckCancelRetrier(undefined, state)).toBeUndefined();
+    expect(stuckCancelRetrier("", state)).toBeUndefined();
   });
 });
 

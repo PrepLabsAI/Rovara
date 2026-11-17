@@ -201,7 +201,7 @@ export async function sweepUnwaitedTasks(
   return result;
 }
 
-const BACKSTOP_SETTINGS = ["SLACK_THREADS_TABLE_NAME", "SLACK_SECRET_ARN", "CALLBACK_SIGNING_KEY"] as const;
+const BACKSTOP_SETTINGS = ["SLACK_THREADS_TABLE_NAME", "SLACK_SECRET_ARN", "CALLBACK_SIGNING_KEY_SECRET_ID"] as const;
 
 /**
  * Whether the infrastructure named the threads table, the Slack secret and the signing key (named

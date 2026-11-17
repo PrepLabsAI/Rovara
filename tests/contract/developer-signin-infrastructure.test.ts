@@ -616,7 +616,8 @@ describe("task-token key and membership IAM", () => {
     // Switch-over incident 2026-11-16: re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA, as staging holds it);
     // the remainder is otherwise identical (only the resource and DependsOn order move with the new ID).
     // Core gateway settings (2026-11-17): re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker's Variables; no IAM change).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("0e2ae750ca2c9deb83b4dc7be4a5ca828ac89269e02538dc053e4a2c6c70fe90");
+    // DEC 254za: re-pinned for the callback signing key's secret (the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables, the dispatcher's conditional read; callback-signing-key-infrastructure.test.ts checks each).
+    expect(createHash("sha256").update(text).digest("hex")).toBe("94b3524b26090e106cc015f249fe68ef7a9f4636cbbc63b250c37160d6d3c672");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -693,7 +694,7 @@ describe("task key deployment boundary coverage", () => {
       "AWS::DynamoDB::Table": "dynamodb", "AWS::S3::Bucket": "s3", "AWS::S3::BucketPolicy": "s3", "AWS::SQS::Queue": "sqs", "AWS::SQS::QueuePolicy": "sqs",
       "AWS::Logs::LogGroup": "logs", "AWS::Logs::MetricFilter": "logs", "AWS::Lambda::Function": "lambda", "AWS::Lambda::Permission": "lambda",
       "AWS::Lambda::EventInvokeConfig": "lambda", "AWS::Lambda::EventSourceMapping": "lambda", "AWS::KMS::Key": "kms", "AWS::KMS::Alias": "kms",
-      "AWS::SecretsManager::Secret": "secretsmanager", "AWS::SNS::Topic": "sns", "AWS::SNS::TopicPolicy": "sns", "AWS::CloudWatch::Alarm": "cloudwatch",
+      "AWS::SecretsManager::Secret": "secretsmanager", "AWS::SecretsManager::ResourcePolicy": "secretsmanager", "AWS::SNS::Topic": "sns", "AWS::SNS::TopicPolicy": "sns", "AWS::CloudWatch::Alarm": "cloudwatch",
       "AWS::ApiGatewayV2::Api": "apigateway", "AWS::ApiGatewayV2::Integration": "apigateway", "AWS::ApiGatewayV2::Authorizer": "apigateway",
       "AWS::ApiGatewayV2::Route": "apigateway", "AWS::ApiGatewayV2::Stage": "apigateway", "AWS::Scheduler::Schedule": "scheduler", "AWS::Scheduler::ScheduleGroup": "scheduler", "AWS::StepFunctions::StateMachine": "states",
     };
@@ -1604,6 +1605,8 @@ const hostedWiringTuples: AccessTuple[] = [
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
 const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
+  // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
+  ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
 ].sort(byText);
 
 describe("broker IAM headroom", () => {

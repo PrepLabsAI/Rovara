@@ -9,6 +9,7 @@ import {
   Duration,
   Fn,
   RemovalPolicy,
+  SecretValue,
   Stack,
   type StackProps,
   Token,
@@ -107,6 +108,21 @@ export class ControlPlaneStack extends Stack {
       minLength: 32,
       description: "Random secret used to scope and authenticate worker callbacks",
     });
+    // The callback signing key as a secret, so no Lambda's environment holds it: the stack creates this secret from the NoEcho parameter's value (an upgrade passes the parameter's previous
+    // value, so the key carries over without anyone reading or printing it). Each function gets only the secret's NAME (shorter than the key, so no environment grows) and a GetSecretValue on
+    // exactly this secret's ARN. A named environment's name is under agentx/<env>/, so the operator role's secrets scope covers it, and it is not agentx/<env>/callback-signing-key, which the CLI
+    // keeps as its own copy and a stack cannot take over. Retained, as the Slack secret is: `agentx destroy` removes a retained secret under agentx/<env>/ that carries the environment's tag.
+    const callbackSigningKeySecretName = `agentx/${naming.env ?? "production"}/callback-key`;
+    const callbackSigningKeySecret = new secretsmanager.Secret(this, "CallbackSigningKeySecret", {
+      secretName: callbackSigningKeySecretName,
+      description: "The callback signing key (a copy the stack made from its CallbackSigningKey parameter); Lambdas read it by name",
+      secretStringValue: SecretValue.cfnParameter(callbackSigningKey),
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    // Who reads it: the broker, the eval tick and (named environments) the reconciler, by the secret's own resource policy, which costs no byte of the functions' role policies (the broker's has
+    // no room left: tests/contract/developer-signin-infrastructure.test.ts). The dispatcher's read is an identity statement under the core switch's condition (core-engine.ts). The one
+    // statement is added after the functions exist, at the end of this constructor's wiring.
+    const callbackSigningKeyReaders: iam.IRole[] = [];
     const adminClaim = new CfnParameter(this, "AdminClaim", {
       type: "String",
       default: "cognito:groups",
@@ -205,7 +221,7 @@ export class ControlPlaneStack extends Stack {
       OIDC_ISSUER: oidcIssuer.valueAsString,
       ADMIN_CLAIM: adminClaim.valueAsString,
       ADMIN_VALUES: adminValues.valueAsString,
-      CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      CALLBACK_SIGNING_KEY_SECRET_ID: callbackSigningKeySecretName,
       GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
       GITHUB_APP_ID: githubAppId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
@@ -241,6 +257,7 @@ export class ControlPlaneStack extends Stack {
       broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
       broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [connectorSecretsArn] }));
     }
+    callbackSigningKeyReaders.push(broker.role!);
     // A rotated OAuth refresh token is written back to its own secret. Only secrets that
     // `agentx admin credential authorize` tagged for it are writable, never other connector secrets.
     broker.addToRolePolicy(new iam.PolicyStatement({
@@ -1130,7 +1147,7 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) sessions.connectStuckCancelAlarm();
     // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
     // legacy template is unchanged.
-    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
+    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKeySecretName);
     if (naming.env !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
@@ -1219,7 +1236,7 @@ export class ControlPlaneStack extends Stack {
     const coreEngine = this.node.tryFindChild("CoreEngineJobs");
     if (naming.env !== undefined && coreEngine instanceof CoreEngine) {
       coreEngine.connectDispatcher(dispatcher, {
-        deleterArn: sessions.deleter.stateMachineArn, callbackSigningKey: callbackSigningKey.valueAsString,
+        deleterArn: sessions.deleter.stateMachineArn, callbackSigningKeySecret: { secretName: callbackSigningKeySecretName, secretArn: callbackSigningKeySecret.secretArn },
         workerSubnets: foundationParameter("Ec2WorkerSubnets"), workerLaunchTemplateId: foundationParameter("Ec2WorkerLaunchTemplateId"),
       });
     }
@@ -1235,10 +1252,19 @@ export class ControlPlaneStack extends Stack {
     const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/broker/src/aws/eval-batch-tick.ts", {
       STATE_TABLE_NAME: state.tableName,
       ARTIFACT_BUCKET_NAME: artifacts.bucketName,
-      CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      CALLBACK_SIGNING_KEY_SECRET_ID: callbackSigningKeySecretName,
       SWEBENCH_SETTINGS_PREFIX: naming.ec2.workerSettingsPrefix,
     }, Duration.seconds(90));
     state.grantReadWriteData(evalBatchTick);
+    callbackSigningKeyReaders.push(evalBatchTick.role!);
+    if (naming.env !== undefined) callbackSigningKeyReaders.push(sessions.reconciler.role!);
+    callbackSigningKeySecret.addToResourcePolicy(new iam.PolicyStatement({
+      sid: "ReadCallbackSigningKey",
+      principals: callbackSigningKeyReaders.map((role) => new iam.ArnPrincipal(role.roleArn)),
+      actions: ["secretsmanager:GetSecretValue"],
+      // In a secret's own policy, "*" is this secret.
+      resources: ["*"],
+    }));
     // A run's launch.json (evals/<runId>/) and a batch's results (evals/batches/<id>/); it reads nothing there.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: evalSettingArns }));

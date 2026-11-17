@@ -218,24 +218,25 @@ describe("the named TEST proof-only installation gate", () => {
     // Switch-over incident 2026-11-16: named and foreign re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA); only ordering moves.
     // Core gateway settings (2026-11-17): named and foreign re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker; checked in
     // core-gateway-settings.test.ts and verified: with the variable passed as before, the old pins hold); legacy unchanged.
+    // DEC 254za: all six re-pinned for the callback signing key's secret (legacy included): the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables and the dispatcher's conditional read.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "681b18a55b6798f8e3b0794ca3911695e3250c76382b674c41c99bbfaa706332",
-        withoutRoute: "9d267d3c06acdfa8710119d40709b5f64cf91b0d597c043da42736ca32a0b283",
+        withRoute: "fd809c0edb6458a4f0596007470cdea7533c9ef0b00e4e2592df991c35711488",
+        withoutRoute: "98b1dae8bdf3b8977c6e3c54a2f472b92d4c7ff73745f379f60160bd5c7cc7f1",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "8e78ff5888897e4471fa5ee6345ff3bd7478c2b24c41dcabbfccb80db7094f54",
-        withoutRoute: "3c17126d261aec2cf388250cddcafaa87ca00b684e0bff8bb85f53895a0bf766",
+        withRoute: "ca40bea2457f1604e00e16062e931b8cf50978004a72b0a108f5ddda75d42d88",
+        withoutRoute: "694d839358b5ae1ee9d653fc34970cd540c04ed4d4786f64f3f65021c70e5e64",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "c9cd4a7890c9d0502fa0df7e5e06a28f87c0dba8de4fa439db39c7099874c201",
-        withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
+        withRoute: "4f2ed4957fd06301c6f9875da12ed59f4a53c3a641be42c8728eaedfc2173e43",
+        withoutRoute: "f7dbb84a614daa78c400aa943fa7dd97ab738ae75da0a5f8013e9be15e7f157b",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
