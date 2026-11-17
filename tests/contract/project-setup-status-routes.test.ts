@@ -818,4 +818,6 @@ describe("what did not change", () => {
 // changed). Removing exactly those 10 rows still gives 805695cd...; removing instead the 9 Slack rows gives #848's approved e616631e...; removing both gives 9c594d20....
 // Batch 12 (rule D): and for #869's 6 new connected sign-in rows (/v1/dev/me/sign-ins*, /v1/dev/company/members/{personId}/sign-ins*; all added, none changed; removing exactly
 // those 6 rows still gives 0a31f2f4...).
-const EXISTING_ROUTES_DIGEST = "ef0ea58f7fbff47dd70a8b9a7ffd52b9e3ef36bc5f581d42fca73f98eb3b1749";
+// Batch 13 (rule D): and for #855's one new row (POST /v1/dev/tasks/{taskId}/answers tasks:act; added, none changed; removing exactly that row still gives ef0ea58f...).
+// The batch's other new rows are APP_ROUTES rows (test environment, wiki map, wiki reads, setup confirm/discard/decide), which this DEV_ROUTES digest does not cover.
+const EXISTING_ROUTES_DIGEST = "8e72149c128813727deb3c8af95007454d20f7fb60e4762249e438a8b497ca80";

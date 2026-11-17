@@ -83,7 +83,8 @@ const onlyId = (template: TemplateJson, prefix: string, type?: string): string =
   return found[0]!;
 };
 const variablesOf = (template: TemplateJson, id: string): Record<string, unknown> =>
-  unpackedBrokerVariables(((template.Resources[id]!.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables) ?? {});
+  // Batch 13: #863 (batch 12) keeps the broker's names in their SSM parameter, so the template is passed to unpack them.
+  unpackedBrokerVariables(((template.Resources[id]!.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables) ?? {}, template);
 
 /** Every statement of every IAM policy in the template (policy resources, managed policies and roles' inline policies), with its resource's logical ID. */
 function statements(template: TemplateJson): Array<{ policy: string; statement: Statement }> {

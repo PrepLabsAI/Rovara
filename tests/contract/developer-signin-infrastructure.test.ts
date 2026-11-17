@@ -643,7 +643,10 @@ describe("task-token key and membership IAM", () => {
     // the remainder is otherwise identical (only the resource and DependsOn order move with the new ID).
     // Core gateway settings (2026-11-17): re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker's Variables; no IAM change).
     // DEC 254za: re-pinned for the callback signing key's secret (the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables, the dispatcher's conditional read; callback-signing-key-infrastructure.test.ts checks each).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("94b3524b26090e106cc015f249fe68ef7a9f4636cbbc63b250c37160d6d3c672");
+    // Batch 13 (rule D; #886 and #906, DEC 254z-amend3 / 254zm): re-pinned for test services' control plane additions only: the TestServices and TestServiceImages parameters,
+    // td/ti packed into the broker's AGENTX_SETTINGS, the dispatcher's new AGENTX_SETTINGS (td, ti) and the session steps' ROVARA_TEST_SERVICES / ROVARA_TEST_SERVICES_HOSTED_IMAGES.
+    // Verified on this tree: with exactly those taken out, the old pin 94b3524b... holds (and #891 alone leaves it unchanged).
+    expect(createHash("sha256").update(text).digest("hex")).toBe("37199a4de27b3e49c8023d381a6adb411fdf6bc722f4619a97a60dcc27898b9c");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
