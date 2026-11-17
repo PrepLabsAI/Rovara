@@ -88,6 +88,9 @@ import { createLocalPlaybook } from "./playbook.js";
 import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
 import { createLocalWikiMap } from "./wiki-map.js";
 import { createLocalWikiBuild } from "./wiki-build.js";
+import { codeHostForRecord } from "../../plugins/routing.js";
+import { createWikiBuildStarter } from "../../core/wiki-build/starter.js";
+import { projectCitationReader, wikiBuildCallbackWiring, wikiBuildEndedHook } from "../../core/wiki-build/wiring.js";
 import { LOCAL_SECRET_ENV, createLocalConnections } from "./connections.js";
 import { createLocalBrowserEvidence, type LocalBrowserEvidence } from "./browser-evidence-settings.js";
 import { createBrowserEvidenceSignIn } from "../../core/proof/browser-evidence-sign-in.js";
@@ -624,7 +627,18 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // Wiki W0: the free file map of a project (listings through the code host; no model, nothing stored).
   const wikiMap = createLocalWikiMap({ flow: flow.deps, registry, companyId, now: () => clock().getTime(), log });
   // Wiki W4: the wiki build controls (Build, Stop, Continue, Refresh now, the agents switch, Delete wiki). The task flow's wiki build starter is the one seam left to fill (`starter`).
-  const wikiBuildControls = createLocalWikiBuild({ flow: flow.deps, wikiMap, owner, companyId, now: () => clock().getTime(), modelAccessConfigured: async () => (await chosen()) !== undefined });
+  const wikiBuildControls = createLocalWikiBuild({ flow: flow.deps, wikiMap, owner, companyId, now: () => clock().getTime(), modelAccessConfigured: async () => (await chosen()) !== undefined, starter: createWikiBuildStarter });
+  // The worker's wiki build callback (the owner's standing, the project's own code host read for the citation re-read, this install's wiki store as the page sink) and the end hook for the build record.
+  // An embedding product may supply its own (`options.wikiBuild`).
+  const wikiBuildCallback = options.wikiBuild ?? wikiBuildCallbackWiring({
+    store: flow.deps.store, companyId, now: () => clock().getTime(),
+    standing: async (personId) => ({ access: personId === owner.personId ? "manage" : "none" }),
+    readFor: (project) => projectCitationReader({
+      projects: flow.deps.projects,
+      fileAt: (repository, path, commit, read) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }).fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, read),
+    }, project),
+  });
+  flow.deps.wikiBuildEnded = wikiBuildEndedHook({ store: flow.deps.store, companyId, now: () => clock().getTime() });
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, lessons, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   // script tokens. The creator is asked of the identity port by Rovara id; the audit steps are the registry's sink's.
@@ -703,7 +717,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
   browserSuggestion.current = (project) => setupAgent.browserEvidenceSuggestion(project);
   const callbackHandler = createCallbackService({
-    flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}), ...(options.wikiBuild === undefined ? {} : { wikiBuild: options.wikiBuild }),
+    flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}), wikiBuild: wikiBuildCallback,
     // The saved sign-in is read only for a run whose recipe has one, from the company's own secret path (`browser-evidence-sign-in-callback.ts`).
     ...(browserEvidence === undefined ? {} : { browserEvidenceSignIn: browserEvidence.signInReader }),
     // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). The approval uses only the

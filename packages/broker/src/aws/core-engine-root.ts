@@ -71,6 +71,8 @@ import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
 import type { HostedWikiMapWiring } from "../core-host/wiki-map-routes.js";
+import { createWikiBuildStarter } from "../core/wiki-build/starter.js";
+import { projectCitationReader, wikiBuildCallbackWiring, wikiBuildEndedHook } from "../core/wiki-build/wiring.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
@@ -477,7 +479,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const fallback = { member: Number(env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"), organization: Number(env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20") };
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
-      }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
+      }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
+        // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
+        wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }) },
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
@@ -585,10 +589,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Wiki W0: the free file map reads the company's own code host (company-bound, listings only) and uses the setup run's live standing; no model key is involved.
           wikiMap: wikiMapWiring,
-          // Lead 4 W4: the wiki build controls. The same live standing, the same code host and the SAME file map wiring (one kept map), the install's model gateway for the run. The task flow's wiki
-          // build starter (W3b's `createWikiBuildStarter`) is the one seam left to fill (`starter`); until it is, Build says "not set up in this deployment" and the other controls work.
+          // Lead 4 W4: the wiki build controls. The same live standing, the same code host and the SAME file map wiring (one kept map), the install's model gateway for the run, and the task
+          // flow's wiki build starter (W3b).
           wikiBuild: {
             standing: setupRunStanding,
+            starter: createWikiBuildStarter,
             modelAccessConfigured: () => { try { return modelGateway() !== undefined; } catch { return false; } },
             map: wikiMapWiring,
             displayName: displayNameOf,
@@ -692,6 +697,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
           // the laptop page's only), so nothing is ever handed over.
           setupAgent: { mayStillRun: async () => false },
+          // Lead 4 W4: a hosted wiki build's callback: the requester's live standing, the project's own code host read for the citation re-read, and THIS company's wiki store as the page sink.
+          wikiBuild: wikiBuildCallbackWiring({
+            store: registry.require("storage"), companyId, now: () => now().getTime(),
+            standing: async (personId, project) => {
+              const standing = await setupRunStanding(personId, companyId, project);
+              return standing?.access === "manage" ? { access: "manage" } : standing?.access === "view" ? { access: "view" } : { access: "none" };
+            },
+            readFor: (project) => projectCitationReader({
+              projects: runtime.flow.deps.projects,
+              fileAt: (repository, path, commit, read) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }).fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, read),
+            }, project),
+          }),
         });
       })();
       found.catch(() => callbackHandlers.delete(companyId));

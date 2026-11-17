@@ -15,16 +15,11 @@ import { API_SHA, FakeStarter } from "../support/wiki-build-fixtures.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const FILES = { "src/a/one.ts": "x", "src/a/two.ts": "x", "src/a/three.ts": "x" };
-const hosts = new Map<string, FakeCodeHost>();
-const adapter = (url: string): FakeCodeHost => {
-  let host = hosts.get(url);
-  if (host === undefined) { host = new FakeCodeHost(new FakeHostModel({ url, id: "1", fullName: url, initialFiles: FILES })); hosts.set(url, host); }
-  return host;
-};
-// One registered "github" host that answers for whichever repository address the call names.
-const github = new Proxy({} as FakeCodeHost, { get: (_target, key) => (key === "kind" ? "github" : (...args: unknown[]) => (adapter((args[0] as { url: string }).url) as never as Record<string, (...a: unknown[]) => unknown>)[key as string]!(...args)) });
+const URL = "https://github.com/acme/app.git";
+const fake = new FakeCodeHost(new FakeHostModel({ url: URL, id: "1", fullName: URL, initialFiles: FILES }));
+const github = Object.assign(Object.create(fake), { kind: "github" }) as FakeCodeHost;
 const registryOf = { names: () => ["github"], get: () => github } as never;
-const projectOf = (name: string, archived = false) => ({ archived, definition: { name, revision: 1, repositories: [{ name, url: `https://github.com/acme/${name}.git`, defaultBranch: "main" }] } });
+const projectOf = (name: string, archived = false) => ({ archived, definition: { name, revision: 1, repositories: [{ name, url: URL, defaultBranch: "main" }] } });
 const PROJECTS: Record<string, ReturnType<typeof projectOf>> = { app: projectOf("app"), site: projectOf("site"), old: projectOf("old", true) };
 const owner = { principal: { roles: ["owner"], personId: "owner-1", displayName: "Owner" } } as never;
 const id = () => randomUUID();
@@ -59,7 +54,7 @@ describe("local wiki build controls", () => {
     const { store, starter, call } = setup();
     expect((await call(get(WB("app"))))!.body).toMatchObject({ status: "none", canManage: true, aiKey: "connected", agents: { on: false }, wiki: { pages: 0 } });
     const started = await call(post(WB("app"), { requestId: id() }));
-    expect(started!.status).toBe(202);
+    expect(started!.status, JSON.stringify(started!.body)).toBe(202);
     expect(started!.body).toMatchObject({ status: "running", payer: "project" });
     expect(starter.started[0]).toMatchObject({ project: "app", payer: { kind: "project", project: "app" } });
     expect(starter.started[0]!.pins).toEqual([{ repo: "app", commit: expect.stringMatching(/^[a-f0-9]{40}$/u) }]);

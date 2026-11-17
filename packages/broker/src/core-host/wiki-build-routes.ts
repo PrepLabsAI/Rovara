@@ -30,16 +30,12 @@ import {
   agentsSwitchControl, continueWikiControl, deleteWikiControl, refreshWikiControl, startWikiControl, stopWikiControl, wikiControlsView, type WikiControlAction, type WikiControlsDeps,
 } from "../core/wiki-build/controls.js";
 import type { WikiBuildStarter } from "../core/wiki-build/run.js";
+import type { WikiBuildStarterInput } from "../core/wiki-build/starter.js";
 import { ensureCoreInUse } from "./engine-stamp.js";
 import type { SetupRunBasis, SetupRunStanding } from "./setup-run-routes.js";
 import { hostOf, wikiMapServiceOf, type HostedWikiMapWiring } from "./wiki-map-routes.js";
 
-/** What the task flow's wiki build starter is made from (W3b's `createWikiBuildStarter` takes exactly this). */
-export interface WikiBuildStarterInput {
-  flow: TaskFlowDeps;
-  caller: TaskStartCaller;
-  cancel(request: { taskId: string; requestId: string }): Promise<void>;
-}
+export type { WikiBuildStarterInput };
 
 /** What the deployment wires for the wiki build controls (aws/core-engine-root.ts). */
 export interface HostedWikiBuildWiring {
