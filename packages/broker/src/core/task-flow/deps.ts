@@ -245,6 +245,11 @@ export interface TaskFlowDeps {
   taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void>;
   /** How long (seconds) a worker machine may be lost or unhealthy before the operation running on it is ended INTERRUPTED (`sweepLostRuns`). Default `RUN_LOST_GRACE_SECONDS`. */
   runLostGraceSeconds?: number;
+  /**
+   * L4-RD: told, best effort, right after a free setup re-check settled as "setup broken" (once per failure, from `advanceRecheck`). The host wires the automatic repair draft here (`core/setup-agent/repair-draft.ts`):
+   * it starts one only when upkeep is on with cap room. Never decides anything itself; a fault is logged by its kind and never reaches the caller.
+   */
+  afterSetupBroken?: (project: string, recheckKey: string) => Promise<void>;
   now?: () => Date;
   newId?: () => string;
   log?: (entry: Record<string, unknown>) => void;

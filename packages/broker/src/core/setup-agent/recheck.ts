@@ -217,7 +217,11 @@ export async function advanceRecheck(deps: TaskFlowDeps, project: string, key: s
   }
   if (health.class === "environment") {
     const done = await settled("broken", await brokenItems(deps, project, row, failedStep), failedStep);
-    if (done?.state === "broken") await markProjectBroken(deps, project, done);
+    if (done?.state === "broken") {
+      await markProjectBroken(deps, project, done);
+      // L4-RD: the host's repair draft hears about it (idempotent: one per failure), and a fault in it never reaches the re-check.
+      await (async () => deps.afterSetupBroken?.(project, done.key))().catch((error: unknown) => log(deps, { event: "setup_drift.repair_hook_failed", error: errorName(error) }));
+    }
     return done;
   }
   return settled("unclear");
