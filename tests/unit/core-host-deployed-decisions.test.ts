@@ -24,6 +24,7 @@ import { decisionCardPath, projectDecisionCards } from "../../packages/broker/sr
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { deleteInvolvedRow, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { taskIndexKey, taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import type { TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -813,5 +814,77 @@ describe("lane L11's wiring parts", () => {
     const listed = await wired.route({ method: "GET", path: "/v1/app/decisions", headers: {} }, caller);
     expect(listed?.statusCode).toBe(200);
     expect(DecisionCardsViewSchema.parse(JSON.parse(listed!.body)).cards.map((card) => card.id)).toEqual([cardOf(taskId)]);
+  });
+});
+
+// Web task channel, involved wiring: the host feeds C5's involved rows to the cards listing, so a co-owner who did not start the task sees its card. The ids are only a source: the live owner rule judges each.
+describe("the deployed decision cards fed by the involved rows (the host's own wiring)", () => {
+  async function involvedWorld() {
+    const t = await hexSetup({ people: true });
+    const taskId = await t.waitingTask(PA);
+    await t.seedPeople(taskId, [[PA, "owner"], [PB, "owner"], [PC, "commenter"], [PD, "viewer"]]);
+    const createdAt = (await t.world.store.get(taskKey(taskId)))!["createdAt"] as string;
+    const wired = (runtime: CoreRuntime) => deployedDevWiringParts({ runtime, registry: t.registry, people: t.people, decisionProofs: t.point.proofs }).decisions!;
+    const list = async (personId: string, companyId: string = ORG) => (await wired(companyId === ORG ? t.runtime : t.otherRuntime).sources.list(cardCaller(personId, companyId, { stepUp: false }))).map((item) => item.taskId);
+    const row = (personId: string, companyId: string = ORG) => ({ companyId, personId, taskId, createdAt });
+    return { ...t, taskId, list, row, createdAt };
+  }
+
+  it("lists a co-owner's card once their involved row exists, and not before", async () => {
+    const t = await involvedWorld();
+    expect(await t.list(PB)).toEqual([]);
+    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
+    expect(await t.list(PB)).toEqual([t.taskId]);
+    expect(await t.list(PA)).toEqual([t.taskId]);
+  });
+
+  it("stops listing it when the row is deleted (a removed or demoted co-owner)", async () => {
+    const t = await involvedWorld();
+    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
+    await deleteInvolvedRow({ store: t.world.store }, t.row(PB));
+    expect(await t.list(PB)).toEqual([]);
+  });
+
+  it("lists a person once even when they have a row and the task is their own", async () => {
+    const t = await involvedWorld();
+    await writeInvolvedRow({ store: t.world.store }, t.row(PA));
+    expect(await t.list(PA)).toEqual([t.taskId]);
+  });
+
+  it("judges every id by the live owner rule: a row never makes a commenter, a viewer, a denied person or a stranger an owner", async () => {
+    const t = await involvedWorld();
+    for (const who of [PC, PD, PE]) await writeInvolvedRow({ store: t.world.store }, t.row(who));
+    for (const who of [PC, PD, PE]) expect(await t.list(who), who).toEqual([]);
+  });
+
+  it("loses a co-owner at once when membership is lost, even with the row still there", async () => {
+    const t = await involvedWorld();
+    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
+    t.memberships.delete(PB);
+    expect(await t.list(PB)).toEqual([]);
+  });
+
+  it("reads only the company's own rows: a row in another company's partition shows nothing here, and the other company's own listing does not see this company's task", async () => {
+    const t = await involvedWorld();
+    await writeInvolvedRow({ store: t.world.store }, t.row(PB, OTHER));
+    expect(await t.list(PB)).toEqual([]);
+    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
+    t.memberships.set(PX, { companyId: OTHER, role: "owner" });
+    await writeInvolvedRow({ store: t.world.store }, t.row(PX, OTHER));
+    expect(await t.list(PX, OTHER)).toEqual([]);
+    expect(await t.list(PB)).toEqual([t.taskId]);
+  });
+
+  it("lists the person's own tasks only when the involved read fails (a store that throws on the involved partition)", async () => {
+    const t = await involvedWorld();
+    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
+    const original = t.runtime.flow.deps.store.query.bind(t.runtime.flow.deps.store);
+    const broken = vi.spyOn(t.runtime.flow.deps.store, "query").mockImplementation(async (request) => {
+      if (request.pk.includes("INVOLVED#")) throw new Error("involved down zzq");
+      return original(request);
+    });
+    expect(await t.list(PB)).toEqual([]);
+    expect(await t.list(PA)).toEqual([t.taskId]);
+    broken.mockRestore();
   });
 });
