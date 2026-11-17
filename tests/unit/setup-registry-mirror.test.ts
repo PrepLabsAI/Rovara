@@ -104,6 +104,9 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
       const mirror = createSetupRegistryMirror({ store: world.store, companyId: FAKE_COMPANY });
       expect(await mirror.itemsFor({ project: "payments", baseRevision: 2, candidateRevision: 3 }, "2026-11-17T00:00:00.000Z"), String(owner)).toEqual([]);
       expect([await legacyRow(world, "payments", 1), await world.store.get(projectCatalogKey("payments"))]).toEqual(before);
+      // The other company's old row may also sit at the candidate's own revision: still theirs, still not a block.
+      await world.store.put({ item: { ...projectKey("payments", 3), entityType: "PROJECT", ...(owner === undefined ? {} : { companyId: owner }), definition: JSON.parse(JSON.stringify(projectDefinition("payments", 3))) as JsonValue, runtimeBinding: {}, registeredBy: "theirs", registeredAt: "2026-11-02T00:00:00.000Z" } });
+      expect(await mirror.itemsFor({ project: "payments", baseRevision: 2, candidateRevision: 3 }, "2026-11-17T00:00:00.000Z"), `${String(owner)} at N+1`).toEqual([]);
     }
     // Positive control: the same shape with THIS company's old rows is refused (the old registry is not where the setup was made from).
     const { world } = await setupWorld({ legacy: [["payments", FAKE_COMPANY]] });
