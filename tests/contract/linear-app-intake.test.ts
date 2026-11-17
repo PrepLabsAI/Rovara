@@ -265,6 +265,13 @@ describe("connection not usable", () => {
     expect(w.intake.started).toEqual([]);
     expect(w.logs).toContainEqual({ event: "linear.intake_failed", companyId: A, project: "alpha", type: "Issue", action: "create", code: "RUNTIME_UNAVAILABLE", retry: true });
   });
+  it("Linear refusing the company token (grant revoked in Linear): logged as TRACKER_WRITE_REFUSED, not retried, nothing starts", async () => {
+    const w = await world();
+    w.linear.revokeGrantOf(WORKSPACE_A);
+    expect(await w.appHook(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }))).toEqual({ status: 200, body: { ok: true } });
+    expect(w.logs).toContainEqual({ event: "linear.intake_failed", companyId: A, project: "alpha", type: "Issue", action: "create", code: "TRACKER_WRITE_REFUSED", retry: false });
+    expect(w.intake.started).toEqual([]);
+  });
   it("an issue read whose link is in another workspace than the connection's is no issue", async () => {
     const w = await world();
     const tracker = linearCompanyTracker({ connections: w.connections, companyId: A, fetch: w.linear.fetch, workspace: "delta" });
