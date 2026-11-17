@@ -23,7 +23,8 @@ import {
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import type { TaskRecord } from "../task-flow/records.js";
-import { verifyProposalDetailed, type CitationFileReader } from "./proposal-verify.js";
+import type { CitationFileReader } from "../citations/citation-check.js";
+import { verifyProposalDetailed } from "./proposal-verify.js";
 import { setupAgentKey } from "./keys.js";
 
 /** The operation mode of a setup run's own step. */

@@ -19,6 +19,10 @@
 // (so it can be kept on the draft and not read again on every page load) is decided here too: a read that failed or ran out of time is not final; a citation that cannot be read
 // by design (no usable quote, a commit the reader cannot fetch, beyond the budget) is a final `unchecked`.
 import { FILE_PROVENANCE_KINDS, setupItemsOf, type Provenance, type SetupItem, type SetupProposal, type SetupVerification } from "@agentx/contracts";
+import {
+  CITATION_LINE_SLACK, CITATION_QUOTE_MIN_CHARS, READABLE_COMMIT, citationHolds, collapseWhitespace as collapse, readCitedFiles, untilLineOf, usableQuoteOf,
+  type CitationFileReader, type CitedFileNeed,
+} from "../citations/citation-check.js";
 
 /** `owner/name` of a repository address on any host (the first two parts of its path), lower-cased; undefined for an address that is not an https address of that shape. */
 export function repositoryFullNameOf(url: string): string | undefined {
@@ -32,45 +36,14 @@ export function repositoryFullNameOf(url: string): string | undefined {
   }
 }
 
-/** Reads a file at a commit in one of the project's repositories: undefined when the file is not there; throws when the code host cannot answer. */
-export type CitationFileReader = (repository: string, path: string, commit: string, options: { untilLine?: number; timeoutMs: number }) => Promise<string | undefined>;
-
 export const VERIFY_READS_MAX = 40;
 export const VERIFY_CONCURRENCY = 4;
 export const VERIFY_DEADLINE_MS = 20_000;
 export const VERIFY_READ_TIMEOUT_MS = 8_000;
-/** How many lines either side of the cited line the quote may be on. Models are off by a line or two; a wider window would let a quote match anywhere. */
-export const VERIFY_LINE_SLACK = 3;
-
-/** The shortest quote (whitespace collapsed) that can support a value. A one-word quote is in nearly every file. */
-export const VERIFY_QUOTE_MIN_CHARS = 8;
-
-/** The commit forms the code host reader fetches (`getFileAtCommit`): a full SHA-1 or SHA-256 hash. A citation with another form can never be read, so it is a final `unchecked`. */
-const READABLE_COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
-
-const collapse = (text: string): string => text.replace(/\s+/gu, " ").trim();
-
-/** The collapsed quote of a citation when it is long enough to show anything; undefined otherwise. */
-const usableQuoteOf = (citation: Pick<Provenance, "quote">): string | undefined => {
-  if (citation.quote === undefined) return undefined;
-  const wanted = collapse(citation.quote);
-  return [...wanted].length >= VERIFY_QUOTE_MIN_CHARS ? wanted : undefined;
-};
-
-/**
- * Whether a file's text supports a citation: the citation has a usable quote (a citation with none holds nothing), the line exists, and the quote (whitespace collapsed) is within
- * `VERIFY_LINE_SLACK` lines of it, or anywhere in the file when no line is named.
- */
-export function citationHolds(text: string, citation: Pick<Provenance, "line" | "quote">): boolean {
-  const wanted = usableQuoteOf(citation);
-  if (wanted === undefined) return false;
-  const lines = text.split(/\r\n|\r|\n/u);
-  if (citation.line !== undefined && citation.line > lines.length) return false;
-  if (citation.line === undefined) return collapse(text).includes(wanted);
-  const from = Math.max(0, citation.line - 1 - VERIFY_LINE_SLACK);
-  const window = lines.slice(from, citation.line + VERIFY_LINE_SLACK).join("\n");
-  return collapse(window).includes(wanted);
-}
+/** How many lines either side of the cited line the quote may be on: the shared citation check's window (core/citations/citation-check.ts). */
+export const VERIFY_LINE_SLACK = CITATION_LINE_SLACK;
+/** The shortest quote (whitespace collapsed) that can support a value: the shared citation check's minimum. */
+export const VERIFY_QUOTE_MIN_CHARS = CITATION_QUOTE_MIN_CHARS;
 
 const isFileCitation = (citation: Provenance): boolean => FILE_PROVENANCE_KINDS.includes(citation.kind);
 
@@ -164,7 +137,7 @@ export async function verifyProposalDetailed(
   const readable = (item: SetupItem, citation: Provenance): boolean => isCheckable(item) && isFileCitation(citation) && usableQuoteOf(citation) !== undefined && READABLE_COMMIT.test(citation.commit ?? "");
 
   // One read per (repository, commit, path), as far as the deepest line any citation needs.
-  const needs = new Map<string, { repository: string; path: string; commit: string; untilLine: number | undefined; whole: boolean }>();
+  const needs = new Map<string, CitedFileNeed>();
   const keyOf = (citation: Provenance) => `${citation.repo!}\0${citation.commit!}\0${citation.path!}`;
   for (const item of items) {
     for (const citation of item.proposed.from) {
@@ -172,37 +145,15 @@ export async function verifyProposalDetailed(
       const key = keyOf(citation);
       const entry = needs.get(key) ?? { repository: citation.repo!, path: citation.path!, commit: citation.commit!, untilLine: 0, whole: false };
       // A quote with no line needs the whole file; a line needs the text through it and the margin after.
-      if (citation.line === undefined) entry.whole = true;
-      else entry.untilLine = Math.max(entry.untilLine ?? 0, citation.line + VERIFY_LINE_SLACK + 1);
+      const until = untilLineOf(citation);
+      if (until === undefined) entry.whole = true;
+      else entry.untilLine = Math.max(entry.untilLine ?? 0, until);
       needs.set(key, entry);
     }
   }
 
-  const texts = new Map<string, { kind: "text"; text: string } | { kind: "missing" } | { kind: "unread" }>();
-  const queue = [...needs.entries()].slice(0, VERIFY_READS_MAX);
-  if (read !== undefined) {
-    let next = 0;
-    const worker = async () => {
-      for (;;) {
-        const index = next;
-        next += 1;
-        const entry = queue[index];
-        if (entry === undefined) return;
-        const remaining = deadline - now();
-        if (remaining <= 0) { texts.set(entry[0], { kind: "unread" }); continue; }
-        const [key, need] = entry;
-        try {
-          const text = await read(need.repository, need.path, need.commit, {
-            ...(need.whole ? {} : { untilLine: need.untilLine! }), timeoutMs: Math.max(1, Math.min(VERIFY_READ_TIMEOUT_MS, remaining)),
-          });
-          texts.set(key, text === undefined ? { kind: "missing" } : { kind: "text", text });
-        } catch {
-          texts.set(key, { kind: "unread" });
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(VERIFY_CONCURRENCY, queue.length) }, worker));
-  }
+  // The shared bounded reader, with this proposal's budget (no byte limits: a file is read only up to the cited line plus the margin).
+  const { texts, queued } = await readCitedFiles(read, needs, { maxFiles: VERIFY_READS_MAX, concurrency: VERIFY_CONCURRENCY, readTimeoutMs: VERIFY_READ_TIMEOUT_MS, deadline, now });
 
   const verdictOf = (item: SetupItem, citation: Provenance): Verdict => {
     // Not worth a read, by design: it can never be better than unchecked, and reading it again would change nothing.
@@ -210,7 +161,7 @@ export async function verifyProposalDetailed(
     const key = keyOf(citation);
     const found = texts.get(key);
     // Past the budget (never queued) is final too; a read that failed or ran out of time (queued) is not.
-    if (found === undefined) return queue.some(([queued]) => queued === key) ? "unread" : "skipped";
+    if (found === undefined) return queued.has(key) ? "unread" : "skipped";
     if (found.kind === "unread") return "unread";
     if (found.kind === "missing") return "fails";
     return citationHolds(found.text, citation) ? "holds" : "fails";
