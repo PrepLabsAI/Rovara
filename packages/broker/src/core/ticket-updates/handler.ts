@@ -22,7 +22,7 @@ import type { CodeMilestoneHandler } from "../milestones/milestones.js";
 import { taskKey } from "../task-flow/keys.js";
 import { sessionBindingsOf } from "../sessions/bindings.js";
 import { noteWriteAccessMissing, noteWriteAccessOk, readTicketUpdates } from "./settings.js";
-import { KEPT_SECONDS, claim, countWithin, giveBack, hourOf, isFinal, refusalOf, release, settle } from "./claims.js";
+import { KEPT_SECONDS, claim, scopeCoversCompany, countWithin, giveBack, hourOf, isFinal, refusalOf, release, settle } from "./claims.js";
 import { inertTicketTitle, plainHttpsLink } from "./text.js";
 import { effectiveLevel, refreshThreadOfTask, sendThreadMilestone, type ThreadOutcome } from "./thread.js";
 
@@ -99,7 +99,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
   if (moment === undefined) return "not_a_moment";
   const task = await deps.store.get(taskKey(milestone.taskId)) as Item | undefined;
   const taskOrg = task?.["orgId"] ?? task?.["companyId"];
-  if (task === undefined || taskOrg !== milestone.orgId || typeof task["project"] !== "string") return "no_task";
+  if (task === undefined || taskOrg !== milestone.orgId || typeof task["project"] !== "string" || !scopeCoversCompany(deps.scope, milestone.orgId)) return "no_task";
   const sessionId = typeof task["sessionId"] === "string" ? task["sessionId"] : milestone.sessionId;
   if (sessionId === undefined) return "no_session";
   const orgId = milestone.orgId;

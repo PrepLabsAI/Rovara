@@ -19,12 +19,14 @@ export interface TaskLogMilestoneDeps {
   /** The summary of the plan waiting for review for this company's task, or undefined. Absent, or a failure: the log gets no `plan_summary` (the other entries are written). */
   planSummaryOf?: ((orgId: OrgId, taskId: string) => Promise<PlanSummaryFacts | undefined>) | undefined;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
+  /** The one company this handler serves (hosted: the company whose milestones it is registered on). A milestone that names another company writes nothing. Absent: the install's one company (a laptop). */
+  companyId?: OrgId | undefined;
 }
 
 /** Writes the entries a milestone calls for. Returns the entries it made (written now or before). Never writes for a task of another company (the milestone names the company and the task's own record must agree). */
 export async function recordMilestoneInLog(deps: TaskLogMilestoneDeps, milestone: CodeMilestone): Promise<TaskLogEntry[]> {
   const status = statusEntryOf(milestone);
-  if (status === undefined) return [];
+  if (status === undefined || (deps.companyId !== undefined && milestone.orgId !== deps.companyId)) return [];
   const task = await deps.store.get(taskKey(milestone.taskId));
   if (task === undefined || (task["orgId"] ?? task["companyId"]) !== milestone.orgId) return [];
   const entries: TaskLogEntry[] = [status];

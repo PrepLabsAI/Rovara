@@ -2,12 +2,17 @@
 // did not happen) and what a tracker's refusal means. Moved out of `handler.ts` unchanged so the one-shot comments and the ticket thread (`thread.ts`) use the same code.
 import {
   AgentXError, INDEX_EXPIRY_ATTRIBUTE, TrackerWriteRefusedError, change, when,
-  type DocumentKey,
+  type DocumentKey, type HostScope, type OrgId,
 } from "@agentx/contracts";
 import type { TicketUpdatesDependencies } from "./handler.js";
 
 export const CLAIM_LEASE_MS = 60_000;
 export const KEPT_SECONDS = 400 * 86_400;
+
+/** Whether a task of this company may be written about with a scope: a handler scoped to one company (hosted: its own Linear connection) never writes for a task of another company, whatever id it is handed. */
+export function scopeCoversCompany(scope: HostScope, orgId: OrgId): boolean {
+  return !("orgId" in scope) || scope.orgId === orgId;
+}
 
 export const hourOf = (now: number): string => new Date(now).toISOString().slice(0, 13);
 
