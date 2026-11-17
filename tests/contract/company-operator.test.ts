@@ -126,8 +126,11 @@ it("only the strict member helper constructs member kinds; broker sources never 
 it("broker forwarding refuses every operator kind and admin preapprovals", async () => {
   const invoke = vi.fn(async () => ({ Payload: Buffer.from(JSON.stringify({ ok: true })) }));
   const forward = companyPreapprovalsThroughLambda(invoke);
-  const member = { kind: "company-preapprove" as const, companyId, email: "person@example.test", role: "member" as const, expiresInHours: 24, createdBy: personId };
-  expect(await forward(member)).toBe(true); expect(invoke).toHaveBeenCalledTimes(1); invoke.mockClear();
+  const member = { kind: "company-preapprove" as const, companyId, email: "person@example.test", role: "member" as const, expiresInHours: 24, createdBy: personId, inviteHash: "c".repeat(64) };
+  expect(await forward(member)).toEqual({}); expect(invoke).toHaveBeenCalledTimes(1); invoke.mockClear();
+  // DEC 254h: a pre-approval always carries its invite link's hash.
+  const { inviteHash: _hash, ...noLink } = member;
+  expect(await forward(noLink as never)).toBe(false);
   for (const kind of operatorKinds) {
     expect(await forward({ ...member, kind, role: "admin" } as never)).toBe(false);
   }

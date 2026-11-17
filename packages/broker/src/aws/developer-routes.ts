@@ -1,7 +1,7 @@
 import { slackRecordScope } from "./slack-workspace-tokens.js";
 import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
-import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, type CompanyInviteList, type CompanySelfCreateResponse } from "@agentx/contracts";
+import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
@@ -162,7 +162,8 @@ export interface DeveloperApiConfiguration {
   /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
   signInClients?: SignInClientRegistry;
   companies?: CompanyMembershipReader;
-  companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<boolean>;
+  /** False: refused or unreachable. A pre-approval's answer carries its expiry (epoch seconds), which is its invite link's (DEC 254h). */
+  companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<false | { expiresAt?: number }>;
   /** DEC 253z: `POST /v1/dev/company`'s forward to the sign-in Lambda (companySelfCreateThroughLambda). Absent: that route is unknown. */
   companySelfCreate?: (request: CompanySelfCreateRequest) => Promise<CompanySelfCreateAnswer>;
   /** DEC 254a: the install's invite codes and self-serve switch, through the sign-in Lambda (companyInvitesThroughLambda), for an install administrator's changes and list. */
@@ -455,19 +456,22 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
 
 /** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
 // Only these two company-admin operations can be built by broker code.
+// DEC 254h: a pre-approval always carries the SHA-256 of the invite link secret the route made for it; the secret never leaves the broker.
 type CompanyPreapprovalRequest =
-  | { kind: "company-preapprove"; companyId: string; email: string; role: "member"; expiresInHours: number; createdBy: string }
+  | { kind: "company-preapprove"; companyId: string; email: string; role: "member"; expiresInHours: number; createdBy: string; inviteHash: string }
   | { kind: "company-preapproval-withdraw"; companyId: string; emailHash: string; createdBy: string };
 const CompanyPreapprovalInvoke = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720), createdBy: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720), createdBy: z.string().regex(/^[a-f0-9]{64}$/), inviteHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   z.object({ kind: z.literal("company-preapproval-withdraw"), companyId: OrgIdSchema, emailHash: z.string().regex(/^[a-f0-9]{64}$/), createdBy: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
 ]);
-export function companyPreapprovalsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: CompanyPreapprovalRequest) => Promise<boolean> {
+const PreapprovalExpiry = z.number().int().positive();
+export function companyPreapprovalsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: CompanyPreapprovalRequest) => Promise<false | { expiresAt?: number }> {
   return async (request) => {
     const parsed = CompanyPreapprovalInvoke.safeParse(request);
     if (!parsed.success) return false;
-    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok === true ? true : reply.ok === false ? false : undefined, "developer.company_preapproval");
-    return answer === true;
+    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok !== true ? (reply.ok === false ? false : undefined)
+      : reply.expiresAt === undefined ? {} : PreapprovalExpiry.safeParse(reply.expiresAt).success ? { expiresAt: reply.expiresAt as number } : undefined, "developer.company_preapproval");
+    return typeof answer === "object" && answer !== null && !("ok" in answer) ? answer : false;
   };
 }
 
@@ -1761,7 +1765,11 @@ export function developerTaskRouteDependencies(
 }
 
 const CompanyInviteInput = z.object({ email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720) }).strict();
-async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+/**
+ * DEC 254h: `POST` also makes the invite link's single-use secret, bound to this company and this pre-approval, and answers it ONCE with the
+ * pre-approval's expiry; only its SHA-256 travels to the sign-in Lambda and is stored. `DELETE` withdraws the pre-approval, which ends its secret.
+ */
+async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<CompanyPreapprovalCreated | { ok: true }> {
   const notFound = () => agentXError("NOT_FOUND", "not found");
   if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
   const isPost = request.method === "POST" && url.pathname === "/v1/dev/company/preapprovals";
@@ -1780,14 +1788,21 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
   if (member.role !== "admin" && member.role !== "owner") throw notFound();
   let forwarded: CompanyPreapprovalRequest;
+  let link: { secret: string; secretHash: string } | undefined;
   if (isPost) {
     const parsed = CompanyInviteInput.safeParse(jsonBody(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "a member invitation needs an email and an expiry from 1 to 720 hours");
-    forwarded = { kind: "company-preapprove", companyId: member.companyId, ...parsed.data, createdBy: caller.developerId };
+    link = newCompanyInviteLink();
+    forwarded = { kind: "company-preapprove", companyId: member.companyId, ...parsed.data, createdBy: caller.developerId, inviteHash: link.secretHash };
   } else forwarded = { kind: "company-preapproval-withdraw", companyId: member.companyId, emailHash: hash!, createdBy: caller.developerId };
-  try { if (await deps.developer.companyPreapprovals?.(forwarded) !== true) throw notFound(); }
+  let answer: false | { expiresAt?: number } | undefined;
+  try { answer = await deps.developer.companyPreapprovals?.(forwarded); }
   catch { throw notFound(); }
-  return { ok: true };
+  if (answer === undefined || answer === false) throw notFound();
+  if (link === undefined) return { ok: true };
+  // A stored pre-approval whose expiry did not come back: its secret was stored but cannot be answered, so the inviter tries again (as for any refusal).
+  if (answer.expiresAt === undefined) throw notFound();
+  return { ok: true, invite: { secret: link.secret, expiresAt: new Date(answer.expiresAt * 1000).toISOString() } };
 }
 
 /**
