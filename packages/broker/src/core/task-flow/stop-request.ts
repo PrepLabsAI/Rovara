@@ -115,21 +115,38 @@ export async function stopTaskOnRequest(deps: TaskFlowDeps, caller: StopCaller, 
   return { task: await now(), repeated: false, nothingRunning: answer.nothingRunning, authority };
 }
 
+/** The admin route's own words for an administrator without a grant on the project (`requireAdministrator`'s missing membership), so another company's administrator reads exactly the same. */
+export const ADMIN_GRANT_MISSING = "project not found";
+
+/**
+ * The install administrator asking: their id (the grant rows' owner key) and `companyOf`, the company of their live membership as the HOST reads it from its own records (never a token, a
+ * header or a body). Undefined (no membership, a revoked one) or a read that throws is no company.
+ */
+export interface StopAdministrator { id: string; companyOf(): Promise<string | undefined> }
+
 /**
  * S2: the install administrator's cancel of a workspace (`POST /v1/admin/workspaces/{id}/cancel`) when the workspace is a core task's. The host has checked the administrator claim; `authorize`
  * is the route's own project check (an administrator grant on the task's project), asked with the project read HERE from the task this company's runtime holds, never a caller's word.
  * A workspace that is not this company's core task's answers like a missing workspace (fixed words). The stop is the core's own `cancelTask`; an audit line names the administrator.
+ * Q2: a project grant names a project by NAME only (its rows carry no company), and two companies may each have a project of that name. So the grant counts only for an administrator whose
+ * live membership is the TASK'S company (the stored task's, never the request's); another company's administrator, or one whose company can't be read, gets the missing grant's answer.
  */
-export async function stopWorkspaceAsAdministrator(deps: TaskFlowDeps, workspaceId: string, administrator: { id: string }, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }> {
+export async function stopWorkspaceAsAdministrator(deps: TaskFlowDeps, workspaceId: string, administrator: StopAdministrator, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }> {
   const location = await locateWorkspace(deps, workspaceId);
   const pointer = location === undefined ? undefined : await deps.store.get(location.taskPointerKey());
   const taskId = pointer?.["taskId"];
   const task = typeof taskId === "string" ? await readTask(deps, taskId) : undefined;
   // The task must be this company's and must hold this workspace: a pointer alone never names a task of another company.
   if (task === undefined || task.companyId !== deps.companyId || task.workspaceId !== workspaceId) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
+  if (await administratorCompany(administrator) !== task.companyId) throw agentXError("NOT_FOUND", ADMIN_GRANT_MISSING);
   await authorize(task.project);
   if (task.closedAt !== undefined) return { taskId: task.taskId, nothingRunning: true };
   await recordAudit(deps, { eventId: `task.stop_requested:${task.taskId}:admin:${newId(deps)}`, actor: { type: "person", id: administrator.id }, action: "task.stop_requested", subject: { type: "task", id: task.taskId }, details: { project: task.project, by: "install-admin" } });
   const answer = await cancelTask(deps, task.taskId);
   return { taskId: task.taskId, nothingRunning: answer.nothingRunning };
+}
+
+/** The administrator's company, or undefined when it can't be read (no cause is kept: the refusal is the same either way). */
+async function administratorCompany(administrator: StopAdministrator): Promise<string | undefined> {
+  try { return await administrator.companyOf(); } catch { return undefined; }
 }

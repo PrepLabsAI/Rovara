@@ -15014,7 +15014,7 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   // FR-015's membership check, answered FORBIDDEN (requireAdministrator's missing-membership answer
   // is NOT_FOUND, which would read as "no such task").
   const membership = await getMembership(dependencies, identity.ownerKey, task.project);
-  if (membership?.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+  if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
   return adminShareMode(
     { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
@@ -15070,7 +15070,7 @@ async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity:
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
   const membership = await getMembership(dependencies, identity.ownerKey, task.project);
-  if (membership?.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+  if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   if (method === "GET") {
     const asked = query.get("roundId") ?? task.workflow?.e2e?.qualifiedRound?.roundId;
@@ -15743,6 +15743,20 @@ export const handler: BrokerHandler = async (event, context) => {
 
 /** One broker log line writer; company-scoped events wrap it with companyLog so the helper owns companyId. */
 function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.stringify({ component: "broker", ...entry })); }
+
+/**
+ * Q2: a project grant names a project by NAME only (its rows carry no company). On an install with company sign-in (a membership reader), the grant counts for a task only when the
+ * administrator's live membership is the task's own company, read from the stored task (an old task without a company is the install's fixed company, as everywhere: `recordInCompany`).
+ * No membership, or one that can't be read, counts as another company's: the caller then gets the missing grant's answer. Without company sign-in there is one company and nothing changes.
+ */
+async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, task: DeveloperTaskRecord): Promise<boolean> {
+  // The deployment wires the reader on the developer sign-in (COMPANY_SIGNIN=enabled), as the other admin routes read it; the top-level reader is the same reader where a host sets it.
+  const companies = dependencies.developer?.companies ?? dependencies.companies;
+  if (companies === undefined) return true;
+  let companyId: string | undefined;
+  try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
+  return companyId !== undefined && recordInCompany(task, companyId);
+}
 
 /** Guided onboarding L2-1: the client create's dependencies, so tests can call it with per-company naming before any route does (PR 19 wires the route). */
 export function clientProjectDependenciesForTests(input: AwsBrokerInput): ReturnType<typeof clientProjectRouteDependencies> {

@@ -767,7 +767,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           if (error instanceof Error && error.name === "CoreEngineOffError") throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
           throw error;
         }
-        return await stopWorkspaceAsAdministrator(flow, workspaceId, administrator, authorize);
+        // Q2: the administrator's company is their live membership in the sign-in table (the reader every core caller is judged by); the core binds the grant to the task's company with it.
+        return await stopWorkspaceAsAdministrator(flow, workspaceId, { id: administrator.id, companyOf: async () => (await membershipOf(administrator.id))?.companyId }, authorize);
       },
     };
   }
