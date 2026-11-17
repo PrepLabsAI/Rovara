@@ -190,6 +190,30 @@ describe("hosted file map: who may do what", () => {
     expect((await call(get(MAP("payments")), admin)).body).toEqual({ status: "none", canManage: true });
   });
 
+  it("serves a kept map only for the branch it was read from, and makes a repository whose code host is missing unavailable, not an error", async () => {
+    const { world, person, call } = await mapWorld();
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    await call(post(MAP("payments")), admin);
+    const definition = project(FAKE_COMPANY, "payments");
+    const changed = { ...definition, revision: 2, repositories: definition.repositories.map((repo) => ({ ...repo, defaultBranch: "develop" })) };
+    await world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 2), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(changed)) as JsonValue } });
+    await world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 2 } });
+    expect((await call(get(MAP("payments")), admin)).body).toEqual({ status: "none", canManage: true });
+    // The branch the project now names does not exist at the host: the repository is unavailable in the map, the request still answers 200.
+    const made = await call(post(MAP("payments")), admin);
+    expect(made.status).toBe(200);
+    expect(made.body["map"].repositories[0].status).toBe("unavailable");
+  });
+
+  it("answers 200 with an unavailable repository when the company has no code host registered for it", async () => {
+    const { person, call, wiring } = await mapWorld();
+    (wiring.wikiMap as { hostFor: unknown }).hostFor = () => { throw new Error("no host for kind"); };
+    const made = await call(post(MAP("payments")), person("p-admin", FAKE_COMPANY, "admin"));
+    expect(made.status).toBe(200);
+    expect(made.body["map"].repositories[0]).toMatchObject({ status: "unavailable", unavailable: "Rovara could not read this repository's files just now." });
+    expect(made.raw).not.toContain("no host for kind");
+  });
+
   it("makes a map once for a button pressed twice in a row", async () => {
     const { person, call, listings } = await mapWorld();
     const admin = person("p-admin", FAKE_COMPANY, "admin");

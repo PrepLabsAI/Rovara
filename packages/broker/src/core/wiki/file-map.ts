@@ -25,6 +25,9 @@ const FIXED_PAGES = 4; // the start page and three fixed project pages (overview
 
 interface Tally { files: number; languages: Map<string, number>; areas: Map<string, number>; skipped: { generated: number; vendored: number; lockfiles: number; assets: number; secret: number }; testFolders: Set<string>; skippedFolders: Set<string> }
 
+/** A path that may be shown: one plain line within the schema's length. Anything else is counted but never named. */
+const nameable = (path: string): boolean => path.length <= 300 && !/[\p{Cc}\p{Cf}]/u.test(path);
+
 /** Counts the entries of one tree. Only directories and files that are NOT secret-shaped can reach a listed path. */
 function tally(entries: readonly TreeEntry[]): Tally {
   const out: Tally = { files: 0, languages: new Map(), areas: new Map(), skipped: { generated: 0, vendored: 0, lockfiles: 0, assets: 0, secret: 0 }, testFolders: new Set(), skippedFolders: new Set() };
@@ -33,6 +36,7 @@ function tally(entries: readonly TreeEntry[]): Tally {
       if (secretDirectory(entry.path)) continue;
       const segments = entry.path.split("/");
       const name = segments[segments.length - 1]!;
+      if (!nameable(entry.path)) continue;
       if (skippedDirectoryClass(name) !== undefined && !segments.slice(0, -1).some((s) => skippedDirectoryClass(s) !== undefined)) out.skippedFolders.add(entry.path);
       else if (isTestFolderName(name) && classifyPath(`${entry.path}/x`) === undefined) out.testFolders.add(entry.path);
       continue;
@@ -47,8 +51,9 @@ function tally(entries: readonly TreeEntry[]): Tally {
     out.files += 1;
     const language = languageOf(entry.path);
     if (language !== undefined) out.languages.set(language, (out.languages.get(language) ?? 0) + 1);
+    // A file whose folder cannot be named plainly is counted in the repository's files but belongs to no named area.
     const area = areaOf(entry.path);
-    out.areas.set(area, (out.areas.get(area) ?? 0) + 1);
+    if (nameable(area)) out.areas.set(area, (out.areas.get(area) ?? 0) + 1);
   }
   return out;
 }
@@ -100,13 +105,14 @@ async function measureActivity(host: FileMapHost, repo: FileMapRepository, commi
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < targets.length && !slowDown) {
-      if (spent >= budget) { stopped ??= "budget"; return; }
+      if (spent + 2 > budget) { stopped ??= "budget"; return; }
       if (deps.now() > until) { stopped ??= "time"; return; }
       const area = targets[cursor++]!;
-      spent += 1;
+      // Reserve the worst case (a folder with no commits costs a second request), so the requests made never exceed the budget; the unused one is given back below.
+      spent += 2;
       try {
         const read = await host.commitActivity!({ url: repo.url }, commit, deps.scope, { since, path: area.path, cap: 100, timeoutMs: READ_TIMEOUT_MS });
-        if (read.count === 0) spent += 1;
+        if (read.count > 0) spent -= 1;
         area.commits = read.count;
         if (read.capped) area.commitsCapped = true;
         if (read.latestAt !== undefined) area.lastChangeAt = read.latestAt;
@@ -128,6 +134,12 @@ function rank(areas: WikiMapArea[]): void {
   const measured = areas.filter((area) => area.commits !== undefined).sort((a, b) => b.commits! - a.commits! || b.files - a.files || a.path.localeCompare(b.path));
   for (const [index, area] of measured.entries()) area.rank = index + 1;
 }
+
+/** What stands in for a code host that is not registered: every read of it fails, so its repository is `unavailable` in fixed words. */
+export const unregisteredHost: FileMapHost = {
+  baseBranchHead: async () => { throw new Error("no code host"); },
+  repositoryTree: async () => { throw new Error("no code host"); },
+};
 
 /** The map of one repository. Never throws: a repository that cannot be read is `unavailable` in fixed words. */
 export async function mapRepository(repo: FileMapRepository, deps: FileMapDeps, until: number, activityBudget: number): Promise<WikiMapRepo> {
@@ -188,6 +200,9 @@ function unavailableFor(error: unknown): string {
   return hostRateLimitRetryAt(error) !== undefined ? "The code host asked Rovara to slow down. Try again in a few minutes." : WIKI_MAP_REPO_UNAVAILABLE;
 }
 
+/** A chip label is one plain line of at most 200 characters. */
+const labelOf = (text: string): string => (text.length <= 200 ? text : `${text.slice(0, 199)}…`);
+
 const chipId = (kind: string, repo: string, path: string): string => `${kind}-${createHash("sha256").update(`${repo}\n${path}`).digest("hex").slice(0, 16)}`;
 
 /** The chips under "Tell Rovara what matters": the busiest areas ("write these first?"), big areas nobody touched in the window ("skip?"), and generated or vendored folders ("skip?", on by default). */
@@ -196,20 +211,20 @@ export function chipsOf(repositories: readonly WikiMapRepo[]): WikiMapChip[] {
   for (const repo of repositories) {
     if (repo.status === "unavailable") continue;
     const busiest = repo.areas.filter((area) => area.kind === "source" && area.rank !== undefined && (area.commits ?? 0) > 0).sort((a, b) => a.rank! - b.rank!).slice(0, 3);
-    for (const area of busiest) chips.push({ id: chipId("write_first", repo.name, area.path), kind: "write_first", repo: repo.name, path: area.path, label: `Write these first? ${repo.name}/${area.path}`, defaultOn: false });
+    for (const area of busiest) chips.push({ id: chipId("write_first", repo.name, area.path), kind: "write_first", repo: repo.name, path: area.path, label: labelOf(`Write these first? ${repo.name}/${area.path}`), defaultOn: false });
     const old = repo.areas.filter((area) => area.kind === "source" && area.path !== "." && area.commits === 0 && area.lastChangeAt !== undefined).sort((a, b) => b.files - a.files || a.path.localeCompare(b.path)).slice(0, 3);
-    for (const area of old) chips.push({ id: chipId("skip_old", repo.name, area.path), kind: "skip_old", repo: repo.name, path: area.path, label: `Skip? ${repo.name}/${area.path} (no changes in ${String(WIKI_MAP_ACTIVITY_DAYS)} days)`, defaultOn: false });
-    for (const folder of repo.skippedFolders.slice(0, 5)) chips.push({ id: chipId("skip_generated", repo.name, folder), kind: "skip_generated", repo: repo.name, path: folder, label: `Skip? ${repo.name}/${folder} (generated or vendored)`, defaultOn: true });
+    for (const area of old) chips.push({ id: chipId("skip_old", repo.name, area.path), kind: "skip_old", repo: repo.name, path: area.path, label: labelOf(`Skip? ${repo.name}/${area.path} (no changes in ${String(WIKI_MAP_ACTIVITY_DAYS)} days)`), defaultOn: false });
+    for (const folder of repo.skippedFolders.slice(0, 5)) chips.push({ id: chipId("skip_generated", repo.name, folder), kind: "skip_generated", repo: repo.name, path: folder, label: labelOf(`Skip? ${repo.name}/${folder} (generated or vendored)`), defaultOn: true });
   }
   return chips;
 }
 
 /** Pages a build would write: a start page, one per repository, the module pages, one for how the repositories connect (two or more), and three fixed project pages. Capped at the project limit. */
-export function forecastOf(repositories: readonly WikiMapRepo[]): WikiFileMap["forecast"] {
+export function forecastOf(repositories: readonly WikiMapRepo[], omitted = 0): WikiFileMap["forecast"] {
   const read = repositories.filter((repo) => repo.status !== "unavailable");
   const modules = read.reduce((sum, repo) => sum + repo.pages.modules, 0);
   const raw = 1 + read.length + modules + (read.length > 1 ? 1 : 0) + (FIXED_PAGES - 1);
-  return { repositories: read.length, files: read.reduce((sum, repo) => sum + repo.files, 0), pages: Math.min(raw, WIKI_MAP_LIMITS.pagesPerProject), pagesCapped: raw > WIKI_MAP_LIMITS.pagesPerProject, price: "not_priced_yet" };
+  return { repositories: read.length, files: read.reduce((sum, repo) => sum + repo.files, 0), pages: Math.min(raw, WIKI_MAP_LIMITS.pagesPerProject), pagesCapped: raw > WIKI_MAP_LIMITS.pagesPerProject, complete: omitted === 0 && repositories.every((repo) => repo.status === "ok"), price: "not_priced_yet" };
 }
 
 /** The file map of a whole project. At most `WIKI_MAP_LIMITS.repositories` repositories are read; the commit-count budget is shared out evenly. Never throws for a repository's own failure. */
@@ -227,8 +242,8 @@ export async function computeWikiFileMap(input: { project: string; repositories:
   const omitted = Math.max(0, input.repositories.length - picked.length);
   return {
     version: 1, project: input.project, computedAt: new Date(deps.now()).toISOString(), repositories,
-    complete: omitted === 0 && repositories.every((repo) => repo.status === "ok"), repositoriesOmitted: omitted,
-    chips: chipsOf(repositories), forecast: forecastOf(repositories),
+    complete: omitted === 0 && repositories.every((repo) => repo.status === "ok" && repo.activity.status === "ok"), repositoriesOmitted: omitted,
+    chips: chipsOf(repositories), forecast: forecastOf(repositories, omitted),
     limits: { activityDays: WIKI_MAP_ACTIVITY_DAYS, modulePagesPerRepository: WIKI_MAP_LIMITS.modulePagesPerRepository, pagesPerProject: WIKI_MAP_LIMITS.pagesPerProject, areasPerRepository: WIKI_MAP_LIMITS.areasPerRepository },
   };
 }

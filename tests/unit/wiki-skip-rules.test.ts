@@ -5,7 +5,7 @@ describe("wiki file map: what is skipped", () => {
   it.each([
     ".env", ".env.local", ".env.production", "app/.env", "config/.ENV", "deploy/server.pem", "keys/id_rsa", "keys/id_ed25519", "a/b/private.key", "store.p12", "x/cert.pfx", "release.jks", "debug.keystore",
     "infra/terraform.tfstate", "infra/prod.tfvars", ".npmrc", ".netrc", ".pypirc", "svc/service-account-prod.json", "app/credentials.json", "app/secrets.yml", "app/my-secret-notes.txt", ".aws/config",
-    "secrets/db.txt", "app/.ssh/known_hosts", "a/b/.secrets/x.json", ".git-credentials", "AuthKey_ABC.p8",
+    "secrets/db.txt", "prod-secrets/x.ts", "secrets_prod/x.ts", "credentials/x.ts", ".env/x.ts", "private-keys/x.ts", "keys/x.ts", "a/Secrets/x.ts", "app/.ssh/known_hosts", "a/b/.secrets/x.json", ".git-credentials", "AuthKey_ABC.p8",
   ])("calls %s secret-shaped", (path) => { expect(classifyPath(path)).toBe("secret"); });
 
   it.each(["src/environment.ts", "docs/env-vars.md", "src/secretary.ts", "src/keyboard.ts", "src/monkey.ts"])("does not call %s secret-shaped", (path) => { expect(classifyPath(path)).not.toBe("secret"); });

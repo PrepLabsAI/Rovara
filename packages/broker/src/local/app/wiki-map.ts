@@ -4,11 +4,11 @@
 //   POST /v1/app/projects/{project}/wiki-map   make it now: the project's repositories read through the code host the registry holds; no model, no key, nothing spent or stored
 //
 // Who: the owner of this install, on the API session. A script token never reaches these routes (the setup page's rule). A project that does not exist answers `PROJECT_NOT_FOUND`.
-import { AgentXError, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type OrgId } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type OrgId, type PluginKind } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
-import type { FileMapRepository } from "../../core/wiki/file-map.js";
-import { createWikiMapService } from "../../core/wiki/map-service.js";
+import { unregisteredHost, type FileMapRepository } from "../../core/wiki/file-map.js";
+import { createWikiMapService, repositoryKeyOf } from "../../core/wiki/map-service.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
 
 const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/wiki-map$/u;
@@ -27,6 +27,10 @@ export interface LocalWikiMap { routes(request: BrokerRequest, caller: TaskCalle
 export function createLocalWikiMap(options: LocalWikiMapOptions): LocalWikiMap {
   const companyId = options.companyId ?? IMPLICIT_COMPANY_ID;
   const service = createWikiMapService({ now: options.now, log: options.log });
+  // A repository whose code host is not registered is unavailable in the map (fixed words), never a failure of the whole request.
+  const hostOf = (repository: { host?: { kind: PluginKind } | undefined }): FileMapRepository["host"] => {
+    try { return codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }); } catch { return unregisteredHost; }
+  };
   return {
     async routes(request, caller) {
       const match = ROUTE.exec(request.path.split("?")[0] ?? request.path);
@@ -38,12 +42,12 @@ export function createLocalWikiMap(options: LocalWikiMapOptions): LocalWikiMap {
         if (latest === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
         const repositories = latest.definition.repositories;
         if (request.method === "GET") {
-          const map = service.read(companyId, project, repositories.map((repository) => repository.url));
+          const map = service.read(companyId, project, repositories.map(repositoryKeyOf));
           return json(200, map === undefined ? { status: "none", canManage: true } : { status: "ready", canManage: true, map });
         }
         const targets: FileMapRepository[] = repositories.map((repository) => ({
           name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch,
-          host: codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }),
+          host: hostOf(repository),
         }));
         const map = await service.make(companyId, project, targets, { orgId: companyId });
         return json(200, { status: "ready", canManage: true, map });

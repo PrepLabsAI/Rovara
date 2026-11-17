@@ -5,7 +5,7 @@
 
 export type PathClass = "secret" | "vendored" | "generated" | "lockfile" | "asset";
 
-const SECRET_DIRS = /^(?:\.?secrets?|\.ssh|\.aws|\.gnupg|\.kube|\.docker)$/iu;
+const SECRET_DIRS = /^(?:\.?secrets?|\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.?credentials?|\.env|private[-_]?keys?|keys|certs?|certificates)$/iu;
 const SECRET_FILE = new RegExp([
   String.raw`^\.env(?:\..*)?$`, String.raw`^.*\.env$`,
   String.raw`^.*\.(?:pem|key|p12|pfx|jks|keystore|kdbx|p8|ppk|tfstate|tfvars|gpg|asc)$`,
@@ -25,7 +25,8 @@ const ASSET_FILE = /\.(?:png|jpe?g|gif|webp|ico|bmp|tiff?|svgz?|avif|heic|woff2?
 
 /** Whether one path segment (a folder or file name) looks like a secret. */
 function secretShaped(name: string, isDirectory: boolean): boolean {
-  if (isDirectory) return SECRET_DIRS.test(name);
+  // A folder is held to the same rules as a file, plus its own list: `prod-secrets/`, `secrets_prod/`, `.env/`, `private-keys/` are as secret-shaped as a file of that name.
+  if (isDirectory) return SECRET_DIRS.test(name) || SECRET_WORD.test(name) || SECRET_FILE.test(name);
   return SECRET_FILE.test(name) || SECRET_WORD.test(name);
 }
 

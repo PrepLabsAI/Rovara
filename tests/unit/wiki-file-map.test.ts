@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HostRateLimitError, WikiFileMapSchema, WIKI_MAP_LIMITS, type CodeHost, type HostScope } from "@agentx/contracts";
+import { HostRateLimitError, WikiFileMapSchema, WIKI_MAP_LIMITS, type HostScope } from "@agentx/contracts";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { computeWikiFileMap, mapRepository, WIKI_MAP_NO_LISTING, WIKI_MAP_REPO_UNAVAILABLE, type FileMapHost, type FileMapRepository } from "../../packages/broker/src/core/wiki/file-map.js";
@@ -21,12 +21,13 @@ function counted(host: FileMapHost) {
   const calls = { tree: 0, dir: 0, activity: 0 };
   const wrapped: FileMapHost = {
     baseBranchHead: (...args) => host.baseBranchHead(...args),
-    repositoryTree: host.repositoryTree === undefined ? undefined : (...args) => { calls.tree += 1; return host.repositoryTree!(...args); },
-    directoryEntries: host.directoryEntries === undefined ? undefined : (...args) => { calls.dir += 1; return host.directoryEntries!(...args); },
-    commitActivity: host.commitActivity === undefined ? undefined : (...args) => { calls.activity += 1; return host.commitActivity!(...args); },
+    ...(host.repositoryTree === undefined ? {} : { repositoryTree: (...args: Parameters<NonNullable<FileMapHost["repositoryTree"]>>) => { calls.tree += 1; return host.repositoryTree!(...args); } }),
+    ...(host.directoryEntries === undefined ? {} : { directoryEntries: (...args: Parameters<NonNullable<FileMapHost["directoryEntries"]>>) => { calls.dir += 1; return host.directoryEntries!(...args); } }),
+    ...(host.commitActivity === undefined ? {} : { commitActivity: (...args: Parameters<NonNullable<FileMapHost["commitActivity"]>>) => { calls.activity += 1; return host.commitActivity!(...args); } }),
   };
   return { wrapped, calls };
 }
+const without = (host: FileMapHost, key: "repositoryTree" | "directoryEntries" | "commitActivity"): FileMapHost => { const copy = { ...host }; delete copy[key]; return copy; };
 const SAMPLE = {
   "README.md": "# hi", "package.json": "{}", "package-lock.json": "{}", "src/a/one.ts": "x", "src/a/two.ts": "x", "src/a/three.ts": "x", "src/b/index.ts": "x", "src/b/b.ts": "x", "src/b/c.ts": "x",
   "tests/a.test.ts": "x", "docs/guide.md": "x", "web/app.py": "x", "web/b.py": "x", "web/c.py": "x", "vendor/lib/x.php": "x", "node_modules/p/i.js": "x", "dist/main.js": "x", "assets/logo.png": "x",
@@ -110,7 +111,7 @@ describe("wiki file map: one repository", () => {
     const w = world(SAMPLE);
     w.model.incompleteTrees.add(w.model.headOf("main"));
     const { wrapped } = counted(w.host);
-    const map = await mapRepository(w.repo({ host: { ...wrapped, directoryEntries: undefined } }), deps, NOW + 60_000, 100);
+    const map = await mapRepository(w.repo({ host: without(wrapped, "directoryEntries") }), deps, NOW + 60_000, 100);
     expect(map.status).toBe("partial");
     expect(map.partial).toContain("partial: the code host cut its file list and cannot list folders");
   });
@@ -129,7 +130,7 @@ describe("wiki file map: one repository", () => {
     const map = await mapRepository(w.repo({ host: failing }), deps, NOW + 60_000, 100);
     expect(map).toMatchObject({ status: "unavailable", unavailable: WIKI_MAP_REPO_UNAVAILABLE, files: 0 });
     expect(JSON.stringify(map)).not.toContain("SECRET");
-    const noListing = await mapRepository(w.repo({ host: { ...counted(w.host).wrapped, repositoryTree: undefined } }), deps, NOW + 60_000, 100);
+    const noListing = await mapRepository(w.repo({ host: without(counted(w.host).wrapped, "repositoryTree") }), deps, NOW + 60_000, 100);
     expect(noListing.unavailable).toBe(WIKI_MAP_NO_LISTING);
   });
 
@@ -160,7 +161,7 @@ describe("wiki file map: one repository", () => {
     const w1 = world(SAMPLE, "one");
     const w2 = world({ "src/x/a.ts": "x", "src/x/b.ts": "x", "src/x/c.ts": "x" }, "two");
     const single = await computeWikiFileMap({ project: "p", repositories: [w1.repo()] }, deps);
-    expect(single.forecast).toEqual({ repositories: 1, files: SAMPLE_COUNTED, pages: 1 + 1 + 3 + 0 + 3, pagesCapped: false, price: "not_priced_yet" });
+    expect(single.forecast).toEqual({ repositories: 1, files: SAMPLE_COUNTED, pages: 1 + 1 + 3 + 0 + 3, pagesCapped: false, complete: true, price: "not_priced_yet" });
     const two = await computeWikiFileMap({ project: "p", repositories: [w1.repo({ name: "one" }), w2.repo({ name: "two" })] }, deps);
     expect(two.forecast.pages).toBe(1 + 2 + 4 + 1 + 3);
     const many: Record<string, string> = {};
@@ -191,11 +192,67 @@ describe("wiki file map: one repository", () => {
   it("shares the commit-count budget across repositories", async () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 30; i += 1) for (const f of ["a", "b", "c"]) files[`m${String(i)}/${f}.ts`] = "x";
-    const repos = Array.from({ length: 4 }, (_, i) => world(files, `r${String(i)}`).repo({ name: `r${String(i)}` }));
+    const repos = Array.from({ length: 8 }, (_, i) => world(files, `r${String(i)}`).repo({ name: `r${String(i)}` }));
     const { wrapped, calls } = counted(repos[0]!.host);
-    await computeWikiFileMap({ project: "p", repositories: repos.map((r) => ({ ...r, host: wrapped })) }, deps);
-    // 30 areas x 4 repos would be 120 calls; each repo gets 160 / 4 = 40 requests, and each 0-commit area costs 2.
-    expect(calls.activity).toBeLessThanOrEqual(WIKI_MAP_LIMITS.activityRequests);
+    const map = await computeWikiFileMap({ project: "p", repositories: repos.map((r) => ({ ...r, host: wrapped })) }, deps);
+    // 30 source folders x 8 repositories would be 240 calls (each folder with no commit costs two requests): each repository gets 160 / 8 = 20 requests, so it measures about 10 folders and says partial.
+    expect(calls.activity).toBeLessThanOrEqual(8 * 10);
+    expect(map.repositories.every((repo) => repo.activity.status === "partial")).toBe(true);
+    expect(map.complete).toBe(false);
+  });
+
+  it("never names a folder that looks secret, whatever it is called, and does not walk into it", async () => {
+    const names = ["prod-secrets", "secrets_prod", "credentials", ".env", "private-keys", "keys", "my.secret", "Secrets"];
+    const files: Record<string, string> = { "src/a/one.ts": "x", "src/a/two.ts": "x", "src/a/three.ts": "x" };
+    for (const name of names) for (const f of ["a.ts", "b.ts", "c.ts"]) files[`${name}/${f}`] = "x";
+    const w = world(files);
+    for (const cut of [false, true]) {
+      if (cut) w.model.incompleteTrees.add(w.model.headOf("main"));
+      const dirs: string[] = [];
+      const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries!(...args); } };
+      const map = await computeWikiFileMap({ project: "p", repositories: [w.repo({ host })] }, deps);
+      const text = JSON.stringify(map).toLowerCase();
+      for (const name of names) expect(text, `${name} cut=${String(cut)}`).not.toContain(name.toLowerCase());
+      expect(map.repositories[0]!.skipped.secret).toBe(cut ? 0 : names.length * 3);
+      for (const dir of dirs) expect(names.map((n) => n.toLowerCase())).not.toContain(dir.toLowerCase());
+    }
+  });
+
+  it("does not walk into vendored, generated or secret folders after a cut tree (they are named, not read)", async () => {
+    const w = world({ "src/a.ts": "x", "node_modules/p/i.js": "x", "vendor/x/y.php": "x", "dist/main.js": "x" });
+    w.model.incompleteTrees.add(w.model.headOf("main"));
+    const dirs: string[] = [];
+    const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries!(...args); } };
+    const map = await mapRepository(w.repo({ host }), deps, NOW + 60_000, 100);
+    expect(dirs.sort()).toEqual(["", "src"]);
+    expect(map.skippedFolders).toEqual(["dist", "node_modules", "vendor"]);
+  });
+
+  it("stops the folder walk when time is up and says partial", async () => {
+    const w = world({ "a/x.ts": "x", "b/x.ts": "x", "c/x.ts": "x" });
+    w.model.incompleteTrees.add(w.model.headOf("main"));
+    let clock = NOW;
+    const map = await mapRepository(w.repo(), { scope, now: () => (clock += 10_000) }, NOW + 25_000, 100);
+    expect(map.status === "partial" || map.status === "unavailable").toBe(true);
+  });
+
+  it("counts, but never names, a folder whose name is not one plain line", async () => {
+    const odd = `bad\nfolder`;
+    const long = "l".repeat(310);
+    const w = world({ [`${odd}/a.ts`]: "x", [`${long}/a.ts`]: "x", "ok/a.ts": "x", "ok/b.ts": "x", "ok/c.ts": "x" });
+    const map = await computeWikiFileMap({ project: "p", repositories: [w.repo()] }, deps);
+    expect(WikiFileMapSchema.safeParse(map).success).toBe(true);
+    expect(map.repositories[0]!.files).toBe(5);
+    expect(map.repositories[0]!.areas.map((a) => a.path)).toEqual(["ok"]);
+    expect(JSON.stringify(map)).not.toContain("bad");
+  });
+
+  it("flags the page count as not whole when a repository is unavailable, and the map as not complete when activity is partial", async () => {
+    const good = world(SAMPLE);
+    const broken: FileMapHost = { ...counted(good.host).wrapped, repositoryTree: async () => { throw new Error("x"); } };
+    const map = await computeWikiFileMap({ project: "p", repositories: [good.repo({ name: "one" }), good.repo({ name: "two", host: broken })] }, deps);
+    expect(map.forecast).toMatchObject({ repositories: 1, complete: false });
+    expect(map.complete).toBe(false);
   });
 
   it("answers in the contract's own shape, with no dollar field", async () => {
@@ -209,7 +266,6 @@ describe("wiki file map: one repository", () => {
 
 // Counted files of SAMPLE: README.md, package.json, src/a x3, src/b x3, tests/a.test.ts, docs/guide.md, web x3 = 13.
 const SAMPLE_COUNTED = 13;
-void (null as unknown as CodeHost);
 
 describe("wiki file map contract", () => {
   it("refuses a map that is partial without saying so, and a whole one that claims to be partial", async () => {

@@ -89,7 +89,7 @@ export const WikiFileMapSchema = z.object({
   /** An ISO time. */
   computedAt: z.string().max(40),
   repositories: z.array(WikiMapRepoSchema).max(WIKI_MAP_LIMITS.repositories),
-  /** False when any repository is partial or unavailable, or the project has more repositories than `limits.repositories`. */
+  /** False when any repository is partial or unavailable, any activity ranking is partial or missing, or the project has more repositories than `limits.repositories`. */
   complete: z.boolean(),
   /** Set when the project has more repositories than were mapped. */
   repositoriesOmitted: count,
@@ -100,6 +100,8 @@ export const WikiFileMapSchema = z.object({
     /** Pages a build would write: a start page, the repository pages, module pages (capped per repository and per project), a cross-repository page when there are two or more repositories, and three fixed project pages. */
     pages: count,
     pagesCapped: z.boolean(),
+    /** False when the page count rests on a map that is not whole (a repository partial, unavailable or left out): the real count may be higher. */
+    complete: z.boolean(),
     /** No dollar amount is carried. */
     price: z.literal("not_priced_yet"),
   }).strict(),

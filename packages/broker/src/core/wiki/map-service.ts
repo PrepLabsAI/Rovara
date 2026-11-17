@@ -10,9 +10,12 @@ export const WIKI_MAP_TTL_MS = 10 * 60_000;
 export const WIKI_MAP_REUSE_MS = 60_000;
 export const WIKI_MAP_CACHE_MAX = 200;
 
+/** What names a repository for the cache: its address AND the branch the map reads, so a changed default branch never serves an old map. */
+export const repositoryKeyOf = (repository: { url: string; defaultBranch: string }): string => `${repository.url}\u0000${repository.defaultBranch}`;
+
 export interface WikiMapService {
-  /** The kept map of this project in this company, if it is fresh and the project's repositories are the same ones; else undefined. */
-  read(companyId: OrgId, project: string, repositoryUrls: readonly string[]): WikiFileMap | undefined;
+  /** The kept map of this project in this company, if it is fresh and the project's repositories (`repositoryKeyOf`) are the same ones; else undefined. */
+  read(companyId: OrgId, project: string, repositoryKeys: readonly string[]): WikiFileMap | undefined;
   /** Makes (or, within `reuseMs`, reuses) the map. */
   make(companyId: OrgId, project: string, repositories: readonly FileMapRepository[], scope: HostScope): Promise<WikiFileMap>;
 }
@@ -30,13 +33,13 @@ export function createWikiMapService(options: { now: () => number; ttlMs?: numbe
   const running = new Map<string, Promise<WikiFileMap>>();
   const fresh = (entry: Kept | undefined, urls: string, within: number): entry is Kept => entry !== undefined && entry.urls === urls && options.now() - entry.at < within;
   return {
-    read(companyId, project, repositoryUrls) {
+    read(companyId, project, repositoryKeys) {
       const entry = kept.get(keyOf(companyId, project));
-      return fresh(entry, urlsOf(repositoryUrls), ttlMs) ? entry.map : undefined;
+      return fresh(entry, urlsOf(repositoryKeys), ttlMs) ? entry.map : undefined;
     },
     async make(companyId, project, repositories, scope) {
       const key = keyOf(companyId, project);
-      const urls = urlsOf(repositories.map((repository) => repository.url));
+      const urls = urlsOf(repositories.map(repositoryKeyOf));
       const existing = kept.get(key);
       if (fresh(existing, urls, reuseMs)) return existing.map;
       const joined = running.get(`${key}\u0000${urls}`);

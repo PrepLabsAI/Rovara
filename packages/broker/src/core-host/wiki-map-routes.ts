@@ -12,8 +12,8 @@
 import { AgentXError, agentXError, WIKI_MAP_NOT_ALLOWED, WIKI_MAP_PROJECT_NOT_FOUND, WIKI_MAP_UNAVAILABLE, type OrgId, type PluginKind } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
-import type { FileMapHost, FileMapRepository } from "../core/wiki/file-map.js";
-import { createWikiMapService, type WikiMapService } from "../core/wiki/map-service.js";
+import { unregisteredHost, type FileMapHost, type FileMapRepository } from "../core/wiki/file-map.js";
+import { createWikiMapService, repositoryKeyOf, type WikiMapService } from "../core/wiki/map-service.js";
 import type { SetupRunStanding } from "./setup-run-routes.js";
 
 export const WIKI_MAP_UNREADABLE = "The project could not be read just now. Try again.";
@@ -46,6 +46,11 @@ const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCo
 const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
 const notFound = (): AgentXError => agentXError("NOT_FOUND", WIKI_MAP_PROJECT_NOT_FOUND);
 
+/** A repository whose code host is not registered is unavailable in the map (fixed words), never a failure of the whole request. */
+export function hostOf(wiring: HostedWikiMapWiring, repository: { host?: { kind: PluginKind } | undefined }): FileMapHost {
+  try { return wiring.hostFor(repository); } catch { return unregisteredHost; }
+}
+
 /** One service per wiring object (the wiring is built once per company), so the kept maps live as long as the company's wiring and are still keyed by company and project. */
 const services = new WeakMap<object, WikiMapService>();
 function serviceOf(wiring: HostedWikiMapWiring, now: () => number, log: HostedWikiMapInput["log"]): WikiMapService {
@@ -75,12 +80,12 @@ export async function routeHostedWikiMap(input: HostedWikiMapInput): Promise<Bro
     const service = serviceOf(input.wiring, input.now, input.log);
     const canManage = access === "manage";
     if (input.request.method === "GET") {
-      const map = service.read(input.companyId, project, repositories.map((repository) => repository.url));
+      const map = service.read(input.companyId, project, repositories.map(repositoryKeyOf));
       return json(200, map === undefined ? { status: "none", canManage } : { status: "ready", canManage, map });
     }
     if (input.request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
     if (!canManage) throw agentXError("FORBIDDEN", WIKI_MAP_NOT_ALLOWED);
-    const targets: FileMapRepository[] = repositories.map((repository) => ({ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, host: input.wiring.hostFor(repository) }));
+    const targets: FileMapRepository[] = repositories.map((repository) => ({ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, host: hostOf(input.wiring, repository) }));
     let map;
     try { map = await service.make(input.companyId, project, targets, { orgId: input.companyId }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", WIKI_MAP_UNAVAILABLE); }
     return json(200, { status: "ready", canManage: true, map });
