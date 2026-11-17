@@ -14,6 +14,7 @@ import type { LinearConnectWiring } from "./linear-connect-routes.js";
 import type { LinearWebhookWiring } from "./linear-app-webhook.js";
 
 const SETTINGS_CACHE_MS = 300_000;
+const MISSING_CACHE_MS = 30_000;
 
 export function kmsLinearSealer(client: Pick<KMSClient, "send">, keyId: string): LinearSealer {
   return {
@@ -39,8 +40,8 @@ export function linearAppSettingsReader(secrets: Pick<SecretsManagerClient, "sen
       const parsed = LinearAppSettingsSchema.safeParse(JSON.parse(response.SecretString ?? ""));
       value = parsed.success ? parsed.data : undefined;
     } catch { value = undefined; }
-    // Only a good read is kept; a failure is tried again next time.
-    if (value !== undefined) cached = { value, at: now() };
+    // A good read is kept 5 minutes; a missing or bad one 30 seconds, so unauthenticated webhook calls can't make a secret read each.
+    cached = { value, at: value === undefined ? now() - SETTINGS_CACHE_MS + MISSING_CACHE_MS : now() };
     return value;
   };
 }

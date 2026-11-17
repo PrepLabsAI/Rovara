@@ -27,22 +27,22 @@ describe("the Linear OAuth client", () => {
   });
   it("exchanges a code form-encoded with the verifier, refusing redirects; only invalid_grant is 'refused'", async () => {
     const seen: Array<{ url: string; init: RequestInit }> = [];
-    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => { seen.push({ url: String(url), init: init! }); return json({ access_token: token(1), refresh_token: token(2), expires_in: 86_399, token_type: "Bearer", scope: "read" }); });
-    const tokens = await exchangeLinearCode({ fetch: fetch as typeof globalThis.fetch, app: LINEAR_APP, code: "c0de", verifier: "ver", now: NOW });
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => { seen.push({ url: typeof url === "string" ? url : url instanceof URL ? url.href : url.url, init: init! }); return json({ access_token: token(1), refresh_token: token(2), expires_in: 86_399, token_type: "Bearer", scope: "read" }); });
+    const tokens = await exchangeLinearCode({ fetch: fetch, app: LINEAR_APP, code: "c0de", verifier: "ver", now: NOW });
     expect(tokens).toEqual({ access: token(1), refresh: token(2), accessExpiresAt: NOW + 86_399_000, scope: "read" });
     expect(seen[0]!.url).toBe("https://api.linear.app/oauth/token");
     expect(seen[0]!.init.redirect).toBe("error");
     expect(Object.fromEntries(new URLSearchParams(seen[0]!.init.body as string))).toEqual({ grant_type: "authorization_code", code: "c0de", redirect_uri: LINEAR_APP.redirectUri, client_id: LINEAR_APP.clientId, client_secret: LINEAR_CLIENT_SECRET, code_verifier: "ver" });
     for (const [status, body, kind] of [[400, { error: "invalid_grant" }, "refused"], [400, { error: "invalid_client" }, "unavailable"], [401, { error: "invalid_client" }, "unavailable"], [500, {}, "unavailable"], [200, { access_token: token(1) }, "unavailable"]] as const) {
       const failing = vi.fn(async () => json(body, status));
-      await expect(refreshLinearTokens({ fetch: failing as typeof globalThis.fetch, app: LINEAR_APP, refresh: token(2), now: NOW })).rejects.toMatchObject({ kind });
+      await expect(refreshLinearTokens({ fetch: failing, app: LINEAR_APP, refresh: token(2), now: NOW })).rejects.toMatchObject({ kind });
     }
     const thrown = vi.fn(async () => { throw new Error(`network down for ${token(9)}`); });
-    const error = await refreshLinearTokens({ fetch: thrown as typeof globalThis.fetch, app: LINEAR_APP, refresh: token(9), now: NOW }).catch((e: unknown) => e) as LinearOAuthFailure;
+    const error = await refreshLinearTokens({ fetch: thrown, app: LINEAR_APP, refresh: token(9), now: NOW }).catch((e: unknown) => e) as LinearOAuthFailure;
     expect(error).toBeInstanceOf(LinearOAuthFailure);
     expect(error.message).not.toContain(token(9));
     const huge = vi.fn(async () => new Response("x".repeat(1_000_001)));
-    await expect(refreshLinearTokens({ fetch: huge as typeof globalThis.fetch, app: LINEAR_APP, refresh: token(2), now: NOW })).rejects.toMatchObject({ kind: "unavailable" });
+    await expect(refreshLinearTokens({ fetch: huge, app: LINEAR_APP, refresh: token(2), now: NOW })).rejects.toMatchObject({ kind: "unavailable" });
   });
   it("reads the workspace and the teams; a team list with more pages, or one unreadable team, is refused whole", async () => {
     const answer = (data: unknown) => vi.fn(async () => json({ data })) as unknown as typeof fetch;
@@ -53,14 +53,14 @@ describe("the Linear OAuth client", () => {
     await expect(linearTeamsOf({ fetch: answer({ teams: { nodes: [team], pageInfo: { hasNextPage: true } } }), access: token(1) })).rejects.toBeInstanceOf(LinearOAuthFailure);
     await expect(linearTeamsOf({ fetch: answer({ teams: { nodes: [team, { id: "t-2", key: "not a key", name: "x" }] } }), access: token(1) })).rejects.toBeInstanceOf(LinearOAuthFailure);
     await expect(linearTeamsOf({ fetch: answer({ teams: { nodes: Array.from({ length: LINEAR_TEAMS_MAX + 1 }, () => team) } }), access: token(1) })).rejects.toBeInstanceOf(LinearOAuthFailure);
-    await expect(linearTeamsOf({ fetch: vi.fn(async () => json({ errors: [{ message: "no" }] })) as unknown as typeof fetch, access: token(1) })).rejects.toBeInstanceOf(LinearOAuthFailure);
+    await expect(linearTeamsOf({ fetch: vi.fn(async () => json({ errors: [{ message: "no" }] })), access: token(1) })).rejects.toBeInstanceOf(LinearOAuthFailure);
   });
   it("revokes form-encoded with token=, best effort", async () => {
     const seen: RequestInit[] = [];
     const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => { seen.push(init!); return new Response("", { status: 200 }); });
-    expect(await revokeLinearToken({ fetch: fetch as typeof globalThis.fetch, token: token(3) })).toBe(true);
+    expect(await revokeLinearToken({ fetch: fetch, token: token(3) })).toBe(true);
     expect(new URLSearchParams(seen[0]!.body as string).get("token")).toBe(token(3));
-    expect(await revokeLinearToken({ fetch: vi.fn(async () => { throw new Error("down"); }) as unknown as typeof globalThis.fetch, token: token(3) })).toBe(false);
+    expect(await revokeLinearToken({ fetch: vi.fn(async () => { throw new Error("down"); }), token: token(3) })).toBe(false);
   });
 });
 
@@ -75,9 +75,13 @@ describe("the app's settings", () => {
     }
     let secret = "{not json";
     const send = vi.fn(async () => ({ SecretString: secret }));
-    const read = linearAppSettingsReader({ send } as never, "name", () => NOW);
+    let clock = NOW;
+    const read = linearAppSettingsReader({ send } as never, "name", () => clock);
     expect(await read()).toBeUndefined();
     secret = JSON.stringify(LINEAR_APP);
+    // A missing or bad secret is remembered 30 seconds (unauthenticated webhook calls can't make a read each), then read again.
+    expect(await read()).toBeUndefined();
+    clock += 30_001;
     expect(await read()).toEqual(LINEAR_APP);
     secret = "{}";
     expect(await read()).toEqual(LINEAR_APP);
@@ -97,7 +101,7 @@ describe("golden: an API-key project's own hook keeps its own secret", () => {
     const tracker = linearTracker({ hook: async () => ({ hook, secret: HOOK_SECRET }) });
     const scope = SCOPE;
     expect(await tracker.events!.normalise(signed(HOOK_SECRET), scope)).toEqual([{
-      eventId: expect.stringMatching(/^linear:issue:i-1:create:label:[0-9a-f]{16}$/), tracker: "linear", item: { tracker: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1" },
+      eventId: expect.stringMatching(/^linear:issue:i-1:create:label:[0-9a-f]{16}$/) as string, tracker: "linear", item: { tracker: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1" },
       type: "item.labelled", label: "rovara", occurredAt: new Date(NOW).toISOString(),
     }]);
     await expect(tracker.events!.normalise(signed(LINEAR_WEBHOOK_SECRET), scope)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });

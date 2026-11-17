@@ -9,7 +9,7 @@ import {
   LinearConnections, linearConnectionKey, linearStateKey, linearTeamKey, linearWorkspaceKey, LINEAR_NEEDS_RECONNECT, LINEAR_NOT_CONNECTED, REFRESH_LEASE_MS, REFRESH_MARGIN_MS, type LinearAppSettings,
 } from "../../packages/broker/src/aws/linear-connections.js";
 import {
-  CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, DISCONNECT_OWNER_ONLY, DISCONNECT_STEP_UP, LINEAR_OTHER_WORKSPACE, LINEAR_TAKEN, PROJECT_NOT_FOUND, START_AGAIN, TEAM_ADMIN_ONLY, TEAM_NOT_FOUND,
+  routeLinearConnect, CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, DISCONNECT_OWNER_ONLY, DISCONNECT_STEP_UP, LINEAR_OTHER_WORKSPACE, LINEAR_TAKEN, PROJECT_NOT_FOUND, START_AGAIN, TEAM_ADMIN_ONLY, TEAM_NOT_FOUND,
 } from "../../packages/broker/src/aws/linear-connect-routes.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_WINDOW_MS, WEBHOOK_REFUSED, type LinearProjectEvent } from "../../packages/broker/src/aws/linear-app-webhook.js";
 import { linearCompanyApiAccess } from "../../packages/broker/src/aws/linear-wiring.js";
@@ -94,7 +94,7 @@ describe("connect start", () => {
     expect(`${url.origin}${url.pathname}`).toBe("https://linear.app/oauth/authorize");
     expect(Object.fromEntries(url.searchParams)).toEqual({
       client_id: LINEAR_CLIENT_ID, redirect_uri: LINEAR_REDIRECT, response_type: "code", scope: "read,comments:create,issues:create", state, actor: "app", prompt: "consent",
-      code_challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/), code_challenge_method: "S256",
+      code_challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as string, code_challenge_method: "S256",
     });
     expect(LINEAR_SCOPES).not.toContain("admin");
     expect(answer.body.expiresAt).toBe(new Date(Date.parse(TIME) + 600_000).toISOString());
@@ -136,6 +136,8 @@ describe("complete", () => {
     expect(audits).toEqual([expect.objectContaining({ companyId: A, action: "connect", actor: PERSON, organizationId: WORKSPACE_A.id })]);
     expect(w.logs).toContainEqual(expect.objectContaining({ companyId: A, event: "linear.connection_bound", actor: PERSON }));
     const status = await w.call("GET", BASE);
+    expect(Object.keys(status.body).sort()).toEqual(["connectedAt", "connectedBy", "requestId", "status", "statusAt", "workspace"]);
+    expect(Object.keys(status.body.workspace as object).sort()).toEqual(["id", "name", "urlKey"]);
     expect(status.body).toMatchObject({ status: "connected", workspace: { name: "Acme Linear" }, connectedAt: TIME, connectedBy: { personId: PERSON, name: "Ada Admin" } });
     expect(status.raw).not.toMatch(/tok_/);
   });
@@ -157,9 +159,15 @@ describe("complete", () => {
     expect(refused(await w.call("POST", `${BASE}/complete`, { state: first.body.state, code }, { sub: PERSON_C, sid: "session-cccc" }))).toEqual(startAgain);
     w.as(PERSON_B, B); w.as(PERSON, A);
     expect(refused(await w.call("POST", `${BASE}/complete`, { state: first.body.state, code }, { sub: PERSON_B, sid: "session-eeee" }))).toEqual(startAgain);
-    // Still live after all that: the owner's own completes once, and only once.
+    // The store itself, with the starter's own session: another person, another company, never spend it (only the company and person checks can refuse these).
+    const starter = { companyId: A, personId: PERSON, sessionId: "session-dddd" };
+    expect(await w.connections.spendState(first.body.state as string, { ...starter, personId: PERSON_C })).toBeUndefined();
+    expect(await w.connections.spendState(first.body.state as string, { ...starter, companyId: B })).toBeUndefined();
+    // Still live after all that: the owner's own completes once, and only once (a FRESH code from Linear for the same state, so only the state's single use can refuse it).
     expect((await w.complete({ state: first.body.state, code })).status).toBe(200);
-    expect(refused(await w.complete({ state: first.body.state, code }))).toEqual(startAgain);
+    const again = w.linear.approve(first.body.authorizeUrl as string, WORKSPACE_A);
+    expect(refused(await w.complete({ state: first.body.state, code: again }))).toEqual(startAgain);
+    expect(await w.connections.spendState(first.body.state as string, starter)).toBeUndefined();
     // Expired.
     const late = await w.start();
     const lateCode = w.linear.approve(late.body.authorizeUrl as string, WORKSPACE_A);
@@ -174,6 +182,17 @@ describe("complete", () => {
     expect(refused(await w.complete({ state: two.body.state, code: codeForOne }))).toEqual(startAgain);
     expect(refused(await w.complete({ state: one.body.state, code: "neverissued" }))).toEqual(startAgain);
     expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeUndefined();
+  });
+  it("reads the live membership at every call: a revoked membership, or one in another company than the resolved one, is 401", async () => {
+    const w = world(); w.as(PERSON, A);
+    const ctx = { documentClient: w.db, signInTableName: "SignIn", now: w.now, wiring: w.deps.developer.linearConnect!, projectInCompany: async () => true, projectRole: async () => undefined };
+    const caller = { developerId: PERSON, sessionId: "session-dddd", amr: "slack", name: "Ada" } as Parameters<typeof routeLinearConnect>[1];
+    const request = { method: "GET", path: BASE, headers: {}, requestId: "r" };
+    const url = new URL(BASE, "https://broker.example.test");
+    await expect(routeLinearConnect(ctx, caller, A, request, url)).resolves.toEqual({ status: "disconnected" });
+    await expect(routeLinearConnect(ctx, caller, B, request, url)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    w.db.set({ ...membershipKey(PERSON), entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId: A, role: "owner", joinedAt: TIME, revokedAt: TIME });
+    await expect(routeLinearConnect(ctx, caller, A, request, url)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
   });
   it("re-reads the role at complete: a person demoted after start is refused", async () => {
     const w = world(); w.as(PERSON, A);
@@ -292,7 +311,28 @@ describe("refresh", () => {
     expect(refused(await w.call("GET", `${BASE}/projects/alpha`))).toEqual({ status: 409, error: { code: "LINEAR_NOT_CONNECTED", message: LINEAR_NEEDS_RECONNECT } });
     const again = await w.connect(WORKSPACE_A);
     expect(again.body).toMatchObject({ status: "connected", reconnected: true });
+    // A reconnect over a still-stored pair revokes the pair it replaces.
+    const third = await w.connect(WORKSPACE_A);
+    expect(third.body).toMatchObject({ reconnected: true });
+    const replaced = w.linear.grants[w.linear.grants.length - 2]!;
+    expect(replaced.revoked).toBe(true);
+    expect(w.linear.grants[w.linear.grants.length - 1]!.revoked).toBe(false);
     expect((await w.call("GET", BASE)).body.status).toBe("connected");
+  });
+  it("a store blip while writing the rotated pair is retried under the same lease, so the rotated refresh token is not lost", async () => {
+    const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
+    expire(w);
+    let blips = 2;
+    const db = { send: async (command: unknown) => {
+      const input = (command as { input?: { UpdateExpression?: string } }).input;
+      if (blips > 0 && input?.UpdateExpression?.startsWith("SET sealedAccess") === true) { blips--; throw Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" }); }
+      return w.db.send(command as never);
+    } };
+    const flaky = new LinearConnections({ documentClient: db, tableName: "State", sealer: w.sealer, fetch: w.linear.fetch, now: w.now, app: async () => ({ ...LINEAR_APP }), log: () => undefined });
+    const access = await flaky.accessToken(A);
+    expect(w.linear.validAccess(access)).toBe(true);
+    expect(await storedRefresh(w)).toBe(w.linear.grants[0]!.current);
+    expect((w.db.get(linearConnectionKey(A).pk, "META") as Record<string, unknown>).leaseId).toBeUndefined();
   });
   it("a misconfigured app (invalid_client) or Linear down is unavailable, never needs_reconnect", async () => {
     const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
@@ -423,7 +463,7 @@ describe("app webhooks", () => {
     expect(await deliver({ ...issue(WORKSPACE_A.id, "team-a-eng"), webhookTimestamp: w.now() + LINEAR_WEBHOOK_WINDOW_MS + 1 })).toEqual(no);
     expect(await deliver({}, { raw: "not json" })).toEqual(no);
     expect(await deliver({}, { raw: JSON.stringify({ type: "Issue", action: "create", organizationId: WORKSPACE_A.id }) })).toEqual(no);
-    expect(await deliver({}, { raw: JSON.stringify({ webhookTimestamp: w.now(), pad: "x".repeat(1_048_577) }) })).toEqual(no);
+    expect(await deliver({}, { raw: JSON.stringify({ webhookTimestamp: w.now(), ...issue(WORKSPACE_A.id, "team-a-eng"), pad: "x".repeat(1_048_577) }) })).toEqual(no);
     expect(delivered).toEqual([]);
     // Inside the window, on the edge.
     expect((await deliver({ ...issue(WORKSPACE_A.id, "team-a-eng"), webhookTimestamp: w.now() - LINEAR_WEBHOOK_WINDOW_MS })).status).toBe(200);
@@ -458,7 +498,7 @@ describe("app webhooks", () => {
     expect(w.db.get(linearConnectionKey(B).pk, "META")).toMatchObject({ status: "connected" });
     await deliver(issue(WORKSPACE_A.id, "team-a-eng"));
     expect(delivered).toEqual([]);
-    await expect(w.connections.accessToken(A)).rejects.toMatchObject({ code: "LINEAR_NOT_CONNECTED", message: expect.stringContaining(LINEAR_NOT_CONNECTED) });
+    await expect(w.connections.accessToken(A)).rejects.toMatchObject({ code: "LINEAR_NOT_CONNECTED", message: expect.stringContaining(LINEAR_NOT_CONNECTED) as string });
     w.as(PERSON, A);
     expect((await w.call("GET", BASE)).body.status).toBe("disconnected");
   });

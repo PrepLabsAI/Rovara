@@ -153,7 +153,7 @@ export class LinearConnections {
     const key = linearStateKey(state);
     const sealedVerifier = await this.deps.sealer.seal(verifier, verifierContext(who.companyId, who.personId, key.pk));
     await this.deps.documentClient.send(new PutCommand({ TableName: this.table, Item: { ...key, entityType: "LINEAR_CONNECT_STATE", provider: "linear", status: "live",
-      ...who, createdAt: new Date(nowMs).toISOString(), expiresAt, sealedVerifier }, ConditionExpression: "attribute_not_exists(pk)" }));
+      ...who, createdAt: new Date(nowMs).toISOString(), expiresAt, sealedVerifier, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt + DELIVERY_KEEP_SECONDS }, ConditionExpression: "attribute_not_exists(pk)" }));
     return { state, verifier, expiresAt };
   }
 
@@ -208,6 +208,12 @@ export class LinearConnections {
       const sealedAccess = await this.deps.sealer.seal(tokens.access, tokenContext(companyId, workspace.id, "access"));
       const sealedRefresh = await this.deps.sealer.seal(tokens.refresh, tokenContext(companyId, workspace.id, "refresh"));
       const reconnect = binding !== undefined;
+      // The pair being replaced (a reconnect) is revoked at Linear after the commit, best effort.
+      const replaced: string[] = [];
+      for (const [sealed, field] of [[existing?.sealedAccess, "access"], [existing?.sealedRefresh, "refresh"]] as const) {
+        if (sealed === undefined || existing === undefined) continue;
+        try { replaced.push(await this.deps.sealer.open(sealed, tokenContext(companyId, existing.organizationId, field))); } catch { /* not revoked */ }
+      }
       try {
         await this.deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
           binding === undefined
@@ -227,6 +233,7 @@ export class LinearConnections {
         continue;
       }
       this.log(companyId, { event: reconnect ? "linear.connection_reconnected" : "linear.connection_bound", actor: personId });
+      for (const token of replaced) if (!await revokeLinearToken({ fetch: this.deps.fetch, token })) this.log(companyId, { event: "linear.revoke_failed" });
       return { outcome: reconnect ? "reconnected" : "connected" };
     }
     // Lost twice: whatever is stored now decides; nothing was overwritten.
@@ -279,18 +286,28 @@ export class LinearConnections {
           ConditionExpression: "leaseId = :lease AND version = :version", ExpressionAttributeValues: ours })).catch(() => undefined);
         throw unavailable();
       }
-      // Our lease ended while Linear answered: whoever holds it now decides. What we got is discarded (the stored refresh token is still accepted for 30 minutes).
-      if (this.deps.now() >= leaseUntil) continue;
-      try {
-        await this.deps.documentClient.send(new UpdateCommand({ TableName: this.table, Key: linearConnectionKey(companyId),
-          UpdateExpression: "SET sealedAccess = :access, sealedRefresh = :refresh, accessExpiresAt = :expires, version = :next, refreshedAt = :at REMOVE leaseId, leaseUntil",
-          ConditionExpression: "leaseId = :lease AND version = :version",
-          ExpressionAttributeValues: { ...ours, ":next": row.version + 1, ":expires": tokens.accessExpiresAt, ":at": new Date(this.deps.now()).toISOString(),
-            ":access": await this.deps.sealer.seal(tokens.access, tokenContext(companyId, row.organizationId, "access")),
-            ":refresh": await this.deps.sealer.seal(tokens.refresh, tokenContext(companyId, row.organizationId, "refresh")) } }));
-      } catch (error) {
-        if (!isConditional(error)) throw unavailable();
-        continue;
+      // If our lease ended while Linear answered and another refresher took it, the write's lease condition fails and what we got is discarded (the stored refresh token is still
+      // accepted for 30 minutes). If nobody took it, our pair is the newest Linear issued, so writing it is right.
+      // Linear has rotated: the new pair is written while our lease stands, tried a few times (a KMS or DynamoDB blip must not drop it), and the lease is given back if it never lands.
+      let written: "written" | "lost" | "failed" = "failed";
+      for (let write = 0; write < 3 && written === "failed"; write++) {
+        try {
+          await this.deps.documentClient.send(new UpdateCommand({ TableName: this.table, Key: linearConnectionKey(companyId),
+            UpdateExpression: "SET sealedAccess = :access, sealedRefresh = :refresh, accessExpiresAt = :expires, version = :next, refreshedAt = :at REMOVE leaseId, leaseUntil",
+            ConditionExpression: "leaseId = :lease AND version = :version",
+            ExpressionAttributeValues: { ...ours, ":next": row.version + 1, ":expires": tokens.accessExpiresAt, ":at": new Date(this.deps.now()).toISOString(),
+              ":access": await this.deps.sealer.seal(tokens.access, tokenContext(companyId, row.organizationId, "access")),
+              ":refresh": await this.deps.sealer.seal(tokens.refresh, tokenContext(companyId, row.organizationId, "refresh")) } }));
+          written = "written";
+        } catch (error) {
+          if (isConditional(error)) written = "lost";
+        }
+      }
+      if (written === "lost") continue;
+      if (written === "failed") {
+        await this.deps.documentClient.send(new UpdateCommand({ TableName: this.table, Key: linearConnectionKey(companyId), UpdateExpression: "REMOVE leaseId, leaseUntil",
+          ConditionExpression: "leaseId = :lease AND version = :version", ExpressionAttributeValues: ours })).catch(() => undefined);
+        throw unavailable();
       }
       return tokens.access;
     }
@@ -311,7 +328,7 @@ export class LinearConnections {
   }
 
   /** The company's projects' team picks (at most LINEAR_PICKS_MAX; more refuses the whole read). */
-  async teamPicks(companyId: string): Promise<LinearTeamPick[]> {
+  async teamPicks(companyId: string, options: { all?: true } = {}): Promise<LinearTeamPick[]> {
     const picks: LinearTeamPick[] = [];
     let start: Record<string, unknown> | undefined;
     do {
@@ -322,7 +339,7 @@ export class LinearConnections {
         const pick = PickRow.parse(item);
         if (pick.companyId !== companyId) throw new Error("pick");
         picks.push(pick);
-        if (picks.length > LINEAR_PICKS_MAX) throw new Error("picks");
+        if (options.all !== true && picks.length > LINEAR_PICKS_MAX) throw new Error("picks");
       }
       start = page.LastEvaluatedKey;
     } while (start !== undefined);
@@ -375,7 +392,8 @@ export class LinearConnections {
   async disconnect(companyId: string, personId: string): Promise<DisconnectOutcome> {
     const row = await this.connection(companyId);
     if (row === undefined) return { outcome: "not_found" };
-    const picks = await this.teamPicks(companyId);
+    // Every pick, however many: a disconnect must never be blocked by the routing read's cap.
+    const picks = await this.teamPicks(companyId, { all: true });
     let access: string | undefined; let refresh: string | undefined;
     try {
       if (row.sealedAccess !== undefined) access = await this.deps.sealer.open(row.sealedAccess, tokenContext(companyId, row.organizationId, "access"));
@@ -392,7 +410,7 @@ export class LinearConnections {
     } catch (error) {
       if (!isConditional(error)) throw error;
       // Lost a race: our own audit row says whether it committed.
-      if (await this.get(audit.Put.Item as { pk: string; sk: string }) === undefined) {
+      if (await this.get({ pk: audit.Put.Item.pk, sk: audit.Put.Item.sk }) === undefined) {
         if (await this.connection(companyId) === undefined) return { outcome: "not_found" };
         throw unavailable();
       }
