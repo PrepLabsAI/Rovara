@@ -166,6 +166,11 @@ export interface BrokerCoreRoot {
   readonly lessons: LessonsApi | undefined;
   readonly policyHook?: ProjectSettingsHook;
   /**
+   * Guided onboarding PR 16: whether archiving a project of this company takes effect, i.e. the switch sends the company's new tasks to the core engine (the only engine that reads the
+   * archived state). Absent while the switch is off: the archive route then refuses an archive.
+   */
+  readonly projectArchiveTakesEffect?: (companyId: string) => boolean;
+  /**
    * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` while the
    * switch is off or for any other path. The broker's HTTP API reaches it through `coreApp` (lane L12).
    */
@@ -634,6 +639,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreTasks,
     coreApp,
     lessons,
+    ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
     ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {
       get settings() {
         if (hookSettings === undefined) throw new Error("the policy hook settings are not readable");
@@ -692,9 +698,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
  * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): while the switch serves, the task routes' core entry and the /v1/app/* routes; off (neither is
  * built), the configuration exactly as given, so the developer API is byte-identical.
  */
-export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry }) {
+export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook" | "projectArchiveTakesEffect">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry; projectArchiveTakesEffect?: (companyId: string) => boolean }) {
   if (root.coreTasks === undefined) return config;
-  return { ...config, ...(root.policyHook === undefined ? {} : { policyHook: root.policyHook }), coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }) };
+  return { ...config, ...(root.policyHook === undefined ? {} : { policyHook: root.policyHook }), coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }),
+    ...(root.projectArchiveTakesEffect === undefined ? {} : { projectArchiveTakesEffect: root.projectArchiveTakesEffect }) };
 }
 
 /** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */

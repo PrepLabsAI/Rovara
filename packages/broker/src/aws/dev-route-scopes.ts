@@ -56,6 +56,11 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Guided onboarding PR 8: a project's setup checklist state (any member of the project's company) and its skipped optional rows (company owner or admin, or the project's administrator); full access only.
   { method: "GET", path: "/v1/dev/client/projects/{project}/setup-status", requires: "full" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/setup-status/skips", requires: "full" },
+  // Guided onboarding PR 16 (DEC 254n item 3): a project's archive and restore, preview first; full access only, then a live company owner or admin, or the project's administrator.
+  { method: "GET", path: "/v1/dev/client/projects/{project}/archive-preview", requires: "full" },
+  { method: "POST", path: "/v1/dev/client/projects/{project}/archive", requires: "full" },
+  { method: "GET", path: "/v1/dev/client/projects/{project}/restore-preview", requires: "full" },
+  { method: "POST", path: "/v1/dev/client/projects/{project}/restore", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
