@@ -229,6 +229,8 @@ export interface BrokerCoreCodeHostInputs {
   credentials: Pick<GitHubAppCredentialProviderOptions, "credentialRef" | "appId" | "getPrivateKey" | "getAppSecret">;
   /** Whether an installation is bound to a company, asked by the client before every mint (`GithubInstallationBindings.requireBound`). */
   requireInstallationBound: NonNullable<GitHubAppCredentialProviderOptions["requireInstallationBound"]>;
+  /** Guided onboarding PR 3: whether the company's connection for a repository owner is uninstalled or suspended (`GithubInstallationBindings.disconnectedFor`). */
+  disconnectedFor?: GitHubAppCredentialProviderOptions["disconnectedFor"];
   /** The core's own store (the registry's storage), where the company's project catalog is. */
   storage: () => Promise<Pick<DocumentStore, "get" | "query">>;
   log?: (entry: Record<string, unknown>) => void;
@@ -245,6 +247,7 @@ export function brokerCoreCodeHost(inputs: BrokerCoreCodeHostInputs): Pick<CodeM
     getPrivateKey: inputs.credentials.getPrivateKey,
     ...(inputs.credentials.getAppSecret === undefined ? {} : { getAppSecret: inputs.credentials.getAppSecret }),
     requireInstallationBound: inputs.requireInstallationBound,
+    ...(inputs.disconnectedFor === undefined ? {} : { disconnectedFor: inputs.disconnectedFor }),
     ...(inputs.fetchImplementation === undefined ? {} : { fetchImplementation: inputs.fetchImplementation }),
     ...(inputs.now === undefined ? {} : { now: inputs.now }),
   });

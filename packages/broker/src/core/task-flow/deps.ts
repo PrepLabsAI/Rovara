@@ -1,4 +1,4 @@
-import type { WorkOrigin } from "@agentx/contracts";
+import type { AgentXError, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
 import type { MoneyStop } from "./money-stop.js";
@@ -322,6 +322,11 @@ export interface TaskFlowDeps {
    * gets lists the `model-access` action. Undefined from `route()`: no provider key is set up, and the step gets neither (the worker then has no model access and fails with its own reason).
    */
   modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
+  /**
+   * DEC 254n (1): the company's engine model check, asked once before a task starts (after the access and project checks, before the limits, the admission and any write). An answer is the
+   * refusal (fixed words) and the start writes nothing but its refusal audit; undefined lets the start go on. Absent: no check, exactly as before.
+   */
+  startModelCheck?: () => Promise<AgentXError | undefined>;
   /**
    * The install's per-step model rule: the model each workflow step runs on, chosen as the step is handed to a worker and kept on the operation. Absent: every step runs on `modelAccess`'s one model, as before.
    * Where it answers, its route replaces `modelAccess.route()` for that step (the worker is told that route, and the model proxy's grant names it).

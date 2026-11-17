@@ -1,10 +1,10 @@
 import { slackRecordScope } from "./slack-workspace-tokens.js";
 import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
-import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, type CompanyInviteList, type CompanySelfCreateResponse } from "@agentx/contracts";
+import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
-import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
+import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -15,9 +15,11 @@ import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
+import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } from "./github-connect-routes.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
+import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js";
 import {
   AgentXNameSchema, AgentXError,
   IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type OrgRole,
@@ -25,6 +27,13 @@ import {
   AGENTX_CLI_CLIENT_ID,
   CLIENT_SCOPES,
   CreateClientProjectRequestSchema,
+  CreateClientProjectsRequestSchema,
+  BulkCreateClientProjectsRequestSchema,
+  RepositoryChoicesQuerySchema,
+  type CreateClientProjectsRequest,
+  type BulkCreateClientProjectsRequest,
+  type BulkCreateClientProjectsResponse,
+  type ClientRepositoryChoicesResponse,
   type CreateClientProjectRequest,
   type ClientRepositoriesResponse,
   type ClientProjectMemberChangeResponse,
@@ -137,6 +146,8 @@ export interface DeveloperApiConfiguration {
   coreTasks?: CoreTaskEntry;
   /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only while the core switch serves. Absent: every /v1/app/* path answers "route not found", reading nothing. */
   coreApp?: CoreAppEntry;
+  /** Guided onboarding PR 16: whether archiving this company's project takes effect (its new tasks start on the core engine, which reads the archived state). Absent: an archive is refused. */
+  projectArchiveTakesEffect?: (companyId: string) => boolean;
   /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */
   taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
   taskChannelPeople?: (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse>;
@@ -163,7 +174,8 @@ export interface DeveloperApiConfiguration {
   /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
   signInClients?: SignInClientRegistry;
   companies?: CompanyMembershipReader;
-  companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<boolean>;
+  /** False: refused or unreachable. A pre-approval's answer carries its expiry (epoch seconds), which is its invite link's (DEC 254h). */
+  companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<false | { expiresAt?: number }>;
   /** DEC 253z: `POST /v1/dev/company`'s forward to the sign-in Lambda (companySelfCreateThroughLambda). Absent: that route is unknown. */
   companySelfCreate?: (request: CompanySelfCreateRequest) => Promise<CompanySelfCreateAnswer>;
   /** DEC 254a: the install's invite codes and self-serve switch, through the sign-in Lambda (companyInvitesThroughLambda), for an install administrator's changes and list. */
@@ -172,6 +184,10 @@ export interface DeveloperApiConfiguration {
   companyImport?: CompanyImportRegistry;
   /** Lane W part 4: T3b's member helper (companyMemberActionsThroughLambda), the only way the admin routes list, remove or change a member. Absent: those routes are unknown. */
   companyMembers?: CompanyMemberActions;
+  /** Guided onboarding PR 1: the GitHub connect routes (github-connect-routes.ts). Absent (or no company layer): those routes are unknown. */
+  githubConnect?: GithubConnectWiring;
+  /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
+  companyEngineModel?: CompanyEngineModelWiring;
   /**
    * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
    * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
@@ -211,6 +227,12 @@ export interface DeveloperRouteDependencies {
   createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
   clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
+  /** Guided onboarding PR 6: one project from several repositories (all on the caller's company's installations, or nothing is created). */
+  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest) => Promise<{ name: string; latestRevision: number }>;
+  /** Guided onboarding PR 6: one project per repository, with one result row each. */
+  createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest) => Promise<BulkCreateClientProjectsResponse>;
+  /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
+  clientRepositoryChoices?: (developerId: string, query: { q?: string | undefined; limit?: number | undefined; after?: string | undefined }) => Promise<ClientRepositoryChoicesResponse>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -458,19 +480,22 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
 
 /** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
 // Only these two company-admin operations can be built by broker code.
+// DEC 254h: a pre-approval always carries the SHA-256 of the invite link secret the route made for it; the secret never leaves the broker.
 type CompanyPreapprovalRequest =
-  | { kind: "company-preapprove"; companyId: string; email: string; role: "member"; expiresInHours: number; createdBy: string }
+  | { kind: "company-preapprove"; companyId: string; email: string; role: "member"; expiresInHours: number; createdBy: string; inviteHash: string }
   | { kind: "company-preapproval-withdraw"; companyId: string; emailHash: string; createdBy: string };
 const CompanyPreapprovalInvoke = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720), createdBy: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720), createdBy: z.string().regex(/^[a-f0-9]{64}$/), inviteHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   z.object({ kind: z.literal("company-preapproval-withdraw"), companyId: OrgIdSchema, emailHash: z.string().regex(/^[a-f0-9]{64}$/), createdBy: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
 ]);
-export function companyPreapprovalsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: CompanyPreapprovalRequest) => Promise<boolean> {
+const PreapprovalExpiry = z.number().int().positive();
+export function companyPreapprovalsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: CompanyPreapprovalRequest) => Promise<false | { expiresAt?: number }> {
   return async (request) => {
     const parsed = CompanyPreapprovalInvoke.safeParse(request);
     if (!parsed.success) return false;
-    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok === true ? true : reply.ok === false ? false : undefined, "developer.company_preapproval");
-    return answer === true;
+    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok !== true ? (reply.ok === false ? false : undefined)
+      : reply.expiresAt === undefined ? {} : PreapprovalExpiry.safeParse(reply.expiresAt).success ? { expiresAt: reply.expiresAt as number } : undefined, "developer.company_preapproval");
+    return typeof answer === "object" && answer !== null && !("ok" in answer) ? answer : false;
   };
 }
 
@@ -1320,6 +1345,9 @@ async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: s
 }
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
+/** Guided onboarding PR 6: one project per repository, and the repository picker. */
+const CLIENT_PROJECTS_BULK = "/v1/dev/client/projects/bulk";
+const CLIENT_REPOSITORY_CHOICES = "/v1/dev/client/repositories/available";
 const CLIENT_CODE_SETTINGS = /^\/v1\/dev\/client\/projects\/([^/]+)\/code-settings$/;
 
 /**
@@ -1351,6 +1379,93 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
   });
 }
+const CLIENT_SETUP_STATUS = /^\/v1\/dev\/client\/projects\/([^/]+)\/setup-status(\/skips)?$/;
+
+/** The project's Slack channel links from the existing binding rows (ids; names only where the company's workspace can be asked, as the access check does). */
+async function projectChannelLinks(deps: DeveloperRouteDependencies, project: string, companyId: string | undefined): Promise<Array<{ channelId: string; name?: string; isPrivate?: boolean }>> {
+  const bindings = (await bindingsOf(deps, undefined, companyId)).filter((binding) => binding.projectName === project);
+  const ids = [...new Set(bindings.map((binding) => binding.channelId))].sort();
+  if (ids.length === 0) return [];
+  const teams = [...new Set(bindings.map((binding) => binding.teamId))];
+  let names = new Map<string, { name: string; isPrivate: boolean }>();
+  if (deps.workspaces !== undefined && companyId !== undefined && teams.length === 1) {
+    try { names = await channelNames(deps, ids, { companyId, teamId: teams[0]! }); } catch { names = new Map(); }
+  }
+  return ids.map((channelId) => describeChannel(channelId, names));
+}
+
+/**
+ * Guided onboarding PR 8: `GET /v1/dev/client/projects/{project}/setup-status` (any member of the project's company) and `PUT .../setup-status/skips` (a company owner or admin, or the project's
+ * administrator). The company is the caller's live membership; another company's project, an unknown one and an unreadable name all answer "project not found". See project-setup-status.ts.
+ */
+async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, skips: boolean, route: DevRoute): Promise<unknown> {
+  const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, person);
+  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
+  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const scope = boundedCompanyReads(deps.documentClient, deps.now);
+  const companyId = await resolveCompany(deps.companies, person.developerId);
+  const latest = await scope.client.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
+  const row = latest.Items?.[0];
+  const definition = row?.definition;
+  if (!recordInCompany(row, companyId) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
+  // With no company layer there is no company to belong to: the person must be one who may use the project.
+  if (companyId === undefined) {
+    const access = await projectsAPersonUses({ ...deps, documentClient: scope.client }, person.developerId, undefined);
+    if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+    if (!access.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
+  }
+  const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
+  const role = membership !== undefined && membership.companyId === companyId ? membership.role : undefined;
+  const own = await projectGrant({ ...memberActions(deps), documentClient: scope.client }, project, person.developerId);
+  const projectAdmin = own?.role === "administrator";
+  const companyAdmin = companyId === undefined ? person.administrator : role === "admin" || role === "owner";
+  const effectiveCompany = companyId ?? IMPLICIT_COMPANY_ID;
+  if (skips) {
+    if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
+    const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: () => jsonBody(request) });
+    scope.check();
+    logDeveloperEvent({ event: "client.project_setup_skip_changed", clientId: person.client.clientId, by: person.developerId, project, row: changed.row, skipped: changed.skipped ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
+    return changed;
+  }
+  if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+  const status = await readProjectSetupStatus({
+    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, definition: { revision: definition.revision, repositories: definition.repositories },
+    viewer: { companyRole: role ?? null, projectAdmin },
+    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId) },
+  });
+  scope.check();
+  return status;
+}
+
+const CLIENT_LIFECYCLE = /^\/v1\/dev\/client\/projects\/([^/]+)\/(archive-preview|archive|restore-preview|restore)$/;
+
+/**
+ * Guided onboarding PR 16: `GET .../archive-preview`, `POST .../archive`, `GET .../restore-preview`, `POST .../restore` on `/v1/dev/client/projects/{project}`. The token and its route row
+ * first (like every row); then only with the company layer (the live membership names the company and the role). The rule and the writes are project-lifecycle-routes.ts's.
+ */
+async function routeClientLifecycle(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, action: LifecycleAction, route: DevRoute): Promise<unknown> {
+  const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, person);
+  // Without the company layer there is no company role to judge by: every project looks missing.
+  const reader = deps.companies;
+  if (reader?.membershipOf === undefined) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
+  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
+  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  return routeProjectLifecycle({
+    documentClient: deps.documentClient, tableName: deps.tableName, now: deps.now,
+    membershipOf: async (personId) => await reader.membershipOf!(personId),
+    grantRole: async (personId, project) => (await projectGrant(memberActions(deps), project, personId))?.role,
+    archiveTakesEffect: (companyId) => deps.developer.projectArchiveTakesEffect?.(companyId) === true,
+    linkedSlackChannels: async (companyId, project) => (await bindingsOf(deps, undefined, companyId)).filter((binding) => binding.projectName === project).length,
+  }, { personId: person.developerId, project: rawProject, action, body: request.body });
+}
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
 /**
@@ -1379,24 +1494,60 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
-  if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
+  // Guided onboarding PR 6: one project per repository, and the repository picker; the same scope and the same role as creating one.
+  const bulk = url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST";
+  const choosing = url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET";
+  if (creating || bulk || choosing || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
     const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
     requireRouteScope(route, creator);
     if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+    if (choosing) {
+      if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
+      if (!query.success || new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) throw agentXError("CONFIG_INVALID", "invalid repository search: use q, limit (1 to 100) and after, once each");
+      return await deps.clientRepositoryChoices(creator.developerId, query.data) satisfies ClientRepositoryChoicesResponse;
+    }
+    if (bulk) {
+      if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
+      if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+      const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data);
+      logDeveloperEvent({ event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
+        ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
+        created: answer.results.filter((row) => row.outcome === "created").length });
+      return answer satisfies BulkCreateClientProjectsResponse;
+    }
     if (!creating) {
       if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
     }
+    const body = jsonBody(request);
+    // Guided onboarding PR 6: a body naming `repositories` makes one project of them all; any other body is the single-repository create, as before.
+    if (body !== null && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "repositories")) {
+      if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      const many = CreateClientProjectsRequestSchema.safeParse(body);
+      if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
+      const created = await deps.createClientProjects(creator.developerId, many.data);
+      logDeveloperEvent({ event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
+        ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }) });
+      return readClientProject(deps, creator.developerId, created.name, creator.companyId);
+    }
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-    const parsed = CreateClientProjectRequestSchema.safeParse(jsonBody(request));
+    const parsed = CreateClientProjectRequestSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     const created = await deps.createClientProject(creator.developerId, parsed.data);
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
     return readClientProject(deps, creator.developerId, created.name, creator.companyId);
   }
+  // Guided onboarding PR 16 (DEC 254n item 3): a project's archive and restore, preview first (project-lifecycle-routes.ts).
+  const lifecycle = CLIENT_LIFECYCLE.exec(url.pathname);
+  if (lifecycle !== null) return routeClientLifecycle(deps, request, lifecycle[1]!, lifecycle[2] as LifecycleAction, route);
   // Lane W: a project's merge rules (contract v0 client.projects.codeSettings), in Code's own CodeSettings shape.
   const settings = CLIENT_CODE_SETTINGS.exec(url.pathname);
   if (settings !== null && (request.method === "GET" || request.method === "PUT")) return routeClientCodeSettings(deps, request, settings[1]!, route);
+  // Guided onboarding PR 8: a project's setup status, and the skipped optional rows.
+  const setupStatus = CLIENT_SETUP_STATUS.exec(url.pathname);
+  if (setupStatus !== null && (request.method === "GET" || request.method === "PUT")) return routeClientSetupStatus(deps, request, setupStatus[1]!, setupStatus[2] !== undefined, route);
   const read = CLIENT_PROJECT.exec(url.pathname);
   if (read !== null && request.method === "GET") {
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
@@ -1764,7 +1915,11 @@ export function developerTaskRouteDependencies(
 }
 
 const CompanyInviteInput = z.object({ email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720) }).strict();
-async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+/**
+ * DEC 254h: `POST` also makes the invite link's single-use secret, bound to this company and this pre-approval, and answers it ONCE with the
+ * pre-approval's expiry; only its SHA-256 travels to the sign-in Lambda and is stored. `DELETE` withdraws the pre-approval, which ends its secret.
+ */
+async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<CompanyPreapprovalCreated | { ok: true }> {
   const notFound = () => agentXError("NOT_FOUND", "not found");
   if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
   const isPost = request.method === "POST" && url.pathname === "/v1/dev/company/preapprovals";
@@ -1783,14 +1938,21 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
   if (member.role !== "admin" && member.role !== "owner") throw notFound();
   let forwarded: CompanyPreapprovalRequest;
+  let link: { secret: string; secretHash: string } | undefined;
   if (isPost) {
     const parsed = CompanyInviteInput.safeParse(jsonBody(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "a member invitation needs an email and an expiry from 1 to 720 hours");
-    forwarded = { kind: "company-preapprove", companyId: member.companyId, ...parsed.data, createdBy: caller.developerId };
+    link = newCompanyInviteLink();
+    forwarded = { kind: "company-preapprove", companyId: member.companyId, ...parsed.data, createdBy: caller.developerId, inviteHash: link.secretHash };
   } else forwarded = { kind: "company-preapproval-withdraw", companyId: member.companyId, emailHash: hash!, createdBy: caller.developerId };
-  try { if (await deps.developer.companyPreapprovals?.(forwarded) !== true) throw notFound(); }
+  let answer: false | { expiresAt?: number } | undefined;
+  try { answer = await deps.developer.companyPreapprovals?.(forwarded); }
   catch { throw notFound(); }
-  return { ok: true };
+  if (answer === undefined || answer === false) throw notFound();
+  if (link === undefined) return { ok: true };
+  // A stored pre-approval whose expiry did not come back (a broken reply): the secret is never shown; the inviter withdraws that invitation and invites again.
+  if (answer.expiresAt === undefined) throw notFound();
+  return { ok: true, invite: { secret: link.secret, expiresAt: new Date(answer.expiresAt * 1000).toISOString() } };
 }
 
 /**
@@ -1845,8 +2007,36 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
   }, { caller: person, stepUp, companyId }, request, url);
 }
 
+/** Guided onboarding PR 1: the GitHub connect routes. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function githubConnectRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.githubConnect;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // Guided onboarding PR 3: the step-up the verified token carries travels beside the caller, for disconnect (its age is checked there).
+  const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeGithubConnect({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url, stepUp);
+}
+
+/** Guided onboarding PR 14: the company engine model route. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.companyEngineModel;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // Full access only (the route table's row), checked while authenticating, before any membership is read.
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeCompanyEngineModel({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request);
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
+  if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
+  if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company") return companySelfCreateRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.

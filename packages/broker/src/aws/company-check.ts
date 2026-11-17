@@ -59,6 +59,12 @@ export function recordInCompany(record: unknown, companyId: string | undefined):
   return company.success && company.data === companyId;
 }
 
+/** A row in a company's own partition: the partition key (`ORG#<company>#...`) already names its company, so the row may leave `companyId`/`orgId` out (Code's own writers and the
+ * switch-over move do). A row that names a company must name THIS one: a present, different (or malformed) owner is drift, never this company's data. */
+export function ownPartitionRow(row: Record<string, unknown>, companyId: string): boolean {
+  return (!Object.hasOwn(row, "companyId") || row["companyId"] === companyId) && (!Object.hasOwn(row, "orgId") || row["orgId"] === companyId);
+}
+
 export const COMPANY_READ_LIMITS = { commands: 512, items: 2_000, bytes: 8_000_000, files: 64, milliseconds: 10_000 } as const;
 
 /** Internal pagination signal; other read routes retain the fixed refusal. */

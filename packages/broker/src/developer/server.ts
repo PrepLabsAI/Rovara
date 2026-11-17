@@ -7,6 +7,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
+  COMPANY_INVITE_LINK_MAX,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
   ChannelInfoRequestSchema,
@@ -402,6 +403,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         methods = selected;
       } catch { return methodUnavailable(); }
     }
+    // DEC 254h: an invite link's secret, read only with the company layer on, with a company named, from an install-level client (the CLI or a
+    // registered install-level client such as the web app). Only its SHA-256 is kept; whether it is any good is decided at the callback, with the
+    // one "not invited" answer for every failure.
+    const invite = deps.company === undefined ? null : query.get("invite");
+    if (invite !== null && (invite.length < 1 || invite.length > COMPANY_INVITE_LINK_MAX || selectedCompany === undefined || (client !== undefined && client.installLevel !== true))) return methodUnavailable();
     const challenge = query.get("code_challenge") ?? "";
     const invalid = (description: string) => toClient(redirectUri, { error: "invalid_request", error_description: description, ...(clientState === "" ? {} : { state: clientState }) });
     if (query.get("response_type") !== "code") return invalid("response_type must be code; update the AgentX CLI and run agentx login again");
@@ -413,6 +419,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
     const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
     // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
+    // A step-up re-proves who someone is; it never joins anyone.
+    if (stepUp && invite !== null) return methodUnavailable();
     if (stepUp && deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
     let request: AuthRequestRecord;
     try {
@@ -423,6 +431,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         // Spec 065 FR-002: a scope the registration does not allow is dropped, not refused.
         ...(client === undefined ? {} : grantedScopes(query.get("scope"), client)),
         ...(selectedCompany === undefined ? {} : { companyId: selectedCompany }),
+        ...(invite === null ? {} : { inviteHash: createHash("sha256").update(invite, "utf8").digest("hex") }),
       });
       if (methods.length === 1) {
         const method = methods[0]!;
@@ -633,14 +642,19 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
       }
+      // DEC 254h: a sign-in carrying an invite link's secret joins by that secret alone (any method, with or without an email), never by email.
+      const byInvite = request.inviteHash !== undefined;
       const joined = candidate === undefined || !OrgIdSchema.safeParse(candidate).success || (request.companyId !== undefined && request.companyId !== candidate) || !clientAllowed
+        || (byInvite && request.companyId === undefined)
         ? { ok: false as const, reason: "not_invited" as const }
-        : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
+        : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash! })
+          : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
       // DEC 253z: not invited anywhere, no company asked for, signing in to the web app: a session with no company (it can only create one).
       companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined && request.stepUp !== true
         && await companylessMayMint(developerId, method, registered);
       if (!joined.ok && !companyless) {
-        const text = { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
+        // DEC 254h: with an invite secret, every failure (unknown, used, expired, withdrawn, wrong company, a member elsewhere, a removed member) is the one answer.
+        const text = byInvite ? "not invited" : { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
         deps.log({ event: "signin.refused", reason: joined.reason, developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: text }) : browserReturn(request.browserReturnTo, false);
       }

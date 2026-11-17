@@ -6,7 +6,7 @@ import { expect } from "vitest";
 import { AgentXError, companyScoped, newCompanyInviteCode } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
-import { authenticateDeveloper, companySelfCreateThroughLambda, routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { authenticateDeveloper, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { CompanyInviteStore } from "../../packages/broker/src/developer/company-invites.js";
 import { companyIssuerProvider } from "../../packages/broker/src/developer/company-issuer.js";
@@ -14,7 +14,7 @@ import { CompanySignInStore } from "../../packages/broker/src/developer/company-
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
 import type { DeveloperIdentityDependencies } from "../../packages/broker/src/developer/server.js";
 import { slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
-import { httpEvent, identityHarness, ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, type FakeSlackUser } from "./developer-fakes.js";
+import { httpEvent, identityHarness, ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, type FakeOidcUser, type FakeSlackUser } from "./developer-fakes.js";
 
 export const WEB = "https://cloud.example.test/callback";
 export const SECRET = ["web", "app", "secret", "for", "tests"].join("-");
@@ -24,7 +24,9 @@ export const OWN_SIGNIN = "your company signs in with its own sign-in method";
 type Answer = { status: number; body: Record<string, unknown> };
 
 function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUser[] } = {}) {
-  const users = ["owner", "carol", "bob", "dana", "legacy"].map((sub) => ({ sub, email: `${sub}@example.test`, email_verified: true, name: `${sub} person`, groups: ["admins"] }));
+  const users: FakeOidcUser[] = ["owner", "carol", "bob", "dana", "legacy", "erin", "frank"].map((sub) => ({ sub, email: `${sub}@example.test`, email_verified: true, name: `${sub} person`, groups: ["admins"] }));
+  // DEC 254h: a person whose identity carries no email at all.
+  users.push({ sub: "noemail", name: "No Email", groups: ["admins"] });
   const h = identityHarness({ oidc: options.administrator === true ? { administrator: { claim: "groups", values: ["admins"] } } : {}, oidcUsers: users, slackUsers: options.slackUsers ?? [] });
   // As production wires it with the company layer on (DEC 254e): the install's Slack app takes any workspace.
   h.deps.providers.slack = slackSignInProvider({ anyWorkspace: true, teamId: TEAM, credentials: async () => ({ clientId: SLACK_CLIENT_ID, clientSecret: SLACK_CLIENT_SECRET }), fetch: h.fetch, jwks: h.slack.jwks, now: h.now });
@@ -39,8 +41,8 @@ function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUs
   const operator = (event: unknown, newCompanyId = B) => companyOperator({ store: company, invites, now: h.now, log: h.deps.log, newCompanyId: () => newCompanyId }, event);
   const issuerRow = { pk: companyScoped(B, "SIGNIN_ISSUER"), sk: "OIDC", entityType: "COMPANY_SIGNIN_ISSUER", issuer: OIDC_ISSUER, clientId: OIDC_CLIENT_ID, displayName: "B sign-in", requiredValues: [], enabled: true, enabledSince: h.now() / 1000 - 60 };
   /** A real sign-in: through the web app (default) or the CLI, naming a company or not; the install's OIDC, or Slack from a workspace. */
-  const signIn = async (subject: string, opts: { cli?: boolean; company?: string; slackTeam?: string } = {}) => {
-    const query = { ...(opts.cli === true ? {} : { client_id: "web-app", redirect_uri: WEB }), ...(opts.company === undefined ? {} : { company: opts.company }) };
+  const signIn = async (subject: string, opts: { cli?: boolean; company?: string; slackTeam?: string; invite?: string } = {}) => {
+    const query = { ...(opts.cli === true ? {} : { client_id: "web-app", redirect_uri: WEB }), ...(opts.company === undefined ? {} : { company: opts.company }), ...(opts.invite === undefined ? {} : { invite: opts.invite }) };
     const back = opts.slackTeam === undefined ? await h.signIn("oidc", subject, { query }) : await h.signIn("slack", subject, { query, teamId: opts.slackTeam });
     const grant = back.searchParams.get("code");
     if (grant === null) return { refused: back.searchParams.get("error_description") ?? back.toString() };
@@ -59,6 +61,7 @@ function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUs
       issuer: ISSUER, env: "staging", methods: { slack: true, oidc: true }, signInTableName: "signin",
       verifyAccessToken: async (authorization) => decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? ""),
       channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
+      companyPreapprovals: companyPreapprovalsThroughLambda(async (payload) => ({ Payload: new TextEncoder().encode(JSON.stringify(await h.handler(JSON.parse(new TextDecoder().decode(payload)) as never))) })),
       companySelfCreate: companySelfCreateThroughLambda(async (payload) => ({ Payload: new TextEncoder().encode(JSON.stringify(await h.handler(JSON.parse(new TextDecoder().decode(payload)) as never))) })),
     },
   };
