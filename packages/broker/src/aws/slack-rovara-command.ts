@@ -9,9 +9,9 @@
 //     stored) bound to company, team, channel, Slack user, person, project and action, for 10 minutes; it is spent once, conditionally on all of them, before anything changes.
 //   - The press re-reads company, person and role live, then runs the same link core as the web (slack-channel-link.ts).
 import { createHash, randomBytes } from "node:crypto";
-import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { AgentXNameSchema, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, orgProjectCatalogPk, SLACK_OIDC_ISSUER, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { AgentXNameSchema, OrgIdSchema, orgProjectCatalogPk, SLACK_OIDC_ISSUER, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { ownerKeyForSubject } from "./lambda.js";
 import {
@@ -127,15 +127,16 @@ async function mintActions(ctx: SlackRovaraContext, bound: Bound[]): Promise<str
   const tokens = bound.map(() => (ctx.wiring.random?.(32) ?? randomBytes(32)).toString("base64url"));
   if (tokens.some((token) => !Token.safeParse(token).success)) throw new Error("random");
   const items = bound.map((fields, index) => ({ Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-    ...rovaraActionKey(tokens[index]!), entityType: "SLACK_ROVARA_ACTION", status: "live", ...fields, createdAt: new Date(nowMs).toISOString(), expiresAt,
-    // The State table's TTL attribute (named environments): spent or not, the row goes a day after it expired.
-    [INDEX_EXPIRY_ATTRIBUTE]: expiresAt + 86_400 } } }));
+    ...rovaraActionKey(tokens[index]!), entityType: "SLACK_ROVARA_ACTION", status: "live", ...fields, createdAt: new Date(nowMs).toISOString(), expiresAt } } }));
   if (items.length === 1) await ctx.documentClient.send(new PutCommand(items[0]!.Put));
   else await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
   return tokens;
 }
 
-/** Spends a live token once, only for the same team, channel, Slack user and action, before its expiry. Undefined for anything else. */
+/**
+ * Spends a live token once, only for the same team, channel, Slack user and action, before its expiry (expiresAt, an ordinary field: the row is refused after 10 minutes).
+ * Spending DELETES the row conditionally on all of them, so a replay finds nothing. Tokens never pressed stay (small rows; a later cleanup may remove them).
+ */
 async function spendAction(ctx: SlackRovaraContext, press: Extract<SlackRovaraEvent, { kind: "press" }>): Promise<z.infer<typeof StoredAction> | undefined> {
   try {
     const key = rovaraActionKey(press.token);
@@ -143,11 +144,10 @@ async function spendAction(ctx: SlackRovaraContext, press: Extract<SlackRovaraEv
     const response = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
     const row = StoredAction.parse(response.Item);
     if (row.teamId !== press.teamId || row.channelId !== press.channelId || row.userId !== press.userId || row.action !== press.action || row.expiresAt <= nowSeconds) return undefined;
-    await ctx.documentClient.send(new UpdateCommand({ TableName: ctx.tableName, Key: key,
-      UpdateExpression: "SET #status = :used, usedAt = :at",
+    await ctx.documentClient.send(new DeleteCommand({ TableName: ctx.tableName, Key: key,
       ConditionExpression: "#status = :live AND teamId = :team AND channelId = :channel AND userId = :user AND #action = :action AND expiresAt > :now",
       ExpressionAttributeNames: { "#status": "status", "#action": "action" },
-      ExpressionAttributeValues: { ":used": "used", ":live": "live", ":at": new Date(ctx.now()).toISOString(), ":team": press.teamId, ":channel": press.channelId,
+      ExpressionAttributeValues: { ":live": "live", ":team": press.teamId, ":channel": press.channelId,
         ":user": press.userId, ":action": press.action, ":now": nowSeconds } }));
     return row;
   } catch { return undefined; }

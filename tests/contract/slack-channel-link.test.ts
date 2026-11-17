@@ -545,10 +545,25 @@ describe("/rovara in Slack", () => {
   it("a press from another team leaves the token unspent; tokens carry the table's TTL", async () => {
     const w = world();
     const value = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
-    expect(w.db.get(rovaraActionKey(value).pk, "META")).toMatchObject({ indexExpiresAt: Math.floor(Date.parse(TIME) / 1000) + 600 + 86_400 });
+    expect(w.db.get(rovaraActionKey(value).pk, "META")).toMatchObject({ expiresAt: Math.floor(Date.parse(TIME) / 1000) + 600 });
+    expect(w.db.get(rovaraActionKey(value).pk, "META")).not.toHaveProperty("indexExpiresAt");
     expect((await w.press({ team: BETA, user: "U0ADA" }, ROVARA_LINK_ACTION, value))!.text).toBe(ROVARA_EXPIRED);
     expect(w.db.get(rovaraActionKey(value).pk, "META")).toMatchObject({ status: "live" });
     expect((await w.press(w.adminA, ROVARA_LINK_ACTION, value))!.text).toContain("Linked <#C0GENERAL> to *web*");
+    // Spent: the row is gone.
+    expect(w.db.get(rovaraActionKey(value).pk, "META")).toBeUndefined();
+  });
+
+  it("a token is refused one second after its 10 minutes, and accepted just before", async () => {
+    const w = world();
+    const early = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
+    w.tick(599_000);
+    expect((await w.press(w.adminA, ROVARA_LINK_ACTION, early))!.text).toContain("Linked");
+    const w2 = world();
+    const late = w2.buttons(await w2.slash(w2.adminA, "link web"))[0]!.value;
+    w2.tick(600_000);
+    expect((await w2.press(w2.adminA, ROVARA_LINK_ACTION, late))!.text).toBe(ROVARA_EXPIRED);
+    expect(w2.db.get(rovaraActionKey(late).pk, "META")).toMatchObject({ status: "live" });
   });
 
   it("a press from a workspace that isn't the company's connected one links nothing", async () => {
