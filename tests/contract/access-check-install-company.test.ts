@@ -221,6 +221,14 @@ describe("DEC 254: the install's company-scoped records", () => {
     for (const id of [NOPOINTER, LEGACY, LEGACY_DUP]) expect(await w.asPerson(id)).toEqual(REFUSED);
   });
 
+  it("with no install Slack team, or no team row, the install reads as legacy for a person with no pointer (pinned: the controller confirms staging has the row)", async () => {
+    const w = world();
+    delete (w.deps.developer as { slackTeamId?: string }).slackTeamId;
+    expect(names((await w.asPerson(LEGACY)).body)).toEqual(["legacy:granted"]);
+    const v = world({ legacy: true });
+    expect(names((await v.asPerson(LEGACY)).body)).toEqual(["legacy:granted"]);
+  });
+
   it("a real removal (pointer and member record deleted together, REMOVED written) refuses, with legacy rows still in place", async () => {
     const w = world();
     expect(names((await w.asPerson(MEMBER)).body)).toEqual(["api:granted", "chat:channel"]);
