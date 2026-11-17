@@ -53,6 +53,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Lane W: a project's merge rules; full access only (the route also checks the project and, to loosen, a fresh step-up).
   { method: "GET", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
+  // Guided onboarding PR 8: a project's setup checklist state (any member of the project's company) and its skipped optional rows (company owner or admin, or the project's administrator); full access only.
+  { method: "GET", path: "/v1/dev/client/projects/{project}/setup-status", requires: "full" },
+  { method: "PUT", path: "/v1/dev/client/projects/{project}/setup-status/skips", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
