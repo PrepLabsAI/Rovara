@@ -323,7 +323,8 @@ async function authorizeColdInitialization(
   ownerOnly: boolean,
   admission?: TaskPeopleDisplayAdmission,
 ): Promise<void> {
-  if (ownerOnly && caller.developerId !== task.developerId) return denied();
+  // C3: only its creator starts an unshared task's list (no channel makes anyone else present on it).
+  if ((ownerOnly || task.share === undefined) && caller.developerId !== task.developerId) return denied();
   const proof = await checked(deps, task, caller.developerId, admission);
   if (!proof.eligible || !taskPersonPresent(proof)) return denied();
 }
@@ -343,25 +344,26 @@ async function currentPeopleForCaller(
 }
 
 /**
- * The role a person holds with no PEOPLE entry. A present `slack` identity (in the task's channel) is an implicit commenter, as before (D2).
- * C3: a `web` identity holds only a role someone gave it (D3: owners add people explicitly), so being a member with a grant alone reaches no task.
+ * The role a person holds with no PEOPLE entry. A `slack` identity in a Slack-shared task's channel is an implicit commenter, as before (D2).
+ * C3: on a task with no share there is no channel, so nobody is an implicit commenter; and a `web` identity holds only a role someone gave it
+ * (D3: owners add people explicitly), so being a member with a grant alone reaches no task.
  */
-function implicitRole(proof: TaskPersonCheck): TaskRole | null {
-  return proof.eligible && taskPersonPresent(proof) && taskPersonKindOf(proof.identity) === "slack" ? "commenter" : null;
+function implicitRole(task: DeveloperTaskRecord, proof: TaskPersonCheck): TaskRole | null {
+  return task.share !== undefined && proof.eligible && taskPersonPresent(proof) && taskPersonKindOf(proof.identity) === "slack" ? "commenter" : null;
 }
 
-function effectiveRoleFromProof(explicit: PersonEntry | undefined, proof: TaskPersonCheck): TaskRole | null {
+function effectiveRoleFromProof(task: DeveloperTaskRecord, explicit: PersonEntry | undefined, proof: TaskPersonCheck): TaskRole | null {
   if (explicit?.role === "denied" || !proof.eligible) return null;
   if (explicit?.role === "owner") return taskPersonPresent(proof) ? "owner" : null;
   if (explicit?.role === "commenter" || explicit?.role === "viewer") return explicit.role;
-  return implicitRole(proof);
+  return implicitRole(task, proof);
 }
 
 async function effectiveRole(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, developerId: string,
   admission?: TaskPeopleDisplayAdmission): Promise<TaskRole | null> {
   const explicit = people.people.find((person) => person.developerId === developerId);
   const proof = await checked(deps, task, developerId, admission);
-  return effectiveRoleFromProof(explicit, proof);
+  return effectiveRoleFromProof(task, explicit, proof);
 }
 
 async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, caller: DeveloperCaller,
@@ -390,7 +392,7 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
     const role = candidate.explicit?.role ?? "commenter";
     const display = displayByDeveloper.get(candidate.identity.developerId);
     const effective = display !== undefined && samePrincipal(display.identity, candidate.identity)
-      ? effectiveRoleFromProof(candidate.explicit, display)
+      ? effectiveRoleFromProof(task, candidate.explicit, display)
       : await effectiveRole(deps, task, people, candidate.identity.developerId, admission);
     if (candidate.explicit === undefined && effective !== "commenter") continue;
     const baseName = candidate.explicit?.name ?? candidate.identity.name;
@@ -715,7 +717,7 @@ export async function changeTaskPeople(
   if (!samePrincipal(mapping.identity, proof.identity) || (input.role !== "denied" && !proof.eligible)
     || (input.role === "owner" && !taskPersonPresent(proof))) return denied();
   const existing = people.people.find((person) => person.developerId === input.targetDeveloperId);
-  const beforeRole = existing?.role ?? implicitRole(proof);
+  const beforeRole = existing?.role ?? implicitRole(task, proof);
   if (existing?.role === input.role) throw agentXError("CONFIG_INVALID", "that person already has this task role");
   if (existing?.role === "owner" && input.role !== "owner" && people.people.filter((person) => person.role === "owner").length === 1) {
     throw agentXError("CONFIG_INVALID", "a task must retain an effective owner");

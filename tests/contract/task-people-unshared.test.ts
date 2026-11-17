@@ -80,6 +80,8 @@ interface World {
   memberships?: Record<string, string | undefined>;
   grants?: Record<string, boolean>;
   revoked?: string[];
+  /** Slack user ids the fresh Slack proof says are not in the task's channel. */
+  outOfChannel?: string[];
 }
 
 function harness(world: World = {}) {
@@ -94,7 +96,7 @@ function harness(world: World = {}) {
   const memberships: Record<string, string | undefined> = { [GALE_ID]: COMPANY_A, [WREN_ID]: COMPANY_A, ...(world.memberships ?? {}) };
   const grants: Record<string, boolean> = { [GALE_ID]: true, [WREN_ID]: true, ...(world.grants ?? {}) };
   const proof = vi.fn(async (request: TaskPersonProofRequest): Promise<TaskPersonProofResponse> => ({
-    ok: true, user: { id: request.slackUserId, teamId: TEAM, name: "Sam Slack" }, memberOf: [CHANNEL],
+    ok: true, user: { id: request.slackUserId, teamId: TEAM, name: "Sam Slack" }, memberOf: world.outOfChannel?.includes(request.slackUserId) === true ? [] : [CHANNEL],
   }));
   const identityDeps: TaskPersonIdentityDependencies = {
     documentClient, tableName: "state", slackTeamId: TEAM, now: () => T0, uuid: () => P_SAM,
@@ -185,7 +187,7 @@ describe("present web owners and the People lifecycle on an unshared task", () =
   ])("a sole web owner who %s makes dispatch OWNERLESS, and reconcile demotes them", async (_label, world) => {
     const h = webPeople(world as World);
     await expect(resolveTaskDispatchPeople(h.peopleDeps, webTask())).resolves.toStrictEqual({ peopleRevision: 3, ownerActorIds: [], status: "OWNERLESS" });
-    await expect(resolveTaskPeopleAccess(h.peopleDeps, webTask(), WREN_ID)).resolves.toMatchObject({ role: "commenter", orphaned: true, peopleRevision: 4, canTakeOwnership: false });
+    await expect(resolveTaskPeopleAccess(h.peopleDeps, webTask(), WREN_ID)).resolves.toMatchObject({ role: "commenter", orphaned: true, peopleRevision: 4, canTakeOwnership: true });
     expect(h.people()).toMatchObject({ revision: 4, orphaned: true, people: [GALE("denied"), WREN("commenter")] });
   });
 
@@ -221,6 +223,56 @@ describe("a web identity holds only a role someone gave it", () => {
     // The owner's view lists only people with a role.
     const view = await getTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A);
     expect(view.people.map((person) => person.name)).toEqual(["Gale GitHub"]);
+  });
+});
+
+describe("no channel on an unshared task: nobody is present without a role", () => {
+  it("gives a present web person with no PEOPLE entry no access on a Slack-shared task either (no implicit commenter for web)", async () => {
+    const shared = webTask({ shared: true, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081", mode: "view", sharedReason: "requested", sharedAt: CREATED } });
+    const h = harness({ task: shared });
+    h.seed(galeRow(), subjectRow(P_GALE, GALE_ID), wrenRow(), subjectRow(P_WREN, WREN_ID), peopleRow([GALE("owner")]));
+    expect((await errorOf(resolveTaskPeopleAccess(h.peopleDeps, shared, WREN_ID))).code).toBe("TASK_ACCESS_DENIED");
+  });
+
+  it("gives an eligible Slack person with no PEOPLE entry no access on an unshared task (no implicit commenter without a channel)", async () => {
+    const h = harness({ task: slackUnsharedTask() });
+    const BAY = "U0BAYSLACK";
+    const bayId = developerIdForSlackUser(BAY);
+    h.seed(samRow(), subjectRow(P_SAM, SAM_ID), personRow("88888888-8888-4888-8888-888888888888", { developerId: bayId, slackUserId: BAY, name: "Bay Slack", method: "slack", issuer: SLACK_OIDC_ISSUER, subject: BAY }),
+      subjectRow("88888888-8888-4888-8888-888888888888", bayId), peopleRow([SAM_ENTRY("owner")]));
+    expect((await errorOf(resolveTaskPeopleAccess(h.peopleDeps, slackUnsharedTask(), bayId))).code).toBe("TASK_ACCESS_DENIED");
+  });
+
+  it("lets only the creator start an unshared task's People list: another present person's read writes nothing", async () => {
+    const h = harness();
+    h.seed(wrenRow(), subjectRow(P_WREN, WREN_ID));
+    expect((await errorOf(getTaskPeople(h.peopleDeps, WREN_CALLER, TASK_A))).code).toBe("TASK_ACCESS_DENIED");
+    expect(h.people()).toBeUndefined();
+  });
+});
+
+describe("Slack identities on a Slack-shared task keep needing the channel to own (D2), now through taskPersonPresent", () => {
+  const SHARE = { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081", mode: "view", sharedReason: "requested", sharedAt: CREATED };
+  const sharedSlackTask = () => webTask({ developerId: SAM_ID, provider: "slack", developerName: "Sam Slack", slackUserId: SAM, client: "slack", shared: true, share: SHARE });
+  const BAY = "U0BAYSLACK";
+  const BAY_ID = developerIdForSlackUser(BAY);
+  const P_BAY = "88888888-8888-4888-8888-888888888888";
+  const bayRow = () => personRow(P_BAY, { developerId: BAY_ID, slackUserId: BAY, name: "Bay Slack", method: "slack", issuer: SLACK_OIDC_ISSUER, subject: BAY });
+  const BAY_ENTRY = (role: string) => ({ developerId: BAY_ID, slackUserId: BAY, name: "Bay Slack", role });
+
+  it("never counts a Slack owner who left the channel for dispatch", async () => {
+    const h = harness({ task: sharedSlackTask(), outOfChannel: [SAM] });
+    h.seed(samRow(), subjectRow(P_SAM, SAM_ID), peopleRow([SAM_ENTRY("owner")]));
+    await expect(resolveTaskDispatchPeople(h.peopleDeps, sharedSlackTask())).resolves.toStrictEqual({ peopleRevision: 3, ownerActorIds: [], status: "OWNERLESS" });
+  });
+
+  it("never lets a Slack commenter outside the channel take ownership of an orphaned task", async () => {
+    const h = harness({ task: sharedSlackTask(), outOfChannel: [BAY] });
+    h.seed(samRow(), subjectRow(P_SAM, SAM_ID), bayRow(), subjectRow(P_BAY, BAY_ID), peopleRow([SAM_ENTRY("denied"), BAY_ENTRY("commenter")], 3, true));
+    const bay = caller(BAY_ID, "Bay Slack", "slack", BAY);
+    await expect(getTaskPeopleCapabilities(h.peopleDeps, bay, TASK_A)).resolves.toMatchObject({ canTakeOwnership: false });
+    await expect(resolveTaskPeopleAccess(h.peopleDeps, sharedSlackTask(), BAY_ID)).resolves.toMatchObject({ role: "commenter", canTakeOwnership: false });
+    expect((await errorOf(takeTaskOwnership(h.peopleDeps, bay, TASK_A, { requestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expectedPeopleRevision: 3 }))).code).toBe("TASK_ACCESS_DENIED");
   });
 });
 
