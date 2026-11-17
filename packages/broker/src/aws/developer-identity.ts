@@ -1,5 +1,6 @@
 import { SlackWorkspaceScopeSchema } from "@agentx/contracts";
 import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
+import { handleSlackInstallRequest, slackInstallSecretsFromSecretsManager } from "./slack-install-identity.js";
 import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
 // packages/broker/src/aws/developer-identity.ts
 // The DeveloperIdentity Lambda (spec 025 phase 25a): wires the sign-in server to AWS. The only
@@ -13,7 +14,7 @@ import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
 import type { ChannelByNameRequest, ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, EndDeveloperSessionsRequest, ListSignInClientsRequest, PutSignInClientRequest, RemoveSignInClientRequest, SlackAuthCheckRequest, SlackUserByEmailRequest, TaskChannelPeopleRequest, TaskPersonProofRequest } from "@agentx/contracts";
 import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
-import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
+import { createDeveloperIdentityHandler, type DeveloperIdentityConfig, type SlackInstallInvoke } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
 import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js";
 import { DeveloperSignInStore, methodSince } from "../developer/store.js";
@@ -279,6 +280,8 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
     now,
     log,
     ...stepUpOf(stepUpFromEnvironment(env, config.issuer, () => new SESv2Client(region), log)),
+    // Guided onboarding PR 4: Add to Slack's Slack side, beside the Slack app's client secret; with the company layer only.
+    ...(company === undefined ? {} : { slackInstall: (event: unknown) => handleSlackInstallRequest({ appClient: slackSecret, secrets: slackInstallSecretsFromSecretsManager(secrets, config.env), fetch }, event) }),
   });
 }
 
@@ -292,7 +295,7 @@ function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Para
 }
 
 export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-  | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest) => {
+  | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SlackInstallInvoke) => {
   built ??= createAwsDeveloperIdentityHandler(process.env);
   return built(event);
 };

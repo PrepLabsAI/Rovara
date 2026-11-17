@@ -13,6 +13,7 @@ export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/de
   "GET /v1/dev/projects/{id}/settings", "PUT /v1/dev/projects/{id}/settings", "GET /v1/dev/company/settings-compliance",
   "GET /v1/dev/company/members", "GET /v1/dev/company/members/{id}/removal-preview", "POST /v1/dev/company/members/{id}/removal", "PUT /v1/dev/company/members/{id}/role",
   "POST /v1/dev/company/github/connect", "POST /v1/dev/company/github/claim", "POST /v1/dev/company/github/choose", "GET /v1/dev/company/github", "DELETE /v1/dev/company/github/{id}",
+  "POST /v1/dev/company/slack/install", "POST /v1/dev/company/slack/install/complete", "POST /v1/dev/company/slack/disconnect", "GET /v1/dev/company/slack",
   "GET /v1/dev/company/engine-model", "PUT /v1/dev/company/engine-model",
   "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
   "GET /v1/dev/client/projects/{id}/setup-status", "PUT /v1/dev/client/projects/{id}/setup-status/skips",

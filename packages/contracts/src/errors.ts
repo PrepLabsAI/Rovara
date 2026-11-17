@@ -116,6 +116,9 @@ export const AgentXErrorCodeSchema = z.enum([
   "NOT_AVAILABLE_HERE",
   // Guided onboarding PR 3: a company's GitHub connection can't be disconnected while its projects use repositories on it (409; the message names those projects, only the company's own). Appended: no code changes meaning.
   "GITHUB_IN_USE",
+  // Guided onboarding PR 4 (409): the Slack workspace is another Rovara company's; this company already holds a different Slack workspace.
+  "SLACK_WORKSPACE_TAKEN",
+  "SLACK_COMPANY_HAS_WORKSPACE",
 ]);
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";
