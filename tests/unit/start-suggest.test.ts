@@ -185,6 +185,21 @@ describe("the hosted route", () => {
     expect(down.raw).not.toContain(CANARY);
   });
 
+  it("the hourly limit is per company and per person: the same person id in another company has their own places", async () => {
+    const r = router("question");
+    const w = world({ [`${A}/alpha/limiter-person`]: "view", [`${B}/alpha/limiter-person`]: "view", [`${A}/alpha/other-person`]: "view" }, r.route);
+    // Company B has no classifier wired in this world, so B's places are asked of a classifier of its own.
+    const rb = router("small_change");
+    for (let i = 0; i < 60; i += 1) expect((await w.post(A, "limiter-person", body())).status).toBe(200);
+    const refused = await w.post(A, "limiter-person", body());
+    expect(refused.status).toBe(429);
+    expect(refused.body).toEqual({ error: { code: "TOO_MANY_REQUESTS", message: START_SUGGEST_WORDS.rate } });
+    // Another person in the same company, and the same person id in the other company, are not held back.
+    expect((await w.post(A, "other-person", body())).status).toBe(200);
+    expect((await w.post(B, "limiter-person", body(), PATH, { route: () => rb.route })).status).toBe(200);
+    expect(rb.calls).toHaveLength(1);
+  });
+
   it("small talk is answered with no classifier at all", async () => {
     const w = world({ [`${A}/alpha/ada`]: "view" });
     expect((await w.post(A, "ada", body("hello team"))).body).toEqual({ kind: "small_talk", classifier: "ok", pick: "answer", smallTalk: "greeting" });
