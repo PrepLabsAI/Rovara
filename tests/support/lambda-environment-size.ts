@@ -65,6 +65,9 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   // The gateway host and agent model at their parameters' longest (CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_AGENT_MODEL_MAX_LENGTH).
   CoreModelGatewayHost: `${"g".repeat(36)}.${"h".repeat(9)}.dev:65535`,
   CoreAgentModel: `claude-${"m".repeat(33)}`,
+  // Web task channel C8 (option b): the web app's host at the parameter's longest (CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, the same pattern), though only the sender function has it; the
+  // switch takes AllowedValues' longest, "off".
+  CoreAttentionEmailHost: `${"w".repeat(36)}.${"e".repeat(9)}.app:65535`,
 };
 const RANDOM = "A1B2C3D4E5F6G";
 const UUID = "12345678-1234-1234-1234-123456789012";

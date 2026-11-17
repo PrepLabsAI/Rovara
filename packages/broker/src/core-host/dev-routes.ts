@@ -41,7 +41,7 @@ import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
 import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
-import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer } from "./inbox-routes.js";
+import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer, inboxOwns } from "./inbox-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
 import { developerTaskView } from "../local/app/task-view.js";
 import type { CoreHostApp } from "./app.js";
@@ -128,7 +128,7 @@ export interface CoreDevWiring {
   /** The company's agent model choice over the gateway's offered models (`createAgentModelChoice`). Absent: `/v1/app/agent-models` says "not on the core yet". */
   modelChoice?: AgentModelChoice;
   /** The URL clients reach the API at (a session's `link`). */
-  origin: () => string;
+  origin: () => string; unsubscribeKey?: Buffer;
   /** Hosted wiring (d): the audit sink for one request, naming the caller it came through (`auditSinkForDeployedCaller`). Absent: the registry's sink as it is. */
   auditFor?: (caller: DeployedCaller, sink: AuditSink) => AuditSink;
   /** Guided onboarding L2-3: the hosted setup run (`/v1/app/projects/<p>/setup-agent...`, setup-run-routes.ts). Absent: those paths say "not on the core yet". */
@@ -156,7 +156,7 @@ function tokenIdOf(raw: string): string {
 function owns(path: string, method: string): boolean {
   if (path === TASK_START) return method === "POST";
   if (TASK_READ.test(path) || PLAYBOOK.test(path)) return method === "GET";
-  if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
+  if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
@@ -229,7 +229,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         const blobs = (await options.app.registry()).require("object-storage");
         return {
           runtime, wiring, blobs,
-          ...(wiring.members === undefined ? {} : { sessions: createSessionRoutes({ flow: runtime.flow, blobs, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }), inbox: createInboxRoutes({ store: runtime.flow.deps.store, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }) }),
+          ...(wiring.members === undefined ? {} : { sessions: createSessionRoutes({ flow: runtime.flow, blobs, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }), inbox: createInboxRoutes({ store: runtime.flow.deps.store, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members, ...(wiring.unsubscribeKey === undefined ? {} : { unsubscribeKey: wiring.unsubscribeKey }) }) }),
           ...(wiring.playbook === undefined ? {} : { playbook: createLocalPlaybook({ playbook: wiring.playbook, store: runtime.flow.deps.store, companyId: runtime.companyId }) }),
           // The owner's moves need both the money cap and the company's owner rule; with either missing they are not served (never Code's laptop owner rule on a hosted company).
           ...(wiring.taskActions === undefined || runtime.flow.deps.access.ownerActing === undefined ? {} : { actions: createTaskActions(runtime.flow.deps, { roundCap: wiring.taskActions.roundCap }) }),

@@ -216,6 +216,9 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core-host/hosted-approvers.ts", "packages/broker/src/core/after-merge/watch.ts",
       // After-merge reporter (#787 M7 slice 2): its own AFTER_MERGE_SENT claim rows (one per report and surface, kept WATCH_KEPT_DAYS, then expired) and nothing else; no other record shares the key.
       "packages/broker/src/core/after-merge/reporter.ts",
+      // Web task channel C8 (option b): the attention email's reverse index, one ATTENTION_PERSON row per company and hashed person id, kept 90 days after it was last written, then expired. Not a
+      // durable record (each new attention row for the person writes it again).
+      "packages/broker/src/core/notify/person-index.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

@@ -1632,7 +1632,16 @@ const githubSignInTuples: AccessTuple[] = [
 /** Guided onboarding PR 4 (Add to Slack): DeveloperIdentity writes, reads (to revoke) and overwrites each company's bot token in the token store's family; no delete, no tags. */
 const slackInstallTuples: AccessTuple[] = ["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"].map((action) =>
   ["role:DeveloperSignInFunctionServiceRole", "Allow", action, "arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/slack-workspaces/*", "{}"] as AccessTuple);
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...slackInstallTuples,
+/**
+ * Web task channel C8, option b (DEC 254zm(3), owner-approved new IAM): the attention email's own sender function may send as the one CoreAttentionEmailSender identity, From pinned, and write X-Ray
+ * traces (every function's tracing default). Its role, this policy and the broker's invoke permission (on the function's own policy, not here) exist only while CoreAttentionEmail is on.
+ */
+const attentionEmailTuples: AccessTuple[] = [
+  ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "ses:SendEmail", "arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:CoreAttentionEmailSender", "{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:CoreAttentionEmailSender\"]}}"],
+  ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTelemetryRecords", "*", "{}"],
+  ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTraceSegments", "*", "{}"],
+];
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...slackInstallTuples, ...attentionEmailTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
 ].sort(byText);
 

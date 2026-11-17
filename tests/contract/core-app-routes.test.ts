@@ -63,7 +63,7 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens/tok_1/revoke", "full"],
     ["POST", "/v1/app/people/p1/erase", "full"],
     // Web task channel C7: the in-app inbox (core/notify/inbox.ts over core-host/inbox-routes.ts).
-    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"],
+    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"], ["POST", "/v1/app/notify/unsubscribe", "full"],
     // Guided onboarding L2-3: the hosted setup run.
     ["GET", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent/stop", "full"],
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],

@@ -12,6 +12,8 @@
 //     switch-off: a switch-on change set shows that one IAM policy Add, the dispatcher's environment Modify and the mapping's Enabled flag. Its grant may take a few seconds to apply
 //     after the mapping is enabled; a first core batch that meets AccessDenied on the deleter comes back and is retried.)
 //   - an alarm on the dead-letter queue;
+//   - (web task channel C8, option b) the attention email: CoreAttentionEmail (default off), CoreAttentionEmailHost and CoreAttentionEmailSender, and the small sender function the broker invokes,
+//     which with its role and invoke permission exists only while CoreAttentionEmail is on (attention-email.ts);
 //   - the `CoreModelGatewayHost` and `CoreAgentModel` parameters (default empty), packed for the broker and the dispatcher, which read them as ROVARA_CORE_MODEL_GATEWAY_URL
 //     (`https://<host>`) and ROVARA_CORE_AGENT_MODEL.
 //
@@ -29,6 +31,7 @@ import {
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
+import { AttentionEmail } from "./attention-email.js";
 
 /** The stack parameter that holds the switch. */
 export const CORE_ENGINE_PARAMETER = "CoreEngine";
@@ -70,6 +73,7 @@ export class CoreEngine extends Construct {
   readonly invokeRole: iam.Role;
   readonly schedules: scheduler.CfnSchedule[] = [];
   readonly isOn: CfnCondition;
+  readonly attentionEmail: AttentionEmail;
   private readonly brokerFunctionArn: string;
 
   constructor(scope: Construct, id: string, props: CoreEngineProps) {
@@ -155,6 +159,8 @@ export class CoreEngine extends Construct {
     this.invokeRole.addToPolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
     const state = Token.asString(Fn.conditionIf(this.isOn.logicalId, "ENABLED", "DISABLED"));
     for (const entry of CORE_JOB_SCHEDULES) this.schedules.push(this.schedule(entry, state));
+    // Web task channel C8 (option b): the attention email's own sender function, OFF by default and absent from the template while off (attention-email.ts).
+    this.attentionEmail = new AttentionEmail(this, "AttentionEmail", { naming: props.naming, env, broker });
   }
 
   private schedule(entry: CoreJobSchedule, state: string): scheduler.CfnSchedule {

@@ -83,6 +83,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons",
     // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
     "CoreModelGatewayHost", "CoreAgentModel",
+    // Web task channel C8 (option b): the attention email switch, the web app's host and the attention email's own SES identity, as the operator set them.
+    "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
     "StepUpEmailSender"],
   slack: ["SlowTurnMinutes", "ModelFallback"],

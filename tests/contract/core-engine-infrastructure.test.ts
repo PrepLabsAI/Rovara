@@ -14,7 +14,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
   BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
-  SERVICE_ROLE_SERVICES, coreDispatchDeadLetterName, coreDispatchQueueName,
+  SERVICE_ROLE_SERVICES, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
@@ -292,14 +292,94 @@ describe("no new deploy-role service", () => {
   it("every resource type the construct adds is one whose service the deploy role and the default boundary already allow, and the stack makes no managed policy", () => {
     const added = Object.entries(inApp.Resources).filter(([id]) => id.startsWith("CoreEngineJobs")).map(([, resource]) => resource.Type);
     const services = new Set(added.map((type) => type.split("::")[1]!.toLowerCase()));
-    expect([...services].sort()).toEqual(["cloudwatch", "iam", "lambda", "scheduler", "sqs"]);
-    for (const service of ["cloudwatch", "lambda", "scheduler", "sqs"]) {
+    expect([...services].sort()).toEqual(["cloudwatch", "iam", "lambda", "logs", "scheduler", "sqs"]);
+    for (const service of ["cloudwatch", "lambda", "logs", "scheduler", "sqs"]) {
       expect(SERVICE_ROLE_SERVICES, service).toContain(service);
       expect(BOUNDARY_SERVICES, service).toContain(service);
     }
     // IAM: only a role under the environment's path and its inline policy, and the dispatcher's conditional inline policy (the deploy role's IamRoles grant); a managed policy would be refused by both.
-    expect(added.filter((type) => type.startsWith("AWS::IAM::")).sort()).toEqual(["AWS::IAM::Policy", "AWS::IAM::Policy", "AWS::IAM::Role"]);
+    // Web task channel C8 (option b): the attention email sender's role and its inline policy (both only while CoreAttentionEmail is on).
+    expect(added.filter((type) => type.startsWith("AWS::IAM::")).sort()).toEqual(["AWS::IAM::Policy", "AWS::IAM::Policy", "AWS::IAM::Policy", "AWS::IAM::Role", "AWS::IAM::Role"]);
     expect(Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::ManagedPolicy")).toEqual([]);
+  });
+});
+
+// Web task channel C8, option b (DEC 254zm(3)): the attention email's own sender function. The guard: OFF builds nothing; on, one function with one narrow statement, invoked by the broker through the
+// function's own policy; the broker's role and environment do not grow.
+describe("the attention email (CoreAttentionEmail, default off)", () => {
+  const attention = Object.entries(inApp.Resources).filter(([id]) => id.startsWith("CoreEngineJobsAttentionEmail"));
+  const conditionId = Object.keys(inApp.Conditions ?? {}).find((id) => id.startsWith("CoreEngineJobsAttentionEmailAttentionEmailIsOn"))!;
+  const of = (type: string) => attention.filter(([, resource]) => resource.Type === type);
+  const inAppBroker = Object.entries(inApp.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
+  const inAppBrokerRoleId = ((inAppBroker[1].Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
+
+  it("declares the switch off by default, the host with the gateway host's pattern, and the sender as one plain address", () => {
+    expect(inApp.Parameters.CoreAttentionEmail).toMatchObject({ Default: "off", AllowedValues: ["off", "on"] });
+    expect(inApp.Parameters.CoreAttentionEmailHost).toMatchObject({ Default: "", AllowedPattern: CORE_MODEL_GATEWAY_HOST_PATTERN, MaxLength: CORE_MODEL_GATEWAY_HOST_MAX_LENGTH });
+    expect(inApp.Parameters.CoreAttentionEmailSender).toMatchObject({ Default: "", MaxLength: 254 });
+    expect(inApp.Conditions![conditionId]).toEqual({ "Fn::Equals": [{ Ref: "CoreAttentionEmail" }, "on"] });
+  });
+
+  it("builds nothing while off: every resource it adds is under AttentionEmailIsOn, so the default template creates none of them", () => {
+    expect(attention.map(([, resource]) => resource.Type).sort()).toEqual(["AWS::IAM::Policy", "AWS::IAM::Role", "AWS::Lambda::Function", "AWS::Lambda::Permission", "AWS::Logs::LogGroup"]);
+    for (const [id, resource] of attention) expect(resource.Condition, id).toBe(conditionId);
+    // Nothing outside the construct names its function or its role.
+    const ids = attention.map(([id]) => id);
+    for (const [id, resource] of Object.entries(inApp.Resources)) if (!ids.includes(id)) for (const own of ids) expect(JSON.stringify(resource), `${id} -> ${own}`).not.toContain(`"${own}"`);
+  });
+
+  it("gives the sender's role exactly one statement of its own: ses:SendEmail on the CoreAttentionEmailSender identity, From pinned; no SES right anywhere else in the stack but the step-up's", () => {
+    const [[, policy]] = of("AWS::IAM::Policy") as [[string, Resource]];
+    const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+    expect(statements.filter((statement) => statement.Sid === "AttentionEmailSend")).toEqual([{
+      Sid: "AttentionEmailSend", Effect: "Allow", Action: "ses:SendEmail",
+      Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "CoreAttentionEmailSender" }]] },
+      Condition: { StringEquals: { "ses:FromAddress": { Ref: "CoreAttentionEmailSender" } } },
+    }]);
+    // The rest is the function's tracing default only.
+    expect(statements.filter((statement) => statement.Sid !== "AttentionEmailSend").flatMap((statement) => list(statement.Action)).sort()).toEqual(["xray:PutTelemetryRecords", "xray:PutTraceSegments"]);
+    const sesPolicies = Object.entries(inApp.Resources).filter(([, resource]) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties).includes("ses:"));
+    expect(sesPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy", "DeveloperSignInFunctionServiceRoleDefaultPolicy"]);
+    expect(JSON.stringify(inApp.Resources[inAppBrokerRoleId])).not.toContain("ses:");
+  });
+
+  it("lets the broker invoke it by the function's own policy (the broker's role is not touched), and names the function so the broker derives it", () => {
+    const [[, permission]] = of("AWS::Lambda::Permission") as [[string, Resource]];
+    const [[functionId, fn]] = of("AWS::Lambda::Function") as [[string, Resource]];
+    expect(permission.Properties).toEqual({ Action: "lambda:InvokeFunction", FunctionName: { "Fn::GetAtt": [functionId, "Arn"] }, Principal: { "Fn::GetAtt": [inAppBrokerRoleId, "Arn"] } });
+    expect(fn.Properties.FunctionName).toBe(coreAttentionEmailFunctionName("staging"));
+    expect((fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toEqual({
+      ATTENTION_EMAIL_FROM: { Ref: "CoreAttentionEmailSender" }, ATTENTION_EMAIL_LINK_ORIGIN: { "Fn::Join": ["", ["https://", { Ref: "CoreAttentionEmailHost" }]] },
+    });
+    // The broker's identity policies do not mention it; its environment has only the packed switch (no variable of its own).
+    const brokerPolicies = Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties.Roles ?? []).includes(inAppBrokerRoleId));
+    for (const resource of brokerPolicies) expect(JSON.stringify(resource)).not.toContain(functionId);
+    expect(JSON.stringify(inApp.Resources[inAppBrokerRoleId])).not.toContain(functionId);
+    const variables = (inAppBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(Object.keys(variables).filter((name) => /ATTENTION/u.test(name))).toEqual([]);
+    const pieces = packedSettings(variables);
+    expect(pieces.get("ae")).toStrictEqual({ Ref: "CoreAttentionEmail" });
+    // The web app's host is the sender's alone: the broker never has it.
+    expect([...pieces.keys()].filter((code) => code === "ah")).toEqual([]);
+    expect(JSON.stringify(variables)).not.toContain("CoreAttentionEmailHost");
+  });
+
+  it("refuses on without its own sender, with the step-up sender's identity, or without the web app's host", () => {
+    const rules = (inApp as { Rules?: Record<string, { RuleCondition: unknown; Assertions: Array<{ Assert: unknown }> }> }).Rules!;
+    const rule = Object.entries(rules).find(([id]) => id.startsWith("CoreEngineJobsAttentionEmailAttentionEmailOwnSender"))![1];
+    expect(rule.RuleCondition).toEqual({ "Fn::Equals": [{ Ref: "CoreAttentionEmail" }, "on"] });
+    expect(rule.Assertions.map((assertion) => assertion.Assert)).toEqual([
+      { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreAttentionEmailSender" }, ""] }] },
+      { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreAttentionEmailSender" }, { Ref: "StepUpEmailSender" }] }] },
+      { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreAttentionEmailHost" }, ""] }] },
+    ]);
+  });
+
+  it("is kept across upgrades, and the legacy template has none of it", () => {
+    for (const name of ["CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender"]) expect(OPERATOR_PARAMETERS["control-plane"], name).toContain(name);
+    const legacyJson = legacy.toJSON() as Json;
+    expect(Object.keys(legacyJson.Parameters ?? {}).filter((name) => name.startsWith("CoreAttentionEmail"))).toEqual([]);
+    expect(JSON.stringify(legacyJson)).not.toContain("attention-email");
   });
 });
 
