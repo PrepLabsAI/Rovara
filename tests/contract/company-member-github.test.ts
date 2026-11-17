@@ -5,7 +5,8 @@ import { AgentXError } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companyMemberActionsThroughLambda, companyMembersThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";
-import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { authenticateCaller, routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { devRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { MEMBER_NOT_FOUND, NOT_FOUND, OWNER_ONLY } from "../../packages/broker/src/aws/company-member-routes.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
@@ -70,7 +71,7 @@ function world(amr: "github" | "slack" = "github", options: { githubOn?: boolean
   const stepUp = () => { claims.step_up_at = Math.floor((NOW - 30_000) / 1000); claims.step_up_amr = "passkey"; };
   const role = (id: string) => (db.get(membershipKey(id).pk, "COMPANY") as { role?: string } | undefined)?.role;
   const revoked = (id: string) => (db.get(membershipKey(id).pk, "COMPANY") as { revokedAt?: string } | undefined)?.revokedAt !== undefined;
-  return { db, claims, call, as, stepUp, forwarded, role, revoked, session: (id: string) => `SESSION#${SESSIONS[id]}` };
+  return { db, claims, deps, jwt, call, as, stepUp, forwarded, role, revoked, session: (id: string) => `SESSION#${SESSIONS[id]}` };
 }
 const refusal = (status: number, code: string, message: string) => ({ status, body: { error: { code, message } } });
 
@@ -215,5 +216,59 @@ describe("the member helper's caller methods", () => {
     const h = helperWorld();
     expect(await h.forward({ developerId: ADMIN, sessionId: "s", amr: amr as never, name: "Ada" }, request)).toEqual({ ok: false, error: "not_found" });
     expect(h.forwarded).toEqual([]); expect(h.db.commandNames()).toEqual([]);
+  });
+});
+
+describe("GitHub people in the member list (DEC 254p (a))", () => {
+  type Row = { personId: string; name?: string };
+  it("show their GitHub name, the same way Slack people show theirs", async () => {
+    for (const amr of ["github", "slack"] as const) {
+      const h = world(amr); h.as(ADMIN);
+      const rows = (await h.call("GET", MEMBERS)).body["members"] as Row[];
+      expect(rows.find((row) => row.personId === ADMIN)!.name).toBe("Ada");
+    }
+  });
+  it("show a hostile name as plain text of at most 80 code points, even when the stored one is very long", async () => {
+    const h = world("github"); h.as(ADMIN);
+    h.db.set({ ...h.db.get(`DEVELOPER#${TARGET}`, "META")!, displayName: `<img src=x onerror=alert(1)>[a](https://evil.example) **${"w".repeat(5_000)}` });
+    h.db.set({ ...h.db.get(`DEVELOPER#${MEMBER}`, "META")!, displayName: "<>**" });
+    const rows = (await h.call("GET", MEMBERS)).body["members"] as Row[];
+    const named = rows.find((row) => row.personId === TARGET)!;
+    expect(named.name).not.toMatch(/[<>[\]`*]/u);
+    expect(Array.from(named.name!).length).toBeLessThanOrEqual(80);
+    expect(rows.find((row) => row.personId === MEMBER)!.name).toBe(`GitHub user ${MEMBER.charCodeAt(0)}`);
+  });
+  it("reach tasks and admin screens as clean text: the signed-in caller's name", async () => {
+    const route = devRouteOf("GET", "/v1/dev/projects")!;
+    const nameOf = async (h: ReturnType<typeof world>) => (await authenticateCaller(h.deps, h.jwt(), route)).name;
+    const github = world("github"); github.as(ADMIN);
+    expect(await nameOf(github)).toBe("Ada");
+    github.db.set({ ...github.db.get(`DEVELOPER#${ADMIN}`, "META")!, displayName: `<img src=x onerror=alert(1)>[a](https://evil.example) ${"v".repeat(900)}` });
+    const hostile = await nameOf(github);
+    expect(hostile).not.toMatch(/[<>[\]`*]/u);
+    expect(Array.from(hostile).length).toBeLessThanOrEqual(80);
+    const slack = world("slack"); slack.as(ADMIN);
+    slack.db.set({ ...slack.db.get(`DEVELOPER#${ADMIN}`, "META")!, displayName: "<b>Ada</b>" });
+    expect(await nameOf(slack)).toBe("<b>Ada</b>");
+  });
+  it("leave a Slack person's stored name exactly as stored, including the old 200-character limit", async () => {
+    const h = world("slack"); h.as(ADMIN);
+    h.db.set({ ...h.db.get(`DEVELOPER#${TARGET}`, "META")!, displayName: "<b>Tia</b>" });
+    h.db.set({ ...h.db.get(`DEVELOPER#${MEMBER}`, "META")!, displayName: "m".repeat(201), email: "m@example.test" });
+    const rows = (await h.call("GET", MEMBERS)).body["members"] as Row[];
+    expect(rows.find((row) => row.personId === TARGET)!.name).toBe("<b>Tia</b>");
+    // As before: a record that does not read (a Slack name over 200 characters) leaves both name and email out.
+    expect(rows.find((row) => row.personId === MEMBER)).not.toHaveProperty("name");
+    expect(rows.find((row) => row.personId === MEMBER)).not.toHaveProperty("email");
+  });
+  it("never show another company's names to a company's admin", async () => {
+    const h = world("github"); h.as(ADMIN);
+    const text = JSON.stringify((await h.call("GET", MEMBERS)).body);
+    for (const other of [OTHER, OTHER_TARGET]) expect(text).not.toContain(other);
+    expect(text).not.toContain("Bea");
+    h.as(OTHER);
+    const own = (await h.call("GET", MEMBERS)).body["members"] as Row[];
+    expect(own.map((row) => row.personId).sort()).toEqual([OTHER, OTHER_TARGET].sort());
+    expect(own.find((row) => row.personId === OTHER)!.name).toBe("Bea");
   });
 });

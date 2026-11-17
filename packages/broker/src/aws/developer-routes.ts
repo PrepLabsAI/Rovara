@@ -126,7 +126,7 @@ import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 import type { CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
-import type { BrokerResponse } from "../handler.js";
+import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
 import type { CompanyImportRegistry } from "./company-import-forwarding.js";
 
 export interface DeveloperApiConfiguration {
@@ -737,7 +737,7 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
   if (companyDeveloper === undefined && startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
     throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : token.amr === "github" ? "GitHub" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
   }
-  const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
+  const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
     // E9: D16's per-request check ends the session at once; the token endpoint revokes it at its next refresh.
@@ -745,7 +745,7 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
   }
   return {
     ...token,
-    name: developer.displayName,
+    name: profileDisplayName(developer) ?? developer.displayName, // DEC 254p (a): a GitHub name is clean text (github-profile.ts); anyone else's is as stored
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
   };
@@ -1320,11 +1320,11 @@ async function authenticateCallerWithStepUp(deps: DeveloperRouteDependencies, au
     return { caller: await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization)) };
   }
   const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000), options);
-  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   requireRouteScope(route, person);
   const caller: DeveloperCaller = {
-    developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName, clientId: person.client.clientId,
+    developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: profileDisplayName(developer) ?? developer.displayName, clientId: person.client.clientId,
     ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }),
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
@@ -1582,7 +1582,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const by = { issuer: `sign-in-client:${caller.client.clientId}`, subject: caller.developerId };
   if (request.method === "GET" && members[2] === undefined) {
     const listed = await listProjectMembers(actions, project);
-    const named = await Promise.all(listed.map(async (member) => ({ ...member, name: (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${member.developerId}`))?.displayName ?? "Unknown" })));
+    const named = await Promise.all(listed.map(async (member) => ({ ...member, name: profileDisplayName((await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject">>(deps, `DEVELOPER#${member.developerId}`)) ?? {}) ?? "Unknown" })));
     return { project, members: named } satisfies ClientProjectMembersResponse;
   }
   if (members[2] === undefined || (request.method !== "PUT" && request.method !== "DELETE")) throw agentXError("NOT_FOUND", "route not found");
