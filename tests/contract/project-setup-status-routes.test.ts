@@ -816,4 +816,6 @@ describe("what did not change", () => {
 // #836/#840 Slack install and channel (9), #835 engine model (2), #839 archive/restore (4), #837 bulk create and available repositories (2).
 // DEC 254y (2), batch 12: re-pinned for #838's 7 new /v1/dev/company/linear* rows and L2-4's 3 new /v1/dev/projects/{p}/intake* rows on top of batch 10's table (all added, none
 // changed). Removing exactly those 10 rows still gives 805695cd...; removing instead the 9 Slack rows gives #848's approved e616631e...; removing both gives 9c594d20....
-const EXISTING_ROUTES_DIGEST = "0a31f2f4e84da798667be48dce0fddb0a79c734749235da3ae47b1cfc4544db6";
+// Batch 12 (rule D): and for #869's 6 new connected sign-in rows (/v1/dev/me/sign-ins*, /v1/dev/company/members/{personId}/sign-ins*; all added, none changed; removing exactly
+// those 6 rows still gives 0a31f2f4...).
+const EXISTING_ROUTES_DIGEST = "ef0ea58f7fbff47dd70a8b9a7ffd52b9e3ef36bc5f581d42fca73f98eb3b1749";
