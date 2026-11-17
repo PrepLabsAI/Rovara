@@ -35,7 +35,7 @@ export async function readCompanyEngineModel(store: EngineModelRowReader, compan
   if (!OrgIdSchema.safeParse(companyId).success) throw new CompanyEngineModelUnreadable();
   const key = companyEngineModelKey(companyId);
   let row: Record<string, unknown> | undefined;
-  try { row = await store.get(key) as Record<string, unknown> | undefined; } catch { throw new CompanyEngineModelUnreadable(); }
+  try { row = await store.get(key); } catch { throw new CompanyEngineModelUnreadable(); }
   if (row === undefined || row === null) return undefined;
   const model = row["model"];
   if (row["pk"] !== key.pk || row["sk"] !== key.sk || row["entityType"] !== COMPANY_ENGINE_MODEL_ENTITY || row["orgId"] !== companyId || row["version"] !== 1

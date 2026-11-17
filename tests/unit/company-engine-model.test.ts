@@ -16,7 +16,7 @@ const A = COMPANY_A_ID as OrgId;
 const B = COMPANY_B_ID as OrgId;
 const INSTALL = { alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" };
 const install = { route: async () => ({ ...INSTALL }) };
-const row = (companyId: string, model: string, extra: Record<string, unknown> = {}) => ({ ...companyEngineModelKey(companyId as OrgId), entityType: "COMPANY_ENGINE_MODEL", orgId: companyId, version: 1, model, updatedAt: "2026-11-17T00:00:00.000Z", updatedBy: "d".repeat(64), ...extra });
+const row = (companyId: string, model: string, extra: Record<string, unknown> = {}) => ({ ...companyEngineModelKey(companyId), entityType: "COMPANY_ENGINE_MODEL", orgId: companyId, version: 1, model, updatedAt: "2026-11-17T00:00:00.000Z", updatedBy: "d".repeat(64), ...extra });
 
 describe("the company's engine model setting", () => {
   it("lives under the company's own key, and is absent until the company sets one", async () => {
@@ -43,7 +43,7 @@ describe("the company's engine model setting", () => {
 
   it("refuses a read that fails, and a company id that is not one", async () => {
     await expect(readCompanyEngineModel({ get: async () => { throw new Error("db host down"); } }, A)).rejects.toThrow(COMPANY_ENGINE_MODEL_UNREADABLE);
-    await expect(readCompanyEngineModel(new MemoryDocumentStore(), "ORG#x" as OrgId)).rejects.toThrow(COMPANY_ENGINE_MODEL_UNREADABLE);
+    await expect(readCompanyEngineModel(new MemoryDocumentStore(), "ORG#x")).rejects.toThrow(COMPANY_ENGINE_MODEL_UNREADABLE);
   });
 
   it("the install default is ROVARA_CORE_AGENT_MODEL with its gateway, else none", () => {

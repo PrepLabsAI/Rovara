@@ -10,9 +10,9 @@
 //   - The setting is written under the company's own key (ORG#<company>#SETTINGS / ENGINE_MODEL) in one transaction with an audit row naming the person, plus a company log line.
 //   - Every refusal is fixed words: no model id, company id or cause is echoed.
 import { randomUUID } from "node:crypto";
-import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import type { z } from "zod";
-import { CompanyEngineModelBodySchema, agentXError, companyLog, OrgIdSchema, orgScoped, type CompanyEngineModelView, type OrgId } from "@agentx/contracts";
+import { CompanyEngineModelBodySchema, agentXError, companyLog, OrgIdSchema, orgScoped, orgSettingsKey, type CompanyEngineModelView } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -75,7 +75,7 @@ const viewOf = (own: string | undefined, install: string | undefined, offered: s
 export async function routeCompanyEngineModel(ctx: CompanyEngineModelContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest): Promise<unknown> {
   if (request.method !== "GET" && request.method !== "PUT") throw agentXError("NOT_FOUND", "not found");
   const member = await liveMembership(ctx, caller, companyId);
-  const company = member.companyId as OrgId;
+  const company = member.companyId;
   const reader = { get: async (key: { pk: string; sk: string }) => (await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> }).Item };
   const readOwn = async (): Promise<string | undefined> => {
     try { return await readCompanyEngineModel(reader, company); } catch { throw agentXError("RUNTIME_UNAVAILABLE", ENGINE_MODEL_SETTING_UNAVAILABLE); }
@@ -113,6 +113,14 @@ export async function routeCompanyEngineModel(ctx: CompanyEngineModelContext, ca
   try {
     await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [setting, { Put: { TableName: ctx.tableName, Item: audit, ConditionExpression: "attribute_not_exists(pk)" } }] }));
   } catch { throw agentXError("RUNTIME_UNAVAILABLE", ENGINE_MODEL_SETTING_UNAVAILABLE); }
+  // The per-step model choice (DEC 243c) keeps a short-lived validation on the company's policy row whose default model was this setting; drop it so no step runs on the previous
+  // model for its remaining lifetime (the broker writes a fresh one before its next dispatch). Only an existing row is touched; a failure leaves it to expire (at most 60 s), and is logged.
+  try {
+    await ctx.documentClient.send(new UpdateCommand({ TableName: ctx.tableName, Key: orgSettingsKey(company, "MODEL_SELECTION_POLICY"), UpdateExpression: "REMOVE agentModelValidation",
+      ConditionExpression: "attribute_exists(pk) AND orgId = :company", ExpressionAttributeValues: { ":company": company } }));
+  } catch (error) {
+    if (!(error instanceof Error && error.name === "ConditionalCheckFailedException")) companyLog(company, ctx.wiring.log)({ event: "company.engine_model_validation_not_cleared" });
+  }
   companyLog(company, ctx.wiring.log)({ event: chosen === null ? "company.engine_model_cleared" : "company.engine_model_set", actor: caller.developerId });
   return viewOf(chosen ?? undefined, installModel(), offered);
 }

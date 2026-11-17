@@ -39,7 +39,7 @@ function world(options: { lists?: Record<string, string[] | "fail" | "malformed"
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Answer, raw: answer.body };
   };
   const audits = () => h.db.find((item) => item["entityType"] === "COMPANY_ENGINE_MODEL_AUDIT");
-  const settingOf = (companyId: string) => readCompanyEngineModel({ get: async (key) => h.db.get(key.pk, key.sk) }, companyId as OrgId);
+  const settingOf = (companyId: string) => readCompanyEngineModel({ get: async (key) => h.db.get(key.pk, key.sk) }, companyId);
   return { h, as, call, offered, logs, audits, settingOf };
 }
 
@@ -74,7 +74,7 @@ describe("GET /v1/dev/company/engine-model", () => {
 
   it("an unreadable setting row (not exactly this company's) is a fixed 503", async () => {
     const w = world();
-    w.h.db.set({ ...companyEngineModelKey(A as OrgId), entityType: "COMPANY_ENGINE_MODEL", orgId: B, version: 1, model: "zai.glm-5", updatedAt: TIME, updatedBy: PERSON });
+    w.h.db.set({ ...companyEngineModelKey(A), entityType: "COMPANY_ENGINE_MODEL", orgId: B, version: 1, model: "zai.glm-5", updatedAt: TIME, updatedBy: PERSON });
     const read = await w.call("GET");
     expect(read.status).toBe(503);
     expect(read.body.error.message).toBe(ENGINE_MODEL_SETTING_UNAVAILABLE);
@@ -189,9 +189,28 @@ describe("two companies", () => {
     expect(viewOf(a.body)).toEqual({ model: "zai.glm-5", source: "company", offered: ["claude-sonnet-5-5", "zai.glm-5", "qwen.qwen3-coder-480b-a35b-v1:0"], preselect: "zai.glm-5" });
     expect((await w.call("PUT", { model: "claude-haiku-5-5", companyId: B })).status).toBe(400);
     expect(await w.settingOf(B)).toBe("claude-haiku-5-5");
+    // A GET whose body or header names B still answers A's own view (the company is only ever the membership's).
+    const sneaky = await w.h.read(PATH, { method: "GET", body: JSON.stringify({ companyId: B }), headers: { "x-company-id": B } });
+    expect(viewOf(JSON.parse(sneaky.body) as Answer)).toMatchObject({ model: "zai.glm-5", source: "company" });
+    expect(sneaky.body).not.toContain("haiku");
     // Every gateway read named the caller's own company.
-    expect(w.offered.mock.calls.map(([company]) => company)).toEqual([A, B, B, A]);
+    expect(w.offered.mock.calls.map(([company]) => company)).toEqual([A, B, B, A, A]);
     expect(w.audits().map((row) => row["orgId"])).toEqual(expect.arrayContaining([A, B]));
     expect(w.audits().every((row) => row["pk"] === `ORG#${row["orgId"] as string}#ENGINE_MODEL_AUDIT`)).toBe(true);
   });
+});
+
+it("a change drops the per-step choice's stored validation of THIS company only (DEC 243c), so no step keeps the previous model", async () => {
+  const w = world();
+  const validation = { choice: { defaultModel: "claude-sonnet-5-5" } };
+  w.h.db.set({ pk: `ORG#${A}#SETTINGS`, sk: "MODEL_SELECTION_POLICY", entityType: "MODEL_SELECTION_POLICY", orgId: A, revision: 1, agentModelValidation: validation });
+  w.h.db.set({ pk: `ORG#${B}#SETTINGS`, sk: "MODEL_SELECTION_POLICY", entityType: "MODEL_SELECTION_POLICY", orgId: B, revision: 1, agentModelValidation: validation });
+  expect((await w.call("PUT", { model: "zai.glm-5" })).status).toBe(200);
+  expect(w.h.db.get(`ORG#${A}#SETTINGS`, "MODEL_SELECTION_POLICY")).toMatchObject({ orgId: A, revision: 1 });
+  expect(w.h.db.get(`ORG#${A}#SETTINGS`, "MODEL_SELECTION_POLICY")?.["agentModelValidation"]).toBeUndefined();
+  expect(w.h.db.get(`ORG#${B}#SETTINGS`, "MODEL_SELECTION_POLICY")?.["agentModelValidation"]).toEqual(validation);
+  // No policy row: none is created.
+  const fresh = world();
+  expect((await fresh.call("PUT", { model: "zai.glm-5" })).status).toBe(200);
+  expect(fresh.h.db.get(`ORG#${A}#SETTINGS`, "MODEL_SELECTION_POLICY")).toBeUndefined();
 });
