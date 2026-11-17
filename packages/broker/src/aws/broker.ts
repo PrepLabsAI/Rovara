@@ -323,6 +323,7 @@ import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type Com
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
+import { installEngineModel } from "../core-host/company-engine-model.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -15278,6 +15279,8 @@ const repositoryGrants = new RepositoryGrantService(
 );
 
 const lambdaClient = new LambdaClient(awsClientConfiguration);
+// Guided onboarding PR 14 (DEC 254n item 1): the company engine model route's read of the gateway's live list for one company; set only where the gateway's origin is.
+const companyEngineModelOffered = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
 function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
   return createDeveloperApiConfiguration(process.env, (issuer, functionName) => ({
@@ -15294,7 +15297,9 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     setDisplayName: setDisplayNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     ...(process.env.COMPANY_SIGNIN === "enabled" ? { companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
-      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }) } : {}),
+      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
+      // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
+      ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine } }) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),

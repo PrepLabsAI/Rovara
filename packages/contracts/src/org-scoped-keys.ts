@@ -94,7 +94,7 @@ export function orgLearningSettingsKey(orgId: OrgId): OrgKey {
   return { pk: orgPk(orgId), sk: "LEARNING_SETTINGS" };
 }
 
-export type OrgSettingName = "WORKSPACE_LIMITS" | "MODEL_SELECTION_POLICY" | "REVIEW_DEFAULT_NOTICE";
+export type OrgSettingName = "WORKSPACE_LIMITS" | "MODEL_SELECTION_POLICY" | "REVIEW_DEFAULT_NOTICE" | "ENGINE_MODEL";
 
 export function orgSettingsKey(orgId: OrgId, name: OrgSettingName): OrgKey {
   return { pk: orgScoped(orgId, "SETTINGS"), sk: name };

@@ -37,6 +37,7 @@ import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
 import type { MoneyStop } from "../../core/task-flow/money-stop.js";
 import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
+import { companyEngineModelRoute } from "../../core-host/company-engine-model.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
 import { createDispatcherLearned, type DispatcherLessonsOptions } from "./dispatcher-lessons.js";
 
@@ -262,7 +263,9 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       const flow = typeof inputs.flow === "function" ? inputs.flow(registry, companyId) : inputs.flow;
       // Declared means present AND `null` (an explicit none) or a value: a key that is there with `undefined` in it is not a declaration.
       if (flow === undefined || flow === null || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name) || flow[name] === undefined)) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
-      const { standingInstructions, modelAccess, learned } = flow;
+      const { standingInstructions, learned } = flow;
+      // DEC 254n (1): each step's route is the company's own engine model when it set one, else the install's (the same answer as before); an unreadable setting dispatches nothing.
+      const modelAccess = flow.modelAccess === null || flow.modelAccess === undefined ? flow.modelAccess : companyEngineModelRoute({ store: registry.require("storage"), companyId, install: flow.modelAccess });
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),

@@ -116,6 +116,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/members/{personId}/removal-preview", requires: "full" },
   { method: "POST", path: "/v1/dev/company/members/{personId}/removal", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/members/{personId}/role", requires: "full" },
+  // Guided onboarding PR 14 (DEC 254n item 1): the company's own engine model (read: any member; change: live owner/admin, checked against the gateway's live list for the company).
+  { method: "GET", path: "/v1/dev/company/engine-model", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/engine-model", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },
