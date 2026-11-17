@@ -206,6 +206,8 @@ const expired = () => page(400, "This sign-in link has expired", ["Run agentx lo
 /** One answer for every code failure (unknown, used, expired, wrong verifier, wrong redirect URI). */
 const INVALID_CODE = ["invalid_grant", "the sign-in code is invalid, used or expired; run agentx login again"] as const;
 const SIGN_IN_ENDED = ["invalid_grant", "your AgentX sign-in has ended; run agentx login again"] as const;
+/** DEC 254b (a): a member of a company with its own sign-in tried the install's. Fixed words, nothing echoed. */
+const COMPANY_OWN_SIGNIN = "your company signs in with its own sign-in method";
 
 export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependencies) {
   const { config, store } = deps;
@@ -220,28 +222,45 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const companyNotFinished = (request: AuthRequestRecord) => request.browserReturnTo === undefined
     ? toClient(request.clientRedirectUri, { error: "access_denied", error_description: "sign-in is not finished", state: request.clientState })
     : browserReturn(request.browserReturnTo, false);
-  const providerFor = async (method: DeveloperSignInMethod, companyId?: string): Promise<SignInProvider> => {
-    if (deps.company === undefined || companyId === undefined || method === "slack") return provider(method);
+  /**
+   * Which provider completes a sign-in, and whether it is the install's own (`install`). DEC 254b (a): a company with no sign-in of its own (every
+   * self-serve company) uses the install's methods, the shared sign-in method; a company with its own issuer only ever uses that issuer.
+   */
+  const providerChoice = async (method: DeveloperSignInMethod, companyId?: string): Promise<{ provider: SignInProvider; install: boolean }> => {
+    if (deps.company === undefined || companyId === undefined || method === "slack") return { provider: provider(method), install: true };
     if (companyId === IMPLICIT_COMPANY_ID) throw new ProviderNotConfiguredError("sign-in is not finished");
+    if (!await deps.company.hasOwnIssuer(companyId)) return { provider: provider(method), install: true };
     const selected = await deps.companyIssuer?.(companyId);
     if (selected === undefined) throw new ProviderNotConfiguredError("sign-in is not finished");
-    return selected.provider;
+    return { provider: selected.provider, install: false };
   };
-  const methodsFor = async (companyId?: string): Promise<DeveloperSignInMethod[] | undefined> => {
-    if (deps.company === undefined || companyId === undefined) return enabledMethods(deps);
-    if (companyId === IMPLICIT_COMPANY_ID || !OrgIdSchema.safeParse(companyId).success || !await deps.company.companyExists(companyId)) return undefined;
-    const selected = await deps.companyIssuer?.(companyId);
-    if (selected === undefined) return undefined;
-    return [...enabledMethods(deps).filter((method) => method === "slack"), "oidc"];
-  };
+  const providerFor = async (method: DeveloperSignInMethod, companyId?: string): Promise<SignInProvider> => (await providerChoice(method, companyId)).provider;
   const slackCompany = async (): Promise<string | undefined> => {
     if (config.slack.teamId === undefined) return undefined;
     return deps.slackTeamCompany === undefined ? IMPLICIT_COMPANY_ID : deps.slackTeamCompany(config.slack.teamId);
   };
-  /** Recheck live membership at each mint. The stored company only selects the method. */
-  async function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false): Promise<boolean> {
+  const methodsFor = async (companyId?: string): Promise<DeveloperSignInMethod[] | undefined> => {
+    if (deps.company === undefined || companyId === undefined) return enabledMethods(deps);
+    if (companyId === IMPLICIT_COMPANY_ID || !OrgIdSchema.safeParse(companyId).success || !await deps.company.companyExists(companyId)) return undefined;
+    if (!await deps.company.hasOwnIssuer(companyId)) {
+      // DEC 254b (a): the shared method. The install's OIDC, and the install's Slack only for the company its team is bound to. None on: unavailable.
+      const shared: DeveloperSignInMethod[] = [];
+      for (const method of enabledMethods(deps)) if (method === "oidc" || await slackCompany() === companyId) shared.push(method);
+      return shared.length === 0 ? undefined : shared;
+    }
+    const selected = await deps.companyIssuer?.(companyId);
+    if (selected === undefined) return undefined;
+    return [...enabledMethods(deps).filter((method) => method === "slack"), "oidc"];
+  };
+  /**
+   * Recheck live membership at each mint. The stored company only selects the method. DEC 254b (a): an OIDC session for a company other than the
+   * built-in one must match how that company signs in NOW: marked `installMethod` exactly when the company has no issuer of its own.
+   */
+  async function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
     if (deps.company === undefined) return true;
     try {
+      if (installMethod === true && (amr !== "oidc" || companyId === undefined || companyId === IMPLICIT_COMPANY_ID)) return false;
+      if (amr === "oidc" && companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID && await deps.company.hasOwnIssuer(companyId) === (installMethod === true)) return false;
       const candidate = amr === "slack" ? await slackCompany() : companyId ?? IMPLICIT_COMPANY_ID;
       if (!OrgIdSchema.safeParse(candidate).success || (companyId !== undefined && companyId !== candidate)) return false;
       let member = await deps.company.membership(personId);
@@ -518,8 +537,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ? client({ error: "access_denied", error_description: `the sign-in was cancelled at ${methodLabel(method)}; run agentx login again` })
       : browserReturn(request.browserReturnTo, false);
     let result: ProviderResult;
+    // Whether the install's own provider completed this sign-in (DEC 254b (a): the shared method), as opposed to a company's own issuer.
+    let installProvider: boolean;
     try {
-      result = await (await providerFor(method, request.companyId)).complete({ code, nonce: request.nonce, redirectUri: endpoint(`/callback/${method}`) });
+      const chosen = await providerChoice(method, request.companyId);
+      installProvider = chosen.install;
+      result = await chosen.provider.complete({ code, nonce: request.nonce, redirectUri: endpoint(`/callback/${method}`) });
     } catch (error) {
       if (deps.company !== undefined && request.companyId !== undefined) {
         deps.log({ event: "signin.error", path: `/v1/auth/callback/${method}`, error: "sign_in_failed" });
@@ -549,11 +572,26 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     let companyId: string | undefined;
     let companyless = false;
+    let installMethod = false;
     if (deps.company !== undefined) {
-      let candidate: string | undefined;
-      try { candidate = method === "slack" ? await slackCompany() : request.companyId ?? IMPLICIT_COMPANY_ID; } catch { candidate = undefined; }
       const registered = request.clientId === undefined ? undefined : await registeredClient(request.clientId);
+      // DEC 254b (a): an install-level client (the CLI, the browser review page, a registered install-level client) that names no company signs the
+      // person in to their LIVE membership's company, read now; no membership row: the built-in company (legacy join, preapproval) as before.
+      const installLevel = request.clientId === undefined || registered?.installLevel === true;
+      let candidate: string | undefined;
+      try {
+        candidate = method === "slack" ? await slackCompany()
+          : request.companyId ?? (installLevel ? (await deps.company.membership(developerId))?.companyId ?? IMPLICIT_COMPANY_ID : IMPLICIT_COMPANY_ID);
+      } catch { candidate = undefined; }
       const clientAllowed = request.clientId === undefined || (registered !== undefined && (registered.installLevel === true || (registered.companyId ?? IMPLICIT_COMPANY_ID) === candidate));
+      // The install's OIDC admits into a company other than the built-in one only when that company has no issuer of its own (no downgrade).
+      installMethod = method === "oidc" && installProvider && candidate !== undefined && candidate !== IMPLICIT_COMPANY_ID;
+      let ownIssuer = false;
+      if (installMethod) { try { ownIssuer = await deps.company.hasOwnIssuer(candidate!); } catch { candidate = undefined; } }
+      if (ownIssuer) {
+        deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
+        return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
+      }
       const joined = candidate === undefined || !OrgIdSchema.safeParse(candidate).success || (request.companyId !== undefined && request.companyId !== candidate) || !clientAllowed
         ? { ok: false as const, reason: "not_invited" as const }
         : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
@@ -566,6 +604,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: text }) : browserReturn(request.browserReturnTo, false);
       }
       if (joined.ok) companyId = joined.membership.companyId;
+      installMethod = installMethod && joined.ok && companyId === candidate;
     }
     let slackUserId = identity.slackUserId;
     // ProviderIdentity.email is set only for a verified email (providers.ts), so only a verified
@@ -581,13 +620,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(slackUserId === undefined ? {} : { slackUserId }),
     }, companyId, companyless ? { companyless: true } : {});
     if (request.browserReturnTo !== undefined) {
-      if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined)) return browserReturn(request.browserReturnTo, false);
+      if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined)) return browserReturn(request.browserReturnTo, false);
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
       const endsAt = Math.floor(deps.now() / 1000) + SESSION_MAX_AGE_SECONDS;
       const { session } = await store.createSession({ developerId, amr: method,
         ...(slackUserId === undefined ? {} : { slackUserId }),
         reviewExpiresAt: endsAt, endsAt,
         ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
+        ...(installMethod ? { installMethod: true as const } : {}),
       });
       deps.log({ event: "signin.browser_succeeded", method, developerId });
       return browserReturn(request.browserReturnTo, true, session.sessionId);
@@ -597,8 +637,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
       ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
+      ...(installMethod ? { installMethod: true as const } : {}),
       // FR-005: only a company sign-in can make an administrator; only the install issuer can make an install-wide administrator (T3).
-      ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless ? { administrator: true as const } : {}),
+      // DEC 254b (a): and only into the built-in company, as before; a member of another company signed in through the shared method never is one.
+      ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) ? { administrator: true as const } : {}),
     };
     if (request.stepUp === true) {
       // Lane ID part 2: a company sign-in's own re-authentication counts when it says when it happened (auth_time) and that is inside the window. A Slack round trip never counts.
@@ -633,7 +675,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (redeemed === undefined) return oauthError(400, ...INVALID_CODE);
     // A code is redeemed only by the client it was issued to (it is burned either way).
     if (redeemed.clientId !== client?.clientId) return oauthError(400, ...INVALID_CODE);
-    if (!await companyMayMint(redeemed.developerId, redeemed.amr, redeemed.companyId, client)) return oauthError(400, ...SIGN_IN_ENDED);
+    if (!await companyMayMint(redeemed.developerId, redeemed.amr, redeemed.companyId, client, false, redeemed.installMethod)) return oauthError(400, ...SIGN_IN_ENDED);
     if (deps.company !== undefined && redeemed.companyId !== undefined && redeemed.companyId !== IMPLICIT_COMPANY_ID && redeemed.amr === "oidc") {
       try { methods = await methodsFor(redeemed.companyId) ?? []; } catch { return oauthError(400, ...SIGN_IN_ENDED); }
     }
@@ -657,11 +699,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const { session } = lookup;
     // Spec 063: a refresh token works only for the client it was issued to, and not across a removal and re-registration.
     if (session.clientId !== client?.clientId) return ended;
-    if (!await companyMayMint(session.developerId, session.amr, session.companyId, client, true)) {
+    if (!await companyMayMint(session.developerId, session.amr, session.companyId, client, true, session.installMethod)) {
       await revoke(session.sessionId, "company_changed"); return ended;
     }
     let companySince: number | undefined;
-    if (deps.company !== undefined && session.companyId !== undefined && session.companyId !== IMPLICIT_COMPANY_ID && session.amr === "oidc") {
+    // A shared-method session (checked just above: its company still has no issuer) is held to the install's own methods, as the built-in company is.
+    if (deps.company !== undefined && session.companyId !== undefined && session.companyId !== IMPLICIT_COMPANY_ID && session.amr === "oidc" && session.installMethod !== true) {
       try {
         const selected = await deps.companyIssuer?.(session.companyId);
         if (selected === undefined) { await revoke(session.sessionId, "method_disabled"); return ended; }
