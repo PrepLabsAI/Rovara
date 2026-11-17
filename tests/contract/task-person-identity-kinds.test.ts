@@ -1,6 +1,7 @@
 // Web task channel C1 (plan 3 items 1 and 3, plan 4.2 "Identity and records"; decisions D1, D2, D4): task people of two identity
-// kinds. A `slack` row (every row written before C1) parses and behaves exactly as before. A `web` row parses, but its proof is
-// always unavailable until C2, so it is never eligible, never an owner, never counted for dispatch and never takes ownership.
+// kinds. A `slack` row (every row written before C1) parses and behaves exactly as before. A `web` row parses; this file's harness
+// wires no web proof readers (C2's `companyMembership` / `projectGrant`), so here a web identity is always unavailable: never eligible,
+// never an owner, never counted for dispatch and never takes ownership. The web proof itself is tested in task-person-web-proof.test.ts.
 // A malformed row is a fixed refusal, never read as the other kind.
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -264,7 +265,7 @@ describe("PERSON and PEOPLE row parsers", () => {
   });
 });
 
-describe("the proof: a web identity is always unavailable until C2", () => {
+describe("the proof: a web identity is unavailable without the web proof readers", () => {
   it("keeps a pre-C1 Slack registry row eligible exactly as before", async () => {
     const h = mixedTask();
     await expect(checkTaskPersonIdentity(h.identityDeps, task(), BAY_ID)).resolves.toStrictEqual({
@@ -305,20 +306,29 @@ describe("the proof: a web identity is always unavailable until C2", () => {
     expect(h.targetProjectAccess).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["the task stored a Slack id but the sign-in record has none", SAM, undefined],
-    ["the task stored no Slack id but the sign-in record has one", undefined, SAM],
-  ])("refuses an OIDC creator when %s (never a silent switch of kind)", async (_label, storedSlack, recordSlack) => {
-    const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc" });
-    if (storedSlack === undefined) delete (meta as { slackUserId?: string }).slackUserId;
-    else meta.slackUserId = storedSlack;
+  it("refuses an OIDC creator when the task stored a Slack id but the sign-in record has none (never a silent switch of kind)", async () => {
+    const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc", slackUserId: SAM });
     const h = harness({
       tasks: [meta],
       developer: { developerId: OLA_ID, provider: "oidc", issuer: OIDC_ISSUER, subject: "ola-employee", displayName: "Ola Oidc",
-        firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: false, ...(recordSlack === undefined ? {} : { slackUserId: recordSlack }) },
+        firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: false },
     });
     const error = await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, OLA_ID));
     expect(error.code).toBe("PROJECT_ACCESS_DENIED");
+    expect(h.proof).not.toHaveBeenCalled();
+  });
+
+  it("keeps an OIDC creator whose task stored no Slack id a web identity when the sign-in record later linked one (C2: no Slack-id equality)", async () => {
+    const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc" });
+    delete (meta as { slackUserId?: string }).slackUserId;
+    const h = harness({
+      tasks: [meta],
+      developer: { developerId: OLA_ID, provider: "oidc", issuer: OIDC_ISSUER, subject: "ola-employee", displayName: "Ola Oidc",
+        firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: false, slackUserId: SAM },
+    });
+    // A web identity, so the web proof applies; this harness has no web readers, so it is unavailable, and Slack is never asked.
+    const error = await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, OLA_ID));
+    expect(error.code).toBe("SLACK_UNAVAILABLE");
     expect(h.proof).not.toHaveBeenCalled();
   });
 
@@ -435,16 +445,25 @@ describe("every caller refuses a web person (real proof wired in)", () => {
     expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"))).toBe(before);
   });
 
-  it("refuses a web identity that a proof port reports as eligible (second line of defence until C2)", async () => {
+  it("accepts a web identity's proof result (C2) but still refuses a malformed one", async () => {
     const h = mixedTask("owner");
     const webCheck: TaskPersonCheck = { subject: { developerId: GALE_ID }, identity: { ...ID_FIELDS, method: "github" }, eligible: true, channelMember: true };
     const deps: TaskPeopleDependencies = {
       ...h.peopleDeps,
       checkTaskPerson: async (record, developerId) => developerId === GALE_ID ? structuredClone(webCheck) : checkTaskPersonIdentity(h.identityDeps, record, developerId),
     };
-    await expect(resolveTaskDispatchPeople(deps, task())).resolves.toMatchObject({ ownerActorIds: [taskOwnerKey(SAM_ID, TASK_A)] });
-    const commenter = mixedTask("commenter");
-    expect((await errorOf(resolveTaskPeopleAccess({ ...deps, documentClient: commenter.peopleDeps.documentClient }, task(), GALE_ID))).code).toBe("TASK_ACCESS_DENIED");
+    await expect(resolveTaskDispatchPeople(deps, task())).resolves.toMatchObject({ ownerActorIds: [taskOwnerKey(SAM_ID, TASK_A), taskOwnerKey(GALE_ID, TASK_A)] });
+    for (const malformed of [
+      { ...webCheck, identity: { ...ID_FIELDS, method: "slack" } },
+      { ...webCheck, subject: { developerId: GALE_ID, slackUserId: BAY } },
+      { ...webCheck, identity: { ...ID_FIELDS, name: "  Gale", method: "github" } },
+    ] as TaskPersonCheck[]) {
+      const bad: TaskPeopleDependencies = {
+        ...h.peopleDeps,
+        checkTaskPerson: async (record, developerId) => developerId === GALE_ID ? structuredClone(malformed) : checkTaskPersonIdentity(h.identityDeps, record, developerId),
+      };
+      await expect(resolveTaskDispatchPeople(bad, task())).resolves.toMatchObject({ ownerActorIds: [taskOwnerKey(SAM_ID, TASK_A)], status: "ALLOWED" });
+    }
   });
 });
 

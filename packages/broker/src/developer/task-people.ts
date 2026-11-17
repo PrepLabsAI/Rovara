@@ -188,13 +188,23 @@ async function checkedFresh(deps: Pick<TaskPeopleDependencies, "checkTaskPerson"
   const result = await deps.checkTaskPerson(task, developerId, admission);
   admission?.assertOpen();
   const identity = result.identity;
-  // C1: only a `slack` identity passes a proof result today; a `web` one is refused here too until C2 adds its proof (D1).
+  // C2: a `web` identity's result comes from the web proof (plan 4.1), with `channelMember` carrying `present`; a malformed identity is refused.
+  const kind = taskPersonKindOf(identity);
   if (result.subject.developerId !== developerId || result.subject.slackUserId !== identity.slackUserId
-    || identity.developerId !== developerId || !isSlackTaskPerson(identity)
-    || typeof identity.name !== "string" || safeName(identity.name, identity.slackUserId) !== identity.name
+    || identity.developerId !== developerId || kind === undefined
+    || typeof identity.name !== "string" || safeName(identity.name, taskPersonNameFallback(identity)) !== identity.name
     || typeof result.eligible !== "boolean" || typeof result.channelMember !== "boolean") return denied();
-  admission?.noteNativeIdentity(identity.developerId, identity.slackUserId);
+  if (isSlackTaskPerson(identity)) admission?.noteNativeIdentity(identity.developerId, identity.slackUserId);
   return result;
+}
+
+/**
+ * C2's contract for C3/C4 (plan 4.1): whether a checked person is "present" on the task. A `slack` identity: in the task's Slack channel, exactly as
+ * before (D2). A `web` identity: a live member of the task's company with a live developer or administrator grant on its project (rules 3 and 4).
+ * The check result carries it in `channelMember`; an owner keeps the role only while eligible and present.
+ */
+export function taskPersonPresent(check: Pick<TaskPersonCheck, "channelMember">): boolean {
+  return check.channelMember;
 }
 
 async function checked(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, developerId: string,
