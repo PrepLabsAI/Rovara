@@ -615,7 +615,7 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     const decided = await decide(async () => ({ actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PA, t.taskId), taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 3 } }] }));
     expect(decided.extra).toEqual([expect.objectContaining({ kind: "check" })]);
     // Two approvers carrying the same fence leave one fence item, not two (a transaction cannot name one key twice).
-    const same = { actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check" as const, key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq" as const, path: ["revision"], value: 3 } }] };
+    const same: Awaited<ReturnType<NonNullable<Parameters<typeof createWorkflowDocumentSubject>[0]["ownerActing"]>>> = { actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 3 } }] };
     const subject = createWorkflowDocumentSubject({ store: t.world.store, ownerActing: async () => same });
     const loaded = (await subject.load(ORG, t.taskId))!;
     const twice = await subject.apply(loaded, { requestId: randomUUID(), outcome: "approve", seen: { revision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256 } } as never, [principalOf(PB), principalOf(PB)], new Date(t.world.clock.now).toISOString());
