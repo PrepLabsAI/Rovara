@@ -70,6 +70,8 @@ export interface AnswerCheck {
   /** How many sentences the model wrote (after the bound) and how many were removed, with fixed reasons. */
   written: number;
   dropped: SentenceDropReason[];
+  /** The places (repository and path) cited by sentences removed because their quote was not at the cited line or the file was not there (J5 looks for wiki claims that cite the same place). */
+  droppedPlaces: Array<{ repo: string; path: string }>;
   /** False when any citation could not be checked (a read failed, a limit was reached). */
   complete: boolean;
 }
@@ -96,7 +98,9 @@ export async function checkAnswer(input: { final: FinalAnswer; heads: ReadonlyMa
   const sources: AnswerCheck["sources"] = [];
   const kept: KeptSentence[] = [];
   const dropped: SentenceDropReason[] = [];
+  const droppedPlaces: AnswerCheck["droppedPlaces"] = [];
   checked.claims.forEach((claim, index) => {
+    if (!claim.kept && claim.dropped === "source_not_found") for (const cite of claims[index]!.citations) if (!droppedPlaces.some((place) => place.repo === cite.repo && place.path === cite.path)) droppedPlaces.push({ repo: cite.repo, path: cite.path });
     if (!claim.kept) { dropped.push(claim.dropped === "uncited" || claim.dropped === "source_not_found" || claim.dropped === "unreadable" || claim.dropped === "code_name_not_in_quote" ? claim.dropped : "other"); return; }
     const mine = claims[index]!.citations;
     if (!numbersInQuotes(claim.sentence, mine.map((citation) => citation.quote ?? ""))) { dropped.push("numbers_not_in_quote"); return; }
@@ -114,5 +118,5 @@ export async function checkAnswer(input: { final: FinalAnswer; heads: ReadonlyMa
     }
     kept.push({ text: claim.sentence, sources: [...new Set(own)] });
   });
-  return { kept, sources, written: sentences.length, dropped, complete: checked.complete };
+  return { kept, sources, written: sentences.length, dropped, droppedPlaces, complete: checked.complete };
 }

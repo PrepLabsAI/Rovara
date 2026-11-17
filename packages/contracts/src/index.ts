@@ -378,6 +378,7 @@ export * from "./wiki-store.js";
 // Lead 4 J1: the smart Just answer service (limits, request, answer object, fixed words).
 export * from "./answers.js";
 export * from "./answer-keys.js";
+export * from "./answer-feedback.js";
 // Lead 4 C1: the wiki corrections (notes, Mark wrong, approvals) routes contract.
 export * from "./wiki-corrections.js";
 export * from "./spec-target.js";

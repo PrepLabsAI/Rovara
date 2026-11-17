@@ -18,11 +18,12 @@ import {
   WIKI_ACTION_FAILED, WIKI_BAD_REQUEST, WIKI_DISPUTED_MAX, WIKI_LESSONS_OFF, WIKI_LESSON_REFUSED, WIKI_NEEDS_MAINTAINER, WIKI_NEEDS_WORKING_ROLE, WIKI_NOT_A_RULE, WIKI_NOTE_NOT_FOUND, WIKI_NOTE_NOT_YOURS,
   WIKI_NO_SUCH_CLAIM, WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TOO_MANY, WIKI_UNAVAILABLE,
   WikiAddNoteRequestSchema, WikiCorrectionsResponseSchema, WikiDisputedResponseSchema, WikiIdSchema, WikiMarkWrongRequestSchema, WikiMarkedResponseSchema, WikiNoBodySchema, WikiNoteAddedResponseSchema,
-  WikiNoteApprovedResponseSchema, WikiNoteDeletedResponseSchema, WikiPageIdSchema, WikiProjectSchema, WikiResolvedResponseSchema, WikiSuggestedResponseSchema, wikiNoteLooksLikeRule,
+  AnswerGapsResponseSchema, WikiNoteApprovedResponseSchema, WikiNoteDeletedResponseSchema, WikiPageIdSchema, WikiProjectSchema, WikiResolvedResponseSchema, WikiSuggestedResponseSchema, wikiNoteLooksLikeRule,
   AgentXError, agentXError, redactText, type DocumentStore, type OrgId, type ProjectRole, type WikiNote, type WikiPageRead, type WikiStore, type WikiYouCan,
 } from "@agentx/contracts";
 import type { z } from "zod";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
+import { listGaps } from "../core/answers/feedback.js";
 import { WIKI_FORMER_MEMBER, WikiStoreError, createWikiStore } from "../core/wiki/store.js";
 import type { WikiNoteLessonInput, WikiNoteLessonResult } from "../core/wiki/note-lesson.js";
 import { WIKI_FORMER_MEMBER_NAME } from "./wiki-routes.js";
@@ -67,8 +68,10 @@ const ROUTES: ReadonlyArray<{ method: "GET" | "POST"; action: Action; pattern: R
   { method: "POST", action: "mark_wrong", pattern: new RegExp(`${BASE}pages/([^/]+)/flags$`, "u") },
   { method: "POST", action: "resolve_marks", pattern: new RegExp(`${BASE}pages/([^/]+)/flags/resolve$`, "u") },
   { method: "GET", action: "disputed", pattern: new RegExp(`${BASE}disputed$`, "u") },
+  // J5: "Questions the wiki could not answer", read from the answer records (maintainers only, like the disputed list).
+  { method: "GET", action: "gaps", pattern: new RegExp(`${BASE}gaps$`, "u") },
 ];
-type Action = "corrections" | "add_note" | "approve_note" | "delete_note" | "suggest_lesson" | "mark_wrong" | "resolve_marks" | "disputed";
+type Action = "gaps" | "corrections" | "add_note" | "approve_note" | "delete_note" | "suggest_lesson" | "mark_wrong" | "resolve_marks" | "disputed";
 
 /** Whether this method and path is one of the correction routes. */
 export function isWikiCorrectionPath(path: string, method: string): boolean {
@@ -126,11 +129,12 @@ export async function routeHostedWikiCorrections(input: HostedWikiCorrectionsInp
     if (!Array.isArray(repositories)) throw projectNotFound();
     // What the role may not do is refused before anything else is looked at (a body, a page, a note).
     if ((route.action === "add_note" || route.action === "mark_wrong" || route.action === "delete_note" || route.action === "suggest_lesson") && !isWorking(role)) throw forbidden(WIKI_NEEDS_WORKING_ROLE);
-    if ((route.action === "approve_note" || route.action === "resolve_marks" || route.action === "disputed") && !isMaintainer(role)) throw forbidden(WIKI_NEEDS_MAINTAINER);
+    if ((route.action === "approve_note" || route.action === "resolve_marks" || route.action === "disputed" || route.action === "gaps") && !isMaintainer(role)) throw forbidden(WIKI_NEEDS_MAINTAINER);
     const store = createWikiStore({ store: input.store, companyId: input.companyId, now: input.now });
     const ctx: Ctx = { input, store, project, role, repositories };
     await guarded(async () => await store.pruneRepositories(project, repositories));
     if (route.action === "disputed") return json(200, await disputedAnswer(ctx));
+    if (route.action === "gaps") return json(200, AnswerGapsResponseSchema.parse(await guarded(async () => await listGaps(store, project))));
     let pageId: string;
     try { pageId = decodeURIComponent(match[2]!); } catch { throw pageNotFound(); }
     if (!WikiPageIdSchema.safeParse(pageId).success) throw pageNotFound();

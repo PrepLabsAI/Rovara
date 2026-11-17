@@ -89,13 +89,18 @@ export function createAnswerService(deps: AnswerServiceDeps) {
   }
 
   /** Flags the wiki claims the model named as wrong, but only those Code itself could not find at the current commit. Never throws. */
-  async function flagOutdated(input: { project: string; answerId: string; final: FinalAnswer; seen: ReadonlyMap<string, { pageId: string; claimId: string; citations: readonly { repo: string; path: string; line: number; quote: string }[] }>; heads: ReadonlyMap<string, string>; code: AnswerCodeSource }): Promise<number> {
+  async function flagOutdated(input: { project: string; answerId: string; final: FinalAnswer; droppedPlaces: readonly { repo: string; path: string }[]; seen: ReadonlyMap<string, { pageId: string; claimId: string; citations: readonly { repo: string; path: string; line: number; quote: string }[] }>; heads: ReadonlyMap<string, string>; code: AnswerCodeSource }): Promise<number> {
     let flagged = 0;
     try {
-      for (const named of input.final.wiki_wrong.slice(0, ANSWER_LIMITS.flagsPerAnswer)) {
-        // Only a claim this answer's own lookups showed the model.
+      // The claims to look at: the ones the model named, then (J5) the ones the model was shown that cite a place a REMOVED sentence also cited. The answer only points Code at them: a claim is flagged below
+      // only when Code itself fails to find the claim's own quote, so a sentence the model got wrong flags nothing. One list, one flag per claim.
+      const candidates = new Map<string, { pageId: string; claimId: string; citations: readonly { repo: string; path: string; line: number; quote: string }[] }>();
+      for (const named of input.final.wiki_wrong) {
         const claim = input.seen.get(`${named.page}\0${named.claim}`);
-        if (claim === undefined) continue;
+        if (claim !== undefined) candidates.set(`${claim.pageId}\0${claim.claimId}`, claim);
+      }
+      for (const [key, claim] of input.seen) if (!candidates.has(key) && claim.citations.some((citation) => input.droppedPlaces.some((place) => place.repo === citation.repo && place.path === citation.path))) candidates.set(key, claim);
+      for (const claim of [...candidates.values()].slice(0, ANSWER_LIMITS.flagsPerAnswer)) {
         // The claim's own places, read again at the commit bound now and looked for ANYWHERE in the file (no line: a quote that only moved is still there). Flagged only when EVERY place was truly looked for
         // and is not in its file at all, or the file is gone: a place that could not be read, was too short to check, is in a repository no longer bound, or only moved is no reason to hide a claim from agents.
         const refs: CitationRef[] = claim.citations.map((citation) => ({ repo: citation.repo, path: citation.path, commit: input.heads.get(citation.repo) ?? "unbound", quote: citation.quote }));
@@ -219,7 +224,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
       const sources = outcome === "not_found" || checked === undefined ? [] : checked.sources.map((source, index) => ({ n: index + 1, repo: source.repo, path: source.path, line: source.line, commit: source.commit }));
       const usedSources = outcome === "not_found" || checked === undefined ? [] : checked.sources;
       const text = outcome === "not_found" || checked === undefined ? "" : checked.kept.map((sentence) => `${sentence.text} ${sentence.sources.map((at) => `[${String(at + 1)}]`).join("")}`.trim()).join(" ");
-      const flagged = final !== undefined && outcome !== "not_found" ? await flagOutdated({ project, answerId, final, seen: toolbox.claimsSeen, heads, code }) : 0;
+      const flagged = final !== undefined ? await flagOutdated({ project, answerId, final, droppedPlaces: checked?.droppedPlaces ?? [], seen: toolbox.claimsSeen, heads, code }) : 0;
       const lines: string[] = [];
       if (flagged > 0) lines.push(ANSWER_WORDS.wikiOutdated);
       if (outcome === "not_found") lines.push(ranOut && final === undefined ? ANSWER_WORDS.ranOut : ANSWER_WORDS.notFound);

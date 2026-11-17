@@ -69,6 +69,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
     // Lead 4 J1: the smart Just answer.
     ["POST", "/v1/app/projects/payments/answers", "full"],
+    // Lead 4 J5: answers feed the wiki (additive: no existing row changed).
+    ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right", "full"], ["GET", "/v1/app/projects/payments/wiki/gaps", "full"],
     // Lead 4 C1: the wiki's corrections (additive: no existing row changed).
     ["GET", "/v1/app/projects/payments/wiki/pages/overview/corrections", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes", "full"],
     ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/delete", "full"],
@@ -93,6 +95,8 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
       // The answer route is one POST: no read of answers, no other writes, no deeper paths.
       ["GET", "/v1/app/projects/payments/answers"], ["PUT", "/v1/app/projects/payments/answers"], ["DELETE", "/v1/app/projects/payments/answers"], ["POST", "/v1/app/projects/payments/answers/a1"], ["POST", "/v1/app/projects/payments/answer"],
+      // J5: "Not right" is one POST, and the gap list one GET.
+      ["GET", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["PUT", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right/x"], ["POST", "/v1/app/projects/payments/wiki/gaps"], ["DELETE", "/v1/app/projects/payments/wiki/gaps"],
       // Corrections: only the methods and paths that exist (a note is deleted by POST .../delete; there is no DELETE, PUT or PATCH row, and no read of the notes list).
       ["DELETE", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview/notes"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes"],
       ["GET", "/v1/app/projects/payments/wiki/pages/overview/flags"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/corrections"], ["POST", "/v1/app/projects/payments/wiki/disputed"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve"],

@@ -27,8 +27,8 @@ export const wikiFlagKey = (orgId: OrgId, project: string, page: string, flagId:
 export const wikiBuildKey = (orgId: OrgId, project: string, buildId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.build}${id(buildId)}` });
 export const wikiAnswerKey = (orgId: OrgId, project: string, answerId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.answer}${id(answerId)}` });
 
-/** A stored row's own key, read back from a query of the project's partition: the sort key must be one of the wiki's families (anything else is refused). */
-const STORED_SK = /^(?:PAGE|BODY|BUILD|ANSWER)#[A-Za-z0-9_-]{1,120}$|^(?:NOTE|FLAG)#[a-z0-9][a-z0-9-]{0,119}#[A-Za-z0-9_-]{4,64}$/u;
+/** A stored row's own key, read back from a query of the project's partition: the sort key must be one of the wiki's families (anything else is refused). THREAD# is J1's thread memory (answerThreadKey), which "Delete wiki" must remove too. */
+const STORED_SK = /^(?:PAGE|BODY|BUILD|ANSWER)#[A-Za-z0-9_-]{1,120}$|^THREAD#[a-f0-9]{32}$|^(?:NOTE|FLAG)#[a-z0-9][a-z0-9-]{0,119}#[A-Za-z0-9_-]{4,64}$/u;
 export function wikiRowKey(orgId: OrgId, project: string, sk: string): WikiKey {
   if (!STORED_SK.test(sk)) throw new Error("not a wiki row's sort key");
   return { pk: wikiPartition(orgId, project), sk: `${sk}` };
