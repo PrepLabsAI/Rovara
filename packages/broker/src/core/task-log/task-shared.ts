@@ -23,9 +23,11 @@ export function taskSharedOf(deps: TaskSharedDependencies): (orgId: OrgId, taskI
     if (task === undefined || (task["orgId"] ?? task["companyId"]) !== orgId) return false;
     // A shared Slack thread task, or a task someone took over: a second person is on it.
     if (typeof task["share"] === "object" && task["share"] !== null) return true;
-    if (Object.hasOwn(task, "currentOwner") && task["currentOwner"] !== undefined) return true;
+    if (typeof task["currentOwner"] === "object" && task["currentOwner"] !== null) return true;
     const people = peopleOfItem(await deps.store.get({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE" }));
-    if (people !== undefined && people !== "unreadable") {
+    // A People list that does not read says nothing reliable about who may see the task: not shared (fail closed), whatever else the records hold.
+    if (people === "unreadable") return false;
+    if (people !== undefined) {
       let owners = 0;
       for (const role of people.values()) {
         if (role === "commenter" || role === "viewer") return true;

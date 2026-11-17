@@ -61,6 +61,11 @@ export interface LinearConnectContext {
   projectInCompany: (project: string, companyId: string) => Promise<boolean>;
   /** The person's grant on the project, read only within the company. */
   projectRole: (project: string, personId: string, companyId: string) => Promise<"administrator" | "developer" | undefined>;
+  /**
+   * Called once a project got its FIRST Linear team (it had none before), for the company's own project: the host saves the new-hosted-project ticket-updates default if none is saved. Best effort: a failure is logged by
+   * name and the project stays on the default of every existing project (status only).
+   */
+  onFirstTeam?: ((companyId: string, project: string, personId: string) => Promise<void>) | undefined;
 }
 
 const CONNECT = `${LINEAR_CONNECT_PATH}/connect`;
@@ -237,10 +242,13 @@ async function projectRoute(ctx: LinearConnectContext, member: z.infer<typeof Me
   // The team must be one the company's OWN token sees now: a team id from anywhere else (another company's workspace) is not found.
   const team = (await companyTeams(ctx, companyId)).find((candidate) => candidate.id === parsed.data.teamId);
   if (team === undefined) throw agentXError("NOT_FOUND", TEAM_NOT_FOUND);
+  // Whether this is the project's first team (a read that fails counts as "had one": nothing is seeded).
+  const hadTeam = ctx.onFirstTeam === undefined ? true : await connections.teamPick(companyId, project).then((pick) => pick !== undefined, () => true);
   try { await connections.setTeam(companyId, project, team, personId, connection); }
   catch (error) {
     if (error instanceof AgentXError && error.code === "LINEAR_NOT_CONNECTED") throw error;
     throw agentXError("RUNTIME_UNAVAILABLE", STATUS_UNAVAILABLE);
   }
+  if (!hadTeam) await ctx.onFirstTeam!(companyId, project, personId).catch(() => { ctx.wiring.log({ event: "linear.ticket_updates_default_failed", companyId }); });
   return { project, team: { id: team.id, key: team.key, name: team.name } };
 }

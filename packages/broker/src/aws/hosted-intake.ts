@@ -12,12 +12,12 @@
 // A company whose new tasks do not start on the core has no intake here (`intakeFor` is undefined, so the webhook logs `linear.intake_not_wired` and nothing starts).
 import { createHash, createHmac } from "node:crypto";
 import {
-  OrgIdSchema, companyLog, type AuditSink, type DocumentStore, type IdentityProvider, type IntakeWaitingList, type OrgId, type Principal, type Tracker,
+  NEW_HOSTED_TICKET_UPDATES, OrgIdSchema, companyLog, type AuditSink, type DocumentStore, type IdentityProvider, type IntakeWaitingList, type OrgId, type Principal, type Tracker,
 } from "@agentx/contracts";
 import { dismissIntakeItem, intakePortsOf, listWaitingIntakeItems, readIntakeItem, startWaitingIntake, type IntakePorts } from "../core/intake/index.js";
 import type { MomentTable } from "../core/ticket-updates/moments.js";
 import { ticketUpdatesHandler, type TicketUpdatesDependencies } from "../core/ticket-updates/handler.js";
-import { refreshTicketThread } from "../core/ticket-updates/index.js";
+import { refreshTicketThread, seedTicketUpdatesIfUnset } from "../core/ticket-updates/index.js";
 import { taskLogMilestoneHandler } from "../core/task-log/milestones.js";
 import type { TaskLogHooks } from "../core/task-log/hooks.js";
 import { taskSharedOf } from "../core/task-log/task-shared.js";
@@ -69,6 +69,11 @@ export interface HostedIntake {
   waiting(companyId: OrgId, project: string): Promise<IntakeWaitingList>;
   /** "Start" by this member: the work is theirs. */
   start(companyId: OrgId, project: string, itemId: string, personId: string): Promise<HostedIntakeStart>;
+  /**
+   * A project that just got its first tracker team (the one place a hosted project first gets tracker intake): when it has NO ticket-updates settings saved, saves the new-hosted-project default (`NEW_HOSTED_TICKET_UPDATES`,
+   * level "full"), once, conditionally, so a saved choice (even a saved status_only) is never overwritten and two adds at once save once. "no_intake": this company's tasks do not start on the core, so nothing is saved.
+   */
+  seedTicketUpdates(companyId: OrgId, project: string, personId: string): Promise<"seeded" | "kept" | "no_intake">;
   /** "Not this one" by this member. `false`: no such waiting ticket. */
   dismiss(companyId: OrgId, project: string, itemId: string, personId: string): Promise<boolean>;
 }
@@ -138,6 +143,11 @@ export function createHostedIntake(deps: HostedIntakeDeps): HostedIntake {
       if (outcome.outcome === "duplicate") return { outcome: "duplicate", state: outcome.state };
       if (outcome.outcome === "skipped") return { outcome: "duplicate", state: "waiting" };
       return outcome;
+    },
+    async seedTicketUpdates(companyId, project, personId) {
+      const company = await companyOf(companyId);
+      if (company === undefined) return "no_intake";
+      return seedTicketUpdatesIfUnset({ store: company.store, now: deps.now }, { orgId: OrgIdSchema.parse(companyId), project, settings: NEW_HOSTED_TICKET_UPDATES, by: personId });
     },
     async dismiss(companyId, project, itemId, personId) {
       if (!ITEM_ID.test(itemId)) return false;

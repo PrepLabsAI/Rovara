@@ -41,6 +41,22 @@ export async function saveTicketUpdates(table: TicketUpdatesTable, input: { orgI
   return input.settings;
 }
 
+/**
+ * Saves `settings` for a project that has NONE saved yet, and nothing otherwise: one put conditional on the item being absent, so a saved choice (including a saved `status_only`, or an item that does not parse) is
+ * never overwritten and two calls at once save once. "seeded" when this call wrote them, "kept" when something was already there.
+ */
+export async function seedTicketUpdatesIfUnset(table: TicketUpdatesTable, input: { orgId: OrgId; project: string; settings: TicketUpdatesSettings; by: string }): Promise<"seeded" | "kept"> {
+  const parsed = TicketUpdatesSettingsSchema.parse(input.settings);
+  const written = await table.store.put({
+    item: {
+      ...ticketUpdatesSettingsKey(input.orgId, input.project), entityType: "TICKET_UPDATES", orgId: input.orgId, project: input.project, settings: JSON.parse(JSON.stringify(parsed)) as StoredDocument,
+      revision: 1, requestId: "seed-new-hosted-default", by: input.by, at: new Date(table.now()).toISOString(),
+    },
+    condition: when.absent(),
+  });
+  return written.applied ? "seeded" : "kept";
+}
+
 /** Notes that a write to a tracker was skipped because its sign-in may not write (or the tracker refused it). Best effort: a failure to note is not the task's. */
 export async function noteWriteAccessMissing(table: TicketUpdatesTable, orgId: OrgId, tracker: string): Promise<void> {
   await table.store.put({ item: { ...ticketWriteAccessKey(orgId, tracker), entityType: "TICKET_WRITE_ACCESS", orgId, tracker, state: "needs_write_access", at: new Date(table.now()).toISOString() } });

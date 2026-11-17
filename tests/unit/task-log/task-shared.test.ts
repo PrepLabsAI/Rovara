@@ -64,6 +64,13 @@ describe("a task is shared beyond its owner only when the company's records say 
     await put(bad, TASK, A);
     await people(bad, TASK, [{ developerId: DEV("b"), role: "commenter" }], { schemaVersion: 2 });
     expect(await taskSharedOf({ store: bad })(A, TASK)).toBe(false);
+    // Even with a session share beside it: an unreadable list is not shared.
+    await share(bad, A, TASK, 1, { kind: "org" });
+    expect(await taskSharedOf({ store: bad })(A, TASK)).toBe(false);
+    // A malformed takeover field is no second person.
+    const malformed = new MemoryDocumentStore();
+    await put(malformed, TASK, A, { currentOwner: null });
+    expect(await taskSharedOf({ store: malformed })(A, TASK)).toBe(false);
     expect(await taskSharedOf({ store: new MemoryDocumentStore() })(A, TASK)).toBe(false);
     const noSession = new MemoryDocumentStore();
     await put(noSession, TASK, A, { sessionId: "../x" });
