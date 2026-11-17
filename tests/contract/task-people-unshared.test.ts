@@ -13,7 +13,6 @@ import { checkTaskPersonIdentity, type ProjectAccessSubject, type TaskPersonIden
 import {
   changeTaskPeople, getTaskPeople, getTaskPeopleCapabilities, resolveTaskDispatchPeople, resolveTaskPeopleAccess, takeTaskOwnership, type TaskPeopleDependencies,
 } from "../../packages/broker/src/developer/task-people.js";
-import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
 import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
