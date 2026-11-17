@@ -12,6 +12,7 @@ import { CompanyInviteStore } from "../../packages/broker/src/developer/company-
 import { companyIssuerProvider } from "../../packages/broker/src/developer/company-issuer.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
+import type { DeveloperIdentityDependencies } from "../../packages/broker/src/developer/server.js";
 import { httpEvent, identityHarness, ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER } from "./developer-fakes.js";
 
 export const WEB = "https://cloud.example.test/callback";
@@ -21,7 +22,7 @@ export const person = (subject: string) => ownerKeyForSubject(OIDC_ISSUER, subje
 export const OWN_SIGNIN = "your company signs in with its own sign-in method";
 type Answer = { status: number; body: Record<string, unknown> };
 
-export function sharedSignInWorld(options: { administrator?: boolean } = {}) {
+function buildWorld(options: { administrator?: boolean } = {}) {
   const users = ["owner", "carol", "bob", "dana", "legacy"].map((sub) => ({ sub, email: `${sub}@example.test`, email_verified: true, name: `${sub} person`, groups: ["admins"] }));
   const h = identityHarness({ oidc: options.administrator === true ? { administrator: { claim: "groups", values: ["admins"] } } : {}, oidcUsers: users });
   const company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
@@ -101,3 +102,7 @@ export function sharedSignInWorld(options: { administrator?: boolean } = {}) {
   return { ...h, company, invites, operator, signIn, oidcSignIn, browserSession, refresh, routes, call, callWith, callOn, access, cliCheck, sessionOf, setup, issuerRow };
 }
 
+
+/** Named, so the world's type does not lean on a path the strict check cannot name. */
+export type SharedSignInWorld = ReturnType<typeof buildWorld> & { deps: DeveloperIdentityDependencies };
+export const sharedSignInWorld = (options: { administrator?: boolean } = {}): SharedSignInWorld => buildWorld(options);
