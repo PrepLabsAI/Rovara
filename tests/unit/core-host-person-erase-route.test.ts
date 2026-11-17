@@ -24,6 +24,7 @@ function setup(overrides: Partial<PersonEraseRouteOptions> & { serving?: boolean
   const deps = (): PersonEraseDeps => ({
     store, audit, now: () => NOW, objects: { deleteEveryVersion: async () => true },
     eraseLearning: async (company, person) => { erased.push(`${company}/${person}`); },
+    eraseWiki: async () => undefined,
   });
   const options: PersonEraseRouteOptions = {
     app: { serving: overrides.serving ?? true },
