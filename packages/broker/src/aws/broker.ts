@@ -350,7 +350,7 @@ import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntri
 import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
-import { ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace } from "./engine-boundary.js";
+import { ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace } from "./engine-boundary.js"; import { coreAdminStop, coreStopButton, coreThreadStop, type CoreStopOutcome } from "./core-stop-entry.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
@@ -5964,9 +5964,9 @@ async function cancelWorkspaceTask(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   workspaceId: string,
-): Promise<TaskCancellation> {
-  const workspace = await requireWorkspace(dependencies, workspaceId);
-  await requireAdministrator(dependencies, identity, workspace.projectName);
+): Promise<TaskCancellation | CoreStopOutcome> {
+  const core = await coreAdminStop(dependencies, dependencies.developer?.coreTasks, identity, workspaceId, (project) => requireAdministrator(dependencies, identity, project)); if (core !== undefined) return core; // S2: a core task's workspace: the core's stop (core-stop-entry.ts)
+  const workspace = await requireWorkspace(dependencies, workspaceId); await requireAdministrator(dependencies, identity, workspace.projectName);
   return cancelRunningTask(dependencies, workspace, {});
 }
 
@@ -6597,7 +6597,7 @@ async function sendSlackWorkflowBack(dependencies: AwsBrokerDependencies, tasks:
  * closed", heard nothing more.
  */
 async function closeSlackWorkflowTask(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowCloseEvent) {
-  const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task");
+  const core = dependencies.developer === undefined ? undefined : await coreStopButton(dependencies, dependencies.developer.coreTasks, event, async () => { const thread = SlackThreadSchema.parse(event.thread); if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks"); return await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId)); }); if (core !== undefined) return core; const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task"); // S2: the Stop button on a core task first (core-stop-entry.ts)
   let closeRequestId = requestId;
   if (event.stop === true) {
     // The close a Stop leads to carries the first press's request ID, so every later press (or the post-result hook) is the same close.
@@ -6872,10 +6872,10 @@ export function isSlackStopTaskEvent(event: unknown): event is SlackStopTaskEven
   return value.source === "agentx.slack-ingress" && value.action === "stop-task" && value.requestContext === undefined;
 }
 
-async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation | { outcome: "NOT_OWNER" }> {
+async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation | CoreStopOutcome | { outcome: "NOT_OWNER" }> {
   const thread = SlackThreadSchema.parse(event.thread);
   const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: event.userId });
-  await companySlackCaller(dependencies, thread, requester.userId);
+  const caller = await companySlackCaller(dependencies, thread, requester.userId);
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   // Spec 043 FR-005: a thread running a SWE-bench run stops the run.
@@ -6886,7 +6886,7 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
   // Q8: in a continue thread a teammate's stop cancels the task's running task operation, whoever
   // started it, as the developer's own cancel would. A view-only or closed thread, or one whose
   // channel now serves another project (F16), stops nothing.
-  const shared = await sharedThread(dependencies, thread);
+  const shared = await sharedThread(dependencies, thread); const core = await coreThreadStop(dependencies, dependencies.developer?.coreTasks, shared, binding, async () => caller); if (core !== undefined) return core; // S2: a thread whose task the core owns: the core's own authorized stop as this Slack person
   // A task started in Slack is driven from its own thread, and only its owner stops it there.
   if (shared?.workflowThread === true) {
     if (shared.closedAt !== undefined || binding.projectName !== shared.project) return { outcome: "NOTHING_RUNNING" };
