@@ -41,7 +41,7 @@ async function world(makePeopleOf?: (store: MemoryDocumentStore) => (session: Ag
   await move("IMPLEMENT", "RUNNING");
   return {
     store, move, logs,
-    pending: async () => [...new Set((await store.query({ pk: PENDING_PK })).items.map((row) => String(row["developerId"])))].sort(),
+    pending: async () => [...new Set((await store.query({ pk: PENDING_PK })).items.map((row) => (row["developerId"] as string)))].sort(),
     inbox: async (developerId) => (await store.query({ pk: inboxPartition(ORG, developerId) })).items.length,
   };
 }
