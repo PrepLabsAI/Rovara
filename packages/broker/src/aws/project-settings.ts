@@ -3,14 +3,14 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, PolicyRowsSchema, POLICY_FIELDS, PROJECT_CATALOG_PK, agentXError, projectCatalogKey, companyScoped, policyFieldPageOnly,
-  canonicalJson, companyLog, orgProjectCatalogKey, orgProjectCatalogPk, orgSettingsKey, createRowsPolicySource, withPolicyHookValues, type HostedPolicyHookSettings, type PolicySource, type PolicyRows, type ResolvedPolicy,
+  AgentXError, AgentXNameSchema, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, PolicyRowsSchema, POLICY_FIELDS, PROJECT_CATALOG_PK, agentXError, projectCatalogKey, companyScoped, policyFieldPageOnly,
+  canonicalJson, companyLog, orgProjectCatalogKey, orgProjectCatalogPk, orgSettingsKey, projectRevisionKey, createRowsPolicySource, withPolicyHookValues, type HostedPolicyHookSettings, type PolicySource, type PolicyRows, type ResolvedPolicy,
 } from "@agentx/contracts";
 import { freshStepUp } from "../core-host/step-up.js";
 import { createPolicyHookClient, policyHookValuesAsker, type PolicyHookClientOptions } from "../core/policy-hook/index.js";
 import { createHostedPolicyHookClient } from "../core/policy-hook/hosted.js";
 import { projectGrant } from "./admin-actions.js";
-import { Membership, boundedCompanyReads, membershipKey, recordInCompany, resolveCompany } from "./company-check.js";
+import { Membership, boundedCompanyReads, membershipKey, ownPartitionRow, recordInCompany, resolveCompany } from "./company-check.js";
 import type { DeveloperCaller, DeveloperRouteDependencies } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
@@ -231,7 +231,7 @@ async function inBatches<T, R>(items: readonly T[], size: number, work: (item: T
   return out;
 }
 
-function complianceQuery(url: URL, indexed: boolean, companyId: string): { limit: number; base: string | undefined; skip: number; filter: boolean } {
+function complianceQuery(url: URL, partition: boolean, companyId: string): { limit: number; base: string | undefined; skip: number; filter: boolean } {
   const names = new Set<string>();
   for (const key of url.searchParams.keys()) {
     if ((key !== "limit" && key !== "cursor" && key !== "filter") || names.has(key)) throw invalidCompliance();
@@ -240,12 +240,13 @@ function complianceQuery(url: URL, indexed: boolean, companyId: string): { limit
   const limitText = url.searchParams.get("limit");
   const limit = limitText === null ? COMPLIANCE_LIMIT_DEFAULT : /^[1-9][0-9]{0,2}$/.test(limitText) ? Number(limitText) : 0;
   if (limit < 1 || limit > COMPLIANCE_LIMIT_MAX) throw invalidCompliance();
-  // The cursor is a position in the install-wide catalog that never holds another company's name: "<the last name this call returned>~<how many catalog entries after it were already
-  // looked at>". The name must be one of THIS company's projects (checked below, with the same refusal for a foreign or unknown name), so a made-up cursor learns nothing beyond a count.
+  // Company partition (v2): a canonical cursor bound to the caller's company and one of its own catalog names. Legacy shared catalog (v1, implicit company only): a position in the
+  // install-wide catalog that never holds another company's name: "<the last name this call returned>~<how many catalog entries after it were already looked at>". Either way the name
+  // must be one of THIS company's projects (checked below, with the same refusal for a foreign or unknown name), so a made-up cursor learns nothing beyond a count.
   const cursorText = url.searchParams.get("cursor");
   let base: string | undefined; let skip = 0;
   if (cursorText !== null) {
-    if (indexed) {
+    if (partition) {
       try {
         if (cursorText.length > 512 || !/^c2\.[A-Za-z0-9_-]+$/.test(cursorText)) throw invalidCompliance();
         const encoded = cursorText.slice(3), bytes = Buffer.from(encoded, "base64url");
@@ -267,6 +268,7 @@ function complianceQuery(url: URL, indexed: boolean, companyId: string): { limit
 
 const complianceCursor = (companyId: string, after: string) => "c2." + Buffer.from(canonicalJson({ v: 2, companyId, after })).toString("base64url");
 const catalogFlag = z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) });
+const positiveRevision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
 async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, url: URL) {
   const startedAt = deps.now();
@@ -285,28 +287,35 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
   } catch { throw agentXError("AUTH_REQUIRED", "company membership required"); }
   const checkedRole = OrgRoleSchema.safeParse(role);
   if (!checkedRole.success || (checkedRole.data !== "admin" && checkedRole.data !== "owner")) throw agentXError("FORBIDDEN", "company administrator required");
-  const flag = await client.send(new GetCommand({ TableName: deps.tableName, Key: orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX"), ConsistentRead: true })) as { Item?: unknown };
-  const indexed = flag.Item !== undefined;
-  if (indexed && !catalogFlag.safeParse(flag.Item).success) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
-  const query = complianceQuery(url, indexed, companyId);
-  if (query.base !== undefined && indexed) {
+  // A named company's projects live only in its own partition (ORG#<company>#PROJECT_CATALOG and ORG#<company>#PROJECT#<name> REV# rows): that partition is authoritative and is
+  // read without any flag. Only the implicit company (Code's legacy single-company data, D1) may still have its projects in the install-wide shared catalog; it reads its partition
+  // once the controller has verified and marked it (PROJECT_CATALOG_INDEX), and the shared catalog before that.
+  let partition = companyId !== IMPLICIT_COMPANY_ID;
+  if (!partition) {
+    const flag = await client.send(new GetCommand({ TableName: deps.tableName, Key: orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX"), ConsistentRead: true })) as { Item?: unknown };
+    partition = flag.Item !== undefined;
+    if (partition && !catalogFlag.safeParse(flag.Item).success) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+  }
+  const query = complianceQuery(url, partition, companyId);
+  if (query.base !== undefined && partition) {
     try {
       const own = await client.send(new GetCommand({ TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, query.base), ConsistentRead: true })) as { Item?: unknown };
       if (own.Item === undefined) throw invalidCompliance();
     } catch { throw invalidCompliance(); }
   }
-  if (query.base !== undefined && !indexed) {
+  if (query.base !== undefined && !partition) {
     const own = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
       ExpressionAttributeValues: { ":pk": `PROJECT#${query.base}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
     if (own.Items?.[0] === undefined || !recordInCompany(own.Items[0], companyId)) throw invalidCompliance();
   }
 
-  // The install's catalog holds every company's names, so each name is kept only if its latest revision belongs to THIS company (the same check the project page makes).
-  // The scan position (`base`, `skip`) only ever names a project of this company, or counts entries; no other company's name is returned.
+  // Company partition: every row is this company's by its key; a row naming another company, or a catalog pointer whose selected revision is missing or not a project of that name,
+  // is drift and fails closed. Legacy shared catalog (implicit company only): the install's catalog holds every company's names, so each name is kept only if its latest revision belongs
+  // to THIS company (the same check the project page makes). The scan position (`base`, `skip`) only ever names a project of this company, or counts entries.
   const names: string[] = [];
   let base = query.base; let skip = query.skip; let toSkip = query.skip; let examined = 0; let exhausted = false;
   let nextCursor: string | null;
-  if (indexed) {
+  if (partition) {
     const drift = () => {
       companyLog(companyId, (line) => console.warn(JSON.stringify(line)))({ event: "project_catalog.index_drift" });
       throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
@@ -316,18 +325,22 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
       ...(query.base === undefined ? {} : { ExclusiveStartKey: orgProjectCatalogKey(companyId, query.base) }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
     const candidates = (page.Items ?? []).map((item) => {
       const name = typeof item["sk"] === "string" ? AgentXNameSchema.safeParse(item["sk"].slice("PROJECT#".length)) : undefined;
+      const latest = positiveRevision.safeParse(item["latestRevision"]);
       if (name?.success !== true || item["pk"] !== orgProjectCatalogPk(companyId) || item["sk"] !== `PROJECT#${name.data}`
-        || item["entityType"] !== "PROJECT_CATALOG" || item["companyId"] !== companyId || item["name"] !== name.data
-        || !z.number().int().positive().safeParse(item["latestRevision"]).success) return drift();
-      return name.data;
+        || item["entityType"] !== "PROJECT_CATALOG" || !ownPartitionRow(item, companyId) || (Object.hasOwn(item, "name") && item["name"] !== name.data)
+        || !latest.success) return drift();
+      return { name: name.data, revision: latest.data };
     });
-    const ownership = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async (name) => {
-      const latest = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-        ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
-      return latest.Items?.[0] !== undefined && recordInCompany(latest.Items[0], companyId);
+    const selected = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async ({ name, revision }) => {
+      const key = projectRevisionKey(companyId, name, revision);
+      const response = await client.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+      const row = response.Item;
+      const definition = row?.["definition"] as { name?: unknown; revision?: unknown } | null | undefined;
+      return row !== undefined && row["pk"] === key.pk && row["sk"] === key.sk && row["entityType"] === "PROJECT" && row["candidate"] !== true && ownPartitionRow(row, companyId)
+        && typeof definition === "object" && definition !== null && definition.name === name && definition.revision === revision;
     });
-    if (ownership.some(own => !own)) drift();
-    names.push(...candidates);
+    if (selected.some(own => !own)) drift();
+    names.push(...candidates.map(({ name }) => name));
     if (page.LastEvaluatedKey !== undefined && names.length === 0) drift();
     nextCursor = page.LastEvaluatedKey === undefined ? null : complianceCursor(companyId, names[names.length - 1]!);
   } else {
@@ -383,7 +396,7 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
   };
   const rows: Array<Awaited<ReturnType<typeof rowOf>>> = [];
   while (rows.length < names.length) {
-    if (rows.length > 0 && deps.now() - startedAt > COMPLIANCE_ROW_DEADLINE_MS) { nextCursor = indexed ? complianceCursor(companyId, names[rows.length - 1]!) : `${names[rows.length - 1]!}~0`; break; }
+    if (rows.length > 0 && deps.now() - startedAt > COMPLIANCE_ROW_DEADLINE_MS) { nextCursor = partition ? complianceCursor(companyId, names[rows.length - 1]!) : `${names[rows.length - 1]!}~0`; break; }
     rows.push(...await Promise.all(names.slice(rows.length, rows.length + COMPLIANCE_HOOK_AT_ONCE).map(rowOf)));
   }
   budget.check();
