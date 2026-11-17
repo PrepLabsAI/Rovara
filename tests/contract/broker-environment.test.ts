@@ -123,7 +123,9 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();
-        const expected = DEPLOY_PARAMETER_VALUES[parameter!] ?? resolver.ref(parameter!);
+        const value = DEPLOY_PARAMETER_VALUES[parameter!] ?? resolver.ref(parameter!);
+        // A host setting (the core's model gateway, core switch-on blocker 2026-11-17) reaches the broker as its https origin.
+        const expected = "httpsOrigin" in spec && spec.httpsOrigin === true ? `https://${value}` : value;
         expect(hydrated[spec.variable]).toBe(expected);
       });
     }
@@ -140,6 +142,8 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
         AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: `${naming.resourcePrefix}-e2e-mock-runtime-v1`,
         CORE_DISPATCH_QUEUE_URL: dispatcher.CORE_DISPATCH_QUEUE_URL,
         CORE_DISPATCH_DEAD_LETTER_URL: dispatcher.CORE_DISPATCH_DEAD_LETTER_URL,
+        // The channel adapters' secret prefix, as infra/lib/channel-adapters.ts writes their secrets under it (core switch-on blocker 2026-11-17: room for the gateway settings).
+        CHANNEL_ADAPTER_SECRET_PREFIX: `agentx/${env}/`,
       });
       // The core dispatch queues are the template's own, by their fixed names.
       const queueNames = Object.values(template.Resources).filter((resource) => resource.Type === "AWS::SQS::Queue").map((resource) => resource.Properties?.QueueName);

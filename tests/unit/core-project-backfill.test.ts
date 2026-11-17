@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { listProjectMembers, projectMemberKey } from "../../packages/broker/src/aws/admin-actions.js";
 import { backfillCorePage, checkCorePeople, planCoreProjectWrites } from "../../packages/broker/src/aws/core-project-backfill.js";
@@ -136,17 +136,17 @@ it("uses the existing binding writer and never steals an installation", async ()
   expect((await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).issues).toContainEqual({ phase: 1, index: 0, reason: "conflict" });
   expect(db.get(foreign.pk, foreign.sk)).toEqual(foreign);
 });
-it("forward planning skips unknown companies and copies known companies in the caller transaction", async () => {
+it("forward planning attributes missing companies to IMPLICIT and copies in the caller transaction", async () => {
   const { db, deps, commands } = setup();
-  expect(await planCoreProjectWrites(deps, legacy())).toMatchObject({ status: "unknown_company", writes: [] });
-  expect(commands).toEqual([]);
-  for (const companyId of [A, B]) {
-    const source = legacy(1, companyId);
+  db.set({ ...orgSettingsKey(IMPLICIT_COMPANY_ID, "PROJECT_CATALOG_INDEX"), verifiedAt: at, count: 0, runId: "catalog-test" });
+  for (const companyId of [IMPLICIT_COMPANY_ID, A, B]) {
+    const source = legacy(1, companyId === IMPLICIT_COMPANY_ID ? undefined : companyId);
     const plan = await planCoreProjectWrites(deps, source);
     expect(plan.status).toBe("ready");
     await db.send(new TransactWriteCommand({ TransactItems: plan.writes }));
     expect(db.get(projectRevisionKey(companyId, "web", 1).pk, source.sk)?.definition).toEqual(definition());
   }
+  expect(commands.length).toBeGreaterThan(0);
 });
 it("refuses oversized input quickly and reports storage/time failures with fixed words", async () => {
   const { deps, commands } = setup();

@@ -1,6 +1,6 @@
 // M4a slice 3 (TE-D8): the company admin's view of every project against the company's bounds. Read-only, company administrator or owner only.
 import { expect, it, vi } from "vitest";
-import { AgentXError, companyScoped } from "@agentx/contracts";
+import { AgentXError, companyScoped, canonicalJson, orgProjectCatalogKey, orgSettingsKey } from "@agentx/contracts";
 import { devRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -296,4 +296,68 @@ it("a stored-row failure reads fail closed: the store's own error never reaches 
   const error = await w.get().then(() => undefined, (caught: Error & { code?: string }) => caught);
   expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "settings unavailable" });
   expect(error?.message).not.toContain("private-canary");
+});
+
+const c2 = (companyId: string, after: string, extra = {}) => "c2." + Buffer.from(canonicalJson({ v: 2, companyId, after, ...extra })).toString("base64url");
+function indexed(w: ReturnType<typeof world>, name: string, companyId = COMPANY) {
+  w.project(name, companyId);
+  w.db.set({ ...orgProjectCatalogKey(companyId, name), entityType: "PROJECT_CATALOG", companyId, name, latestRevision: 1 });
+}
+function flag(w: ReturnType<typeof world>, companyId = COMPANY) {
+  w.db.set({ pk: companyScoped(companyId, "SETTINGS"), sk: "PROJECT_CATALOG_INDEX", verifiedAt: new Date(now).toISOString(), count: 1, runId: "catalog-test" });
+}
+it("flagged paging is byte-identical including read count with zero or 500 foreign projects", async () => {
+  for (const companyId of [COMPANY, B]) {
+    const other = companyId === COMPANY ? B : COMPANY;
+    const pages = [];
+    for (const foreign of [0, 500]) {
+      const w = world(); w.setCompany(companyId); w.member("admin", {}, companyId); flag(w, companyId);
+      for (let i = 0; i < 250; i++) indexed(w, `p${String(i).padStart(4, "0")}b`, companyId);
+      for (let i = 0; i < foreign; i++) indexed(w, `p${String(i).padStart(4, "0")}a`, other);
+      const got = []; let cursor: string | null = null;
+      do {
+        w.send.mockClear();
+        const page = await w.get("?limit=50" + (cursor === null ? "" : `&cursor=${cursor}`));
+        expect(w.send.mock.calls.some(([c]) => JSON.stringify(c.input).includes('"PROJECT_CATALOG"'))).toBe(false);
+        got.push({ page, reads: w.send.mock.calls.length }); cursor = page.nextCursor;
+      } while (cursor !== null);
+      expect(got.flatMap(p => p.page.projects)).toHaveLength(250); pages.push(got);
+    }
+    expect(pages[0]).toEqual(pages[1]);
+  }
+});
+it("flagged cursors reject replay, forgery and v1 with identical fixed words", async () => {
+  const w = world(); indexed(w, "alpha"); indexed(w, "beta"); flag(w);
+  const first = await w.get("?limit=1"); expect(first.nextCursor).toBe(c2(COMPANY, "alpha"));
+  const malformed = [c2(B, "alpha"), c2(COMPANY, "missing"), c2(COMPANY, "alpha", { extra: true }), c2(COMPANY, "alpha", { v: 1 }), "~200", "alpha~0", "garbage", first.nextCursor + "=",
+    "c2." + Buffer.from(JSON.stringify({ v: 2, companyId: COMPANY, after: "alpha" })).toString("base64url")];
+  for (const cursor of malformed) await expect(w.get(`?cursor=${encodeURIComponent(cursor)}`)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "invalid settings compliance request" });
+  w.setCompany(B); w.member("admin", {}, B); flag(w, B);
+  await expect(w.get(`?cursor=${first.nextCursor}`)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "invalid settings compliance request" });
+});
+it("unflagged behavior stays v1; unmark restores it; flagged deadline resumes in v2", async () => {
+  const w = world(); for (let i = 0; i < 12; i++) indexed(w, `p${String(i).padStart(2, "0")}`);
+  expect((await w.get("?limit=1")).nextCursor).toBe("p00~0");
+  flag(w); w.hook(() => { w.advance(1100); return {}; });
+  const first = await w.get("?limit=12"); expect(first.projects).toHaveLength(4); expect(first.nextCursor).toBe(c2(COMPANY, "p03"));
+  expect((await w.get(`?cursor=${first.nextCursor}`)).projects[0]?.project).toBe("p04");
+  const key = orgSettingsKey(COMPANY, "PROJECT_CATALOG_INDEX"); w.db.delete(key.pk, key.sk);
+  expect((await w.get("?limit=1")).nextCursor).toBe("p00~0");
+});
+it("index drift fails closed and logs only the caller company once", async () => {
+  const w = world(); indexed(w, "foreign", B); flag(w);
+  w.db.set({ ...orgProjectCatalogKey(COMPANY, "foreign"), entityType: "PROJECT_CATALOG", companyId: COMPANY, name: "foreign", latestRevision: 1 });
+  const log = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    await expect(w.get()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "settings unavailable" });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(log.mock.calls[0]![0] as string)).toEqual({ companyId: COMPANY, event: "project_catalog.index_drift" });
+    expect(JSON.stringify(log.mock.calls)).not.toContain(B);
+  } finally { log.mockRestore(); }
+});
+
+it("a v2 cursor existence read failure has the same fixed refusal as garbage", async () => {
+  const w = world(); indexed(w, "alpha"); flag(w);
+  w.db.injectFault({ command: "GetCommand", match: input => JSON.stringify(input).includes("PROJECT#alpha"), error: { name: "InternalServerError", message: "private-canary" } });
+  await expect(w.get(`?cursor=${c2(COMPANY, "alpha")}`)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "invalid settings compliance request" });
 });

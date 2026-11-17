@@ -82,6 +82,7 @@ import type { CompanySignInStore } from "./company-membership.js";
 import type { CompanyInviteStore } from "./company-invites.js";
 import type { SelectedCompanyIssuer } from "./company-issuer.js";
 import { companyOperator, type CompanyOperatorRequest, type CompanyOperatorResponse } from "./company-operator.js";
+import { companyImportOperator, type CompanyImportEventInput, type CompanyImportReplyValue, type CompanyImportStore } from "./company-import.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
@@ -104,6 +105,8 @@ export interface DeveloperIdentityDependencies {
   company?: CompanySignInStore;
   /** DEC 254a, 253z: invite codes and self-serve create (with `company` only). Absent: those events answer unavailable, and nobody signs in with no company. */
   companyInvites?: CompanyInviteStore;
+  /** DEC 254b (b): an operator's import of the install's old company layout, and its undo, with Code's company layer on or off. */
+  companyImport?: CompanyImportStore;
   companyIssuer?: (companyId: string) => Promise<SelectedCompanyIssuer | undefined>;
   companyDirectory?: (companyId: string) => SlackDirectory | undefined;
   slackTeamCompany?: (teamId: string) => string | undefined | Promise<string | undefined>;
@@ -955,11 +958,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
       | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
-      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest,
+      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput,
   ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
-    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse> => {
+    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue> => {
     if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
+      if (deps.companyImport !== undefined && (event.kind === "company-import" || event.kind === "company-import-undo")) return companyImportOperator({ store: deps.companyImport, log: deps.log }, event);
       if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, ...(deps.companyInvites === undefined ? {} : { invites: deps.companyInvites }), clients: store, now: deps.now, log: deps.log }, event);
       // ID-STEPUP-FOLLOWUPS: the factor email and passkeys. Each checks the caller's own live session (and, for a change, its fresh step-up) in this table.
       if (event.kind === "list-passkeys") return factorAdmin.listPasskeys(event);

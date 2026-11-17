@@ -217,18 +217,20 @@ describe("the named TEST proof-only installation gate", () => {
     // #722: named/foreign re-pinned for the combined stacked baseline (#689 + R2 step 4; no template change of #722's own), the same values as L1a (#731) measured before its edits.
     // ENV-ROOM (pr/broker-env-diet): named/foreign re-pinned for the packed broker environment (AGENTX_NAMES, AGENTX_SETTINGS, AGENTX_ACCOUNT_ID; the snapshot diff is the broker's Variables only); legacy unchanged.
     // Switch-over incident 2026-11-16: named and foreign re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA); only ordering moves.
+    // Core gateway settings (2026-11-17): named and foreign re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker; checked in
+    // core-gateway-settings.test.ts and verified: with the variable passed as before, the old pins hold); legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "806128f89453deb2e870ab307d12bb4be811568cffb1c105214dd2c1652e2819",
-        withoutRoute: "a2795d80e5a542717ff4271ffa31f385dec9c8c783002ea50b6ee083cf965e68",
+        withRoute: "681b18a55b6798f8e3b0794ca3911695e3250c76382b674c41c99bbfaa706332",
+        withoutRoute: "9d267d3c06acdfa8710119d40709b5f64cf91b0d597c043da42736ca32a0b283",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "96f6c8459030d34737d9802a7aeff82940e28a3037e6f2ddd0d6798f9e621644",
-        withoutRoute: "cfde335b057285fcc45d906e5705ba439909653bdc6bf28c6947944a2a383050",
+        withRoute: "8e78ff5888897e4471fa5ee6345ff3bd7478c2b24c41dcabbfccb80db7094f54",
+        withoutRoute: "3c17126d261aec2cf388250cddcafaa87ca00b684e0bff8bb85f53895a0bf766",
       },
       {
         label: "legacy",

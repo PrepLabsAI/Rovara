@@ -157,15 +157,19 @@ export async function pinnedEvalPlan(delivered: unknown): Promise<EvalFinalCheck
     const found = pinnedCheck(delivered);
     if (found === undefined) return undefined;
     const { pin, plan, repository, candidate, base, codeHash } = found;
-    const paths = [...new Set(plan.questions.map(q => q.path))];
+    // DEC 253q: the judge's pinned scoring file is read at the base with the questions; a changed one is the same "questions changed: re-approve".
+    const paths = [...new Set([...plan.questions.map(q => q.path), ...(plan.judgeScoring === undefined ? [] : [plan.judgeScoring.path])])];
     const [atBase, atHead] = paths.length === 0 ? [new Map(), new Map()] as Side[] : await hashesAt(repository.directory, [base, candidate.treeSha], paths, pin.signal);
     if (atBase === undefined || atHead === undefined || pin.signal.aborted) return undefined;
+    if (plan.judgeScoring !== undefined && atBase.get(plan.judgeScoring.path) !== plan.judgeScoring.hash) return EVAL_PLAN_QUESTIONS_CHANGED;
+    // A candidate that edits the judge's scoring file scores its own answers by another rule: every question counts as edited, so none is proof (DEC 170: eval edits can't be proof).
+    const scoringEdited = plan.judgeScoring !== undefined && atHead.get(plan.judgeScoring.path) !== plan.judgeScoring.hash;
     const questions: EvalFinalCheckPlan["questions"][number][] = [];
     for (const question of plan.questions) {
       const baseHash = atBase.get(question.path);
       // The base must hold exactly the question the approved plan was made from.
       if (baseHash === undefined || baseHash !== question.hash) return EVAL_PLAN_QUESTIONS_CHANGED;
-      questions.push({ id: question.id, category: question.category, baseHash, headHash: atHead.get(question.path) ?? EVAL_QUESTION_REMOVED_HASH });
+      questions.push({ id: question.id, category: question.category, baseHash, headHash: scoringEdited ? EVAL_QUESTION_REMOVED_HASH : atHead.get(question.path) ?? EVAL_QUESTION_REMOVED_HASH });
     }
     return {
       company: plan.company, project: plan.project, selection: plan.selection, inputs: plan.inputs,

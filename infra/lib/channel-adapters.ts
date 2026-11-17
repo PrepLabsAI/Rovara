@@ -6,6 +6,7 @@ import {
 import { CONVERSATION_STATE_THREAD_ATTRIBUTES, CONVERSATION_STATE_WORKSPACE_ATTRIBUTES } from "@agentx/contracts";
 import { Construct } from "constructs";
 import { packagedFunction } from "./control-plane.js";
+import { addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import type { AgentXNaming } from "./naming.js";
 
 export interface ChannelAdaptersProps {
@@ -275,8 +276,10 @@ export class ChannelAdapters extends Construct {
     // The broker registers adapters and writes their secrets. Links and link codes are in the state table, which it
     // already reads and writes; one statement only, since the broker role's policy is near IAM's size limit.
     if (props.registry) {
-      props.broker.addEnvironment("CHANNEL_ADAPTERS", enabled);
-      props.broker.addEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX", secretPrefix);
+      // Packed in a named broker's AGENTX_SETTINGS (ca; DEC 254h, room for GitHub sign-in); the legacy broker is given it whole.
+      addBrokerSetting(props.broker, props.naming, "channelAdapters", enabled);
+      // Derived by a named broker from its environment's name (ENV-ROOM); the legacy broker is given it whole.
+      addDerivedBrokerVariable(props.broker, props.naming, "CHANNEL_ADAPTER_SECRET_PREFIX", secretPrefix);
       props.broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue"], resources: [adapterSecrets] }));
     }
 

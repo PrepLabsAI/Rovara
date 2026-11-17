@@ -2576,7 +2576,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "CHANNEL_ADAPTERS": {
               "Ref": "ChannelAdapters",
             },
-            "CHANNEL_ADAPTER_SECRET_PREFIX": "agentx/staging/",
             "COMPANY_READS": "enabled",
             "DEVELOPER_OIDC_ISSUER": {
               "Ref": "DeveloperOidcIssuer",
