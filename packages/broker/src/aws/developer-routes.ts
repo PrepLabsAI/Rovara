@@ -629,22 +629,34 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
 }
 
 /** Company policy is selected only from live membership and the stored OIDC session.
- * Fixed-size reads share one budget and the host's existing SDK timeout; no cache or token company. */
+ * Fixed-size reads share one budget and the host's existing SDK timeout; no cache or token company.
+ * Undefined: the session is held to the install's own OIDC (the built-in company, or a shared-method session of a company with no issuer). */
 async function companyOidcSession(deps: DeveloperRouteDependencies, session: SessionRecord, resolvedCompany?: string): Promise<DeveloperRecord | undefined> {
   if (deps.companies === undefined || session.amr !== "oidc") return undefined;
   try {
     const scope = boundedCompanyReads(deps.documentClient, deps.now);
     const companyId = resolvedCompany ?? await scope.read(() => resolveCompany(deps.companies, session.developerId));
     if ((session.companyId ?? IMPLICIT_COMPANY_ID) !== companyId) throw new Error("session company");
-    if (companyId === IMPLICIT_COMPANY_ID) return undefined;
+    if (companyId === IMPLICIT_COMPANY_ID) {
+      if (session.installMethod !== undefined) throw new Error("session method");
+      return undefined;
+    }
     const parsed = z.object({
       sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.literal("oidc"),
       companyId: OrgIdSchema, startedAt: z.iso.datetime(), endsAt: z.number().finite(),
-      reviewExpiresAt: z.number().finite().optional(),
+      reviewExpiresAt: z.number().finite().optional(), installMethod: z.literal(true).optional(),
     }).safeParse(await scope.read(async () => session));
     if (!parsed.success) throw new Error("session record");
     const key = companyIssuerKey(companyId);
     const response = await scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
+    // DEC 254b (a): a company with no issuer row signs in only through the install's own OIDC (the shared method), and only a session the sign-in
+    // server marked so; the install's switch and since time then hold, as for the built-in company. A company with any issuer row never takes it.
+    if (response.Item === undefined) {
+      if (parsed.data.installMethod !== true || !deps.developer.methods.oidc) throw new Error("shared method");
+      scope.check();
+      return undefined;
+    }
+    if (parsed.data.installMethod !== undefined) throw new Error("shared method");
     const issuer = CompanyIssuerRecord.extend({ pk: z.literal(key.pk), sk: z.literal("OIDC") }).safeParse(response.Item);
     if (!issuer.success || !issuer.data.enabled || (issuer.data.requiredValues.length > 0 && issuer.data.requiredClaim === undefined)
       || startedBeforeMethodOn(session.startedAt, Math.max(issuer.data.enabledSince, issuer.data.since ?? 0))) throw new Error("issuer policy");

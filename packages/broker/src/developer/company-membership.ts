@@ -50,6 +50,15 @@ export class CompanySignInStore {
     const found = CompanyRecord.safeParse(await this.read(companyKey(companyId)));
     return found.success && found.data.companyId === companyId;
   }
+  /**
+   * DEC 254b (a): whether a company has a sign-in of its own. Any stored issuer row counts, even a disabled or unreadable one (fail closed: such a
+   * company is never opened to the install's shared method). The built-in company never has one. A read error throws.
+   */
+  async hasOwnIssuer(companyId: string): Promise<boolean> {
+    if (!OrgIdSchema.safeParse(companyId).success) throw unavailable();
+    if (companyId === IMPLICIT_COMPANY_ID) return false;
+    return await this.read(companyIssuerKey(companyId)) !== undefined;
+  }
   async membership(personId: string): Promise<Member | undefined> {
     if (!CompanyPersonId.safeParse(personId).success) throw unavailable();
     const row = await this.read(membershipKey(personId));
