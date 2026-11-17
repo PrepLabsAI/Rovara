@@ -532,6 +532,44 @@ describe("the hosted rule is for approvers of THIS company only", () => {
   });
 });
 
+describe("the rule inside the decision (the subject's own, read again after the proof is verified)", () => {
+  const STEP = (w: Awaited<ReturnType<typeof world>>) => ({ at: new Date(w.clock.now - 60_000).toISOString(), method: "passkey" });
+  /** An approval whose approvers point is wrapped: `afterVerify` runs once the proof is verified (so the roles can change between the decider's check and the rule inside the gate). */
+  const rig = (w: Awaited<ReturnType<typeof world>>, afterVerify: (result: Awaited<ReturnType<typeof w.approvers.verify>>) => Awaited<ReturnType<typeof w.approvers.verify>>, roles: { company: () => OrgRole | undefined }) => createHostedTestEnvironmentApproval({
+    companyId: A, deps: w.depsOf(), store: w.store, audit: w.sink, identity: w.identity, proofKey: KEY, now: () => new Date(w.clock.now),
+    approvers: { ...w.approvers, verify: async (request, proofOf) => afterVerify(await w.approvers.verify(request, proofOf)) },
+    people: { membershipOf: async (personId) => { const found = w.people.get(personId); const role = roles.company(); return found === undefined || role === undefined ? undefined : { companyId: found.companyId, role }; }, projectGrantRole: async (personId, project) => w.people.get(personId)?.grants[project] },
+  });
+
+  it("the risk the rule reads is the proposal's: a maintainer who was a company admin at the check, and is a member at the act, is refused a high-risk proposal", async () => {
+    const w = await world();
+    const seen = await w.seed(A, "payments", highRisk());
+    w.person("mia", A, "member", { payments: "administrator" });
+    let flipped = false;
+    const approval = rig(w, (result) => { flipped = true; return result; }, { company: () => (flipped ? "member" : "admin") });
+    const answer = await approval.approve({ personId: "mia", stepUp: STEP(w), project: "payments", approval: w.bodyFor(seen) });
+    expect(answer).toMatchObject({ ok: false, reason: "not_allowed" });
+    expect(await w.approved(A, "payments")).toBeUndefined();
+    // Positive control: the same maintainer at a medium-risk proposal passes the same rule.
+    const w2 = await world();
+    const medium = await w2.seed(A, "payments");
+    w2.person("mia", A, "member", { payments: "administrator" });
+    let flipped2 = false;
+    const approval2 = rig(w2, (result) => { flipped2 = true; return result; }, { company: () => (flipped2 ? "member" : "admin") });
+    expect(await approval2.approve({ personId: "mia", stepUp: STEP(w2), project: "payments", approval: w2.bodyFor(medium) })).toMatchObject({ ok: true });
+  });
+
+  it("an approver the point names in another company is refused whatever the person's live role here (the gate refuses first, wrong_company; the rule's own company check is defence in depth and an equivalent mutant)", async () => {
+    const w = await world();
+    const seen = await w.seed(A, "payments");
+    w.person("ann", A, "admin");
+    const approval = rig(w, (result) => (result.approved ? { ...result, approver: { ...result.approver, companyId: OTHER } } : result), { company: () => "admin" });
+    const answer = await approval.approve({ personId: "ann", stepUp: STEP(w), project: "payments", approval: w.bodyFor(seen) });
+    expect(answer).toMatchObject({ ok: false });
+    expect(await w.approved(A, "payments")).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------- (3) the workers
 
 describe("Code's workers and the test environment's task flow", () => {

@@ -44,9 +44,9 @@ async function setup(switches: NodeJS.ProcessEnv) {
   const app = appOver(world, { ROVARA_CORE_ENGINE: "on" });
   const members = new Map<string, CompanyMembership>();
   const companyOf = vi.fn(async (caller: DeployedCaller) => members.get(caller.principal.personId + caller.principal.companyId));
-  const callerOf = (companyId: string): DeployedCaller => {
-    const caller: DeployedCaller = { principal: localOwnerPrincipal({ companyId }), client: "cli" };
-    members.set(caller.principal.personId + companyId, { companyId, role: "owner" });
+  const callerOf = (companyId: string, role: CompanyMembership["role"] = "owner", personId?: string): DeployedCaller => {
+    const caller: DeployedCaller = { principal: localOwnerPrincipal({ companyId, ...(personId === undefined ? {} : { personId }) }), client: "cli" };
+    members.set(caller.principal.personId + companyId, { companyId, role });
     return caller;
   };
   const allowed = new Set<string>(["payments"]);
@@ -57,7 +57,7 @@ async function setup(switches: NodeJS.ProcessEnv) {
     testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },
   };
   const routes = createCoreDevRoutes({ app, companyOf, wiring: () => wiring });
-  return { world, app, routes, callerOf, allowed, companyOf, env };
+  return { world, app, routes, callerOf, allowed, companyOf, env, members };
 }
 const bodyOf = (answer: { body: string } | undefined) => JSON.parse(answer!.body) as Record<string, unknown> & { error?: { message: string } };
 
@@ -102,9 +102,9 @@ describe("the state answer on the deployed API", () => {
     expect(theirs["project"]).toBe("payments");
   });
 
-  it("a project the person may not read answers exactly like a missing one, and nothing of it is read", async () => {
+  it("a project the person may not read answers exactly like a missing one, and nothing of it is read (a member: an owner or admin needs no grant, see 'the state read by company role')", async () => {
     const h = await setup({});
-    const caller = h.callerOf(FAKE_COMPANY);
+    const caller = h.callerOf(FAKE_COMPANY, "member", "reader");
     h.allowed.delete("payments");
     const spy = vi.spyOn(h.world.store, "query");
     const hidden = await h.routes.route(get(PATH), caller);
@@ -138,6 +138,139 @@ describe("the state answer on the deployed API", () => {
     const off = createCoreDevRoutes({ app: appOver(h.world, {}), companyOf: h.companyOf, wiring: () => ({ origin: () => "x", canReadProject: async () => true, testEnvironment: { env: {}, catalogName: "owner-starter-list" } }) });
     expect(await off.route(get(PATH), h.callerOf(FAKE_COMPANY))).toBeUndefined();
     expect(h.companyOf).not.toHaveBeenCalled();
+  });
+});
+
+// L4-B3c: the state read admits a live company owner or admin without a project grant (the same reach the approve route has), for projects of THEIR company only; every other person needs the grant.
+// `allowed` is the hosted grant check (`projectGrant`): it knows nothing of company roles, exactly as in core-engine-root.ts.
+describe("the state read by company role (owner or admin without a project grant)", () => {
+  const ledger = async (h: Awaited<ReturnType<typeof setup>>, companyId: string) => {
+    await h.world.store.put({ item: { ...projectRevisionKey(companyId, "ledger", 1), entityType: "PROJECT", definition: JSON.parse(JSON.stringify({ ...PROJECT, name: "ledger" })) as JsonValue } });
+    await h.world.store.put({ item: { ...orgProjectCatalogKey(companyId, "ledger"), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
+  };
+  const deps = (h: Awaited<ReturnType<typeof setup>>) => ({ store: h.world.store, now: () => h.world.clock.now, env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" } });
+  const digestOf = (answer: { body: string } | undefined) => (bodyOf(answer)["proposal"] as { digest?: string } | undefined)?.digest;
+  const NOT_FOUND = (h: Awaited<ReturnType<typeof setup>>) => h.routes.route(get("/v1/app/projects/nothere/test-environment"), h.callerOf(FAKE_COMPANY, "member", "reader-of-nothing"));
+
+  it.each(["owner", "admin"] as const)("a live %s with no grant on the project reads its proposal", async (role) => {
+    const h = await setup({});
+    h.allowed.delete("payments");
+    await proposeTestEnvironment(deps(h), { orgId: FAKE_COMPANY, project: "payments", proposedBy: "dev", body: BODY });
+    const answer = await h.routes.route(get(PATH), h.callerOf(FAKE_COMPANY, role, `${role}-no-grant`));
+    expect(answer?.statusCode).toBe(200);
+    expect(digestOf(answer)).toMatch(/^[a-f0-9]{64}$/u);
+    expect(bodyOf(answer)["project"]).toBe("payments");
+  });
+
+  it("an owner whose grant read fails still reads (the shortcut does not depend on the grant), and a member whose grant read fails gets the missing-project words", async () => {
+    const h = await setup({});
+    await proposeTestEnvironment(deps(h), { orgId: FAKE_COMPANY, project: "payments", proposedBy: "dev", body: BODY });
+    const failing = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: () => ({ origin: () => "x", canReadProject: async () => { throw new Error("grant table down"); }, testEnvironment: { env: h.env, catalogName: "owner-starter-list" as const } }) });
+    expect((await failing.route(get(PATH), h.callerOf(FAKE_COMPANY, "owner", "o1")))?.statusCode).toBe(200);
+    const member = await failing.route(get(PATH), h.callerOf(FAKE_COMPANY, "member", "m1"));
+    expect(member).toEqual(await NOT_FOUND(h));
+  });
+
+  it("a member with no grant gets exactly the missing-project 404 and nothing of the project is read; the same member WITH the grant reads", async () => {
+    const h = await setup({});
+    await proposeTestEnvironment(deps(h), { orgId: FAKE_COMPANY, project: "payments", proposedBy: "dev", body: BODY });
+    h.allowed.delete("payments");
+    const caller = h.callerOf(FAKE_COMPANY, "member", "m2");
+    const missing = await NOT_FOUND(h);
+    const queries = vi.spyOn(h.world.store, "query");
+    const gets = vi.spyOn(h.world.store, "get");
+    const hidden = await h.routes.route(get(PATH), caller);
+    expect(hidden?.statusCode).toBe(404);
+    expect(hidden).toEqual(missing);
+    expect(queries).not.toHaveBeenCalled();
+    expect(gets).not.toHaveBeenCalled();
+    h.allowed.add("payments");
+    expect(digestOf(await h.routes.route(get(PATH), caller))).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it("an owner or admin asking about a project that does not exist in their company gets the same 404 as a person who may not read it, and nothing is read", async () => {
+    const h = await setup({});
+    h.allowed.delete("payments");
+    const missing = await NOT_FOUND(h);
+    const queries = vi.spyOn(h.world.store, "query");
+    for (const role of ["owner", "admin"] as const) {
+      const answer = await h.routes.route(get("/v1/app/projects/nothere/test-environment"), h.callerOf(FAKE_COMPANY, role, `${role}-missing`));
+      expect(answer, role).toEqual(missing);
+    }
+    expect(queries).not.toHaveBeenCalled();
+  });
+
+  it("two companies: an owner of another company gets 404 for a project only this company has, and reads their own company's project of the same name", async () => {
+    const h = await setup({});
+    h.allowed.clear();
+    await ledger(h, FAKE_COMPANY);
+    await proposeTestEnvironment(deps(h), { orgId: FAKE_COMPANY, project: "ledger", proposedBy: "dev", body: BODY });
+    const theirs = h.callerOf(OTHER, "owner", "other-owner");
+    expect(await h.routes.route(get("/v1/app/projects/ledger/test-environment"), theirs)).toEqual(await NOT_FOUND(h));
+    const mine = h.callerOf(FAKE_COMPANY, "owner", "my-owner");
+    expect(digestOf(await h.routes.route(get("/v1/app/projects/ledger/test-environment"), mine))).toMatch(/^[a-f0-9]{64}$/u);
+    // The same name in both companies: each owner reads only their own company's proposal.
+    await ledger(h, OTHER);
+    const other = { ...BODY, roundBudgetMin: 45 };
+    await proposeTestEnvironment(deps(h), { orgId: OTHER, project: "ledger", proposedBy: "dev", body: other });
+    const a = digestOf(await h.routes.route(get("/v1/app/projects/ledger/test-environment"), mine));
+    const b = digestOf(await h.routes.route(get("/v1/app/projects/ledger/test-environment"), theirs));
+    expect(a).toMatch(/^[a-f0-9]{64}$/u);
+    expect(b).toMatch(/^[a-f0-9]{64}$/u);
+    expect(a).not.toBe(b);
+  });
+
+  it("two projects: an owner reads each project's own proposal, and a member granted one project cannot read the other", async () => {
+    const h = await setup({});
+    await ledger(h, FAKE_COMPANY);
+    await proposeTestEnvironment(deps(h), { orgId: FAKE_COMPANY, project: "payments", proposedBy: "dev", body: BODY });
+    await proposeTestEnvironment(deps(h), { orgId: FAKE_COMPANY, project: "ledger", proposedBy: "dev", body: { ...BODY, roundBudgetMin: 45 } });
+    const owner = h.callerOf(FAKE_COMPANY, "owner", "o2");
+    const pay = await h.routes.route(get(PATH), owner);
+    const led = await h.routes.route(get("/v1/app/projects/ledger/test-environment"), owner);
+    expect(bodyOf(pay)["project"]).toBe("payments");
+    expect(bodyOf(led)["project"]).toBe("ledger");
+    expect(digestOf(pay)).not.toBe(digestOf(led));
+    const member = h.callerOf(FAKE_COMPANY, "member", "m3");
+    expect((await h.routes.route(get(PATH), member))?.statusCode).toBe(200);
+    expect((await h.routes.route(get("/v1/app/projects/ledger/test-environment"), member))?.statusCode).toBe(404);
+  });
+
+  it("the role is read live on every request: an owner who becomes a member (or is removed) loses the shortcut at once", async () => {
+    const h = await setup({});
+    h.allowed.delete("payments");
+    await proposeTestEnvironment(deps(h), { orgId: FAKE_COMPANY, project: "payments", proposedBy: "dev", body: BODY });
+    const caller = h.callerOf(FAKE_COMPANY, "owner", "o3");
+    expect((await h.routes.route(get(PATH), caller))?.statusCode).toBe(200);
+    h.members.set(caller.principal.personId + FAKE_COMPANY, { companyId: FAKE_COMPANY, role: "member" });
+    expect((await h.routes.route(get(PATH), caller))?.statusCode).toBe(404);
+    h.members.set(caller.principal.personId + FAKE_COMPANY, { companyId: FAKE_COMPANY, role: "admin" });
+    expect((await h.routes.route(get(PATH), caller))?.statusCode).toBe(200);
+    h.members.delete(caller.principal.personId + FAKE_COMPANY);
+    expect((await h.routes.route(get(PATH), caller))?.statusCode).toBe(401);
+  });
+
+  it("only a real catalog row counts: a row of another kind, or a catalog read that fails, is no project for an owner; a granted owner still reads a project with no catalog row", async () => {
+    const h = await setup({});
+    h.allowed.clear();
+    const owner = h.callerOf(FAKE_COMPANY, "owner", "o5");
+    const missing = await NOT_FOUND(h);
+    await h.world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "wrongkind"), entityType: "SOMETHING_ELSE", latestRevision: 1 } });
+    expect(await h.routes.route(get("/v1/app/projects/wrongkind/test-environment"), owner)).toEqual(missing);
+    const realGet = h.world.store.get.bind(h.world.store);
+    vi.spyOn(h.world.store, "get").mockImplementation(async (key) => { if (JSON.stringify(key) === JSON.stringify(orgProjectCatalogKey(FAKE_COMPANY, "payments"))) throw new Error("store down"); return realGet(key); });
+    expect(await h.routes.route(get(PATH), owner)).toEqual(missing);
+    vi.restoreAllMocks();
+    // No change for a grant holder: the grant alone still reads a project that has no catalog row.
+    h.allowed.add("unlisted");
+    expect((await h.routes.route(get("/v1/app/projects/unlisted/test-environment"), owner))?.statusCode).toBe(200);
+  });
+
+  it("a script token is still refused for an owner (the shortcut is for a signed-in person only)", async () => {
+    const h = await setup({});
+    const owner = h.callerOf(FAKE_COMPANY, "owner", "o4");
+    const token = await h.routes.route(get(PATH), { ...owner, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+    expect(token?.statusCode).toBe(403);
   });
 });
 
