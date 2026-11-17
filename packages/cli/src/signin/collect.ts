@@ -6,9 +6,7 @@ import { secretFromSource, type Prompter, type SecretSource } from "../init/prom
 import { SIGN_IN_BOT_SCOPES, missingScopes, readSlackTeamIdFromSecret, slackSecretName, slackSecretWithSignIn, slackSignInCallbackUrl, type SlackApi } from "../init/slack-app.js";
 import { oidcSecretName, type DeveloperSignInSettings } from "./settings.js";
 
-export interface SigninFlags { methods?: "slack" | "oidc" | "both"; slackClientId?: string; oidcIssuer?: string; oidcClientId?: string; oidcRequiredClaim?: string; oidcRequiredValues?: string; oidcDisplayName?: string;
-  /** DEC 254h: `agentx signin enable github` only. */
-  githubClientId?: string }
+export interface SigninFlags { methods?: "slack" | "oidc" | "both"; slackClientId?: string; oidcIssuer?: string; oidcClientId?: string; oidcRequiredClaim?: string; oidcRequiredValues?: string; oidcDisplayName?: string }
 export interface SigninSecretFlags { slackClientSecret?: SecretSource; oidcClientSecret?: SecretSource }
 
 /**

@@ -137,9 +137,6 @@ export const BROKER_SETTINGS = {
   signInSlack: { code: "ss", variable: "DEVELOPER_SIGNIN_SLACK" },
   signInSlackSince: { code: "sn", variable: "DEVELOPER_SIGNIN_SLACK_SINCE" },
   oidcSince: { code: "os", variable: "DEVELOPER_OIDC_SINCE" },
-  // DEC 254h: GitHub sign-in (Code's company layer only) and when it was last turned on.
-  signInGithub: { code: "gh", variable: "DEVELOPER_SIGNIN_GITHUB" },
-  githubSince: { code: "gs", variable: "DEVELOPER_GITHUB_SINCE" },
   mcpConfirmElicitation: { code: "mc", variable: "MCP_CONFIRM_ELICITATION" },
   coreAllowedCompanies: { code: "ac", variable: "ROVARA_CORE_ALLOWED_COMPANIES" },
   coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },

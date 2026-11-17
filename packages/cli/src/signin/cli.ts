@@ -31,8 +31,6 @@ export interface SignInCommandOptions {
   slackClientId?: string; slackClientSecretFile?: string; slackClientSecretEnv?: string;
   signinOidcIssuer?: string; signinOidcClientId?: string; signinOidcClientSecretFile?: string; signinOidcClientSecretEnv?: string;
   signinOidcRequiredClaim?: string; signinOidcRequiredValues?: string; signinOidcDisplayName?: string;
-  /** DEC 254h: agentx signin enable github only. */
-  signinGithubClientId?: string;
 }
 
 /** Adds the developer sign-in flags (F14): the same names on agentx signin enable and agentx init. */
@@ -56,7 +54,6 @@ export function signInFlags(options: SignInCommandOptions): { flags: SigninFlags
     flags: definedEntries<SigninFlags>({
       slackClientId: options.slackClientId, oidcIssuer: options.signinOidcIssuer, oidcClientId: options.signinOidcClientId,
       oidcRequiredClaim: options.signinOidcRequiredClaim, oidcRequiredValues: options.signinOidcRequiredValues, oidcDisplayName: options.signinOidcDisplayName,
-      githubClientId: options.signinGithubClientId,
     }),
     secretFlags: definedEntries<SigninSecretFlags>({
       slackClientSecret: secretSource(options.slackClientSecretFile, options.slackClientSecretEnv),
@@ -98,8 +95,8 @@ export function registerSigninCommands(program: Command, context: SigninCommandC
       ...(overrides.pollMs === undefined ? {} : { pollMs: overrides.pollMs }),
     };
   };
-  const signinMethod = (method: string): "slack" | "oidc" | "github" => {
-    if (method !== "slack" && method !== "oidc" && method !== "github") throw agentXError("CONFIG_INVALID", `unknown sign-in method ${JSON.stringify(method)}; use slack, oidc or github`);
+  const signinMethod = (method: string): "slack" | "oidc" => {
+    if (method !== "slack" && method !== "oidc") throw agentXError("CONFIG_INVALID", `unknown sign-in method ${JSON.stringify(method)}; use slack or oidc`);
     return method;
   };
   const changedText = (changed: boolean) => (changed ? "Developer sign-in updated.\n" : "Nothing to change.\n");
@@ -118,9 +115,8 @@ export function registerSigninCommands(program: Command, context: SigninCommandC
     signin
       .command("enable")
       .description("turn on Slack sign-in or company sign-in; shows the change to the control plane and asks first")
-      .argument("<method>", "slack, oidc or github")
+      .argument("<method>", "slack or oidc")
       .option(regionOption, regionHelp)
-      .option("--signin-github-client-id <id>", "github only: the GitHub OAuth app's Client ID (its client secret is stored separately, never through this command)")
       .option("--yes", "apply without asking; the change is still printed", false),
   ).action(async (method: string, options: SignInCommandOptions & { region?: string; yes: boolean }, command: Command) => {
     const globals = globalOptions(command);
@@ -131,7 +127,7 @@ export function registerSigninCommands(program: Command, context: SigninCommandC
   signin
     .command("disable")
     .description("turn a sign-in method off; everyone signed in with it is signed out")
-    .argument("<method>", "slack, oidc or github")
+    .argument("<method>", "slack or oidc")
     .option(regionOption, regionHelp)
     .option("--yes", "apply without asking; the change is still printed", false)
     .action(async (method: string, options: { region?: string; yes: boolean }, command: Command) => {

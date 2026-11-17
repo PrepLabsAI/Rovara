@@ -8,9 +8,9 @@ import { withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { SignInCredentials } from "./collect.js";
-import { DeveloperSignInSettingsSchema, describeSignIn, githubEverOn, readSignInSettings, readSlackTeamId, signInParameterName, signInStackParameters, writeSignInSettings, writeSlackTeamId, type DeveloperSignInSettings } from "./settings.js";
+import { DeveloperSignInSettingsSchema, describeSignIn, readSignInSettings, readSlackTeamId, signInParameterName, signInStackParameters, writeSignInSettings, writeSlackTeamId, type DeveloperSignInSettings } from "./settings.js";
 
-export interface SignInChoice { slack: boolean; oidc?: NonNullable<DeveloperSignInSettings["oidc"]>; github?: NonNullable<DeveloperSignInSettings["github"]> }
+export interface SignInChoice { slack: boolean; oidc?: NonNullable<DeveloperSignInSettings["oidc"]> }
 
 export interface ApplySignInInput {
   env: string; store: ParameterStore; cloudFormation: { send(command: unknown): Promise<unknown> }; holder: string; settings: EnvironmentSettings;
@@ -89,10 +89,9 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       ...current?.since,
       ...(choice.slack && current?.slack !== true ? { slack: nowSeconds } : {}),
       ...(choice.oidc !== undefined && current?.oidc === undefined ? { oidc: nowSeconds } : {}),
-      ...(choice.github !== undefined && current?.github === undefined ? { github: nowSeconds } : {}),
     };
     const parsed = DeveloperSignInSettingsSchema.safeParse({
-      schemaVersion: 1, env: input.env, slack: choice.slack, ...(choice.oidc === undefined ? {} : { oidc: choice.oidc }), ...(choice.github === undefined ? {} : { github: choice.github }),
+      schemaVersion: 1, env: input.env, slack: choice.slack, ...(choice.oidc === undefined ? {} : { oidc: choice.oidc }),
       ...(Object.keys(since).length === 0 ? {} : { since }),
       updatedAt: new Date(input.now()).toISOString(), updatedBy: input.holder,
     });
@@ -100,17 +99,13 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     const next = parsed.data;
     const teamId = input.slackTeamId ?? await readSlackTeamId(input.store, input.env);
     if (next.slack && teamId === undefined) throw agentXError("CONFIG_INVALID", "Slack sign-in needs the Slack team ID; run agentx signin enable slack, which records it");
-    const withGithub = githubEverOn(current) || githubEverOn(next);
-    const before = describeSignIn(current, withGithub);
-    const after = describeSignIn(next, withGithub);
+    const before = describeSignIn(current);
+    const after = describeSignIn(next);
     const summary = [
       `Developer sign-in for ${input.env}:`,
       ...before.map((line, index) => changeLine(line, after[index] ?? line)),
       ...(current?.slack === true && !next.slack ? [signedOut("Slack")] : []),
       ...(current?.oidc !== undefined && next.oidc === undefined ? [signedOut("company sign-in")] : []),
-      ...(current?.github !== undefined && next.github === undefined ? [signedOut("GitHub")] : []),
-      // DEC 254h: GitHub is served only while Code's company layer is on (COMPANY_SIGNIN); its client secret is stored by the owner, never here.
-      ...(next.github !== undefined && current?.github === undefined ? [`GitHub sign-in is offered only while company sign-in (COMPANY_SIGNIN) is on, and reads its client secret from ${next.github.clientSecretName}, which must already hold {"clientSecret": "..."}.`] : []),
     ];
     const credentialsLine = input.credentials === undefined ? [] : [`The client credentials will be stored in ${input.credentials.secretName}.`];
 

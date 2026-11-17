@@ -109,7 +109,7 @@ function parsePeople(value: unknown): TaskPeople | undefined {
 function parseIdentity(value: Record<string, unknown>): TaskPersonIdentity | undefined {
   if (!HEX64.test(String(value.developerId)) || !SlackUserIdSchema.safeParse(value.slackUserId).success
     || typeof value.name !== "string" || safeName(value.name, String(value.slackUserId)) !== value.name
-    || (value.method !== "slack" && value.method !== "oidc" && value.method !== "github") || typeof value.issuer !== "string" || value.issuer.length === 0 || value.issuer.length > 2048
+    || (value.method !== "slack" && value.method !== "oidc") || typeof value.issuer !== "string" || value.issuer.length === 0 || value.issuer.length > 2048
     || typeof value.subject !== "string" || value.subject.length === 0 || value.subject.length > 512) return undefined;
   return {
     developerId: String(value.developerId), slackUserId: String(value.slackUserId), name: value.name,
@@ -369,7 +369,7 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
       ? effectiveRoleFromProof(candidate.explicit, display)
       : await effectiveRole(deps, task, people, candidate.identity.developerId, admission);
     if (candidate.explicit === undefined && effective !== "commenter") continue;
-    const suffix = (sameSlack.get(candidate.identity.slackUserId) ?? 0) > 1 ? (candidate.identity.method === "slack" ? " (Slack identity)" : candidate.identity.method === "github" ? " (GitHub identity)" : " (OIDC identity)") : "";
+    const suffix = (sameSlack.get(candidate.identity.slackUserId) ?? 0) > 1 ? (candidate.identity.method === "slack" ? " (Slack identity)" : " (OIDC identity)") : "";
     const baseName = candidate.explicit?.name ?? candidate.identity.name;
     const labeledName = suffix === "" ? baseName : `${redactAndCap(baseName, 80 - suffix.length).text}${suffix}`;
     rendered.push({

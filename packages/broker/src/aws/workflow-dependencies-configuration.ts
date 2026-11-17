@@ -1,5 +1,5 @@
 import type { DeveloperApiConfiguration } from "./developer-routes.js";
-import { developerSinceFromEnvironment, githubSignInFromEnvironment } from "./developer-routes.js";
+import { developerSinceFromEnvironment } from "./developer-routes.js";
 
 export function workflowDependenciesConfigurationFromEnvironment(environment: Record<string, string | undefined>): {
   workflowDependenciesEnabled: boolean;
@@ -30,7 +30,7 @@ export function createDeveloperApiConfiguration(
     ...integrations(issuer, identityFunctionName),
     issuer,
     env,
-    methods: { slack: environment.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (environment.DEVELOPER_OIDC_ISSUER ?? "") !== "", ...(githubSignInFromEnvironment(environment) ? { github: true } : {}) },
+    methods: { slack: environment.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (environment.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
     ...(slackTeamId === "" ? {} : { slackTeamId }),
     since: developerSinceFromEnvironment(environment),
     signInTableName,

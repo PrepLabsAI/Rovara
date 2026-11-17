@@ -13,7 +13,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
 import type { ChannelByNameRequest, ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, EndDeveloperSessionsRequest, ListSignInClientsRequest, PutSignInClientRequest, RemoveSignInClientRequest, SlackAuthCheckRequest, SlackUserByEmailRequest, TaskChannelPeopleRequest, TaskPersonProofRequest } from "@agentx/contracts";
-import { ProviderNotConfiguredError, githubSignInProvider, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
+import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
 import { createDeveloperIdentityHandler, type DeveloperIdentityConfig, type SlackInstallInvoke } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
 import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js";
@@ -35,9 +35,6 @@ export type DeveloperIdentityLambdaConfig = DeveloperIdentityConfig & {
   /** Set instead of oidcSettings when the company sign-in settings are unusable. Only that method
    * then refuses ("not finished"); Slack sign-in, keys, refresh and the invoke keep working. */
   oidcProblem?: string;
-  /** DEC 254h: GitHub's OAuth app client id, and the name of the secret holding its client secret (read by reference only); or what is missing. */
-  githubSettings?: { clientId: string; secretId: string };
-  githubProblem?: string;
 };
 
 /** Reads the given environment (F1: never process.env directly), so it can be tested. */
@@ -85,24 +82,10 @@ function sinceFrom(text: string | undefined): { since: number } | Record<string,
   return since === undefined ? {} : { since };
 }
 
-/** The GitHub OAuth app's client id: letters, digits, dots, dashes and underscores. */
-export const GITHUB_CLIENT_ID = /^[A-Za-z0-9._-]{1,64}$/;
-/** DEC 254h: GitHub sign-in's settings. Off unless DEVELOPER_SIGNIN_GITHUB is exactly "enabled"; on but unusable: a fixed problem, never a guess. */
-function githubFrom(env: NodeJS.ProcessEnv): Pick<DeveloperIdentityLambdaConfig, "github" | "githubSettings" | "githubProblem"> {
-  if (env.DEVELOPER_SIGNIN_GITHUB !== "enabled") return {};
-  const github = { github: sinceFrom(env.DEVELOPER_GITHUB_SINCE) };
-  const clientId = env.DEVELOPER_GITHUB_CLIENT_ID ?? "";
-  const secretId = env.DEVELOPER_GITHUB_SECRET_ID ?? "";
-  if (!GITHUB_CLIENT_ID.test(clientId)) return { ...github, githubProblem: "DEVELOPER_GITHUB_CLIENT_ID is not set; ask an admin to run agentx signin enable github" };
-  if (secretId === "") return { ...github, githubProblem: "DEVELOPER_GITHUB_SECRET_ID is not set; ask an admin to run agentx signin enable github" };
-  return { ...github, githubSettings: { clientId, secretId } };
-}
-
 export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): DeveloperIdentityLambdaConfig {
   const issuer = env.DEVELOPER_OIDC_ISSUER ?? "";
   const teamId = env.SLACK_TEAM_ID ?? "";
   const config: DeveloperIdentityLambdaConfig = {
-    ...githubFrom(env),
     env: required(env, "AGENTX_ENV"),
     issuer: required(env, "DEVELOPER_TOKEN_ISSUER"),
     slack: { enabled: env.DEVELOPER_SIGNIN_SLACK === "enabled", ...(teamId === "" ? {} : { teamId }), ...sinceFrom(env.DEVELOPER_SIGNIN_SLACK_SINCE) },
@@ -155,13 +138,6 @@ export function parseSlackSignInSecret(json: string): { botToken: string; client
     ...(typeof value.clientId === "string" && value.clientId !== "" ? { clientId: value.clientId } : {}),
     ...(typeof value.clientSecret === "string" && value.clientSecret !== "" ? { clientSecret: value.clientSecret } : {}),
   };
-}
-
-/** DEC 254h: the GitHub OAuth app's secret, `{"clientSecret": "..."}`, as the company sign-in's. Its value is never logged or echoed. */
-export function parseGithubClientSecret(json: string): string {
-  const secret = parseSecretObject(json, "GitHub sign-in secret").clientSecret;
-  if (typeof secret !== "string" || secret === "") throw new ProviderNotConfiguredError("the GitHub sign-in secret has no clientSecret; ask an admin to store it, then run agentx signin check");
-  return secret;
 }
 
 export function parseOidcClientSecret(json: string): string {
@@ -272,10 +248,6 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
     return oidcSignInProvider({ ...oidcSettings, clientSecret: cachedSecret(secrets, oidcSecretId, parseOidcClientSecret), fetch, jwksFor, now });
   };
   const oidc = oidcProvider();
-  const github = config.github === undefined ? undefined
-    : config.githubSettings === undefined ? unconfiguredProvider("github", config.githubProblem ?? "GitHub sign-in is not set up; ask an admin to run agentx signin enable github")
-      : githubSignInProvider({ clientId: config.githubSettings.clientId, clientSecret: cachedSecret(secrets, config.githubSettings.secretId, parseGithubClientSecret), fetch, now });
-  if (config.githubProblem !== undefined) log({ event: "signin.not_configured", method: "github", detail: config.githubProblem });
   if (config.oidcProblem !== undefined) log({ event: "signin.not_configured", method: "oidc", detail: config.oidcProblem });
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(region), { marshallOptions: { removeUndefinedValues: true } });
   const tableName = required(env, "DEVELOPER_SIGNIN_TABLE_NAME");
@@ -302,7 +274,6 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       // DEC 254e: with Code's company layer on, any Slack workspace may sign in (the company still comes only from membership).
       slack: slackSignInProvider({ ...(company === undefined ? {} : { anyWorkspace: true }), teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
       ...(oidc === undefined ? {} : { oidc }),
-      ...(github === undefined ? {} : { github }),
     },
     directory,
     ...(workspaces === undefined ? {} : { directoryForWorkspace: createWorkspaceSlackDirectory({ legacy: directory, workspaces, fetch, now }) }),
