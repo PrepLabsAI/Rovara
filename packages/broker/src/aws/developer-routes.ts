@@ -98,7 +98,7 @@ import { decodeJwt } from "jose";
 import { applyAccessRules, type AccessCheckContext, type AccessCheckRule } from "../developer/access-rules.js";
 import { CompanyIssuerRecord, companyIssuerKey } from "../developer/company-issuer.js";
 import { CompanyRecord, companyKey } from "../developer/company-membership.js";
-import { INSTALL_COMPANY_PROJECTS_MAX, InstallCompanyRefused, installCompanyBindings, installCompanyCatalog, installCompanyGrants, installCompanyLatestDefinition, installCompanyOf, mergeSurvivor } from "./install-company.js";
+import { INSTALL_COMPANY_PROJECTS_MAX, InstallCompanyRefused, installCompanyBindings, installCompanyCatalog, installCompanyGrants, installCompanyLatestDefinition, installCompanyOf, installUsesCompanyLayout, mergeSurvivor } from "./install-company.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -979,6 +979,8 @@ async function installCompanyAccess(deps: DeveloperRouteDependencies, developerI
     const walk = await mergeSurvivor((id) => getSignIn(scoped, `DEVELOPER#${id}`), developerId);
     const company = await installCompanyOf(budget.client, deps.tableName, walk.survivorId);
     if (company === undefined) {
+      // A company-layout install: no pointer means removed or never joined, never "read the legacy keys".
+      if (await installUsesCompanyLayout(budget.client, deps.tableName, deps.developer.slackTeamId)) return "refused";
       if (walk.survivorId === developerId) return undefined;
       // A merged sign-in on a legacy install: the survivor's legacy grants.
       const access = await projectsAPersonUses(scoped, walk.survivorId);
@@ -1014,7 +1016,7 @@ async function installCompanyAccess(deps: DeveloperRouteDependencies, developerI
       company: { companyId, companyRole: role, ...(company.name === undefined ? {} : { companyName: company.name }) },
     };
   } catch (error) {
-    if (error instanceof InstallCompanyRefused || error instanceof AgentXError) return "refused";
+    if (error instanceof InstallCompanyRefused || error instanceof AgentXError || error instanceof z.ZodError) return "refused";
     throw error;
   }
 }

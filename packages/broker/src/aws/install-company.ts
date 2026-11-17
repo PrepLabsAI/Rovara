@@ -17,8 +17,8 @@ import {
 
 /** The longest merge chain followed (the same bound the install that wrote the merges used for its own readers). */
 export const MERGE_HOPS_MAX = 8;
-/** Projects one company may hold in this answer; more refuses the whole answer, never a silent cut. */
-export const INSTALL_COMPANY_PROJECTS_MAX = 500;
+/** Projects one company may hold in this answer (inside the shared 512-read budget, with room for the walk and the point reads); more refuses the whole answer, never a silent cut. */
+export const INSTALL_COMPANY_PROJECTS_MAX = 400;
 
 type Client = { send(command: unknown): Promise<unknown> };
 type Item = Record<string, unknown>;
@@ -28,6 +28,18 @@ export const developerOrgPointerKey = (personId: string) => ({ pk: `DEVELOPER_OR
 export const installCompanyKey = (companyId: OrgId) => ({ pk: orgPk(OrgIdSchema.parse(companyId)), sk: "META" });
 export const installCompanyMemberKey = (companyId: OrgId, personId: string) => ({ pk: orgPk(OrgIdSchema.parse(companyId)), sk: `MEMBER#${PersonId.parse(personId)}` });
 export const installCompanyBanKey = (companyId: OrgId, personId: string) => ({ pk: orgScoped(OrgIdSchema.parse(companyId), "BAN"), sk: PersonId.parse(personId) });
+
+/**
+ * Whether this install keeps its people in the company layout: the install's own Slack team is claimed by a company (`SLACK_TEAM#<team>` / `ORG`, which the
+ * company-layout install writes for its team). On such an install a person with no company pointer is in no company (removal deletes the pointer with the
+ * member record), so the caller refuses instead of reading the legacy keys. A legacy install has no such row and reads exactly as before.
+ */
+export async function installUsesCompanyLayout(client: Client, tableName: string, teamId: string | undefined): Promise<boolean> {
+  if (teamId === undefined) return false;
+  const key = { pk: `SLACK_TEAM#${teamId}`, sk: "ORG" };
+  const answer = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Item };
+  return answer?.Item !== undefined;
+}
 
 /** Refused: the caller answers its one fixed refusal. Carries no cause. */
 export class InstallCompanyRefused extends Error {
@@ -51,12 +63,10 @@ export async function mergeSurvivor(read: (personId: string) => Promise<unknown>
     if (!parsed.success) return refuse();
     const record = parsed.data;
     first ??= record;
-    if (first.revoked === true) return refuse();
+    // A revoked sign-in anywhere on the walk (the signed-in id, a middle hop or the survivor) refuses.
+    if (record.revoked === true) return refuse();
     const next = record.mergedInto;
-    if (next === undefined) {
-      if (record.revoked === true) return refuse();
-      return { survivorId: current, signedIn: first, survivor: record };
-    }
+    if (next === undefined) return { survivorId: current, signedIn: first, survivor: record };
     if (!PersonId.safeParse(next).success || seen.has(next as string)) return refuse();
     seen.add(next as string);
     current = next as string;
@@ -120,7 +130,6 @@ export async function installCompanyCatalog(client: Client, tableName: string, c
     const name = typeof row.name === "string" ? row.name : (row.sk as string).slice("PROJECT#".length);
     return name.length > 0 && row.sk === `PROJECT#${name}` ? [name] : [];
   });
-  if (names.length > INSTALL_COMPANY_PROJECTS_MAX) return refuse();
   return names;
 }
 

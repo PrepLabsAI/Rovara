@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { AccessCheckResponseSchema, AgentXError, type ChannelMembersRequest } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { MERGE_HOPS_MAX } from "../../packages/broker/src/aws/install-company.js";
+import { INSTALL_COMPANY_PROJECTS_MAX, MERGE_HOPS_MAX } from "../../packages/broker/src/aws/install-company.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = Date.parse("2026-11-17T12:00:00.000Z");
@@ -18,8 +18,10 @@ const SECRET = ["web", "app", "secret", "for", "tests"].join("-");
 const REFUSED = { status: 401, body: { error: { code: "AUTH_REQUIRED", message: expect.any(String) as unknown } } };
 const rev = (n: number, developerTasks?: unknown) => ({ sk: `REV#${String(n).padStart(12, "0")}`, entityType: "PROJECT", definition: { revision: n, ...(developerTasks === undefined ? {} : { developerTasks }) } });
 
-function world() {
+function world(options: { legacy?: true } = {}) {
   const db = new FakeDynamoDb({ seed: 5 });
+  // A company-layout install claims its own Slack team for a company; a legacy install has no such row.
+  if (options.legacy !== true) db.set({ pk: "SLACK_TEAM#T0TEAM", sk: "ORG", orgId: COMPANY_A.orgId });
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: SURVIVOR, sid: "s", amr: "slack" };
   const channelCalls: ChannelMembersRequest[] = [];
   db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false,
@@ -134,7 +136,7 @@ describe("DEC 254: the install's company-scoped records", () => {
   });
 
   it("legacy-only data still works, exactly as before, with no company fields", async () => {
-    const w = world();
+    const w = world({ legacy: true });
     const answer = await w.asPerson(LEGACY);
     expect(answer.status).toBe(200);
     expect(names(answer.body)).toEqual(["legacy:granted"]);
@@ -145,7 +147,7 @@ describe("DEC 254: the install's company-scoped records", () => {
   });
 
   it("a merged sign-in on a legacy install reads the survivor's legacy grants", async () => {
-    const w = world();
+    const w = world({ legacy: true });
     const answer = await w.asService(LEGACY_DUP);
     expect(answer.body.developerId).toBe(LEGACY_DUP);
     expect(names(answer.body)).toEqual(["legacy:granted"]);
@@ -211,6 +213,54 @@ describe("DEC 254: the install's company-scoped records", () => {
     w.person(web, "Web Mia"); w.person(slackOnly, "Slack Mia", { slackUserId: "U0MIA", mergedInto: web });
     w.member(A, web, "member");
     expect(names((await w.asPerson(slackOnly)).body)).toEqual(["chat:channel"]);
+  });
+
+  it("on a company-layout install, a person with no company is refused, never given the legacy read", async () => {
+    const w = world();
+    // NOPOINTER and LEGACY have legacy rows (LEGACY: a legacy grant) but no company.
+    for (const id of [NOPOINTER, LEGACY, LEGACY_DUP]) expect(await w.asPerson(id)).toEqual(REFUSED);
+  });
+
+  it("a real removal (pointer and member record deleted together, REMOVED written) refuses, with legacy rows still in place", async () => {
+    const w = world();
+    expect(names((await w.asPerson(MEMBER)).body)).toEqual(["api:granted", "chat:channel"]);
+    w.db.delete(`DEVELOPER_ORG#${MEMBER}`, "ORG");
+    w.db.delete(`ORG#${A}`, `MEMBER#${MEMBER}`);
+    w.db.set({ pk: `ORG#${A}#REMOVED`, sk: MEMBER, at: TIME });
+    for (const answer of [await w.asPerson(MEMBER), await w.asService(MEMBER)]) {
+      expect(answer).toEqual(REFUSED);
+      expect(JSON.stringify(answer.body)).not.toMatch(/legacy-trap|api|chat/);
+    }
+  });
+
+  it("a revoked sign-in in the middle of a merge chain refuses", async () => {
+    const w = world();
+    const first = hex("c"), middle = hex("d");
+    w.person(first, "First", { mergedInto: middle }); w.person(middle, "Middle", { mergedInto: SURVIVOR, revoked: true });
+    expect(await w.asPerson(first)).toEqual(REFUSED);
+    w.person(middle, "Middle", { mergedInto: SURVIVOR });
+    expect(companyOf((await w.asPerson(first)).body).companyId).toBe(A);
+  });
+
+  it("a merged id's own stale pointer to another company is ignored: only the survivor's company answers", async () => {
+    const w = world();
+    w.db.set({ pk: `DEVELOPER_ORG#${SLACK_DUP}`, sk: "ORG", orgId: B });
+    w.db.set({ pk: `ORG#${B}`, sk: `MEMBER#${SLACK_DUP}`, role: "owner" });
+    const answer = await w.asPerson(SLACK_DUP);
+    expect(companyOf(answer.body)).toEqual({ companyId: A, companyRole: "owner", companyName: "Founders Co" });
+    expect(JSON.stringify(answer.body)).not.toMatch(/secret-b|Other Co/);
+  });
+
+  it("a company that is closing (not closed) still answers", async () => {
+    const w = world();
+    w.company(A, "Founders Co", { closingAt: TIME });
+    expect((await w.asPerson(SURVIVOR)).status).toBe(200);
+  });
+
+  it(`refuses a company with more than ${INSTALL_COMPANY_PROJECTS_MAX} projects, never a silent cut`, async () => {
+    const w = world();
+    for (let i = 0; i < INSTALL_COMPANY_PROJECTS_MAX; i++) w.db.set({ pk: `ORG#${A}#PROJECT_CATALOG`, sk: `PROJECT#p${i}`, name: `p${i}` });
+    expect(await w.asPerson(SURVIVOR)).toEqual(REFUSED);
   });
 
   it("a viewer grant gives no task use", async () => {
