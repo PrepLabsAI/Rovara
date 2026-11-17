@@ -90,6 +90,8 @@ export const ANSWER_WORDS = {
   rate: "You've asked a lot of questions lately. Try again a little later.",
   unavailable: "Couldn't answer that just now.",
   limitReached: "This project has reached its spending limit for now.",
+  /** The company's monthly answers limit or budget has no room (the gateway's `answers_paused`), or one answer cannot fit it. */
+  paused: "Answers are paused for this month.",
   badRequest: "An answer needs a request ID and a question of 1 to 1,000 characters.",
 } as const;
 
