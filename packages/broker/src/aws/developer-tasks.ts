@@ -246,7 +246,7 @@ import {
 } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
-import { TASK_ENTRY_AREAS, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
+import { TASK_ENTRY_AREAS, involvedOnCore, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -6369,7 +6369,11 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
     if (core !== undefined) return core.value;
     return startTask(deps, caller, body(request));
   }
-  if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
+  if (request.method === "GET" && url.pathname === "/v1/dev/tasks") {
+    // Web task channel C5: exactly `?involved=1` lists the tasks the caller was added to, through the core (every task re-checked there). Any other query is the ordinary list, unchanged.
+    if (url.searchParams.get("involved") === "1") return involvedOnCore(deps.coreTasks, request, caller);
+    return listTasks(deps, caller, url);
+  }
   // Lane E2: a task's route goes by the task's stored engine. A task the core owns is answered by the core's own handlers (or refused), never by the readers below.
   // Matched by string, not by a path pattern, so the route inventory (named-scopes) reads no new route here.
   const entryPath = url.pathname.startsWith(TASK_PATH_PREFIX) ? url.pathname.slice(TASK_PATH_PREFIX.length) : undefined;
