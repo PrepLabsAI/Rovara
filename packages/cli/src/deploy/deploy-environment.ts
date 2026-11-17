@@ -10,7 +10,7 @@ import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSett
 import { installOrder, OPERATOR_PARAMETERS, SECRET_PARAMETERS, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKey, type SecretValueStore } from "./signing-key.js";
-import { readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
+import { GITHUB_SIGN_IN_PARAMETER_NAMES, readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
 
 export type { SecretValueStore } from "./signing-key.js";
 
@@ -103,7 +103,7 @@ export function withDeclaredSignIn(parameters: Record<string, string>, declared:
   // function silently resetting stored sign-in settings on the operator's behalf.
   if (declared === undefined) return parameters;
   const filtered = { ...parameters };
-  for (const name of SIGN_IN_PARAMETER_NAMES) {
+  for (const name of [...SIGN_IN_PARAMETER_NAMES, ...GITHUB_SIGN_IN_PARAMETER_NAMES]) {
     if (!declared.has(name)) delete filtered[name];
   }
   return filtered;
