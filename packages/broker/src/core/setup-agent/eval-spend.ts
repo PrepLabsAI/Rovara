@@ -14,7 +14,7 @@ export const EVAL_SPEND_KIND = "setup-eval-spend";
 /** Cap and membership come from the trusted host, never the proposal or a stored approver role. */
 type Table = { store: DocumentStore; companyId: OrgId; members?: SessionMembers; monthlyCapMicros?: number; log?: (event: "eval_spend_approval_invalid" | "eval_plan_invalid") => void };
 
-async function roleFor(deps: Table, project: string, person: SessionPerson): Promise<"owner" | "admin" | "maintainer" | undefined> {
+export async function roleFor(deps: Pick<Table, "members">, project: string, person: SessionPerson): Promise<"owner" | "admin" | "maintainer" | undefined> {
   try {
     const members = deps.members ?? localOwnerMembers();
     const companyRole = await members.companyRole(person);
@@ -47,9 +47,15 @@ async function readRecord(deps: Table, project: string): Promise<EvalSpendApprov
 const fitsMonthlyCap = (deps: Table, plan: EvalSpendPlan): boolean =>
   Number.isSafeInteger(deps.monthlyCapMicros) && deps.monthlyCapMicros! >= plan.budget.maximum.costMicros;
 
+/**
+ * The approver's CURRENT role. EVAL-APPROVED-ROLE-NO-PRINCIPAL: the person is named by the approval's own stored identity as a principal of the record's company (its person id and identity
+ * provider; no role is carried), so a members reader that resolves people by principal (the hosted `deployedSessionMembers`) can find them. Before, no principal was passed, every hosted
+ * approval read "approval needs renewing" and a same-item re-propose never reused it. The role itself is still read live from the members seam; the stored `approvedBy.role` is never used.
+ */
 async function approvedRole(deps: Table, row: EvalSpendApprovalRecord) {
   if (row.approvedBy === undefined) return undefined;
-  return roleFor(deps, row.project, { companyId: row.company, developerId: developerIdOf(row.approvedBy) });
+  const principal: Principal = { companyId: row.company, personId: row.approvedBy.personId, provider: row.approvedBy.provider, displayName: "", roles: [] };
+  return roleFor(deps, row.project, { companyId: row.company, developerId: developerIdOf(row.approvedBy), principal });
 }
 
 /** Called only with the trusted discovery/estimate, never request JSON or a model's approval claim.
@@ -176,12 +182,15 @@ export function createEvalSpendSubject(deps: Table): DecisionSubject {
 }
 
 /** No reservation implementation lives here. F1e binds the trusted adapter; absent/unreadable is zero spend. */
-export function createEvalSpendCapabilities(options: Table & { project: string; current(): Promise<EvalSpendPlan | undefined>; adapter?: EvalReservationAdapter }): { approval: EvalSpendApproval; meter: MonthlyMeter } {
+export function createEvalSpendCapabilities(options: Table & { project: string; current(): Promise<EvalSpendPlan | undefined>; adapter?: EvalReservationAdapter;
+  /** EVAL-PLAN-SNAPSHOT: the digest of the ONE approved item the caller read its plan from. Set: only that item answers (a re-approval in between, of another item, is no grant). */
+  digest?: string }): { approval: EvalSpendApproval; meter: MonthlyMeter } {
   const issued = new WeakMap<EvalSpendGrant, EvalSpendApprovalRecord>();
   const resolve = async () => {
     if (options.adapter === undefined) return undefined;
     const row = await readRecord(options, options.project);
     if (row?.state !== "approved" || row.approvedBy === undefined) return undefined;
+    if (options.digest !== undefined && row.digest !== options.digest) return undefined;
     const parsed = EvalSpendPlanSchema.safeParse(await options.current());
     if (!parsed.success) return undefined;
     const current = parsed.data;

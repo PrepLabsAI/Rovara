@@ -23,12 +23,18 @@ export interface EvalPlanScope { readonly companyId: string; readonly project: s
 /** The run's own pinned base: each repository's base commit, from the operation's own stored dispatch payload (`workflowBase`, the broker's pin), never the request. Undefined when it has none. */
 export interface EvalPlanRun { readonly bases: ReadonlyArray<{ readonly repositoryId: string; readonly baseCommitSha: string }> | undefined }
 
+/** One consistent read of the plan and its approval: both of the SAME approved spend item (EVAL-PLAN-SNAPSHOT). */
+export interface EvalPlanRead {
+  /** The confirmed final-check plan of this company's project (Rovara's own selection, inventory and pins). */
+  readonly plan: unknown;
+  /** The persisted spend approval of the very item `plan` was read with (F3e `createEvalSpendCapabilities(...).approval`, bound to that item's digest), or undefined when it is not wired here. */
+  readonly approval: EvalSpendApproval | undefined;
+}
+
 /** The broker's trusted sources. Each one is asked only for the run's own scope, and each answer is checked against it again here. */
 export interface EvalPlanSources {
-  /** The confirmed final-check plan of this company's project (Rovara's own selection, inventory and pins), or undefined when there is none. `run` names the run's pinned base (DEC 253j(1)). */
-  plan(scope: EvalPlanScope, run: EvalPlanRun): Promise<unknown>;
-  /** The persisted spend approval of this company's project (F3e `createEvalSpendCapabilities(...).approval`), or undefined when it is not wired here. */
-  approval(scope: EvalPlanScope): EvalSpendApproval | undefined;
+  /** The plan and its approval in ONE read, or undefined when there is no plan. `run` names the run's pinned base (DEC 253j(1)). */
+  read(scope: EvalPlanScope, run: EvalPlanRun): Promise<EvalPlanRead | undefined>;
   /** The company's own base-score cache (`createDocumentBaseScoreCache` for this company), or undefined when it is not wired here. */
   cache(companyId: string): BaseScoreCache | undefined;
 }
@@ -81,13 +87,15 @@ export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operati
   const log = (event: Parameters<NonNullable<EvalPlanDeliveryDeps["log"]>>[0]): void => { try { deps.log?.(event); } catch { /* logging never changes the answer */ } };
   try {
     const base = WorkflowReviewBaseSchema.safeParse(payload["workflowBase"]);
-    const plan = record(await deps.sources.plan(scope, Object.freeze({ bases: base.success ? base.data : undefined })));
-    if (plan === undefined) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
+    // One read: the plan and the approval of the same approved item (never two reads a re-approval could fall between).
+    const found = await deps.sources.read(scope, Object.freeze({ bases: base.success ? base.data : undefined }));
+    const plan = record(found?.plan);
+    if (found === undefined || plan === undefined) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
     const key = record(plan["key"]);
     // The plan must be this company's and this project's, in its own fields and in its cache key.
     if (plan["company"] !== scope.companyId || plan["project"] !== scope.project || key?.["company"] !== scope.companyId || key["project"] !== scope.project) { log("eval_plan_scope_mismatch"); return NOT_AVAILABLE; }
     let approval: Extract<EvalPlanDelivery, { status: "ready" }>["approval"] = null;
-    const reader = deps.sources.approval(scope);
+    const reader = found.approval;
     if (reader !== undefined) {
       const grant = EvalPlanDeliveryGrantSchema.safeParse(await reader.read().catch(() => undefined));
       if (grant.success && grant.data.company === scope.companyId && grant.data.project === scope.project) approval = grant.data;

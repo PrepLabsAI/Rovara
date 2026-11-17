@@ -1,4 +1,4 @@
-421 record kinds: 60 company-scoped, 15 install-wide, 346 needs-company. 202 routes: 36 company-scoped, 2 install-wide, 164 needs-company.
+422 record kinds: 61 company-scoped, 15 install-wide, 346 needs-company. 202 routes: 36 company-scoped, 2 install-wide, 164 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -252,6 +252,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:EVAL_BATCH_WATCH | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:EVAL_SPEND_APPROVAL | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:EVAL_PLAN | company-scoped | State table | no | - | DEC 253j(1) trusted eval plan (core/setup-agent/eval-spend.ts evalPlanKey): key is the company-scoped setup partition setupPartition(companyId, project) = orgScoped(companyId, SETUP_DRAFT#project), sort key EVAL_PLAN, next to EVAL_SPEND; written only by proposeEvalSpendApproval with the caller's checked company; readApprovedEvalPlan answers a row only when it names this company and project, its digest recomputes, and the approved EVAL_SPEND item of the same company names it. Two-company cases in tests/unit/eval-plan-source.test.ts (same project name in both companies, rows copied across partitions, re-labelled rows). |
+| record | entity:EVAL_DISCOVERY | company-scoped | State table | no | - | DEC 253n(1) setup eval discovery report (core/setup-agent/eval-discovery.ts evalDiscoveryKey): key is the company-scoped setup partition setupPartition(companyId, project) with sort key EVAL_DISCOVERY#<task>; written only by the setup-agent callback for a running setup run of the callback's own company (setupRunOfOperation), put-if-absent, with the commits the broker recorded; the confirm route (POST /v1/app/projects/{p}/setup-agent/eval-confirm) reads it only at the caller's own company's key and refuses a row whose company, project, task or recomputed digest differ. Two-company cases in tests/unit/eval-discovery-confirm.test.ts (B naming A's run, A's row copied into B's partition, re-labelled rows). |
 | record | entity:EVENT_BATCH | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:EVIDENCE_BLOB | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:FAILURE_INDEX | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |

@@ -416,6 +416,7 @@ export * from "./eval-round-artifact.js";
 export * from "./eval-plan-delivery.js";
 // DEC 253j(1): the trusted EVAL_PLAN record (stored next to EVAL_SPEND, bound by its digest).
 export * from "./eval-plan-record.js";
+export * from "./eval-discovery-report.js";
 export * from "./eval-proof-basis.js";
 
 export * from "./model-gateway-token.js";

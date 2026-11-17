@@ -17,9 +17,14 @@ export interface EvalFinalCheckPlan {
   judgePin: string; baselineJudgePin: string; baseEvalSetHash?: string; sameJudgeFamily?: boolean; subsetSupported: boolean;
   questions: EvalQuestionPlan["questions"]; maxCallsPerQuestion: number; maxCostMicrosPerQuestion: number;
 }
+/**
+ * EVAL-PLAN-STALE-REASON: the plan port's answer when the approved plan cannot run because a question file changed on the base (main) since setup approved it. Compared by identity:
+ * only the worker's own `pinnedEvalPlan` returns it; no delivered or repository data can be this object.
+ */
+export const EVAL_PLAN_QUESTIONS_CHANGED: Readonly<{ notRun: "questions_changed" }> = Object.freeze({ notRun: "questions_changed" as const });
 export interface EvalFinalCheckPorts {
   roundKind?: EvalRoundKind;
-  plan(): Promise<EvalFinalCheckPlan | undefined>;
+  plan(): Promise<EvalFinalCheckPlan | typeof EVAL_PLAN_QUESTIONS_CHANGED | undefined>;
   approval: EvalSpendApproval; meter: MonthlyMeter; cache: BaseScoreCache;
   baselines: Pick<EvalBaselines, "forTask">;
   /** Resolves only after the sandbox and every call have joined, including on abort. Bounded
@@ -79,7 +84,11 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
   if (roundKind === "working") return refuse("needs_fresh_sandbox");
   if (facts.status !== "verified") return refuse("checks_failed");
   if (facts.signal.aborted) return refuse("stopped");
-  try { plan = validPlan(await ports.plan()); } catch { return refuse("not_connected"); }
+  try {
+    const answered = await ports.plan();
+    if (answered === EVAL_PLAN_QUESTIONS_CHANGED) return refuse("questions_changed");
+    plan = validPlan(answered);
+  } catch { return refuse("not_connected"); }
   if (plan === undefined) return refuse("not_connected");
   const p = plan;
   const finish = (output: EvalRoundOutput): EvalRoundArtifact => {

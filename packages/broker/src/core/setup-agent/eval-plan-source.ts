@@ -1,5 +1,8 @@
 // DEC 253j(1): the broker's TRUSTED eval plan source, the `EvalPlanSources` the `eval-plan` callback answers a CHECKS run from (core/proof/eval-plan-delivery.ts).
 //
+// ONE CONSISTENT READ (EVAL-PLAN-SNAPSHOT): `read` reads the approved item and its plan once (`readApprovedEvalPlan`, both rows, bound to each other by digest) and answers the plan AND an
+// approval bound to that same item's digest. A re-approval in between, of another item, gives no grant; the plan of one item is never paired with the grant of another.
+//
 //   plan      the stored EVAL_PLAN of this company's project, only while it is bound to an APPROVED eval spend item and unedited since (`readApprovedEvalPlan`). The run's own pinned base
 //             (the operation's stored `workflowBase`, never the request) fills the per-task key parts the broker can know: the base commit and its code hash (`evalCodeHash`). The worker
 //             computes the same parts and every question's base and head hash from the pinned candidate and checks them against this plan; a mismatch is not runnable.
@@ -9,8 +12,8 @@
 //   cache     this company's own base-score cache (`createDocumentBaseScoreCache`), read by the callback at the plan's own key.
 //
 // Every source answers only its own company: a scope naming another company is no answer. Nothing here reads the request.
-import { createDocumentBaseScoreCache, evalCodeHash, type AdapterRegistry, type BaseScoreCache, type DocumentStore, type EvalSpendApproval, type OrgId } from "@agentx/contracts";
-import type { EvalPlanRun, EvalPlanScope, EvalPlanSources } from "../proof/eval-plan-delivery.js";
+import { createDocumentBaseScoreCache, evalCodeHash, type AdapterRegistry, type BaseScoreCache, type DocumentStore, type OrgId } from "@agentx/contracts";
+import type { EvalPlanRead, EvalPlanRun, EvalPlanScope, EvalPlanSources } from "../proof/eval-plan-delivery.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { readApprovedEvalPlan } from "./eval-spend.js";
 import { createBoundEvalSpendCapabilities } from "./eval-reservation.js";
@@ -36,24 +39,25 @@ function baseOf(run: EvalPlanRun | undefined, repository: string | undefined): s
 export function createEvalPlanSources(deps: EvalPlanSourceDeps): EvalPlanSources {
   const table = { store: deps.store, companyId: deps.companyId, ...(deps.members === undefined ? {} : { members: deps.members }), ...(deps.log === undefined ? {} : { log: deps.log }) };
   return {
-    async plan(scope: EvalPlanScope, run: EvalPlanRun): Promise<unknown> {
+    async read(scope: EvalPlanScope, run: EvalPlanRun): Promise<EvalPlanRead | undefined> {
       if (scope.companyId !== deps.companyId) return undefined;
       const found = await readApprovedEvalPlan(table, scope.project);
       if (found === undefined) return undefined;
       const baseCommit = baseOf(run, found.plan.repository);
       if (baseCommit === undefined) return undefined;
       const { key, ...body } = found.plan;
+      const spend = found.spend;
       return {
-        company: deps.companyId, project: scope.project, ...body,
-        key: { company: deps.companyId, project: scope.project, baseCommit, codeHash: evalCodeHash(baseCommit), judgePin: body.judgePin, ...key },
-        planDigest: found.spend.plan.evalPlanDigest,
+        plan: {
+          company: deps.companyId, project: scope.project, ...body,
+          key: { company: deps.companyId, project: scope.project, baseCommit, codeHash: evalCodeHash(baseCommit), judgePin: body.judgePin, ...key },
+          planDigest: spend.plan.evalPlanDigest,
+        },
+        // The grant of exactly the item this plan was read with: its digest is bound, and its "current" plan is that item's (never a later read's).
+        approval: createBoundEvalSpendCapabilities(deps.registry, { ...table, project: scope.project, digest: spend.digest,
+          // Re-read at grant time: the same item must still be approved WITH its stored plan bound to it (a plan row lost or edited since gives no grant).
+          current: async () => { const now = await readApprovedEvalPlan(table, scope.project); return now !== undefined && now.spend.digest === spend.digest ? spend.plan : undefined; } }).approval,
       };
-    },
-    approval(scope: EvalPlanScope): EvalSpendApproval | undefined {
-      if (scope.companyId !== deps.companyId) return undefined;
-      return createBoundEvalSpendCapabilities(deps.registry, { ...table, project: scope.project,
-        // The current trusted plan is the approved item, only while its stored eval plan is still bound to it.
-        current: async () => (await readApprovedEvalPlan(table, scope.project))?.spend.plan }).approval;
     },
     cache(companyId: string): BaseScoreCache | undefined {
       return companyId === deps.companyId ? createDocumentBaseScoreCache(deps.store, { companyId: deps.companyId }) : undefined;

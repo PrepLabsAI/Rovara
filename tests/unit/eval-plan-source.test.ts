@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, createDocumentBaseScoreCache, evalBaseCacheKey, evalCodeHash, evalCommandFingerprint, evalPlanDigest, evalQuestionHash, evalSpendDigest, evalSpendInputsDigest,
+  EVAL_NOT_RUN_SENTENCES, EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, attestRovaraOnlyBaseCheckout, evalResultFromArtifact, createDocumentBaseScoreCache, evalBaseCacheKey, evalCodeHash, evalCommandFingerprint, evalPlanDigest, evalQuestionHash, evalSpendDigest, evalSpendInputsDigest,
   type Approvers, type EvalBaseRecord, type EvalPlanBody, type EvalReservationAdapter, type EvalSpendApprovalRecord, type EvalSpendPlan, type Principal,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -16,6 +16,7 @@ import { createNoopAuditSink } from "../../packages/broker/src/ports/policy-defa
 import { createDecisionGate, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { EVAL_SPEND_KIND, createEvalSpendSubject, evalPlanKey, evalSpendKey, proposeEvalSpendApproval, readApprovedEvalPlan } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { createEvalPlanSources } from "../../packages/broker/src/core/setup-agent/eval-plan-source.js";
+import type { EvalPlanSources } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
 import { setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
@@ -49,6 +50,10 @@ const BASE = "c".repeat(40);
 /** A registry with `adapter` (or nothing) bound at the `eval-reservation` plug-in point. */
 const registryWith = (adapter?: EvalReservationAdapter) => ({ names: (point: string) => point === "eval-reservation" && adapter !== undefined ? ["test"] : [], get: () => adapter }) as never;
 const run = (bases: Array<{ repositoryId: string; baseCommitSha: string }> | undefined = [{ repositoryId: "web", baseCommitSha: BASE }]) => ({ bases });
+/** The plan of ONE read (EVAL-PLAN-SNAPSHOT), or undefined. */
+const planOf = async (sources: EvalPlanSources, r: { bases: Array<{ repositoryId: string; baseCommitSha: string }> | undefined }) => (await sources.read({ companyId: A, project }, r))?.plan;
+/** The grant of ONE read's approval (bound to the item the plan was read with), or undefined. */
+const grantOf = async (sources: EvalPlanSources) => await (await sources.read({ companyId: A, project }, run()))?.approval?.read();
 
 /** One company's setup table, decision gate and spend approvals, over a store that may be shared with another company. */
 function company(companyId: string, store = new MemoryDocumentStore()) {
@@ -247,11 +252,10 @@ describe("the EVAL_PLAN reader refuses what is not bound to an approved digest",
     await store.put({ item: { ...item, company: B } });
     expect(await b.read()).toBeUndefined();
     const sourcesA = createEvalPlanSources({ store, companyId: A, registry: registryWith(a.adapter) });
-    expect(await sourcesA.plan({ companyId: B, project }, run())).toBeUndefined();
-    expect(sourcesA.approval({ companyId: B, project })).toBeUndefined();
+    expect(await sourcesA.read({ companyId: B, project }, run())).toBeUndefined();
     expect(sourcesA.cache(B)).toBeUndefined();
-    expect(await createEvalPlanSources({ store, companyId: B, registry: registryWith(b.adapter) }).plan({ companyId: B, project }, run())).toBeUndefined();
-    expect(JSON.stringify(await sourcesA.plan({ companyId: A, project }, run()))).not.toContain(B);
+    expect(await createEvalPlanSources({ store, companyId: B, registry: registryWith(b.adapter) }).read({ companyId: B, project }, run())).toBeUndefined();
+    expect(JSON.stringify(await planOf(sourcesA, run()))).not.toContain(B);
   });
 });
 
@@ -260,29 +264,56 @@ describe("the broker's eval plan source", () => {
     const a = company(A);
     await a.approve();
     const sources = createEvalPlanSources({ store: a.store, companyId: A, registry: registryWith() });
-    expect(await sources.plan({ companyId: A, project }, run())).toEqual({
+    expect(await planOf(sources, run())).toEqual({
       company: A, project, ...(({ key, ...rest }) => { void key; return rest; })(evalPlan()), planDigest: evalPlanDigest(A, project, evalPlan()),
       key: { company: A, project, baseCommit: BASE, codeHash: evalCodeHash(BASE), judgePin, commandFingerprint: inputs.commandFingerprint, catalogRowId: "model", model: "model", modelVersion: "version-1" },
     });
-    expect(await sources.plan({ companyId: A, project }, { bases: undefined })).toBeUndefined();
-    expect(await sources.plan({ companyId: A, project }, run([{ repositoryId: "web", baseCommitSha: "not-a-commit" }]))).toBeUndefined();
-    expect(await sources.plan({ companyId: A, project }, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))).toBeUndefined();
+    expect(await planOf(sources, { bases: undefined })).toBeUndefined();
+    expect(await planOf(sources, run([{ repositoryId: "web", baseCommitSha: "not-a-commit" }]))).toBeUndefined();
+    expect(await planOf(sources, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))).toBeUndefined();
     const named = company(A);
     await named.approve(evalPlan({ repository: "api" }));
     const namedSources = createEvalPlanSources({ store: named.store, companyId: A, registry: registryWith() });
-    expect(((await namedSources.plan({ companyId: A, project }, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))) as { key: { baseCommit: string } }).key.baseCommit).toBe("d".repeat(40));
-    expect(await namedSources.plan({ companyId: A, project }, run())).toBeUndefined();
+    expect(((await planOf(namedSources, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))) as { key: { baseCommit: string } }).key.baseCommit).toBe("d".repeat(40));
+    expect(await planOf(namedSources, run())).toBeUndefined();
   });
 
   it("spend authority comes only from the registry's bound eval-reservation adapter: Code (none) answers no approval; a bound adapter answers the grant for this plan (mutant: the adapter check)", async () => {
     const a = company(A);
     await a.approve();
-    expect(await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith() }).approval({ companyId: A, project })!.read()).toBeUndefined();
-    const grant = await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }).approval({ companyId: A, project })!.read();
+    expect(await grantOf(createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith() }))).toBeUndefined();
+    const grant = await grantOf(createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }));
     expect(grant).toMatchObject({ company: A, project, selection: "evals/demo", inputsDigest: evalSpendInputsDigest(inputs), provider: "customer", connected: true, maxCalls: 6, maxCostMicros: 60 });
     // The approval follows the plan's binding: an edited plan withdraws it.
     await rewrite(a.store, A, row => ({ ...row, plan: { ...(row["plan"] as EvalPlanBody), maxCallsPerQuestion: 99 } }));
-    expect(await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }).approval({ companyId: A, project })!.read()).toBeUndefined();
+    expect(await grantOf(createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }))).toBeUndefined();
+  });
+
+  it("ONE consistent read (EVAL-PLAN-SNAPSHOT): the approval answers only for the item its plan was read with; a re-approval in between, of a changed plan, gives no grant (mutant: the digest binding)", async () => {
+    const a = company(A);
+    await a.approve();
+    const sources = createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) });
+    const first = (await sources.read({ companyId: A, project }, run()))!;
+    expect((first.plan as { planDigest: string }).planDigest).toBe(evalPlanDigest(A, project, evalPlan()));
+    // Between the plan read and the grant read, another item (same selection, inputs, estimate and budget; other questions) is proposed and approved.
+    const changed = evalPlan({ questions: [evalPlan().questions[0]!] });
+    await a.approve(changed);
+    expect(await first.approval!.read()).toBeUndefined();
+    // A new read pairs the new plan with the new item's grant.
+    const second = (await sources.read({ companyId: A, project }, run()))!;
+    expect((second.plan as { planDigest: string }).planDigest).toBe(evalPlanDigest(A, project, changed));
+    expect(await second.approval!.read()).toMatchObject({ company: A, project, selection: "evals/demo" });
+    // The plan row lost after the read: the same item no longer has its plan bound, so no grant (review L1).
+    const third = (await sources.read({ companyId: A, project }, run()))!;
+    const planRow = (await a.store.get(evalPlanKey(A, project)))!;
+    await a.store.delete({ key: evalPlanKey(A, project) });
+    expect(await third.approval!.read()).toBeUndefined();
+    await a.store.put({ item: planRow });
+    expect(await third.approval!.read()).toMatchObject({ company: A });
+    // While the new item only waits, neither read has a grant.
+    await a.propose(evalPlan());
+    expect(await second.approval!.read()).toBeUndefined();
+    expect(await sources.read({ companyId: A, project }, run())).toBeUndefined();
   });
 });
 
@@ -360,11 +391,46 @@ describe("end to end: the signed eval-plan route, the worker's pinned hashes and
     expect(["spend_not_approved", "not_connected"]).not.toContain(artifact?.notRunReason);
   });
 
-  it("a base whose question differs from the approved plan is not runnable: no plan, so not connected, zero calls (mutant: the worker's base hash check)", async () => {
-    const e = await endToEnd({ adapter: true, base: { "evals/demo/q1.txt": "changed on main\n", "evals/demo/q2.txt": Q2 } });
-    const ports = { roundKind: "check_unsealed" as const, ...e.sources, meter: { reserve: async () => { throw new Error("must not hold"); } }, runner: async () => { throw new Error("must not run"); } };
-    const artifact = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports, facts()));
-    expect(artifact).toMatchObject({ outcome: "not_run", notRunReason: "not_connected" });
+  it("a question file changed on main since approval reads its own reason, \"questions changed since setup approval: re-approve\", with zero calls (mutants: the worker's base hash check, the stale reason)", async () => {
+    for (const base of [{ "evals/demo/q1.txt": "changed on main\n", "evals/demo/q2.txt": Q2 }, { "evals/demo/q2.txt": Q2 }]) {
+      const e = await endToEnd({ adapter: true, base });
+      let spent = 0;
+      const ports = { roundKind: "check_unsealed" as const, ...e.sources, meter: { reserve: async () => { spent++; throw new Error("must not hold"); } }, runner: async () => { spent++; throw new Error("must not run"); } };
+      const artifact = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports, facts()));
+      expect(artifact).toMatchObject({ outcome: "not_run", notRunReason: "questions_changed", usage: { calls: 0 } });
+      expect(EVAL_NOT_RUN_SENTENCES[artifact!.notRunReason!]).toBe("not run: questions changed since setup approval: re-approve");
+      expect(spent).toBe(0);
+    }
+  });
+
+  it("setup approval through to a finished final-check eval: the approved plan, its own grant and its baseline drive one eval that holds, runs both sides and compares (fake meter and runner)", async () => {
+    const e = await endToEnd({ adapter: true });
+    const reports = await realpath(await mkdtemp(join(tmpdir(), "eps-report-"))); roots.push(reports);
+    const holds: Array<{ company: string; calls: number }> = []; const stages: string[] = []; let calls = 0; let closed = 0;
+    const ports = { roundKind: "check_unsealed" as const, ...e.sources,
+      meter: { reserve: async (r: { approval: { company: string; project: string; selection: string }; calls: number; costMicros: number }) => {
+        // The grant the meter is asked to hold for is this plan's own (the one read's), for this company and project.
+        expect(r.approval).toMatchObject({ company: A, project, selection: "evals/demo" });
+        holds.push({ company: r.approval.company, calls: r.calls });
+        return { call: async () => { calls++; return { class: "ok" as const, calls: 1, costMicros: 10 }; }, close: async () => { closed++; } };
+      } },
+      runner: async (r: { side: "old" | "new"; ids: readonly string[]; runs: 1 | 2 | 3; call: (frame: never) => Promise<unknown> }) => {
+        stages.push(r.side);
+        for (let i = 0; i < r.ids.length * r.runs; i++) await r.call({} as never);
+        const file = `report-${stages.length}.json`;
+        await writeFile(join(reports, file), JSON.stringify({ schemaVersion: 1, eval_set_hash: inputs.evalSetHash, measures: [{ name: "accuracy", unit: "fraction", direction: "up_good", value: 1 }],
+          questions: r.ids.map(id => ({ id, samples: Array.from({ length: r.runs }, () => ({ pass: true, answer: id === "q1" ? "a" : "b" })) })) }));
+        return { report: { root: reports, cwd: ".", argument: file, notBeforeMs: Date.now() - 1000 }, facts: { total: r.ids.length * r.runs, run: r.ids.length * r.runs, notRun: 0, byClass: {}, overrunStop: false },
+          calls: 0, costMicros: 0, changedPromptCalls: r.side === "new" ? r.ids.length : 0, seconds: 1, attestation: attestRovaraOnlyBaseCheckout({ baseCommit: e.repo.baseSha }) };
+      } };
+    const artifact = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports as never, facts()));
+    expect(artifact, JSON.stringify(artifact)).toMatchObject({ outcome: "done", evalConfigured: true, basis: { evalSetHash: inputs.evalSetHash, judgePin, model: "model", modelVersion: "version-1", oldRuns: 3 } });
+    expect(evalResultFromArtifact(artifact).label).toBe("No regression measured (eval)");
+    expect(holds.length).toBeGreaterThan(0);
+    expect(holds.every(h => h.company === A)).toBe(true);
+    expect(stages).toContain("new");
+    expect(calls).toBeGreaterThan(0);
+    expect(closed).toBe(holds.length);
   });
 
   it("the one ask is bounded: it carries an abort signal, and an aborted (timed-out) ask reads as no plan, no grant and a cache miss", async () => {
