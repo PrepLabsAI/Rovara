@@ -41,7 +41,7 @@ import { readWorkspace } from "./stage-machine.js";
 import { dispatchQueueName, iso, log } from "./support.js";
 import type { OperationRecord, WorkspaceRecord } from "./records.js";
 import type { PlaybookMode } from "../playbook/service.js";
-import { wikiContextForStep } from "./wiki-step.js";
+import { invocationTooBigForWiki, wikiContextForStep } from "./wiki-step.js";
 import { chooseStepModel, heldStepModel, type OperationModelChoice, type StepModelOutcome } from "./step-model.js";
 
 /** How long a capability the worker is given lives: nine hours, as Cloud's. */
@@ -399,7 +399,14 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     }
   }
   const parsed = WorkerInvocationSchema.safeParse(draft);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {
+    if (draft.payload["wikiContext"] === undefined || !invocationTooBigForWiki(parsed.data)) return parsed.data;
+    // The step is already large: the wiki is what is left out, so it is never the reason a worker refuses the body.
+    const { wikiContext: _wiki, ...withoutWiki } = draft.payload;
+    void _wiki;
+    const slim = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutWiki });
+    return slim.success ? slim.data : parsed.data;
+  }
   // Lessons and the wiki never block a step: a learned or wiki context the worker's schema does not take is dropped, and the step is built without it.
   if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined) {
     const { learnedContext: _dropped, wikiContext: _droppedWiki, ...withoutMemory } = draft.payload;

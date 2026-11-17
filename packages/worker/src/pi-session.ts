@@ -46,7 +46,7 @@ import {
   type RepositoryContextFile,
 } from "./repository-context.js";
 import { quotedContextText } from "./context-text.js";
-import { WIKI_AGENT_INDEX_FILE, type LoadedKnowledgeManifest } from "@agentx/contracts";
+import type { LoadedKnowledgeManifest } from "@agentx/contracts";
 import { buildLoadedKnowledgeManifest } from "./knowledge/manifest.js";
 import { mergeSkills } from "./knowledge/skills.js";
 import { knowledgeExtension } from "./knowledge/extension.js";
@@ -267,8 +267,6 @@ export async function createWorkspacePiSession(
     /** Lane E: the context-source tools and the note that tells the model about them (see PiSessionInput.contextTools). */
     contextTools?: readonly ToolDefinition[];
     contextNote?: string;
-    /** Lead 4 A1: the `AGENTX-WIKI.md` index of the project wiki placed for this step (wiki-agent.ts); in this session's context, with its fixed instruction. Absent: no wiki. */
-    wikiNote?: string;
     /** The same sources through Pi's own MCP client (see PiSessionInput.contextMcp). */
     contextMcp?: ContextMcpSession;
     /** Structured answers: the tool(s) the step delivers its answer through (see PiSessionInput.answerTools). */
@@ -318,7 +316,6 @@ export async function createWorkspacePiSession(
   const contextFiles = knowledgeLoad?.files ?? [];
   const knowledgeSession = knowledgeLoad?.session;
   if (input.contextNote !== undefined && ((input.contextTools !== undefined && input.contextTools.length > 0) || input.contextMcp !== undefined)) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
-  if (input.wikiNote !== undefined) contextFiles.push({ path: WIKI_AGENT_INDEX_FILE, content: input.wikiNote });
   const handle = await adapter.create({
     ...(knowledgeSession === undefined ? {} : { knowledgeSession }),
     cwd: workingDirectory,
@@ -376,8 +373,6 @@ export async function openRegisteredWorkspacePiSession(
     /** Lane E, as for `createWorkspacePiSession`. */
     contextTools?: readonly ToolDefinition[];
     contextNote?: string;
-    /** Lead 4 A1: the `AGENTX-WIKI.md` index of the project wiki placed for this step (wiki-agent.ts); in this session's context, with its fixed instruction. Absent: no wiki. */
-    wikiNote?: string;
     contextMcp?: ContextMcpSession;
     /** As for `createWorkspacePiSession`. */
     answerTools?: readonly ToolDefinition[];
@@ -410,7 +405,6 @@ export async function openRegisteredWorkspacePiSession(
   const knowledgeLoad = input.workflowMode === "SETUP" ? undefined : await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits, { workflowMode: input.workflowMode, knowledge: input.knowledge, onLoaded: input.onKnowledgeLoaded });
   const contextFiles = knowledgeLoad?.files ?? [];
   if (input.contextNote !== undefined && ((input.contextTools !== undefined && input.contextTools.length > 0) || input.contextMcp !== undefined)) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
-  if (input.wikiNote !== undefined) contextFiles.push({ path: WIKI_AGENT_INDEX_FILE, content: input.wikiNote });
   const handle = await adapter.open({
     ...(knowledgeLoad?.session === undefined ? {} : { knowledgeSession: knowledgeLoad.session }),
     cwd: rootPath,

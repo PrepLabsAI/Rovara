@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { WIKI_AGENT_LIMITS, WikiContextSchema, wikiAgentSwitchKey, wikiUsePartition, type OrgId, type WikiPageWrite, type WikiReadReport } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
+import { WIKI_INVOCATION_MARGIN_BYTES, invocationTooBigForWiki } from "../../packages/broker/src/core/task-flow/wiki-step.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { agentPageOf, buildWikiContext, createWikiForStep, createWikiOnEvents, deleteWikiUse, readWikiTaskUse, recordWikiReports, setWikiAgentSwitch, wikiAgentSwitchIsOn, wikiReportsOfEvents } from "../../packages/broker/src/core/wiki/agent-context.js";
 import { COMPANY_PURGE_COOLING_OFF_MS } from "../../packages/broker/src/core/company/purge.js";
@@ -194,20 +195,40 @@ describe("wiki for agents: page -> agent (golden)", () => {
 });
 
 describe("wiki for agents: the agent copy is a second wall behind the store's agent view", () => {
-  it("leaves out a pending note and a not-found claim even if a read handed them over", () => {
-    const written = page("X");
+  it("leaves out a pending note, a not-found claim, a claim with an open flag and every paragraph resting on one, even if a read handed them over", () => {
+    const written = page("X", {
+      blocks: [
+        { kind: "heading", blockId: "h0001", level: 2, text: "Heading" },
+        { kind: "paragraph", blockId: "p0001", text: "KEPT", claimIds: ["c0001"] },
+        { kind: "paragraph", blockId: "p0002", text: "NOTFOUND-PARA", claimIds: ["c0002"] },
+        { kind: "paragraph", blockId: "p0003", text: "FLAGGED-PARA", claimIds: ["c0003"] },
+      ],
+      claims: [claim("c0001", "x"), claim("c0002", "x"), claim("c0003", "x")],
+    });
     const read = {
-      page: { ...written, writtenAt: "2026-11-17T10:00:00.000Z", claims: [written.claims[0]!, { ...written.claims[1]!, source: "not_found" as const }] },
+      page: { ...written, writtenAt: "2026-11-17T10:00:00.000Z", claims: [written.claims[0]!, { ...written.claims[1]!, source: "not_found" as const }, written.claims[2]!] },
       notes: [
         { noteId: "note-pending", pageId: "overview", text: "PENDING", authorId: "p1", createdAt: "2026-11-17T10:00:00.000Z", approval: { state: "pending" as const } },
         { noteId: "note-approved", pageId: "overview", text: "APPROVED", authorId: "p1", createdAt: "2026-11-17T10:00:00.000Z", approval: { state: "approved" as const, by: "m1", at: "2026-11-17T10:00:00.000Z" } },
       ],
-      flags: [], staleBlockIds: [],
+      flags: [{ flagId: "flag-0001", pageId: "overview", claimId: "c0003", by: { kind: "task" as const, taskId: TASK }, createdAt: "2026-11-17T10:00:00.000Z", state: "open" as const }],
+      staleBlockIds: ["p0002", "p0003", "p0001"],
     };
     const copy = agentPageOf(read);
     expect(copy?.notes).toEqual([{ noteId: "note-approved", text: "APPROVED" }]);
     expect(copy?.claims.map((c) => c.claimId)).toEqual(["c0001"]);
-    expect(JSON.stringify(copy)).not.toContain("p1");
+    expect(copy?.blocks.map((b) => b.blockId)).toEqual(["h0001", "p0001"]);
+    expect(copy?.staleBlockIds).toEqual(["p0001"]);
+    const json = JSON.stringify(copy);
+    for (const gone of ["NOTFOUND-PARA", "FLAGGED-PARA", "PENDING", "p1"]) expect(json).not.toContain(gone);
+  });
+});
+
+describe("wiki for agents: the wiki never makes a step too big to send", () => {
+  it("measures the whole invocation against a margin under the 1 MiB body the workers accept", () => {
+    expect(invocationTooBigForWiki({ payload: { prompt: "x".repeat(WIKI_INVOCATION_MARGIN_BYTES - 1_000) } })).toBe(false);
+    expect(invocationTooBigForWiki({ payload: { prompt: "x".repeat(WIKI_INVOCATION_MARGIN_BYTES + 1) } })).toBe(true);
+    expect(WIKI_INVOCATION_MARGIN_BYTES + WIKI_AGENT_LIMITS.contextBytes).toBeLessThanOrEqual(1024 * 1024 + 80 * 1024);
   });
 });
 
@@ -252,7 +273,7 @@ describe("wiki for agents: the delivery seam and the report", () => {
     const w = await ready();
     const forStep = createWikiForStep(w.opts(A));
     expect(await forStep({ ...step, companyId: B })).toEqual({});
-    for (const mode of ["SETUP_DRAFT", "SETUP_AGENT", "SPEC_WRITE", "CHECKS"]) expect(await forStep({ ...step, workflowMode: mode })).toEqual({});
+    for (const mode of ["SETUP_DRAFT", "SETUP_AGENT", "SPEC_WRITE", "CHECKS", "FEEDBACK_REVIEW"]) expect(await forStep({ ...step, workflowMode: mode })).toEqual({});
     await recordWikiReports(w.opts(A), { project: "alpha", operationId: OP, reports: [report()] });
     expect(await readWikiTaskUse(w.opts(A), { project: "alpha", taskId: TASK })).toBeUndefined();
     for (const mode of [undefined, "UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"]) expect((await forStep({ ...step, workflowMode: mode })).wikiContext).toBeDefined();

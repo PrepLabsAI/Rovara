@@ -32,3 +32,7 @@ export async function wikiContextForStep(deps: TaskFlowDeps, workspace: Workspac
     if (timer !== undefined) clearTimeout(timer);
   }
 }
+
+/** Workers and their machines refuse a body over 1 MiB. The wiki never makes a step too big to send: past this margin it is left out. */
+export const WIKI_INVOCATION_MARGIN_BYTES = 900 * 1024;
+export const invocationTooBigForWiki = (invocation: unknown): boolean => Buffer.byteLength(JSON.stringify(invocation), "utf8") > WIKI_INVOCATION_MARGIN_BYTES;

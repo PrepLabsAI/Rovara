@@ -28,7 +28,7 @@ export const WIKI_AGENT_INSTRUCTION = "The wiki is a map written by a machine. U
 export const WIKI_STALE_MARK = "[may be out of date]";
 
 /** The workflow modes whose steps are given the wiki: the stages that read and decide (`undefined` is a plain task step). Never a setup run, a spec write or a check round. The broker and the worker both ask this. */
-const WIKI_AGENT_MODES: ReadonlySet<string | undefined> = new Set([undefined, "UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW", "FEEDBACK_REVIEW"]);
+const WIKI_AGENT_MODES: ReadonlySet<string | undefined> = new Set([undefined, "UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"]);
 export const wikiModeAllows = (mode: string | undefined): boolean => WIKI_AGENT_MODES.has(mode);
 
 export const WIKI_AGENT_LIMITS = {

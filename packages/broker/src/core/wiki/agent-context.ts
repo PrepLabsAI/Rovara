@@ -60,12 +60,16 @@ function mostlyStale(entry: WikiIndexEntry): boolean {
 /** The agent copy of a page read (exported for its test). A second wall behind the store's agent view: a pending note or a not-found claim is left out here too. */
 export function agentPageOf(read: WikiPageRead): WikiAgentPage | undefined {
   const { page } = read;
+  // Claims an agent never sees: not found, or marked wrong (an open flag on the claim); and every block resting on one of them.
+  const hidden = new Set([...page.claims.filter((claim) => claim.source === "not_found").map((claim) => claim.claimId), ...read.flags.flatMap((flag) => (flag.claimId === undefined ? [] : [flag.claimId]))]);
+  const blocks = page.blocks.filter((block) => block.kind === "heading" || !block.claimIds.some((claimId) => hidden.has(claimId)));
+  const kept = new Set(blocks.map((block) => block.blockId));
   const candidate = {
     pageId: page.pageId, kind: page.kind, title: page.title, summary: page.summary, ...(page.parentId === undefined ? {} : { parentId: page.parentId }), order: page.order, repos: page.repos,
-    blocks: page.blocks,
-    claims: page.claims.filter((claim) => claim.source !== "not_found").map((claim) => ({ claimId: claim.claimId, source: claim.source, citations: claim.citations })),
+    blocks,
+    claims: page.claims.filter((claim) => !hidden.has(claim.claimId)).map((claim) => ({ claimId: claim.claimId, source: claim.source, citations: claim.citations })),
     notes: read.notes.filter((note) => note.approval.state === "approved").slice(0, WIKI_AGENT_LIMITS.notesPerPage).map((note) => ({ noteId: note.noteId, text: note.text })),
-    staleBlockIds: read.staleBlockIds,
+    staleBlockIds: read.staleBlockIds.filter((blockId) => kept.has(blockId)),
   };
   const parsed = WikiAgentPageSchema.safeParse(candidate);
   return parsed.success ? parsed.data : undefined;
