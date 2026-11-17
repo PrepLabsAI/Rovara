@@ -882,7 +882,11 @@ describe("T8: what skipping must not skip", () => {
     const h = await launch({ planFormat: "markdown" });
     const t = await toAfterPlan(h, { instructions: "Fix the typo in README.md", restatement: "Fix a typo in README.md.", markdown: "# Plan\n\nFix it.\n" });
     const { cr } = await buildAndPublish(h, t, { "README.md": "# demo\n\nA friendlier greeting.\n" });
-    expect(cr.body).not.toMatch(/\bproven\b/iu);
+    // DEC 254zzh (owner-approved, #894's redesign): the description now always shows a "Proven" label; for a docs change it must say nothing was proven,
+    // and no other line may claim proof.
+    const provenLabel = /^\*\*Proven\*\* No approved requirements to prove\.$/mu;
+    expect(cr.body).toMatch(provenLabel);
+    expect(cr.body.replace(provenLabel, "")).not.toMatch(/\bproven\b/iu);
   });
 
   it("T8f-no-counters-for-skipped: no catch counter is written for a step that did not run", async () => {
@@ -2823,11 +2827,13 @@ describe("T11: each unseen commit scanned on its own", () => {
     const t = await toAfterPlan(h);
     const published = await buildAndPublish(h, t, SMALL, false);
     const bodyOf = () => h.model.changeRequests.find((entry) => entry.id === published.cr.id)!.body;
-    expect(bodyOf()).toContain("## Merge order\nMerge order: demo first.");
+    // DEC 254zzh (owner-approved, #894's redesign): the merge order is an item of the "Check these before you approve" list, with the flow's line under it.
+    const checkList = () => { const body = bodyOf(); const at = body.indexOf("### Check these before you approve"); expect(at).toBeGreaterThanOrEqual(0); const end = body.indexOf("<details>", at); return body.slice(at, end < 0 ? undefined : end); };
+    expect(checkList()).toMatch(/^\d+\. \*\*The order of merging matters\.\*\*\n {3}- Merge order: demo first\.$/mu);
     word = "second";
     h.model.setChecks(published.commit, [{ name: "unit-tests", state: "completed", conclusion: "success", required: false, url: "", runId: "run-1" }]);
     await settle(h, 5);
-    expect(bodyOf()).toContain("Merge order: demo second.");
+    expect(checkList()).toMatch(/^\d+\. \*\*The order of merging matters\.\*\*\n {3}- Merge order: demo second\.$/mu);
     expect(bodyOf()).not.toContain("demo first");
     // The page asks for the whole task (no repository); the descriptions ask for their own.
     expect(asked).toContain("demo");
