@@ -8,7 +8,7 @@ import {
   type WikiPageWrite,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { wikiBuildPartition } from "../../packages/broker/src/core/wiki-build/keys.js";
 import { readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
@@ -189,7 +189,7 @@ describe("hosted wiki build controls: who may do what", () => {
     for (const request of [get(WB("payments")), post(WB("payments"), { requestId: id() }), post(WB("payments", "/delete"), { requestId: id() })]) {
       const answer = await routes.route(request, caller);
       expect(answer?.statusCode).toBe(403);
-      expect(JSON.parse(answer!.body).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
+      expect((JSON.parse(answer!.body) as Body).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
     }
   });
 

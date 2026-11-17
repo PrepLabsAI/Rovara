@@ -39,7 +39,7 @@ export function wikiBuildCallbackWiring(options: WikiWiringBase & {
 }): Omit<WikiBuildCallbackDeps, "store" | "companyId" | "now"> {
   const wiki = createWikiStore({ store: options.store, companyId: options.companyId, now: options.now });
   return {
-    standing: options.standing, read: undefined, readFor: options.readFor,
+    standing: (personId, project) => options.standing(personId, project), read: undefined, readFor: (project) => options.readFor(project),
     sinkFor: (project) => wiki.pageSink(project),
     recordBuild: async (project, record) => { await wiki.writeBuild(project, record); },
   };
