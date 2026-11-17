@@ -257,7 +257,8 @@ describe("pointers that name a task they do not hold", () => {
     const { app, world, task, status } = await coreWorld();
     const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
     const authorize = vi.fn(async () => undefined);
-    const foreign = randomUUID();
+    // Company B's copy of the same workspace id, naming company A's task: only the task's company tells them apart.
+    const foreign = task.workspaceId;
     await world.store.put({ item: { ...workspaceKey(OTHER, foreign), entityType: "WORKSPACE", id: foreign, companyId: OTHER, ownerKey: "k", status: "READY", activeOperationId: null } });
     await world.store.put({ item: { ...taskPointerKey(OTHER, foreign), taskId: task.taskId } });
     await expect(stopWorkspaceAsAdministrator({ ...deps, companyId: OTHER }, foreign, { id: "admin" }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND" });
