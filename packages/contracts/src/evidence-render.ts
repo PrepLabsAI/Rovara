@@ -4,6 +4,7 @@
 // list and line is bounded, with the rest counted ("and 52 more checks"), so the block stays inside a pull request description however large the pack is. Browser-safe: nothing here imports a Node module.
 import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPTED_AI_PROOF_WORDS, checkKindWords, trustLabelWords, type ProofBasis, type EvidenceTrustClass } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
+import { FailureCausesSchema, failureCauseWords } from "./failure-causes.js";
 import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { EVIDENCE_DEPENDENCY_LABEL_WORDS, hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
 import { renderAiEvidence } from "./evidence-ai-render.js";
@@ -14,7 +15,7 @@ import { rovaraProblem, type RovaraProblemFacts } from "./rovara-problem.js";
 /** The last line of the compact form: where the checks, the dependencies and the not-tested list are. */
 export const EVIDENCE_COMPACT_POINTER = "Checks, dependencies and what was not tested: open in Rovara";
 
-export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3 } as const;
+export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3, failureCausesListed: 10 } as const;
 
 /** The result axis, in words (the v1 axis kept). */
 export const EVIDENCE_RESULT_WORDS: Record<(typeof EVIDENCE_RESULTS)[number], string> = {
@@ -128,6 +129,21 @@ function checkLine(check: Check): string {
   return bullet(details.length === 0 ? head : `${head}, ${details.join(", ")}`);
 }
 
+/**
+ * TE-A6 (DEC 254zt): under a failed check, the failing tests by name and the change that most likely broke each, or "unknown" and why. At most `failureCausesListed` tests across the whole block (`budget` is what is left),
+ * the rest counted. Only for a check that failed and whose causes read as the contract says: anything else (no causes, an older pack, a newer shape this build does not read) adds nothing, so a check without per-test data
+ * renders exactly its per-check line, byte for byte. Every test id and path is made inert here.
+ */
+function failureCauseLines(check: Check, budget: { left: number; more: number }): string[] {
+  if (check.after !== "failed") return [];
+  const parsed = FailureCausesSchema.safeParse(check.tests?.failureCauses);
+  if (!parsed.success || parsed.data.length === 0) return [];
+  const shown = parsed.data.slice(0, Math.max(0, budget.left));
+  budget.left -= shown.length;
+  budget.more += parsed.data.length - shown.length;
+  return shown.map((row) => `  ${bullet(`${inert(row.testId, 100)}: ${failureCauseWords(row.cause, inert)}`)}`);
+}
+
 function checksLines(checks: readonly Check[]): string[] {
   if (checks.length === 0) return ["Checks: none"];
   const counts = OUTCOME_ORDER.flatMap((outcome) => {
@@ -136,11 +152,13 @@ function checksLines(checks: readonly Check[]): string[] {
   });
   const other = checks.filter((check) => !(OUTCOME_ORDER as readonly string[]).includes(check.after)).length;
   if (other > 0) counts.push(`${number(other)} ${NEWER_EVIDENCE_WORDS.toLowerCase()}`);
-  const listed = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).map(checkLine);
+  const budget = { left: EVIDENCE_RENDER_LIMITS.failureCausesListed, more: 0 };
+  const listed = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).flatMap((check) => [checkLine(check), ...failureCauseLines(check, budget)]);
   const measuresSource = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).some((check) => (check.measures?.length ?? 0) > 0)
     ? ["Measures: reported by the project's test runner, not measured by Rovara"] : [];
-  const more = checks.length - listed.length;
-  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...measuresSource, ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
+  const more = checks.length - Math.min(checks.length, EVIDENCE_RENDER_LIMITS.checksListed);
+  const unlisted = budget.more > 0 ? [bullet(`and ${plural(budget.more, "more failing test")} with a cause not listed`)] : [];
+  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...measuresSource, ...listed, ...unlisted, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
 }
 
 function trustOf(entry: Dependency): EvidenceTrustClass | undefined {

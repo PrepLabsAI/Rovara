@@ -7,6 +7,7 @@ import { EvidenceAiSchema, readEvidenceAi } from "./evidence-ai.js";
 import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES, isRegisteredCheckKind, partsOutsideKind, type EvidenceTrustClass } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
+import { FailureCausesSchema } from "./failure-causes.js";
 import { TEST_ID_MAX } from "./test-id.js";
 import { RawBaselineSchema, RawRepositoryBaselinesSchema } from "./test-env-baseline.js";
 import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
@@ -385,6 +386,12 @@ const testsShape = {
     flakyOnRerunCount: CountSchema.optional(),
     names: z.array(EvidenceTestSchema).max(EVIDENCE_TEST_NAMES_MAX),
     newTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_NEW_TESTS_MAX),
+    /**
+     * TE-A6 (DEC 254zt): for the failing tests of this check (at most 50, each once), the change that most likely broke it, or "unknown" and why (failure-causes.ts). Written only when the worker could join
+     * the check's failing tests to the change (a check with more failing tests than the limit, or no readable change, has none, and its per-check line is all there is). Absent on every pack built before it: a pack without it reads and renders
+     * exactly as it always did. The reader schemas drop a key they do not know (readers of 0.5.18 and later); a reader older than that, and every strict writer schema, refuses a pack that has it, so ship readers first as for TE-B3's parts.
+     */
+    failureCauses: FailureCausesSchema.optional(),
 };
 /** What the WRITER builds and the worker's raw file holds: strict. */
 export const EvidenceChecksTestsSchema = z.object(testsShape).strict();
@@ -441,6 +448,14 @@ function checkPartsProblems(entry: { tests?: z.infer<typeof EvidenceChecksTestsS
   if (flaky !== undefined && (flaky.flakyOnRerun === undefined) !== (flaky.flakyOnRerunCount === undefined)) issue(["tests", "flakyOnRerunCount"], "flakyOnRerun and flakyOnRerunCount come together");
   if (flaky?.flakyOnRerun !== undefined && flaky.flakyOnRerunCount !== undefined && flaky.flakyOnRerunCount < flaky.flakyOnRerun.length) issue(["tests", "flakyOnRerunCount"], "the count is at least the names listed");
   if (tests !== undefined && flaky?.flakyOnRerunCount !== undefined && flaky.flakyOnRerunCount > tests.failed + tests.errored) issue(["tests", "flakyOnRerunCount"], "a flaky test failed in this round, so there are at most as many as failing tests");
+  const causes = (tests as { failureCauses?: Array<{ testId: string }>; names?: Array<{ name: string; status: string }> } | undefined)?.failureCauses;
+  if (tests !== undefined && causes !== undefined) {
+    const failing = new Set((tests.names).filter((name) => name.status === "failed" || name.status === "errored").map((name) => name.name));
+    if (new Set(causes.map((cause) => cause.testId)).size !== causes.length) issue(["tests", "failureCauses"], "a failing test has one cause");
+    if (causes.some((cause) => !failing.has(cause.testId))) issue(["tests", "failureCauses"], "a cause belongs to a test that failed in this check");
+    // The worker answers every failing test of a check or none: when the names list is whole (below its cap) a cause is there for each one, so a stale or doctored list is refused.
+    if (tests.names.length < EVIDENCE_TEST_NAMES_MAX && causes.length !== failing.size) issue(["tests", "failureCauses"], "every failing test of the check has a cause");
+  }
   if (entry.coverage !== undefined && entry.coverage.linesCovered > entry.coverage.linesChanged) issue(["coverage", "linesCovered"], "covered lines are some of the changed lines");
   if (entry.findings !== undefined && entry.findings.newCount !== Object.values(entry.findings.bySeverity).reduce((sum, count) => sum + count, 0)) issue(["findings", "newCount"], "newCount is the severities together");
 }
