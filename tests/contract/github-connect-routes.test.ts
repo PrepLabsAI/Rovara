@@ -17,7 +17,7 @@ const CLIENT_SECRET = ["client", "secret", "canary"].join("-");
 const tokenFor = (name: string) => ["ghu", `${name.replace(/[^A-Za-z0-9]/g, "")}0123456789abcdefghij`].join("_");
 
 type Answer = Record<string, unknown> & { error: { code: string; message: string } };
-interface GitHubUser { id: number; login: string; installations: Array<{ id: number; app_id?: number; account: { login: string; id: number; type: string }; suspended_at?: string | null }>; admins?: string[]; membership?: Record<string, unknown>; pad?: number }
+interface GitHubUser { id: number; login: string; installations: Array<{ id: number; app_id?: number; account: { login: string; id: number; type: string }; suspended_at?: string | null }>; admins?: string[]; membership?: Record<string, unknown>; pad?: number; totalCount?: number }
 
 function fakeGithub(users: Record<string, GitHubUser>) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -38,7 +38,7 @@ function fakeGithub(users: Record<string, GitHubUser>) {
     const user = users[code]!;
     const path = url.replace("https://api.github.com", "");
     if (path === "/user") return json({ id: user.id, login: user.login });
-    if (path.startsWith("/user/installations?")) return json({ total_count: user.installations.length, installations: user.installations.map((row) => ({ app_id: Number(APP_ID), suspended_at: null, ...row })), ...(user.pad === undefined ? {} : { pad: "x".repeat(user.pad) }) });
+    if (path.startsWith("/user/installations?")) return json({ total_count: user.totalCount ?? user.installations.length, installations: user.installations.map((row) => ({ app_id: Number(APP_ID), suspended_at: null, ...row })), ...(user.pad === undefined ? {} : { pad: "x".repeat(user.pad) }) });
     const org = /^\/user\/memberships\/orgs\/([^/]+)$/.exec(path)?.[1];
     if (org !== undefined) {
       const organization = { login: org, id: user.installations.find((row) => row.account.login === org && row.account.type === "Organization")?.account.id };
@@ -358,14 +358,14 @@ describe("review round 1: every spend condition, GitHub control edges and limits
         if (command.constructor.name === "UpdateCommand" && command.input.Key?.pk?.startsWith("GITHUB_CONNECT#") === true) {
           const row = w.db.get(command.input.Key.pk, "META")!; w.db.set({ ...row, [field]: value });
         }
-        return send(command as never);
-      }) as typeof w.db.send;
+        return send(command);
+      });
       const answer = await w.claim({ state, code: "alice-code", installationId: 101 });
       expect(answer.status).toBe(403); expect(answer.body.error).toEqual(uniform);
       expect(w.github.requests).toHaveLength(0);
     });
   it("a pending admin invitation, or a membership of another organization with the same login, does not control it", async () => {
-    for (const membership of [{ state: "pending" }, { organization: { login: "acme", id: 1 } }]) {
+    for (const membership of [{ state: "pending" }, { organization: { login: "acme", id: 1 } }, { organization: undefined }]) {
       const w = world({ "p": { id: 7, login: "alice", installations: [ACME], admins: ["acme"], membership } });
       expect((await w.claim({ state: await w.startState(), code: "p", installationId: 101 })).body.error).toEqual(uniform);
     }
@@ -379,6 +379,8 @@ describe("review round 1: every spend condition, GitHub control edges and limits
     ["an answer over the byte cap", 101, { installations: [ACME], admins: ["acme"], pad: 1_000_001 }],
     ["more organizations than the cap", 101, { installations: Array.from({ length: 26 }, (_, i) => ({ id: 101 + i, account: { login: `org${i}`, id: 4000 + i, type: "Organization" } })), admins: Array.from({ length: 26 }, (_, i) => `org${i}`) }],
     ["a repeated installation id", 101, { installations: [ACME, ACME], admins: ["acme"] }],
+    ["a total that disagrees with the page", 101, { installations: [ACME], admins: ["acme"], totalCount: 2 }],
+    ["one login with two organization ids", 101, { installations: [ACME, { id: 102, account: { login: "acme", id: 1, type: "Organization" } }], admins: ["acme"] }],
   ] as const)("%s refuses the whole answer", async (_name, target, shape) => {
     const w = world({ "x": { id: 7, login: "alice", ...shape } as unknown as GitHubUser });
     expect((await w.claim({ state: await w.startState(), code: "x", installationId: target })).body.error).toEqual(uniform);
@@ -390,7 +392,7 @@ describe("review round 1: every spend condition, GitHub control edges and limits
     w.db.send = (async (command: { constructor: { name: string } }) => {
       if (command.constructor.name === "TransactWriteCommand") w.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
       return send(command as never);
-    }) as typeof w.db.send;
+    });
     expect(await w.bindings.claimPerson(A, { installationId: 9, accountLogin: "x" }, PERSON)).toBe("taken");
     expect(w.db.get("GITHUB_INSTALLATION#9", "BINDING")).toBeUndefined();
   });
@@ -400,6 +402,9 @@ describe("review round 1: every spend condition, GitHub control edges and limits
     w.as(PERSON_B, A, "member");
     expect((await w.read()).body.installations).toEqual([expect.objectContaining({ connectedBy: { kind: "person", personId: PERSON, name: "Ada Admin" } })]);
     w.db.set({ ...w.db.get(membershipKey(PERSON).pk, membershipKey(PERSON).sk)!, revokedAt: TIME });
+    expect((await w.read()).body.installations).toEqual([expect.objectContaining({ connectedBy: { kind: "person", personId: PERSON } })]);
+    // Moved to another company (live there): still not named on this company's page.
+    w.db.set({ ...w.db.get(membershipKey(PERSON).pk, membershipKey(PERSON).sk)!, revokedAt: undefined, companyId: B });
     expect((await w.read()).body.installations).toEqual([expect.objectContaining({ connectedBy: { kind: "person", personId: PERSON } })]);
   });
 });
