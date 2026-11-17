@@ -26,7 +26,7 @@ import type { ProjectSettingsHook } from "./project-settings.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, HostedPolicyHookSettingsSchema, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, isContextSourceStage,
   when, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -55,7 +55,8 @@ import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
-import type { TaskAccess } from "../core/task-flow/deps.js";
+import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
+import { WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../core/task-flow/stop-request.js";
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
@@ -618,6 +619,26 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     } catch { return undefined; }
   };
   const companyOfWorkspace = workspaceCompanyReader(inputs.documentClient, inputs.stateTableName);
+  // S2: the install administrator's cancel of a core task's workspace, in the workspace's own company's runtime (its discovery pointer and scoped record name the company; a company the
+  // core does not serve, or a workspace with no company, answers like a missing workspace).
+  if (coreTasks !== undefined && !settingsBlocked) {
+    const entry = coreTasks;
+    coreTasks = {
+      route: (request, caller) => entry.route(request, caller),
+      stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
+        const companyId = await companyOfWorkspace(workspaceId);
+        if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
+        let flow: TaskFlowDeps;
+        try {
+          flow = (await app.runtimeFor(companyId)).flow.deps;
+        } catch (error) {
+          if (error instanceof Error && error.name === "CoreEngineOffError") throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
+          throw error;
+        }
+        return await stopWorkspaceAsAdministrator(flow, workspaceId, administrator, authorize);
+      },
+    };
+  }
   const callbackHandlers = new Map<string, Promise<(request: BrokerRequest) => Promise<BrokerResponse>>>();
   const callbackHandlerFor = (companyId: OrgId): Promise<(request: BrokerRequest) => Promise<BrokerResponse>> => {
     let found = callbackHandlers.get(companyId);
