@@ -149,6 +149,21 @@ describe("PEOPLE for a task with no Slack share", () => {
     expect(h.people()).toBeUndefined();
   });
 
+  it("writes no People change when the task is shared while the change is being proved (the write's condition fails)", async () => {
+    const h = webPeople({}, "owner", "viewer");
+    const check = h.peopleDeps.checkTaskPerson!;
+    h.peopleDeps.checkTaskPerson = async (task, developerId) => {
+      const result = await check(task, developerId);
+      if (developerId === WREN_ID) h.db.set({ ...(webTask() as unknown as Record<string, unknown>), shared: true, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081", mode: "view", sharedReason: "requested", sharedAt: CREATED } });
+      return result;
+    };
+    const before = JSON.stringify(h.people());
+    await expect(changeTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A, {
+      requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", expectedPeopleRevision: 3, targetDeveloperId: WREN_ID, role: "owner",
+    })).rejects.toThrow();
+    expect(JSON.stringify(h.people())).toBe(before);
+  });
+
   it("answers a missing task, a shared task and a refused person with the same words when there are no Slack display reads", async () => {
     const missing = harness();
     const shared = harness({ task: webTask({ shared: true, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081", mode: "view", sharedReason: "requested", sharedAt: CREATED } }) });
