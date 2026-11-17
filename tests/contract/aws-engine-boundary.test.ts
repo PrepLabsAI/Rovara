@@ -5,7 +5,9 @@ import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/leg
 import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, sharedTaskKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { INTENT_NOT_WAITING_MESSAGE, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { readTask as readCoreTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
@@ -43,7 +45,7 @@ beforeAll(async () => { await loadSlackBroker(); });
 // Every suffix routeDeveloperTaskRequest serves after `/v1/dev/tasks/<id>`, written out by hand.
 const ROUTE_SUFFIXES = ["", "/events", "/plan", "/messages", "/diff", "/comments", "/people", "/people/role", "/people/take-ownership", "/people/requests/abc", "/readers", "/readers/abc",
   "/continue", "/cancel", "/close", "/pull-requests", "/share", "/workflow/decision", "/workflow/retry", "/workflow/review", "/workflow/publish-retry", "/workflow/keep-pull-requests",
-  "/workflow/send-back", "/workflow/review-findings", "/workflow/feedback", "/workflow/feedback-decision", "/workflow/feedback-retry", "/canvas-closeout/retry", "/e2e-publication-context"];
+  "/workflow/send-back", "/workflow/review-findings", "/workflow/feedback", "/workflow/feedback-decision", "/workflow/feedback-retry", "/canvas-closeout/retry", "/e2e-publication-context", "/answers"];
 
 describe("the owner of each operation, for every stamp", () => {
   it("names an operation for every developer task route, and none for anything else", () => {
@@ -152,10 +154,10 @@ async function registerProject(world: FakeWorld, companyId: string): Promise<voi
   await world.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
 }
 
-function appOver(world: FakeWorld, access: TaskFlowDeps["access"] = createOwnerTaskAccess()): CoreHostApp {
+function appOver(world: FakeWorld, access: TaskFlowDeps["access"] = createOwnerTaskAccess(), understandFirst = false): CoreHostApp {
   return createCoreHostApp({
     env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI, ...(understandFirst ? { flowOptions: { understandFirst: true } } : {}) }),
   });
 }
 
@@ -177,14 +179,14 @@ const ownerRule = (): TaskFlowDeps["access"] => ({
   ownerActing: async (principal, task) => (principal.personId === task.developerId || developerIdOf(principal) === task.developerId ? { actorId: task.ownerKey } : undefined),
 });
 
-async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean; newTasksOnWorkflow?: true } = {}) {
+async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean; newTasksOnWorkflow?: true; understand?: true } = {}) {
   const world = createFakeWorld();
   await registerProject(world, FAKE_COMPANY);
   await registerProject(world, OTHER);
-  const app = appOver(world, options.actions === true ? ownerRule() : createOwnerTaskAccess());
+  const app = appOver(world, options.actions === true ? ownerRule() : createOwnerTaskAccess(), options.understand === true);
   const owner = localOwnerPrincipal({ companyId: FAKE_COMPANY });
   const runtime = await app.runtimeFor(FAKE_COMPANY);
-  const { task } = await runtime.flow.start({ principal: owner, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+  const { task } = await runtime.flow.start({ principal: owner, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, ...(options.understand === true ? {} : { workflowPath: "QUICK" as const }) });
   const principals = new Map<string, DeployedCaller>([[MAYA.developerId, { principal: owner, client: "cli" }], [OMAR.developerId, { principal: localOwnerPrincipal({ companyId: OTHER }), client: "cli" }]]);
   const members = new Map<string, CompanyMembership>([[`${owner.personId}${FAKE_COMPANY}`, { companyId: FAKE_COMPANY, role: "owner" }], [`${owner.personId}${OTHER}`, { companyId: OTHER, role: "owner" }]]);
   // OMAR signed in to the broker but unknown to the core: no principal for him, or a principal with no membership.
@@ -350,6 +352,84 @@ describe("a core task on the AWS developer routes", () => {
     expect(answer.status).toBeGreaterThanOrEqual(500);
     expect(JSON.stringify(answer.body)).not.toContain("Add a /health endpoint");
     expect(workspaceReads()).toEqual([]);
+  });
+});
+
+describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id}/answers` (S3)", () => {
+  const ANSWERS = [{ questionId: "q1", optionId: "a" }];
+  /** Understand asked one question on the core task (as its callback would record it). */
+  async function asked(world: FakeWorld, app: CoreHostApp, taskId: string): Promise<void> {
+    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    const now = new Date(world.clock.now).toISOString();
+    let record = (await readCoreTask(deps, taskId))!;
+    if (record.workflow?.state === "READY") { expect(await commitWorkflow(deps, record, startWorkflowUnderstand(record.workflow, now))).toBe(true); record = (await readCoreTask(deps, taskId))!; }
+    const next = recordIntentAssessment(record.workflow, { expectedRevision: record.workflow!.revision, now, assessment: { kind: "questions", restatement: "Add a health endpoint.", questions: [{ id: "q1", text: "Which path?", options: [{ id: "a", label: "/health" }, { id: "b", label: "/healthz" }] }] } });
+    expect(await commitWorkflow(deps, record, next)).toBe(true);
+  }
+
+  it("with the company's owner rule wired, the owner answers a core task through the core: 200 and { task } in the developer task view; a repeat answers the same; no AWS reader touches its workspace", async () => {
+    const { dev, task, world, app, workspaceReads, coreRead } = await coreWorld({ actions: true, understand: true });
+    await asked(world, app, task.taskId);
+    const requestId = randomUUID();
+    const answer = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/answers`, { requestId, round: 1, answers: ANSWERS });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({ task: { taskId: task.taskId } });
+    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    expect((await readCoreTask(deps, task.taskId))!.workflow!.intent!.answers).toHaveLength(1);
+    const again = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/answers`, { requestId, round: 1, answers: ANSWERS });
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual(JSON.parse((await coreRead())!.body));
+    expect((await readCoreTask(deps, task.taskId))!.workflow!.intent!.answers).toHaveLength(1);
+    expect(workspaceReads()).toEqual([]);
+  });
+
+  it("another company's caller is answered exactly like a task id that does not exist, for every body; nothing is answered", async () => {
+    const { dev, task, world, app } = await coreWorld({ actions: true, understand: true });
+    await asked(world, app, task.taskId);
+    for (const body of [{ requestId: randomUUID(), round: 1, answers: ANSWERS }, {}, [1], null, undefined, { requestId: "x", round: 0, answers: [] }]) {
+      const missingId = randomUUID();
+      const theirs = await dev(OMAR, "POST", `/v1/dev/tasks/${task.taskId}/answers`, body);
+      const missing = await dev(OMAR, "POST", `/v1/dev/tasks/${missingId}/answers`, body);
+      expect(theirs.status, JSON.stringify(body)).toBe(missing.status);
+      expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), JSON.stringify(body)).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
+      expect(JSON.stringify(theirs.body)).not.toContain(FAKE_COMPANY);
+    }
+    expect((await readCoreTask((await app.runtimeFor(FAKE_COMPANY)).flow.deps, task.taskId))!.workflow!.intent!.answers).toHaveLength(0);
+  });
+
+  it("without the company's owner rule the owner reads 'not on the core yet' (fixed words), and nothing is answered", async () => {
+    const { dev, task, world, app } = await coreWorld({ understand: true });
+    await asked(world, app, task.taskId);
+    const answer = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/answers`, { requestId: randomUUID(), round: 1, answers: ANSWERS });
+    expect(answer.status).toBe(404);
+    expect(answer.body).toEqual({ error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } });
+    expect((await readCoreTask((await app.runtimeFor(FAKE_COMPANY)).flow.deps, task.taskId))!.workflow!.intent!.answers).toHaveLength(0);
+  });
+
+  it("golden: an unstamped (workflow) task's answers route answers and writes exactly as with no core entry on the install: 'not waiting' for its owner, the missing task's answer for another company", async () => {
+    const legacyAnswers = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {
+      const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
+      const taskId = (started.body.task as { taskId: string }).taskId;
+      const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
+      const writes: string[] = [];
+      const stop = harness.db.onWrite((change) => writes.push(Object.keys(change).join()));
+      const answers: unknown[] = [];
+      for (const body of [{ requestId: "11111111-1111-4111-8111-111111111111", round: 1, answers: ANSWERS }, {}, null]) {
+        answers.push(await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/answers`, body));
+        answers.push(await harness.dev(OMAR, "POST", `/v1/dev/tasks/${taskId}/answers`, body));
+      }
+      stop();
+      // The broker stamps each answer with its own request id (coreWorld's `dev` drops it); everything else is compared.
+      const scrub = (value: unknown) => [taskId, workspaceId].reduce((text, id) => text.replaceAll(id, "<id>"), JSON.stringify(value, (key, field: unknown) => (key === "requestId" ? undefined : field)));
+      return { answers: answers.map(scrub), writes };
+    };
+    const without = await legacyAnswers(await createDeveloperTaskBroker());
+    const withCore = await legacyAnswers(await coreWorld({ actions: true, newTasksOnWorkflow: true }));
+    expect(withCore.answers).toEqual(without.answers);
+    expect(withCore.writes).toEqual(without.writes);
+    expect(without.writes).toEqual([]);
+    expect(JSON.parse(without.answers[0]!)).toEqual({ status: 409, body: { error: { code: "INTENT_NOT_WAITING", message: INTENT_NOT_WAITING_MESSAGE } } });
+    expect(JSON.parse(without.answers[1]!)).toMatchObject({ status: 404 });
   });
 });
 

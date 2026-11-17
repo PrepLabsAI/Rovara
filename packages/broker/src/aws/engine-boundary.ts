@@ -32,7 +32,7 @@ export interface EngineStateTable {
 /** The developer task routes, each with the area of the work it touches. The owner is decided by `entryOwner`, not by this area (see the header). */
 export const TASK_ENTRY_AREAS = {
   read: "flow", events: "flow", plan: "flow", messages: "flow", comments: "flow", people: "flow", "people/role": "flow", "people/take-ownership": "flow", "people/requests": "flow",
-  readers: "flow", share: "flow", cancel: "flow", close: "flow", "workflow/decision": "flow", "canvas-closeout/retry": "flow",
+  readers: "flow", share: "flow", cancel: "flow", close: "flow", "workflow/decision": "flow", "canvas-closeout/retry": "flow", answers: "flow",
   continue: "build", "workflow/retry": "build", "workflow/review": "build", "workflow/send-back": "build", "workflow/review-findings": "build",
   diff: "merge", "pull-requests": "merge", "workflow/publish-retry": "merge", "workflow/keep-pull-requests": "merge", "workflow/feedback": "merge", "workflow/feedback-decision": "merge",
   "workflow/feedback-retry": "merge", "e2e-publication-context": "merge",

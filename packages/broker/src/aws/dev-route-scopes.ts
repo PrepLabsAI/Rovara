@@ -79,6 +79,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/send-back", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/review-findings", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-retry", requires: "tasks:act" },
+  // S3: the owner's answers to Understand's questions (a core task's; a workflow task has none to answer). The route keeps it to the task's owner.
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/answers", requires: "tasks:act" },
   // #644: a comment, or steering the running step (which the route itself keeps to the task's owner).
   { method: "POST", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:act" },
