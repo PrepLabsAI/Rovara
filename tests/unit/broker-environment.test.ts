@@ -37,7 +37,7 @@ const NAMES = {
 } as const satisfies Record<BrokerNameKey, string>;
 const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
-  workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled",
+  workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
   coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off",
   coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6",
 } as const satisfies Record<BrokerSettingKey, string>;
@@ -129,6 +129,8 @@ describe("hydrateBrokerEnvironment: a named environment's broker", () => {
       SLACK_MEMBER_WORKSPACE_LIMIT: "3", SLACK_ORGANIZATION_WORKSPACE_LIMIT: "20", AGENTX_TASK_PEOPLE_CHANGES_ENABLED: "false", AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: "true",
       AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: "false", AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: "false", SLACK_TEAM_ID: "", DEVELOPER_SIGNIN_SLACK: "enabled",
       DEVELOPER_SIGNIN_SLACK_SINCE: "1794693600", DEVELOPER_OIDC_SINCE: "0", MCP_CONFIRM_ELICITATION: "enabled",
+      // DEC 254h: GitHub sign-in's switch and since, and the channel adapters' switch packed to make room for them.
+      DEVELOPER_SIGNIN_GITHUB: "disabled", DEVELOPER_GITHUB_SINCE: "0", CHANNEL_ADAPTERS: "enabled",
     });
   });
 
@@ -147,6 +149,13 @@ describe("hydrateBrokerEnvironment: a named environment's broker", () => {
     });
     expect(env.CONNECTOR_SECRET_PREFIX).toBe("agentx/staging/connectors/");
     expect(env.AGENTX_ALARM_PREFIX).toBe("agentx-staging-");
+  });
+
+  it("turns the company reads on in every named broker, and leaves the legacy install's environment without them (DEC 254h)", () => {
+    expect(hydrated(packed()).COMPANY_READS).toBe("enabled");
+    expect(hydrated({ ...SCOPE, [BROKER_NAMES_VARIABLE]: "" }).COMPANY_READS).toBe("enabled");
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: settings(SETTINGS) }).COMPANY_READS).toBeUndefined();
+    expect(hydrated({ ...SCOPE }).COMPANY_READS).toBeUndefined();
   });
 
   it("builds in the region's own partition and hosts", () => {
