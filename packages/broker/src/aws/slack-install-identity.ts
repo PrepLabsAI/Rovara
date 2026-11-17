@@ -5,14 +5,10 @@
 //   exchange { code, redirectUri }    -> oauth.v2.access, checked (the bot token comes back to the broker in memory, for it to store or revoke after its binding check)
 //   revoke { botToken }               -> auth.revoke
 //   store { companyId, teamId, botToken } / revoke-stored { companyId, teamId } / drop { companyId, teamId } -> the token store's writer
-// Guided onboarding PR 5 (slack-channel-link.ts): the company's own stored bot token, for its own workspace only (the broker names the company and team from the binding):
-//   channels { companyId, teamId, cursor? }    -> conversations.list: one page of public channels and the private ones the bot is in, shared channels left out
-//   channel { companyId, teamId, channelId }   -> conversations.info: found or not (a private channel the bot is not in is "not found" to a bot token)
-//   join { companyId, teamId, channelId }      -> conversations.join (public channels)
 // Nothing here logs an invoke's payload or Slack's answer.
 import { CreateSecretCommand, GetSecretValueCommand, PutSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { z } from "zod";
-import { OrgIdSchema, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { OrgIdSchema, SlackUserIdSchema } from "@agentx/contracts";
 import { slackWorkspaceTeam } from "./slack-workspace-binding.js";
 import { slackWebFetch } from "./slack-web.js";
 
@@ -118,70 +114,6 @@ export function slackInstallSecretsFromSecretsManager(client: { send(command: un
   };
 }
 
-// ---- Guided onboarding PR 5: the company's channels, with the company's own token -----------------------------------------------------------------------------------
-
-/** One channel as the picker and the link check see it. Shared channels (Slack Connect, org-shared) are never offered or linked: another organization's people are in them. */
-export interface SlackChannelView { id: string; name: string; isPrivate: boolean; isMember: boolean; isArchived: boolean; isShared: boolean }
-const ChannelName = z.string().min(1).max(80).regex(/^[\p{L}\p{N}_.-]+$/u);
-const Cursor = z.string().min(1).max(512).regex(/^[A-Za-z0-9=+/_-]+$/);
-/** The most channels one picker page carries (Slack's own page limit for conversations.list is 1000; it recommends at most 200). */
-export const SLACK_CHANNEL_PAGE_MAX = 200;
-
-/** A conversations.* channel object, checked. Undefined for anything that is not one channel of `teamId` (an IM, a group DM, an unreadable shape). */
-function channelOf(value: unknown, teamId: string): SlackChannelView | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const channel = value as Record<string, unknown>;
-  const id = SlackChannelIdSchema.safeParse(channel.id);
-  const name = ChannelName.safeParse(channel.name);
-  if (!id.success || !name.success || channel.is_im === true || channel.is_mpim === true || (channel.is_channel !== true && channel.is_group !== true && channel.is_private !== true)) return undefined;
-  // A channel seen from another workspace's context is shared, whatever its flags say.
-  const otherContext = channel.context_team_id !== undefined && channel.context_team_id !== teamId;
-  return {
-    id: id.data, name: name.data, isPrivate: channel.is_private === true, isMember: channel.is_member === true, isArchived: channel.is_archived === true,
-    isShared: channel.is_ext_shared === true || channel.is_shared === true || channel.is_org_shared === true || channel.is_pending_ext_shared === true || otherContext,
-  };
-}
-
-async function slackRead(fetchFn: typeof fetch, token: string, method: string, query: Record<string, string>): Promise<Record<string, unknown>> {
-  const response = await slackWebFetch(method, token, { query, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: "error" }, fetchFn);
-  const text = await response.text();
-  if (text.length > 2_000_000) throw new Error("too large");
-  const answer = JSON.parse(text) as unknown;
-  if (answer === null || typeof answer !== "object" || Array.isArray(answer)) throw new Error("shape");
-  return answer as Record<string, unknown>;
-}
-
-/** conversations.list, one page: the bot sees public channels and the private ones it is in (https://docs.slack.dev/reference/methods/conversations.list). */
-export async function listSlackChannels(fetchFn: typeof fetch, token: string, teamId: string, cursor: string | undefined): Promise<{ channels: SlackChannelView[]; nextCursor?: string }> {
-  const answer = await slackRead(fetchFn, token, "conversations.list", { types: "public_channel,private_channel", exclude_archived: "true", limit: String(SLACK_CHANNEL_PAGE_MAX), ...(cursor === undefined ? {} : { cursor }) });
-  if (answer.ok !== true || !Array.isArray(answer.channels) || answer.channels.length > SLACK_CHANNEL_PAGE_MAX) throw new Error("list");
-  const channels = answer.channels.map((value) => channelOf(value, teamId)).filter((channel): channel is SlackChannelView => channel !== undefined)
-    .filter((channel) => !channel.isShared && !channel.isArchived && (!channel.isPrivate || channel.isMember));
-  const next = Cursor.safeParse((answer.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor);
-  return { channels, ...(next.success ? { nextCursor: next.data } : {}) };
-}
-
-/** conversations.info: the channel as the company's bot sees it, or "not_found" (another workspace's channel, or a private one the bot is not in). Anything else throws. */
-export async function readSlackChannel(fetchFn: typeof fetch, token: string, teamId: string, channelId: string): Promise<SlackChannelView | "not_found"> {
-  const answer = await slackRead(fetchFn, token, "conversations.info", { channel: channelId });
-  if (answer.ok !== true) {
-    if (answer.error === "channel_not_found") return "not_found";
-    throw new Error("info");
-  }
-  const channel = channelOf(answer.channel, teamId);
-  if (channel === undefined || channel.id !== channelId) throw new Error("info");
-  return channel;
-}
-
-/** conversations.join (public channels only; https://docs.slack.dev/reference/methods/conversations.join). True when the bot is in the channel afterwards. */
-export async function joinSlackChannel(fetchFn: typeof fetch, token: string, channelId: string): Promise<boolean> {
-  try {
-    const response = await slackWebFetch("conversations.join", token, { body: { channel: channelId }, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: "error" }, fetchFn);
-    const answer = await response.json() as { ok?: unknown };
-    return answer.ok === true;
-  } catch { return false; }
-}
-
 // ---- The invoke ---------------------------------------------------------------------------------------------------------------------------------------------------
 
 const Team = z.string().max(32).refine(slackWorkspaceTeam);
@@ -193,9 +125,6 @@ export const SlackInstallRequestSchema = z.discriminatedUnion("op", [
   z.object({ kind: z.literal("slack-install"), op: z.literal("store"), companyId: OrgIdSchema, teamId: Team, botToken: Token }).strict(),
   z.object({ kind: z.literal("slack-install"), op: z.literal("revoke-stored"), companyId: OrgIdSchema, teamId: Team }).strict(),
   z.object({ kind: z.literal("slack-install"), op: z.literal("drop"), companyId: OrgIdSchema, teamId: Team }).strict(),
-  z.object({ kind: z.literal("slack-install"), op: z.literal("channels"), companyId: OrgIdSchema, teamId: Team, cursor: Cursor.optional() }).strict(),
-  z.object({ kind: z.literal("slack-install"), op: z.literal("channel"), companyId: OrgIdSchema, teamId: Team, channelId: SlackChannelIdSchema }).strict(),
-  z.object({ kind: z.literal("slack-install"), op: z.literal("join"), companyId: OrgIdSchema, teamId: Team, channelId: SlackChannelIdSchema }).strict(),
 ]);
 export type SlackInstallRequest = z.infer<typeof SlackInstallRequestSchema>;
 
@@ -234,23 +163,9 @@ export async function handleSlackInstallRequest(deps: SlackInstallIdentityDepend
         return { ok: true };
       }
       case "drop": await deps.secrets.dropToken(request.companyId, request.teamId); return { ok: true };
-      case "channels": case "channel": case "join": {
-        // Only this company's own token for this team: the name is built from both (slackWorkspaceSecretName). None stored (or dropped): nothing is asked of Slack.
-        const token = await deps.secrets.readToken(request.companyId, request.teamId);
-        if (token === undefined) return { ok: false, error: "no_token" };
-        if (request.op === "channels") return { ok: true, ...await listSlackChannels(deps.fetch, token, request.teamId, request.cursor) };
-        if (request.op === "channel") { const channel = await readSlackChannel(deps.fetch, token, request.teamId, request.channelId); return channel === "not_found" ? { ok: true, found: false } : { ok: true, found: true, channel }; }
-        return { ok: true, joined: await joinSlackChannel(deps.fetch, token, request.channelId) };
-      }
     }
   } catch { return { ok: false, error: "failed" }; }
 }
-
-const ChannelReply = z.object({ id: SlackChannelIdSchema, name: ChannelName, isPrivate: z.boolean(), isMember: z.boolean(), isArchived: z.boolean(), isShared: z.boolean() }).strict();
-const ChannelsReply = z.object({ ok: z.literal(true), channels: z.array(ChannelReply).max(SLACK_CHANNEL_PAGE_MAX), nextCursor: Cursor.optional() }).strict();
-const ChannelInfoReply = z.union([z.object({ ok: z.literal(true), found: z.literal(false) }).strict(), z.object({ ok: z.literal(true), found: z.literal(true), channel: ChannelReply }).strict()]);
-/** What the broker's channel calls answer when the company has no stored token (operator-bound, uninstalled, or dropped). */
-export class SlackNoToken extends Error { constructor() { super("no token"); this.name = "SlackNoToken"; } }
 
 const ExchangeReply = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("granted"), grant: z.object({ teamId: Team, teamName: TeamName.optional(), botToken: Token, botUserId: SlackUserIdSchema, installerSlackUserId: SlackUserIdSchema }).strict() }).strict(),
@@ -280,23 +195,5 @@ export function slackInstallThroughLambda(invoke: (payload: Uint8Array) => Promi
     store: (companyId: string, teamId: string, botToken: string) => done({ kind: "slack-install", op: "store", companyId, teamId, botToken }),
     revokeStored: (companyId: string, teamId: string) => done({ kind: "slack-install", op: "revoke-stored", companyId, teamId }),
     drop: (companyId: string, teamId: string) => done({ kind: "slack-install", op: "drop", companyId, teamId }),
-    // Guided onboarding PR 5. SlackNoToken when the company has no stored token; any other failure throws.
-    async channels(companyId: string, teamId: string, cursor?: string): Promise<{ channels: SlackChannelView[]; nextCursor?: string }> {
-      const reply = await call({ kind: "slack-install", op: "channels", companyId, teamId, ...(cursor === undefined ? {} : { cursor }) });
-      if (reply.ok === false && reply.error === "no_token") throw new SlackNoToken();
-      const { channels, nextCursor } = ChannelsReply.parse(reply);
-      return { channels, ...(nextCursor === undefined ? {} : { nextCursor }) };
-    },
-    async channel(companyId: string, teamId: string, channelId: string): Promise<SlackChannelView | "not_found"> {
-      const reply = await call({ kind: "slack-install", op: "channel", companyId, teamId, channelId });
-      if (reply.ok === false && reply.error === "no_token") throw new SlackNoToken();
-      const parsed = ChannelInfoReply.parse(reply);
-      return parsed.found ? parsed.channel : "not_found";
-    },
-    async join(companyId: string, teamId: string, channelId: string): Promise<boolean> {
-      const reply = await call({ kind: "slack-install", op: "join", companyId, teamId, channelId });
-      if (reply.ok === false && reply.error === "no_token") throw new SlackNoToken();
-      return reply.ok === true && reply.joined === true;
-    },
   };
 }

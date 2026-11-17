@@ -192,7 +192,14 @@ describe("the broker's core root, switch on", () => {
     const off = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
     expect(withCoreRoutes(config, off)).toBe(config);
     const on = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, fakeTables().client));
-    expect(withCoreRoutes(config, on)).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks, coreApp: on.coreApp });
+    const served = withCoreRoutes(config, on) as typeof config & { projectArchiveTakesEffect?: (companyId: string) => boolean };
+    expect(served).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks, coreApp: on.coreApp, projectArchiveTakesEffect: on.projectArchiveTakesEffect });
+    // Guided onboarding PR 16: an archive takes effect only for a company whose new tasks the switch sends to the core.
+    expect(served.projectArchiveTakesEffect?.(ORG)).toBe(true);
+    const forOne = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: ORG }, fakeTables().client));
+    expect(forOne.projectArchiveTakesEffect?.(ORG)).toBe(true);
+    expect(forOne.projectArchiveTakesEffect?.(OTHER)).toBe(false);
+    expect(off.projectArchiveTakesEffect).toBeUndefined();
     expect(withCoreRoutes(config, { coreTasks: on.coreTasks, coreApp: undefined })).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks });
     expect(config).toEqual({ issuer: "https://api.example" });
   });

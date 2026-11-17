@@ -29,11 +29,16 @@ import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 /** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
 export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[]; companyId?: string;
   /** Lane ID part 2: the client asked for a step-up (`acr_values=step-up`). The sign-in at the provider then only says who it is; Code's own factor follows. */
-  stepUp?: true }
+  stepUp?: true;
+  /** DEC 254h: the SHA-256 of the invite link secret this sign-in carries (`invite=`, with `company=`). The secret itself is never stored. */
+  inviteHash?: string }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
-  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
+  email?: string; slackUserId?: string;
+  /** DEC 254e: the Slack workspace (id, and its name when Slack gives one) of a Slack sign-in with Code's company layer on. Never a company. */
+  slackTeamId?: string; slackTeamName?: string;
+  firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
   /**
    * ID-STEPUP-FOLLOWUPS (a): where step-up codes go. Captured once, from the verified email of the person's FIRST sign-in, or set by a company admin; a later sign-in never changes it,
    * whatever the provider now says (`email` follows the provider; this does not). Absent: no email factor until an admin sets one.
@@ -43,13 +48,17 @@ export interface DeveloperRecord { developerId: string; provider: DeveloperSignI
   factorEmailSetBy?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
 
 /**
  * What a code carries into its session. `stepUpAt` (epoch seconds) and `stepUpMethod` (lane ID part 2): when and how the person last proved it was them with a factor Code owns.
  * Set only by a completed step-up; a refresh carries them over unchanged, so the step-up ages and is never renewed by a refresh.
+ * DEC 254b (a): `installMethod` marks a session bound to a company other than the built-in one that was signed in through the install's own OIDC
+ * (the shared sign-in method), because that company has no sign-in of its own. Written only by the sign-in server; every mint, refresh and broker
+ * check refuses it once the company has its own issuer, and refuses an unmarked session for a company that has none.
+ * DEC 254b (f): `joinedByInvite` is set only by the sign-in server, when this sign-in's own join consumed a live pre-approval for the session's company.
  */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
 
 /**
  * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
@@ -306,7 +315,11 @@ export class DeveloperSignInStore {
     return item === undefined ? undefined : strip(item);
   }
 
-  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string): Promise<DeveloperRecord> {
+  /**
+   * `companyless` (DEC 253z): a sign-in with no company. Its record is marked, so it never reads as a legacy person's (who would join the built-in
+   * company), and its email goes in no company's email index.
+   */
+  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string, options: { companyless?: true } = {}): Promise<DeveloperRecord> {
     // One atomic update, not a read-then-overwrite: a concurrent revocation (or another sign-in)
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
@@ -322,6 +335,7 @@ export class DeveloperSignInStore {
       // ID-STEPUP-FOLLOWUPS (a): a mark only the write that first sets it holds (two sign-ins in one millisecond have different marks).
       "firstSignInMark = if_not_exists(firstSignInMark, :mark)",
       "revoked = if_not_exists(revoked, :false)",
+      ...(options.companyless === true ? ["companyless = :true"] : []),
     ];
     const removeClauses: string[] = [];
     const values: Record<string, unknown> = {
@@ -332,11 +346,18 @@ export class DeveloperSignInStore {
       ":at": at,
       ":false": false,
       ":mark": mark,
+      ...(options.companyless === true ? { ":true": true } : {}),
     };
     if (profile.email === undefined) removeClauses.push("email");
     else { setClauses.push("email = :email"); values[":email"] = profile.email; }
     if (profile.slackUserId === undefined) removeClauses.push("slackUserId");
     else { setClauses.push("slackUserId = :slackUserId"); values[":slackUserId"] = profile.slackUserId; }
+    // DEC 254e: written only when given (company layer on), so every other sign-in's write is exactly as before.
+    if (profile.slackTeamId !== undefined) {
+      setClauses.push("slackTeamId = :slackTeamId"); values[":slackTeamId"] = profile.slackTeamId;
+      if (profile.slackTeamName === undefined) removeClauses.push("slackTeamName");
+      else { setClauses.push("slackTeamName = :slackTeamName"); values[":slackTeamName"] = profile.slackTeamName; }
+    }
 
     const update = (withName: boolean) => this.input.documentClient.send(new UpdateCommand({
       TableName: this.input.tableName,
@@ -355,7 +376,7 @@ export class DeveloperSignInStore {
     }
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
-      await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+      if (options.companyless !== true) await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
       // ID-STEPUP-FOLLOWUPS (a): the factor email is captured on the FIRST sign-in only. Both conditions hold only for the write that created the record: if_not_exists keeps an earlier
       // first sign-in's time and mark (a record from before the mark has an older time), so a later sign-in, with whatever email the provider now says, never sets or moves it.
       try {
@@ -452,6 +473,8 @@ export class DeveloperSignInStore {
       ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
       ...(record.stepUpAt === undefined || record.stepUpMethod === undefined ? {} : { stepUpAt: record.stepUpAt, stepUpMethod: record.stepUpMethod }),
       ...(record.companyId === undefined ? {} : { companyId: record.companyId }),
+      ...(record.installMethod === true ? { installMethod: true as const } : {}),
+      ...(record.joinedByInvite === true ? { joinedByInvite: true as const } : {}),
     };
   }
 
