@@ -25,7 +25,7 @@ import { Construct } from "constructs";
 import {
   CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
-  coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
+  coreDispatchDeadLetterName, coreDispatchQueueName, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
@@ -66,6 +66,7 @@ export class CoreEngine extends Construct {
   private readonly companyDayCap: CfnParameter;
   private readonly policyHook: CfnParameter;
   private readonly lessons: CfnParameter;
+  private readonly systemRuns: CfnParameter;
   private readonly modelGatewayHost: CfnParameter;
   private readonly agentModel: CfnParameter;
   /** DEC 254z-amend3: the install's test services switch ("1" on, the default; "0" off), packed for the broker and the dispatcher (`td`) and given to the session steps whole. */
@@ -78,6 +79,7 @@ export class CoreEngine extends Construct {
   readonly invokeRole: iam.Role;
   readonly schedules: scheduler.CfnSchedule[] = [];
   readonly isOn: CfnCondition;
+  readonly systemRunsOn: CfnCondition;
   private readonly brokerFunctionArn: string;
 
   constructor(scope: Construct, id: string, props: CoreEngineProps) {
@@ -105,6 +107,10 @@ export class CoreEngine extends Construct {
       addBrokerSetting(broker, props.naming, key, value);
       addPackedSetting(dispatcher, key, value);
     }
+    // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs, default off (written out: tests/contract/config-keys.test.ts reads the declaration). BROKER ONLY: the dispatcher refuses every access question (it holds no
+    // people), so it never reads this flag. It also holds the hourly `upkeep-night` schedule off (below).
+    this.systemRuns = new CfnParameter(stack, "CoreSystemRuns", { type: "String", default: SYSTEM_RUNS_DEFAULT, maxLength: 64, allowedPattern: SYSTEM_RUNS_PARAMETER_PATTERN, description: "Core system-started runs (Rovara's own setup re-check and nightly check): off (the default), on, or on:<company id>[:<company id>]. Also enables the hourly upkeep-night schedule" });
+    addBrokerSetting(broker, props.naming, "coreSystemRuns", this.systemRuns.valueAsString);
     addBrokerSetting(broker, props.naming, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     addPackedSetting(dispatcher, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     broker.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
@@ -172,7 +178,10 @@ export class CoreEngine extends Construct {
     });
     this.invokeRole.addToPolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
     const state = Token.asString(Fn.conditionIf(this.isOn.logicalId, "ENABLED", "DISABLED"));
-    for (const entry of CORE_JOB_SCHEDULES) this.schedules.push(this.schedule(entry, state));
+    // The upkeep night (L4-P1) is enabled only while the engine is not off AND system runs are not off: the resource is there, its state follows the flag (default DISABLED, so merging this changes nothing).
+    this.systemRunsOn = new CfnCondition(this, "CoreSystemRunsIsOn", { expression: Fn.conditionAnd(Fn.conditionNot(Fn.conditionEquals(this.parameter.valueAsString, "off")), Fn.conditionNot(Fn.conditionEquals(this.systemRuns.valueAsString, "off"))) });
+    const upkeepState = Token.asString(Fn.conditionIf(this.systemRunsOn.logicalId, "ENABLED", "DISABLED"));
+    for (const entry of CORE_JOB_SCHEDULES) this.schedules.push(this.schedule(entry, entry.job === UPKEEP_NIGHT_JOB ? upkeepState : state));
   }
 
   private schedule(entry: CoreJobSchedule, state: string): scheduler.CfnSchedule {

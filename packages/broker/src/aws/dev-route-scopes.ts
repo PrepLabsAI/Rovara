@@ -226,6 +226,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/stop", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
+  // L4-P1: "Re-check setup" (core-host/setup-run-routes.ts `routeHostedSetupCheck`): the project's plain setup check, started by a person. Full access only; any live role on the project reads where it stands; a live company owner or
+  // admin, or the project's administrator, starts it (the audit record first). No AI, no model key.
+  { method: "GET", path: "/v1/app/projects/{project}/setup-check", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-check", requires: "full" },
   // Wiki W0: a project's free file map (code host listings only: no model call, nothing spent or stored): full access only, then a live company owner or admin, or the project's administrator, to make one;
   // any person with a role on the project reads a kept one.
   { method: "GET", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },

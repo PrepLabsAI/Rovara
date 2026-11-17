@@ -193,6 +193,8 @@ export const BROKER_SETTINGS = {
   coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },
   coreCompanyDayCap: { code: "cd", variable: "ROVARA_CORE_COMPANY_DAY_CAP_USD" },
   coreLessons: { code: "cl", variable: "ROVARA_CORE_LESSONS" },
+  // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs (the stack parameter CoreSystemRuns, default off).
+  coreSystemRuns: { code: "sy", variable: "ROVARA_CORE_SYSTEM_RUNS" },
   // Core switch-on blocker (2026-11-17): the switch, and the model gateway's host and agent model (the stack parameters CoreEngine, CoreModelGatewayHost and CoreAgentModel), packed
   // to make room for the gateway settings in the broker's 4 KB.
   coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },

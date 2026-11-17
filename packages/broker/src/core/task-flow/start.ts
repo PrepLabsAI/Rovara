@@ -116,7 +116,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   };
 
   // Access first, from the identity adapter's own answer; it is asked again at every step that spends.
-  const verdict = await deps.access.checkStart(principal, request.project);
+  const verdict = await deps.access.checkStart(principal, request.project, run?.setupAgent !== undefined ? "setup_agent" : run?.wikiBuild !== undefined ? "wiki_build" : undefined);
   if (!verdict.allowed) return refused(agentXError(verdict.code, verdict.message));
   if (request.agent !== undefined || request.input !== undefined) return refused(agentXError("CONFIG_INVALID", "agents are not set up in this deployment"));
   if (request.shareToChannel === true || request.shareMode !== undefined || request.channel !== undefined) return refused(agentXError("CONFIG_INVALID", "sharing a task to a channel is not set up in this deployment"));
@@ -174,7 +174,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt, ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
   // L4-DR (DEC 254z c): the free drift check. No model runs; the base commit's setup files are compared with the snapshot saved at the setup's approval, and a change starts the project's own setup check by itself (once per
   // commit, under the monthly cap on automatic runs). The task is not held here: only its first coding run waits for the result. A setup run (it IS the fix) is never checked; any fault is logged and the start goes on.
-  const driftItems = run?.setupAgent === undefined ? await setupDriftAtStart(deps, { project: request.project, taskId, definition: project.definition }) : [];
+  // L4-P1: Rovara's own re-check is a system start, so it stands behind the company's SystemRuns flag where the install has one (hosted); with the flag off nothing is read or started for it.
+  const driftItems = run?.setupAgent === undefined && deps.systemRuns?.enabled() !== false ? await setupDriftAtStart(deps, { project: request.project, taskId, definition: project.definition }) : [];
   // The approved test environment the task starts with, pinned in the start's own transaction: a later approval changes the NEXT task, never this one.
   const testEnvironment = asWorkflow ? await deps.testEnvironment?.forStart({ project: request.project, taskId }) : undefined;
 
