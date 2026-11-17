@@ -27,7 +27,7 @@ import { overwriteRow, putRow } from "../automation/kit.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { iso, log } from "../task-flow/support.js";
 import { classifyNightlyHealth, type NightlyHealth } from "../test-env/nightly-health.js";
-import { STALLED_STEP, buildSetupCheck, relayCheck, setupStateOf, setupStateOfCheck, type SetupCheckMark, type SetupState } from "./check.js";
+import { buildSetupCheck, relayCheck, setupStateOf, setupStateOfCheck, type SetupCheckMark, type SetupState } from "./check.js";
 import {
   SETUP_CHECKING_WORDS, driftTaskKey, isRow, recheckCurrentKey, recheckRowKey, repairNoticeKey, setupBrokenTaskWords, setupRepairCardOf, setupStillWorksWords, setupTestsFailingWords,
   type DriftTaskRow, type RecheckRow, type RecheckState, type RepairNoticeRow, type SetupRepairCard,
@@ -64,7 +64,6 @@ const uuidOf = (text: string): string => {
 export function classifySetupRecheck(state: SetupState): NightlyHealth {
   const step = state.failedStep;
   if (typeof step !== "string" || step === "" || state.failedStage === undefined) return classifyNightlyHealth(undefined);
-  if (step === STALLED_STEP) return { class: "unclear", cause: "incomplete_run" };
   if (state.failedStage === "test_command") return { class: "tests", setupProved: true };
   // Only a setup COMMAND the worker names is a broken setup. A failed clone, an expired host credential, a machine that would not start, a dev container: nothing there says the project's own setup commands fail, so none
   // of them is read as one (an outage of the code host or of the machines never pauses a project).
@@ -357,7 +356,12 @@ export async function setupGateBeforeBuild(deps: TaskFlowDeps, input: { project:
     if (row.state !== "broken") return release();
     const latest = await deps.projects.latest(input.project);
     // A new setup was approved since: it has its own baseline, and this task is no longer held back by the old break.
-    if (latest === undefined || latest.definition.revision !== row.setupRevision || !(await brokenStillHolds(deps, input.project, row))) return release();
+    if (latest === undefined || latest.definition.revision !== row.setupRevision) return release();
+    // The project's mark may not have been written when the break was settled (a store fault): it is written again now, and only a mark that is someone else's (a newer check) lifts the break.
+    if (!(await brokenStillHolds(deps, input.project, row))) {
+      await markProjectBroken(deps, input.project, row);
+      if (!(await brokenStillHolds(deps, input.project, row))) return release();
+    }
     return { answer: "blocked", words: setupBrokenTaskWords(row.failedStep ?? "setup") };
   } catch (error) {
     log(deps, { event: "setup_drift.gate_failed", taskId: input.taskId, error: errorName(error) });

@@ -669,6 +669,23 @@ describe("what the re-check says, and what blocks", () => {
     expect(((await w.h.store.get(projectMetaKey(w.h.deps.companyId, "payments")))?.["setupCheck"] as { workspaceId: string }).workspaceId).toBe(again.workspaceId);
   });
 
+  it("a break whose mark could not be written at once is written again when a task asks, and still holds", async () => {
+    const w = await world();
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    const task = await startTask(w);
+    const realUpdate = w.h.store.update.bind(w.h.store);
+    let failures = 0;
+    w.h.store.update = (async (input: Parameters<DocumentStore["update"]>[0]) => { if (input.key.sk === "META" && input.ops.some((op) => (op as { path?: unknown }).path?.toString() === "setupCheck" || (op as { path?: unknown }).path === "setupCheck") && failures < 1) { failures += 1; throw new Error("store fault"); } return realUpdate(input); }) as DocumentStore["update"];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const [row] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+      await finishCheck(w.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+      if (attempt === 0) await advanceAfterFailure(w.h); else await advanceCurrentRecheck(w.h.deps, "payments");
+    }
+    expect(failures).toBe(1);
+    expect((await w.h.store.get(projectMetaKey(w.h.deps.companyId, "payments")))?.["setupCheck"]).toBeUndefined();
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toMatchObject({ answer: "blocked" });
+  });
+
   it("a re-check of an older revision that passes after a newer setup was approved does not move the baseline", async () => {
     const w = await world();
     const before = (await readSetupSnapshot(w.h.store, w.h.deps.companyId, "payments")) as { repositories: Array<{ commit: string }> };
