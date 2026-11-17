@@ -53,6 +53,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Guided onboarding PR 8: a project's setup checklist state (any member of the project's company) and its skipped optional rows (company owner or admin, or the project's administrator); full access only.
   { method: "GET", path: "/v1/dev/client/projects/{project}/setup-status", requires: "full" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/setup-status/skips", requires: "full" },
+  // L2-5 c: "no evals" for the project's latest finished setup run (the same people as the skips); full access only.
+  { method: "PUT", path: "/v1/dev/client/projects/{project}/setup-status/eval-none", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
