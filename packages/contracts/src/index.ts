@@ -46,6 +46,7 @@ export * from "./rovara-code-node.js";
 export * from "./rovara-code-intent.js";
 export * from "./intake.js";
 export * from "./ticket-updates.js";
+export * from "./task-log.js";
 export * from "./rovara-code-understand.js";
 export * from "./plan-critique-block.js";
 export * from "./workflow-proposed-checks.js";

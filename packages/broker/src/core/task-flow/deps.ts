@@ -30,6 +30,7 @@ import type {
   WorkflowReviewPhase,
   WorkflowSnapshot,
 } from "@agentx/contracts";
+import type { TaskLogHooks } from "../task-log/hooks.js";
 import type { RepositoryGrantService } from "../../repository-access.js";
 import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
 import type { StepOutcome } from "./outcome.js";
@@ -298,6 +299,11 @@ export interface TaskFlowDeps {
   autonomy?: (task: TaskRecord) => Promise<{ autonomy: Autonomy; unreadable?: true; noCompany?: true }>;
   /** Lane L10: records a milestone ("fixing", "stuck") in the transaction of the change that caused it. Absent: none is recorded (the workflow change still is). */
   milestones?: CodeMilestones;
+  /**
+   * The task log's hook (`core/task-log/hooks.ts`): told after a change that wrote log entries in its own transaction is committed (the answers to Understand's questions, the questions it asked), so the surfaces that draw the log
+   * catch up. Absent: nothing is told; the entries are written all the same.
+   */
+  taskLog?: Pick<TaskLogHooks, "changed">;
   /**
    * Lane L12: keeps the evidence of a run whose checks were just recorded for a candidate (the proof page and the pull request read it). Informational: called best effort after the verification is recorded, and
    * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.

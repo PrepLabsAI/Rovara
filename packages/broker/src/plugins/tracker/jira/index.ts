@@ -12,12 +12,14 @@
 import { createHash } from "node:crypto";
 import {
   TrackerItemSchema, TrackerSearchError, TrackerWriteRefusedError, agentXError, HostScopeSchema,
-  type HostScope, type NeutralStatus, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerItem, type TrackerItemRef, type UntrustedText,
+  type HostScope, type NeutralStatus, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerItem, type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 
 export const JIRA_TRACKER_KIND = "jira";
 /** The comment property that marks Rovara's update (its value is a hash of the update's key, nothing else). */
 export const JIRA_MARKER_PROPERTY = "rovara.ticket-update";
+/** A Jira comment's id is a number. */
+const JIRA_COMMENT_ID = /^[0-9]{1,18}$/u;
 export const JIRA_KEY = /^[A-Z][A-Z0-9_]{0,30}-[1-9][0-9]{0,9}$/u;
 const ATLASSIAN_HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.atlassian\.net$/u;
 const JIRA_LABEL = /^[^"\\\p{Cc}]{1,100}$/u;
@@ -218,7 +220,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
       });
     },
 
-    async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, commentOptions?: TrackerCommentOptions): Promise<void> {
+    async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, commentOptions?: TrackerCommentOptions): Promise<TrackerCommentResult | void> {
       checkedScope(scope);
       const key = keyOf(ref);
       if (body.length === 0 || body.length > COMMENT_MAX_CHARS) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
@@ -232,9 +234,10 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
       if (recent.status !== 200) throw unavailable();
       // Only a comment the key's OWN account wrote counts, so someone else's comment carrying the marker cannot hold ours back.
       const me = await call("/rest/api/3/myself").then((answer) => (answer.status === 200 ? str(rec(answer.body)["accountId"]) : undefined));
-      const already = me !== undefined && arr(rec(recent.body)["comments"]).some((comment) => rec(rec(comment)["author"])["accountId"] === me
-        && arr(rec(comment)["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY && rec(rec(property)["value"])["id"] === marker));
-      if (already) return;
+      const earlier = me === undefined ? undefined : arr(rec(recent.body)["comments"]).map(rec).find((comment) => rec(comment["author"])["accountId"] === me
+        && arr(comment["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY && rec(rec(property)["value"])["id"] === marker));
+      // The same update again is the same comment: its id is answered, so the caller can edit it.
+      if (earlier !== undefined) return JIRA_COMMENT_ID.test(str(earlier["id"]) ?? "") ? { commentId: str(earlier["id"])! } : undefined;
       const paragraphs = body.split("\n").filter((line) => line !== "").map((line) => ({ type: "paragraph", content: [{ type: "text", text: line }] }));
       // For a task only its owner can see, the comment is internal, so a Jira Service Management customer never sees it (a plain Jira project ignores the property).
       const properties = [{ key: JIRA_MARKER_PROPERTY, value: { id: marker } }, ...(commentOptions?.requirePrivate === true ? [{ key: "sd.public.comment", value: { internal: true } }] : [])];
@@ -242,6 +245,30 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
       if (refused(answer.status)) throw new TrackerWriteRefusedError("needs_write_access");
       if (answer.status === 404) throw new TrackerWriteRefusedError("not_found");
       if (answer.status !== 201 && answer.status !== 200) throw unavailable();
+      // Jira has no threads: a reply (`parentId`) is an ordinary comment on the issue.
+      const created = str(rec(answer.body)["id"]);
+      return created !== undefined && JIRA_COMMENT_ID.test(created) ? { commentId: created } : undefined;
+    },
+
+    async updateComment(ref: TrackerItemRef, commentId: string, body: UntrustedText, scope: HostScope): Promise<void> {
+      checkedScope(scope);
+      const key = keyOf(ref);
+      if (body.length === 0 || body.length > COMMENT_MAX_CHARS) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
+      if (!JIRA_COMMENT_ID.test(commentId)) throw agentXError("CONFIG_INVALID", "the comment is not a Jira comment id");
+      const path = `/rest/api/3/issue/${encodeURIComponent(key)}/comment/${commentId}`;
+      // Only a comment on THIS issue that the key's own account wrote as a Rovara update is rewritten.
+      const found = await call(`${path}?expand=properties`);
+      if (refused(found.status)) throw new TrackerWriteRefusedError("needs_write_access");
+      if (found.status === 404) throw new TrackerWriteRefusedError("not_found");
+      if (found.status !== 200) throw unavailable();
+      const me = await call("/rest/api/3/myself").then((answer) => (answer.status === 200 ? str(rec(answer.body)["accountId"]) : undefined));
+      const comment = rec(found.body);
+      if (str(comment["id"]) !== commentId || me === undefined || rec(comment["author"])["accountId"] !== me || !arr(comment["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY)) throw new TrackerWriteRefusedError("not_found");
+      const paragraphs = body.split("\n").filter((line) => line !== "").map((line) => ({ type: "paragraph", content: [{ type: "text", text: line }] }));
+      const written = await call(path, { method: "PUT", body: { body: { type: "doc", version: 1, content: paragraphs } } });
+      if (refused(written.status)) throw new TrackerWriteRefusedError("needs_write_access");
+      if (written.status === 404) throw new TrackerWriteRefusedError("not_found");
+      if (written.status !== 200 && written.status !== 204) throw unavailable();
     },
 
     async setStatusByName(ref: TrackerItemRef, name: string, scope: HostScope): Promise<"moved" | "no_such_status"> {

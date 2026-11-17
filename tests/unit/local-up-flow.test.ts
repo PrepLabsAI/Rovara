@@ -513,6 +513,36 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await h.api("/v1/app/sessions/ses_00000000000000000000")).status).toBe(404);
   });
 
+  it("puts Understand's questions, and the owner's answers with who and where, in the task log, in the same commits that asked and answered", async () => {
+    const h = await launch();
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "66666666-6666-4666-8666-666666666667", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+    const taskId = started.body.task.taskId;
+    const store = h.runtime.registry.require("storage");
+    const workspaceId = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    const understand = await h.nextJob(workspaceId, seen);
+    const questions = { kind: "questions", restatement: "Add a health endpoint.", questions: [{ id: "q1", text: "Which path? Use sk-live token please", options: [{ id: "a", label: "/health" }, { id: "b", label: "/healthz" }], recommended: "a" }] };
+    await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify(questions) });
+    await h.callback(understand, "result", { status: "SUCCEEDED" });
+    const logOf = async () => (await store.query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "TASKLOG#" } })).items.map((item) => item["entry"] as Record<string, unknown>);
+    // The question is in the log from the commit that asked it (the log says nothing of an answer yet).
+    expect(await logOf()).toMatchObject([{ kind: "question", key: "question:r1:q1", questionId: "q1", round: 1, text: "Which path? Use sk-live token please", choices: ["/health", "/healthz"] }]);
+    const sessionId = (await h.api(`/v1/dev/tasks/${taskId}`)).body.task.sessionId!;
+    const answered = await h.api(`/v1/app/sessions/${sessionId}/answers`, { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777778", round: 1, answers: [{ questionId: "q1", optionId: "a", text: "and keep it simple" }] } });
+    expect(answered.status, JSON.stringify(answered.body)).toBe(200);
+    const entries = await logOf();
+    expect(entries).toHaveLength(2);
+    // Who and where come from the person the broker signed in and the surface that took the answer, never from the body.
+    expect(entries.find((entry) => entry["kind"] === "answer")).toMatchObject({ key: "answer:r1:q1", questionId: "q1", text: "/health: and keep it simple", surface: "web" });
+    expect(typeof entries.find((entry) => entry["kind"] === "answer")!["by"]).toBe("string");
+    // An answer sent again after the round moved on is refused and writes nothing more.
+    const again = await h.api(`/v1/app/sessions/${sessionId}/answers`, { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777779", round: 1, answers: [{ questionId: "q1", optionId: "b" }] } });
+    expect(again.status).toBeGreaterThanOrEqual(400);
+    expect(await logOf()).toHaveLength(2);
+  });
+
   it("`rovara open` has the running process open the browser and prints no address, and says so when nothing is running", async () => {
     const h = await launch();
     const { taskId } = await toPlanReview(h);
