@@ -149,7 +149,7 @@ async function verify(deps: Deps, companyId: string, runId: string, mark: boolea
     const selected = await get(deps, projectRevisionKey(companyId, name, row["latestRevision"] as number));
     const selectedDefinition = selected?.["definition"] as { name?: unknown; revision?: unknown } | undefined;
     if (selectedDefinition?.name !== name || selectedDefinition.revision !== row["latestRevision"] || !ownPartitionRow(row, companyId) || (expected.has(name) && (row["latestRevision"] as number) < expected.get(name)!)
-      || selected?.["entityType"] !== "PROJECT" || selected["candidate"] === true || !ownPartitionRow(selected, companyId)) conflicts.push(name);
+      || selected?.["entityType"] !== "PROJECT" || !ownPartitionRow(selected, companyId)) conflicts.push(name);
   }
   const missing = [...expected.keys()].filter(n => !actual.has(n)), extra = [...actual].filter(n => !expected.has(n));
   if (missing.length || conflicts.length) return { ok: false, written: 0, missing, extra, conflicts: [...new Set(conflicts)] };

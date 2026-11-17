@@ -335,8 +335,9 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
       const key = projectRevisionKey(companyId, name, revision);
       const response = await client.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
       const row = response.Item;
+      // A setup approval moves the catalog onto its candidate revision and leaves `candidate: true` on that row (setup-agent/apply.ts), as the engine's own reader accepts.
       const definition = row?.["definition"] as { name?: unknown; revision?: unknown } | null | undefined;
-      return row !== undefined && row["pk"] === key.pk && row["sk"] === key.sk && row["entityType"] === "PROJECT" && row["candidate"] !== true && ownPartitionRow(row, companyId)
+      return row !== undefined && row["pk"] === key.pk && row["sk"] === key.sk && row["entityType"] === "PROJECT" && ownPartitionRow(row, companyId)
         && typeof definition === "object" && definition !== null && definition.name === name && definition.revision === revision;
     });
     if (selected.some(own => !own)) drift();

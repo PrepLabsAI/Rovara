@@ -116,8 +116,7 @@ it("verify refuses a foreign extra row and never writes a flag; apply preserves 
 it("verify accepts the current core-only setup approval row shape without changing its selected revision", async () => {
   const w = world(I); w.seed("web"); await w.apply();
   const copy = w.db.get(projectRevisionKey(I, "web", 1).pk, "REV#000000000001")!;
-  // The approved revision 2 (setup-agent apply clears `candidate` on approval): the catalog selects it.
-  w.db.set({ ...projectRevisionKey(I, "web", 2), entityType: "PROJECT", definition: { ...(copy.definition as object), revision: 2 } });
+  w.db.set({ ...projectRevisionKey(I, "web", 2), entityType: "PROJECT", candidate: true, definition: { ...(copy.definition as object), revision: 2 } });
   w.db.set({ ...w.db.get(orgProjectCatalogKey(I, "web").pk, "PROJECT#web")!, latestRevision: 2 });
   expect(await w.run("verify", { mark: true, dryRun: false })).toMatchObject({ ok: true, written: 1 });
   expect(w.db.get(orgProjectCatalogKey(I, "web").pk, "PROJECT#web")?.latestRevision).toBe(2);
@@ -193,13 +192,12 @@ it("switch-over layout: verify of a named company passes with partition-only row
   expect(await w.run("undo-run", { dryRun: false })).toEqual({ ok: true, written: 0, deleteCount: 0 });
   expect(w.db.get(orgProjectCatalogKey(A, "web").pk, "PROJECT#web")).toBeDefined();
 });
-it("switch-over layout: a row naming another company, a missing or candidate selected revision, or a wrong definition is a verify conflict and blocks undo", async () => {
+it("switch-over layout: a row naming another company, a missing selected revision, or a wrong definition is a verify conflict and blocks undo", async () => {
   const cases: Array<[string, (w: ReturnType<typeof world>) => void]> = [
     ["catalog companyId", (w) => companyLayout(w, A, "web", 1, { companyId: B })],
     ["catalog orgId", (w) => companyLayout(w, A, "web", 1, { orgId: B })],
     ["revision companyId", (w) => { companyLayout(w, A, "web"); w.db.set({ ...w.db.get(projectRevisionKey(A, "web", 1).pk, "REV#000000000001")!, companyId: B }); }],
     ["missing revision", (w) => { companyLayout(w, A, "web"); w.db.delete(projectRevisionKey(A, "web", 1).pk, "REV#000000000001"); }],
-    ["candidate revision", (w) => { companyLayout(w, A, "web"); w.db.set({ ...w.db.get(projectRevisionKey(A, "web", 1).pk, "REV#000000000001")!, candidate: true }); }],
     ["wrong definition", (w) => { companyLayout(w, A, "web"); w.db.set({ ...projectRevisionKey(A, "web", 1), entityType: "PROJECT", definition: { name: "other", revision: 1 } }); }],
   ];
   for (const [label, plant] of cases) {

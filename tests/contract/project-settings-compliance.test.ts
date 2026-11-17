@@ -395,7 +395,6 @@ it("a row in the company's partition that names another company, or selects no p
     ["revision companyId", (w) => w.db.set({ ...w.db.get(revision.pk, revision.sk)!, companyId: B })],
     ["revision orgId", (w) => w.db.set({ ...w.db.get(revision.pk, revision.sk)!, orgId: B })],
     ["revision missing", (w) => w.db.delete(revision.pk, revision.sk)],
-    ["revision candidate", (w) => w.db.set({ ...w.db.get(revision.pk, revision.sk)!, candidate: true })],
     ["revision entityType", (w) => w.db.set({ ...w.db.get(revision.pk, revision.sk)!, entityType: "PROJECT_META" })],
     ["definition name", (w) => w.db.set({ ...w.db.get(revision.pk, revision.sk)!, definition: { name: "other", revision: 1 } })],
     ["definition revision", (w) => w.db.set({ ...w.db.get(revision.pk, revision.sk)!, definition: { name: "web", revision: 2 } })],
@@ -411,11 +410,12 @@ it("a row in the company's partition that names another company, or selects no p
       expect(JSON.stringify(log.mock.calls)).not.toContain(B);
     } finally { log.mockRestore(); }
   }
-  // The same rows with the caller's own companyId present are fine.
+  // The same rows with the caller's own companyId present are fine, and so is an approved setup's revision (the catalog selects it; it keeps `candidate: true`).
   const w = world(); own(w, "web");
   w.db.set({ ...w.db.get(orgProjectCatalogKey(COMPANY, "web").pk, "PROJECT#web")!, companyId: COMPANY, orgId: COMPANY });
   w.db.set({ ...w.db.get(revision.pk, revision.sk)!, companyId: COMPANY });
-  expect((await w.get()).projects.map((row) => row.project)).toEqual(["web"]);
+  own(w, "approved"); w.db.set({ ...w.db.get(projectRevisionKey(COMPANY, "approved", 1).pk, "REV#000000000001")!, candidate: true });
+  expect((await w.get()).projects.map((row) => row.project)).toEqual(["approved", "web"]);
 });
 it("implicit company: flagged paging reads only its partition and is byte-identical with zero or 500 foreign projects", async () => {
   const pages = [];
