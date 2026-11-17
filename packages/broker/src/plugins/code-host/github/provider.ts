@@ -145,6 +145,10 @@ export interface GitHubCodeHostProvider {
   deleteLessonsBranch?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<"deleted" | "gone">;
   /** Optional immutable tree read. Truncation is explicit; failures and rate limits throw. */
   listTreeAtCommit?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ truncated: boolean; entries: Array<{ path: string; mode: string; type: string; sha: string }> }>;
+  /** Optional (wiki W0): the direct children of one directory at a commit, names and kinds only (`complete` false when GitHub cut the 1,000-entry listing). */
+  listDirectoryAtCommit?(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ entries: Array<{ name: string; type: string }>; complete: boolean }>;
+  /** Optional (wiki W0): the commits of a commit's history that touched a path since a time, from one page of at most `cap`; `latestAt` is the newest one's time (else the newest that ever touched the path). */
+  listCommitActivity?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options: { since: string; path?: string; cap: number; timeoutMs?: number }): Promise<{ count: number; capped: boolean; latestAt?: string }>;
   /** Promote only errors observed by the file-details port reads; existing client methods retain their error codes. */
   fileDetailsError?(error: unknown): unknown;
   /** Optional PR head and merge base from a fresh PR/compare read, never the target branch tip. */
