@@ -216,6 +216,9 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core-host/hosted-approvers.ts", "packages/broker/src/core/after-merge/watch.ts",
       // After-merge reporter (#787 M7 slice 2): its own AFTER_MERGE_SENT claim rows (one per report and surface, kept WATCH_KEPT_DAYS, then expired) and nothing else; no other record shares the key.
       "packages/broker/src/core/after-merge/reporter.ts",
+      // Lead 4 wiki (A1, W3): the project's wiki-use rows (the agents switch is a row that never expires; the delivery refs and task reports expire) and the build run's own rows (notes, done pages and cached verdicts expire after
+      // WIKI_BUILD_KEEP_SECONDS; the pointer does not). Each names the store's TTL attribute for its own rows only, in its own partition.
+      "packages/broker/src/core/wiki/agent-context.ts", "packages/broker/src/core/wiki-build/keys.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

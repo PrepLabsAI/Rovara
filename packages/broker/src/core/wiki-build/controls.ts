@@ -15,7 +15,7 @@ import {
 } from "@agentx/contracts";
 import { deleteWikiUse, setWikiAgentSwitch, wikiAgentSwitchIsOn, type WikiAgentOptions } from "../wiki/agent-context.js";
 import { createWikiStore } from "../wiki/store.js";
-import { wikiBuildPartition } from "./keys.js";
+import { wikiBuildPartition, wikiBuildRowKey } from "./keys.js";
 import { continueWikiBuild, startWikiBuild, stopWikiBuild, wikiBuildState, type WikiBuildDeps, type WikiBuildView } from "./run.js";
 
 export type WikiControlAction = "start_requested" | "continue_requested" | "stop_requested" | "refresh_requested" | "agents_switched" | "delete_requested";
@@ -154,7 +154,7 @@ export async function deleteWikiBuildRows(store: Pick<DocumentStore, "query" | "
   const ordered = [...items.filter((item) => item.sk === "RUN"), ...items.filter((item) => item.sk !== "RUN")];
   for (const item of ordered) {
     if (item.pk !== pk) continue;
-    await store.delete({ key: { pk: item.pk, sk: item.sk } });
+    await store.delete({ key: wikiBuildRowKey({ orgId, project }, item.sk) });
   }
   return items.length;
 }
