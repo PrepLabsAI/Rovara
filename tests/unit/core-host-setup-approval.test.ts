@@ -72,10 +72,10 @@ async function setupWorld(options: { approval?: boolean } = {}) {
   const app = appOver(world);
   const people = new Map<string, Person>();
   /** How many more project-grant reads answer before the grant is gone (to take a role away mid-decision). Undefined: never. */
-  const grantReadsLeft: { value?: number } = {};
+  const grantReadsLeft: { value?: number; thenThrow?: boolean } = {};
   const membershipOf = async (personId: string) => { const found = people.get(personId); return found === undefined ? undefined : { companyId: found.companyId, role: found.role }; };
   const projectGrantRole = async (personId: string, name: string) => {
-    if (grantReadsLeft.value !== undefined && grantReadsLeft.value-- <= 0) return undefined;
+    if (grantReadsLeft.value !== undefined && grantReadsLeft.value-- <= 0) { if (grantReadsLeft.thenThrow === true) throw new Error("grant table down detail"); return undefined; }
     return people.get(personId)?.grants[name];
   };
   const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}, stepUpAgoMs: number | null = 60_000): DeployedCaller => {
@@ -114,7 +114,7 @@ async function setupWorld(options: { approval?: boolean } = {}) {
     if (answer === undefined) throw new Error("not served");
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Record<string, unknown>, raw: answer.body };
   };
-  return { world, person, call, routes, audit, grantReadsLeft };
+  return { world, person, call, routes, audit, grantReadsLeft, wirings };
 }
 
 const decideBody = (digest: string, outcome: "approve" | "reject" = "approve", revision = 2) => ({ requestId: setupDecisionRequestId(digest, revision) + randomUUID().slice(0, 8), outcome, seen: { revision, artifactDigest: digest } });
@@ -210,6 +210,35 @@ describe("hosted setup approval: who may decide, by the candidate's risk", () =>
   });
 });
 
+describe("hosted setup approval: the decision's own rule (behind the route's check)", () => {
+  it("refuses when the approver's standing cannot be read inside the decision, deciding nothing and echoing nothing", async () => {
+    const { world, person, call, grantReadsLeft } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    grantReadsLeft.value = 1;
+    grantReadsLeft.thenThrow = true;
+    const refused = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
+    expect(refused.status).toBe(403);
+    expect(refused.body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_NEEDS_MAINTAINER } });
+    expect(refused.raw).not.toContain("detail");
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+  });
+
+  it("holds the risk rule in the gate itself: a maintainer's valid proof on a high risk candidate, presented to the gate directly, is refused", async () => {
+    const { world, person, wirings } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { network: { allowedDomains: ["api.stripe.com"] } });
+    person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    const approval = wirings.get(FAKE_COMPANY)!.approval!;
+    const requestId = setupDecisionRequestId(digest, 2);
+    const card = { cardId: "setup_proposal:payments", contentVersion: digest };
+    const credential = await approval.issue({ companyId: FAKE_COMPANY, personId: "p-maint", stepUp: { at: new Date(world.clock.now - 60_000).toISOString(), method: "passkey" }, requestId, kind: "setup", project: "payments", revision: 2, artifactDigest: digest, outcome: "approve", card });
+    const result = await approval.gate.decide({ companyId: FAKE_COMPANY, kind: "setup-proposal", subjectId: "payments", requestId, outcome: "approve", seen: { revision: 2, artifactDigest: digest }, credentials: [credential], card });
+    expect(result).toEqual({ status: "refused", reason: "not_the_approver", detail: SETUP_NEEDS_ADMIN });
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+    expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "checking" });
+  });
+});
+
 describe("hosted setup approval: the proof and the binding", () => {
   it("needs a fresh step-up: none, or one older than the window, is refused before anything is read", async () => {
     for (const ago of [null, 11 * 60_000]) {
@@ -251,6 +280,14 @@ describe("hosted setup approval: the proof and the binding", () => {
     expect(refused.status).toBe(409);
     expect(await latestOf(world, FAKE_COMPANY)).toBe(3);
     expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "checking" });
+  });
+
+  it("takes only a setup decision's own request id (setup-...), apart from task decisions' ids", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    expect((await call(post(`${RUN}/decide`, { ...decideBody(digest), requestId: "decision-request-0001" }), owner)).status).toBe(400);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
   });
 
   it("answers 'nothing waiting' when no candidate waits, and takes a strict body", async () => {
@@ -370,12 +407,22 @@ describe("hosted approvers: a setup candidate's proof", () => {
 
   it("never lets a task proof stand for a setup candidate, nor a setup proof for a task", async () => {
     const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
-    // A task proof whose task id field is the project name cannot be issued (a task id is a UUID); one for a task is refused on the setup subject.
+    // A task proof is refused on the setup subject (and a setup proof on a task): the proof's subject type is signed into it.
     const taskToken = issueStepUpApproval(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: TASK, revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST } }, NOW).token;
     expect(await point().verify(request(), proof(request(), taskToken))).toEqual({ approved: false, reason: "other_subject" });
     const taskRequest = request({ subject: { type: "task", id: TASK }, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
     const setupForTask = token({ project: TASK, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
     expect(await point().verify(taskRequest, proof(taskRequest, setupForTask))).toEqual({ approved: false, reason: "other_subject" });
+  });
+
+  it("refuses a task proof for a project whose name looks like a task id: only the proof's subject type tells them apart", async () => {
+    const UUID_PROJECT = "3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f";
+    const card = { cardId: `setup_proposal:${UUID_PROJECT}`, contentVersion: DIGEST };
+    const req = request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: UUID_PROJECT }, projectName: UUID_PROJECT, card });
+    const taskProof = issueStepUpApproval(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: UUID_PROJECT, revision: 2, artifactDigest: DIGEST, outcome: "approve", card }, NOW).token;
+    expect(await point().verify(req, proof(req, taskProof))).toEqual({ approved: false, reason: "other_subject" });
+    // The same act as a setup proof is accepted.
+    expect(await point().verify(req, proof(req, token({ project: UUID_PROJECT, card })))).toMatchObject({ approved: true });
   });
 
   it("issues no setup proof for a malformed project name", () => {

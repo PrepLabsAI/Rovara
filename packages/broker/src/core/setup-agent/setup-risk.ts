@@ -35,7 +35,7 @@ const AREA_ORDER: readonly SetupChangeArea[] = ["setup_commands", "test_commands
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const same = (left: unknown, right: unknown): boolean => {
-  try { return canonicalJson(left as never) === canonicalJson(right as never); } catch { return false; }
+  try { return canonicalJson(left) === canonicalJson(right); } catch { return false; }
 };
 
 /** A command's environment entries as `name=value` texts, or undefined for a command this code cannot read whole. */
@@ -76,7 +76,8 @@ export function classifySetupChange(base: unknown, candidate: unknown): SetupCha
     if (BOOKKEEPING.has(field) || same(base[field], candidate[field])) continue;
     if (field === "setup") add({ area: "setup_commands", risk: commandsRisk(base[field], candidate[field]) });
     else if (field === "readiness") add({ area: "test_commands", risk: commandsRisk(base[field], candidate[field]) });
-    else add(FIXED[field] ?? { area: "other", risk: "high" });
+    // Own keys only: a field named like an inherited property (`constructor`, `__proto__`) is unknown, so high.
+    else add(Object.hasOwn(FIXED, field) ? FIXED[field]! : { area: "other", risk: "high" });
   }
   const changes = AREA_ORDER.filter((area) => found.has(area)).map((area) => ({ area, risk: found.get(area)! }));
   const risk = changes.reduce<SetupRisk>((highest, change) => (RANK[change.risk] > RANK[highest] ? change.risk : highest), "low");

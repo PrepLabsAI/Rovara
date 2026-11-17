@@ -92,7 +92,8 @@ export interface HostedSetupRunInput {
 }
 
 const DecideBodySchema = z.object({
-  requestId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/u),
+  /** The id the page was offered (`setup-<digest>-<revision>`, setup-approval.ts `setupDecisionRequestId`): its own namespace, apart from task decisions' ids. */
+  requestId: z.string().regex(/^setup-[A-Za-z0-9_-]{2,122}$/u),
   outcome: z.enum(["approve", "reject"]),
   /** The candidate revision and digest the person saw. */
   seen: z.object({ revision: z.number().int().min(1), artifactDigest: z.string().regex(/^[a-f0-9]{64}$/u) }).strict(),

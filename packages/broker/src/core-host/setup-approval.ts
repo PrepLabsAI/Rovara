@@ -73,7 +73,7 @@ export interface HostedSetupApprovalOptions {
 
 /** The hosted setup approval for one company (see the file comment). */
 export function createHostedSetupApproval(options: HostedSetupApprovalOptions): HostedSetupApproval {
-  const companyId = options.flow.companyId as OrgId;
+  const companyId = options.flow.companyId;
   const standing = setupApproverStandingFrom(options.people, companyId);
   const subject = createSetupProposalSubject({
     flow: options.flow,

@@ -77,6 +77,17 @@ describe("classifySetupChange", () => {
   it("counts a command list it cannot read as high, never low", () => {
     expect(classifySetupChange(base, next({ setup: [{ executable: "npm" }] })).risk).toBe("high");
     expect(classifySetupChange(base, next({ readiness: [null] })).risk).toBe("high");
+    // An approved command it cannot read is not a baseline to compare with: high.
+    expect(classifySetupChange({ ...base, setup: [{ executable: "npm" }] }, next({ setup: [command("npm", ["install"])] })).risk).toBe("high");
+  });
+
+  it("counts a field named like an inherited property (constructor, __proto__, toString) as unknown, so high", () => {
+    for (const field of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      const candidate = JSON.parse(`{"${field}": {"x": 1}}`) as Record<string, unknown>;
+      expect(Object.hasOwn(candidate, field), field).toBe(true);
+      const result = classifySetupChange(base, { ...JSON.parse(JSON.stringify(base)) as Record<string, unknown>, revision: 4, ...candidate });
+      expect(result, field).toEqual({ risk: "high", changes: [{ area: "other", risk: "high" }] });
+    }
   });
 });
 
