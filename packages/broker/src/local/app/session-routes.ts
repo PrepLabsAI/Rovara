@@ -174,7 +174,8 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
         return result.status === "refused" ? refused(result) : json(200, result.message);
       }
       if (action === "answers") {
-        requireLevelOf(you, "use", "answer its questions");
+        // D5: only the task's owners answer the agent (owner level `edit`); a People commenter (`use`) comments and asks, never answers.
+        requireLevelOf(you, "edit", "answer its questions");
         await answerQuestions(session, caller, body);
         return json(200, { session: await see((await sessions.get(orgId, sessionId)) ?? session) });
       }
@@ -205,7 +206,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
     }
   };
 
-  /** Answers to Understand's questions (needs `use`): the workflow takes them, and Understand runs again with them in the same commit. */
+  /** Answers to Understand's questions (needs `edit`, D5): the workflow takes them, and Understand runs again with them in the same commit. */
   async function answerQuestions(session: AgentSessionRecord, caller: TaskCaller, body: Record<string, unknown>): Promise<void> {
     const taskId = session.subject.kind === "task" ? session.subject.taskId : undefined;
     if (taskId === undefined) throw agentXError("NOT_FOUND", "There is no such session.");

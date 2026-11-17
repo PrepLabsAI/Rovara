@@ -39,6 +39,9 @@ import type { MoneyStop } from "../../core/task-flow/money-stop.js";
 import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
 import { companyEngineModelRoute } from "../../core-host/company-engine-model.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
+import { createTaskTestEnvironment } from "../../core/test-env/seam.js";
+import { hostedServiceCatalog } from "../hosted-test-services.js";
+import { createWikiForStep } from "../../core/wiki/agent-context.js";
 import { createDispatcherLearned, type DispatcherLessonsOptions } from "./dispatcher-lessons.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
@@ -189,6 +192,8 @@ export interface DispatcherMachineOps {
 
 export interface DispatcherCoreInputs {
   env: NodeJS.ProcessEnv;
+  /** The callback signing key, read from Secrets Manager by the dispatcher (aws/callback-signing-key.ts); never part of `env`. Blank: the host is not configured. */
+  callbackSigningKey: string;
   /** The State table, as the dispatcher's document client reads it (whose a workspace is, its binding). */
   documentClient: Parameters<typeof workspaceCompanyReader>[0];
   /** The AWS clients the core's adapters speak (made by the dispatcher only when the core is first needed). */
@@ -219,7 +224,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
   const queueUrl = required(env[CORE_DISPATCH_QUEUE_URL_VARIABLE]);
   const deadLetterUrl = required(env[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE]);
   const tableName = required(env.STATE_TABLE_NAME);
-  const callbackSigningKey = required(env.CALLBACK_SIGNING_KEY);
+  const callbackSigningKey = required(inputs.callbackSigningKey);
   const bucket = required(env.ARTIFACT_BUCKET_NAME);
   const subnets = required(env.EC2_WORKER_SUBNETS);
   const launchTemplateId = required(env.EC2_WORKER_LAUNCH_TEMPLATE_ID);
@@ -272,7 +277,11 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         // The broker's switch controls whether it writes fresh validation rows. The dispatcher always uses a fresh row when present and otherwise its configured default.
         stepModels: dispatcherStoredAgentModelChoice({ store: registry.require("storage"), companyId, now: () => now().getTime(), defaultRoute: async () => modelAccess?.route(), log: inputs.log }),
         ...(learned === null || learned === undefined ? {} : { learned }),
+        // Lead 4 A1: the project wiki, for this company only (its own store, its own id); it gives nothing unless the project's "Give the wiki to agents" switch is on.
+        wiki: createWikiForStep({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
+        // DEC 254zm: a coding or verification step is told the plan of the test environment its task pinned (the company's own records; the owner starter list is the catalog while test services are switched on).
+        testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
       };
       return {
       callbackSigningKey,

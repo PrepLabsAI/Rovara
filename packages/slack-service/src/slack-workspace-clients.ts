@@ -10,7 +10,7 @@ const refused = () => new Error("This Slack workspace is not available.");
 const MAX_CLIENTS = 128;
 
 /** Each client's token closure retains one immutable binding; concurrent requests share no mutable selection. */
-export function createWorkspaceSlackClients(options: { legacyToken(): Promise<string>; workspaces?: ServiceSlackWorkspaces; fetch?: typeof fetch }) {
+export function createWorkspaceSlackClients(options: { legacyToken(): Promise<string>; workspaces?: ServiceSlackWorkspaces; legacyTeamId?: string; fetch?: typeof fetch }) {
   const transport = options.fetch === undefined ? {} : { fetch: options.fetch };
   const legacy = { web: createSlackWebClient({ token: () => options.legacyToken(), ...transport }), userName: createSlackUserNames({ token: () => options.legacyToken(), ...transport }) };
   const cache = new Map<string, typeof legacy>();
@@ -18,6 +18,8 @@ export function createWorkspaceSlackClients(options: { legacyToken(): Promise<st
     async forThread(thread: Pick<SlackThread, "teamId">): Promise<typeof legacy> {
       const workspaces = options.workspaces;
       if (workspaces === undefined) return legacy;
+      // L2-2 PR 18d: the install's own team keeps today's client (the install token) while company mode is on.
+      if (options.legacyTeamId !== undefined && thread?.teamId === options.legacyTeamId) return legacy;
       try {
         const teamId = thread?.teamId;
         // Validate the team before any binding read, including hostile runtime callers.

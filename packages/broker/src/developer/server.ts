@@ -68,6 +68,8 @@ import {
   type RemovePersonPasskeysResponse,
   type SetFactorEmailRequest,
   type SetFactorEmailResponse,
+  type SignInLinkStartRequest, type SignInLinkFinishRequest, type SignInLinksListRequest, type SignInUnlinkRequest,
+  type SignInLinkStartResponse, type SignInLinkFinishResponse, type SignInLinksListResponse, type SignInUnlinkResponse,
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
@@ -75,6 +77,7 @@ import { mergeSurvivor } from "../aws/install-company.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { createFactorAdmin } from "./factor-admin.js";
+import { createSignInLinks } from "./sign-in-links.js";
 import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
@@ -328,6 +331,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // As a refresh checks: the session's method is still on, and was on when it started.
     methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, methodSince(config, session.amr)),
   });
+  // DEC 254w: connecting a second sign-in method to the signed-in person (sign-in-links.ts).
+  const signInLinks = createSignInLinks({
+    store, company: () => deps.company, provider, methodEnabled: (method) => enabledMethods(deps).includes(method),
+    methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, methodSince(config, session.amr)),
+    registeredClient: (clientId) => registeredClient(clientId), installSlackCompany: () => slackCompany(),
+    slackTeamCompany: async (teamId) => deps.slackTeamCompany === undefined ? undefined : deps.slackTeamCompany(teamId), endpoint, now: deps.now, log: deps.log,
+  });
   const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
@@ -539,6 +549,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   });
 
   async function callback(method: DeveloperSignInMethod, query: URLSearchParams, headers: Record<string, string | undefined>): Promise<HttpResult> {
+    // DEC 254w: a connect link's callback (its state is a link id, never a sign-in request's).
+    if (deps.company !== undefined && signInLinks.isLinkState(query.get("state"))) {
+      const answered = await signInLinks.callback(method, query);
+      if (answered !== undefined) return answered;
+    }
     const state = query.get("state") ?? "";
     const pending = state === "" ? undefined : await store.getAuthRequest(state);
     if (pending === undefined || pending.method !== method) return expired();
@@ -690,18 +705,20 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const link = await directory.lookupByEmail(identity.email);
       slackUserId = link === "unavailable" ? (companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? existing?.slackUserId : undefined) : link === "none" ? undefined : link.userId;
     }
+    // DEC 254w: a Slack user the person connected stays their Slack link whatever this sign-in's method or lookup says.
+    if (existing?.linkedSlackUserId !== undefined) slackUserId = existing.linkedSlackUserId;
     // A merged sign-in rewrites neither its own record nor the survivor's.
     if (!merged) await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
       ...(identity.email === undefined ? {} : { email: identity.email }),
       ...(slackUserId === undefined ? {} : { slackUserId }),
       ...(identity.slackTeam === undefined ? {} : { slackTeamId: identity.slackTeam.id, ...(identity.slackTeam.name === undefined ? {} : { slackTeamName: identity.slackTeam.name }) }),
-    }, companyId, companyless ? { companyless: true } : {});
+    }, companyId, { ...(companyless ? { companyless: true as const } : {}), ...(deps.company === undefined ? {} : { unmerged: true as const }) });
     if (request.browserReturnTo !== undefined) {
       if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined)) return browserReturn(request.browserReturnTo, false);
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
       const endsAt = Math.floor(deps.now() / 1000) + SESSION_MAX_AGE_SECONDS;
-      const { session } = await store.createSession({ developerId, amr: method,
+      const { session } = await store.createSession({ developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}),
         ...(slackUserId === undefined ? {} : { slackUserId }),
         reviewExpiresAt: endsAt, endsAt,
         ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
@@ -711,7 +728,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return browserReturn(request.browserReturnTo, true, session.sessionId);
     }
     const grant: CodeGrant & { codeChallenge: string; redirectUri: string } = {
-      developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
+      developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}), ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
       ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
       ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
@@ -749,11 +766,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return { ...back, statusCode: status };
   }
 
+  /**
+   * DEC 254w: a merged or connected sign-in still stands for its person: its identity's walk ends at that person now. Once a connected method is
+   * removed (or a merge undone), a code, step-up grant or session it made before that is refused, whenever it is used.
+   */
+  async function stillSeated(signedInId: string | undefined, developerId: string): Promise<boolean> {
+    if (signedInId === undefined) return true;
+    try { return (await mergeSurvivor((id) => store.getDeveloper(id), signedInId)).survivorId === developerId; } catch { return false; }
+  }
+
   async function authorizationCodeGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {
     const redeemed = await store.redeemCode({ code: form.get("code") ?? "", verifier: form.get("code_verifier") ?? "", redirectUri: form.get("redirect_uri") ?? "" });
     if (redeemed === undefined) return oauthError(400, ...INVALID_CODE);
     // A code is redeemed only by the client it was issued to (it is burned either way).
     if (redeemed.clientId !== client?.clientId) return oauthError(400, ...INVALID_CODE);
+    if (!await stillSeated(redeemed.signedInId, redeemed.developerId)) return oauthError(400, ...SIGN_IN_ENDED);
     if (!await companyMayMint(redeemed.developerId, redeemed.amr, redeemed.companyId, client, false, redeemed.installMethod)) return oauthError(400, ...SIGN_IN_ENDED);
     if (deps.company !== undefined && redeemed.companyId !== undefined && redeemed.companyId !== IMPLICIT_COMPANY_ID && redeemed.amr === "oidc") {
       try { methods = await methodsFor(redeemed.companyId) ?? []; } catch { return oauthError(400, ...SIGN_IN_ENDED); }
@@ -808,6 +835,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const developer = await store.getDeveloper(session.developerId);
     if (developer === undefined || developer.revoked) {
       await revoke(session.sessionId, "developer_revoked");
+      return ended;
+    }
+    if (!await stillSeated(session.signedInId, session.developerId)) {
+      await revoke(session.sessionId, "sign_in_unlinked");
       return ended;
     }
     if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
@@ -962,9 +993,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
       | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
-      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput | SlackInstallInvoke,
+      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput | SlackInstallInvoke
+      | SignInLinkStartRequest | SignInLinkFinishRequest | SignInLinksListRequest | SignInUnlinkRequest,
   ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
-    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue | Record<string, unknown>> => {
+    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue
+    | SignInLinkStartResponse | SignInLinkFinishResponse | SignInLinksListResponse | SignInUnlinkResponse | Record<string, unknown>> => {
     if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
       if (event.kind === "slack-install") return deps.slackInstall === undefined ? { ok: false, error: "not_set_up" } : deps.slackInstall(event);
@@ -975,6 +1008,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (event.kind === "remove-passkey") return factorAdmin.removePasskey(event);
       if (event.kind === "remove-person-passkeys") return factorAdmin.removePersonPasskeys(event);
       if (event.kind === "set-factor-email") return factorAdmin.setFactorEmail(event);
+      // DEC 254w: connected sign-ins. Each checks the caller's own live session in this table.
+      if (event.kind === "sign-in-link-start") return signInLinks.start(event);
+      if (event.kind === "sign-in-link-finish") return signInLinks.finish(event);
+      if (event.kind === "sign-in-links-list") return signInLinks.list(event);
+      if (event.kind === "sign-in-unlink") return signInLinks.unlink(event);
       // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);

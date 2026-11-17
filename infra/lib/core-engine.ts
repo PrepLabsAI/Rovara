@@ -24,7 +24,7 @@ import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch 
 import { Construct } from "constructs";
 import {
   CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
-  CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -32,6 +32,10 @@ import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
 
 /** The stack parameter that holds the switch. */
 export const CORE_ENGINE_PARAMETER = "CoreEngine";
+/** DEC 254z-amend3: the stack parameter that holds the test services switch. */
+export const TEST_SERVICES_PARAMETER = "TestServices";
+/** DEC 254zm: the stack parameter that says the install's copies of the starter images are in place (`mirrored`), so Code's workers run test services. */
+export const TEST_SERVICE_IMAGES_PARAMETER = "TestServiceImages";
 
 /** The broker's actions on the core dispatch queue and its dead letters. */
 export const CORE_BROKER_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
@@ -64,6 +68,10 @@ export class CoreEngine extends Construct {
   private readonly lessons: CfnParameter;
   private readonly modelGatewayHost: CfnParameter;
   private readonly agentModel: CfnParameter;
+  /** DEC 254z-amend3: the install's test services switch ("1" on, the default; "0" off), packed for the broker and the dispatcher (`td`) and given to the session steps whole. */
+  readonly testServices: CfnParameter;
+  /** DEC 254zm: `none` (the default) or `mirrored`, packed for the broker and the dispatcher (`ti`) and given whole to the session steps. */
+  readonly testServiceImages: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
@@ -110,6 +118,16 @@ export class CoreEngine extends Construct {
       addBrokerSetting(broker, props.naming, key, value);
       addPackedSetting(dispatcher, key, value);
     }
+    // DEC 254z-amend3: test services, ON by default with the owner's opt-out "0". A stack parameter, so an upgrade keeps what the operator set (OPERATOR_PARAMETERS); packed (`td`, read as ROVARA_TEST_SERVICES)
+    // for the broker and the dispatcher, where the core reads it, and given whole to the session steps (control-plane.ts). Code's workers cannot run test services yet, so while it is on the broker and the
+    // dispatcher say "not available here" (aws/hosted-test-services.ts).
+    this.testServices = new CfnParameter(stack, TEST_SERVICES_PARAMETER, { type: "String", default: TEST_SERVICES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICES_PARAMETER_VALUES], description: "Test services: 1 on (the default), 0 off" });
+    addBrokerSetting(broker, props.naming, "testServices", this.testServices.valueAsString);
+    addPackedSetting(dispatcher, "testServices", this.testServices.valueAsString);
+    // DEC 254zm: whether the five starter copies are in place. `none` until the operator copied and checked them (scripts/test-services-mirror.ts), then `mirrored`: kept across upgrades (OPERATOR_PARAMETERS).
+    this.testServiceImages = new CfnParameter(stack, "TestServiceImages", { type: "String", default: TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICE_IMAGES_PARAMETER_VALUES], description: "Test service images: none (the default) or mirrored once the starter copies are checked" });
+    addBrokerSetting(broker, props.naming, "testServiceImages", this.testServiceImages.valueAsString);
+    addPackedSetting(dispatcher, "testServiceImages", this.testServiceImages.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).
@@ -182,10 +200,10 @@ export class CoreEngine extends Construct {
    *     there whatever the switch says. Exactly this queue, never send and never the dead letters. The dispatcher's role is not the broker's (which is at IAM's size limit);
    *   - only while the switch is not off (a policy of its own under `CoreEngineIsOn`): the deleter's start (the core ends a machine it started for a workspace that closed meanwhile).
    *     No ec2:TerminateInstances: the core's dispatch never stops a machine, and a stop claimed elsewhere is finished by the idle reaper;
-   *   - the switch, the queue's names and the workers' placement (subnets, launch template) as plain variables, and the callback signing key only while the switch is not off (an empty value otherwise), so an off dispatcher holds no
-   *     key it does not use.
+   *   - the switch, the queue's names and the workers' placement (subnets, launch template) as plain variables, and the callback signing key's secret name only while the switch is not off (an empty value otherwise, and no grant to read it), so an off dispatcher can read no
+   *     key it does not use. The key is never an environment value.
    */
-  connectDispatcher(dispatcher: lambda.Function, props: { deleterArn: string; callbackSigningKey: string; workerSubnets: string; workerLaunchTemplateId: string }): lambda.CfnEventSourceMapping {
+  connectDispatcher(dispatcher: lambda.Function, props: { deleterArn: string; callbackSigningKeySecret: { secretName: string; secretArn: string }; workerSubnets: string; workerLaunchTemplateId: string }): lambda.CfnEventSourceMapping {
     dispatcher.addEnvironment(CORE_DISPATCH_QUEUE_ARN_VARIABLE, this.queue.queueArn);
     dispatcher.addEnvironment(CORE_DISPATCH_QUEUE_URL_VARIABLE, this.queue.queueUrl);
     dispatcher.addEnvironment(CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, this.deadLetters.queueUrl);
@@ -193,11 +211,15 @@ export class CoreEngine extends Construct {
     // Where a core workspace's worker runs: the install's own workers, as the broker places a sign-in client's project (never a binding a company writes).
     dispatcher.addEnvironment("EC2_WORKER_SUBNETS", props.workerSubnets);
     dispatcher.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", props.workerLaunchTemplateId);
-    dispatcher.addEnvironment("CALLBACK_SIGNING_KEY", Token.asString(Fn.conditionIf(this.isOn.logicalId, props.callbackSigningKey, "")));
+    dispatcher.addEnvironment("CALLBACK_SIGNING_KEY_SECRET_ID", Token.asString(Fn.conditionIf(this.isOn.logicalId, props.callbackSigningKeySecret.secretName, "")));
     dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: "ConsumeCoreDispatchQueue", actions: [...CORE_DISPATCHER_QUEUE_ACTIONS], resources: [this.queue.queueArn] }));
     const corePolicy = new iam.Policy(this, "DispatcherCorePolicy", {
       roles: [dispatcher.role!],
-      statements: [new iam.PolicyStatement({ sid: "CoreStartSessionDeleter", actions: ["states:StartExecution"], resources: [props.deleterArn] })],
+      statements: [
+        new iam.PolicyStatement({ sid: "CoreStartSessionDeleter", actions: ["states:StartExecution"], resources: [props.deleterArn] }),
+        // The callback signing key, by name, exactly that secret, and only while the switch is not off (with the ARN itself).
+        new iam.PolicyStatement({ sid: "ReadCallbackSigningKey", actions: ["secretsmanager:GetSecretValue"], resources: [props.callbackSigningKeySecret.secretArn] }),
+      ],
     });
     (corePolicy.node.defaultChild as iam.CfnPolicy).cfnOptions.condition = this.isOn;
     const mapping = new lambda.CfnEventSourceMapping(this, "DispatcherMapping", {

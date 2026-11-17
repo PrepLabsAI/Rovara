@@ -4,7 +4,8 @@
 //
 //   ROVARA_TEST_ENVIRONMENT   the project test environment (propose, prove, approve, the task's checks, the nightly run, the evidence line). ON unless exactly "0": nothing happens until
 //                             an environment is approved, so on is the safe default for a laptop.
-//   ROVARA_TEST_SERVICES      dependencies get a backing (real software, local AWS, fakes) on a sealed per-run network. OFF unless exactly "1": it needs Docker and the signed service catalog.
+//   ROVARA_TEST_SERVICES      dependencies get a backing (real software, local AWS, fakes) on a sealed per-run network. ON unless exactly "0" (DEC 254z-amend3); the host may still say it cannot run them
+//                             (`ROVARA_TEST_SERVICES_UNAVAILABLE`, test-services-switch.ts), and then nothing new happens and a task that needed them says why.
 //   ROVARA_TEST_ACCOUNTS      a project may use the customer's own test accounts. OFF unless exactly "1". Needs the services switch too.
 //   ROVARA_PROJECT_IMAGES     a project may bring its own images. OFF unless exactly "1". Needs the services switch too.
 //   ROVARA_SAVED_ENVIRONMENTS a project's proven setup is built into an image, kept in the image registry and used by tasks. OFF unless exactly "1".

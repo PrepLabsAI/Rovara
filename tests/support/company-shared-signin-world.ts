@@ -31,7 +31,7 @@ function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUs
   // As production wires it with the company layer on (DEC 254e): the install's Slack app takes any workspace.
   h.deps.providers.slack = slackSignInProvider({ anyWorkspace: true, teamId: TEAM, credentials: async () => ({ clientId: SLACK_CLIENT_ID, clientSecret: SLACK_CLIENT_SECRET }), fetch: h.fetch, jwks: h.slack.jwks, now: h.now });
   const company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
-  const invites = new CompanyInviteStore({ documentClient: h.db, tableName: "signin", now: h.now, company, newCompanyId: () => X });
+  const invites = new CompanyInviteStore({ documentClient: h.db, tableName: "signin", now: h.now, company, selfServeAllowed: true, newCompanyId: () => X });
   h.deps.company = company; h.deps.companyInvites = invites;
   // B's own issuer: the same IdP URL and client as the install's (the hardest no-downgrade case); its secret is read by B's own name.
   h.deps.companyIssuer = companyIssuerProvider({ store: company, env: h.deps.config.env, readSecret: async () => OIDC_CLIENT_SECRET, fetch: h.fetch, jwksFor: () => h.oidc.jwks, now: h.now });

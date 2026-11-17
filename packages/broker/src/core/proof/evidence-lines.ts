@@ -178,21 +178,30 @@ export function evidenceNotTestedLines(pack: EvidencePack, level: number, exclud
  * The evidence lines of the Proof section at a shrink level (0..4): counts per kind and coverage at levels 0 and 1, then the Environment line, the not-run line and the link at every level. The not-tested
  * bullets are returned apart (`notTested`) because the Proof section puts them under "What wasn't tested". Without a pack bound to this code there is nothing: stale evidence is never shown as current.
  */
-export function evidenceLines(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined, level: number, extra: { proven?: ProvenTestNames; testProofQualifier?: ReturnType<typeof testProofQualifier>; alreadyListed?: ReadonlySet<string> } = {}): { lines: string[]; notTested: string[] } {
+export function evidenceLines(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined, level: number, extra: { proven?: ProvenTestNames; testProofQualifier?: ReturnType<typeof testProofQualifier>; alreadyListed?: ReadonlySet<string> } = {}): { lines: string[]; notTested: string[]; checks: string[]; setup: string[] } {
   const pack = boundEvidence(context, candidateDigest);
-  if (context === undefined || pack === undefined) return { lines: [], notTested: [] };
+  if (context === undefined || pack === undefined) return { lines: [], notTested: [], checks: [], setup: [] };
   const full = level <= 1;
   // Test services: what backed each dependency, in the fixed words of the honesty labels (nothing for a pack without dependencies, so such a pull request reads as it did).
   const dependencies = packDependencyLines(pack, level);
+  // L4-C: the lines about the checks themselves (counts per kind, coverage, flaky reruns) and the lines about where they ran (environment, services, not run, baseline, link) are kept apart for the two drawers.
+  const checks = [...(full ? [testsLine(pack, extra.proven, extra.testProofQualifier), coverageLine(pack)] : []), flakyLine(pack)].filter((line): line is string => line !== undefined);
+  const setup = [
+    environmentLine(pack, level),
+    ...dependencies.lines,
+    notRunLine(pack),
+    // TE-C1: which run "already failing" came from (never dropped, like the not-run line it sits after; the words are counts and fixed words, the branch name goes through the inert-text function).
+    context.baseline === undefined ? undefined : baselineWords(context.baseline),
+    evidenceLinkLine(context),
+  ].filter((line): line is string => line !== undefined);
   const lines = [
     ...(full ? [testsLine(pack, extra.proven, extra.testProofQualifier), coverageLine(pack)] : []),
     environmentLine(pack, level),
     ...dependencies.lines,
     flakyLine(pack),
     notRunLine(pack),
-    // TE-C1: which run "already failing" came from (never dropped, like the not-run line it sits after; the words are counts and fixed words, the branch name goes through the inert-text function).
     context.baseline === undefined ? undefined : baselineWords(context.baseline),
     evidenceLinkLine(context),
   ].filter((line): line is string => line !== undefined);
-  return { lines, notTested: [...evidenceNotTestedLines(pack, level, extra.alreadyListed), ...dependencies.notTested] };
+  return { lines, notTested: [...evidenceNotTestedLines(pack, level, extra.alreadyListed), ...dependencies.notTested], checks, setup };
 }

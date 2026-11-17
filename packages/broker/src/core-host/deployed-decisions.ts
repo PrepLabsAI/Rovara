@@ -55,7 +55,7 @@ const PERSON_ID = /^[^#\s]{1,256}$/u;
 const isPrincipal = (value: unknown): value is Principal => value !== null && typeof value === "object" && typeof (value as Principal).personId === "string" && typeof (value as Principal).provider === "string" && typeof (value as Principal).companyId === "string";
 
 /** The person's live membership in THIS company, or undefined (another company's, none, revoked, malformed, or a read that failed). */
-async function liveMemberRole(people: DeployedPeople, companyId: OrgId, personId: string): Promise<OrgRole | undefined> {
+export async function liveMemberRole(people: DeployedPeople, companyId: OrgId, personId: string): Promise<OrgRole | undefined> {
   if (typeof personId !== "string" || !PERSON_ID.test(personId)) return undefined;
   let membership: { companyId: OrgId; role: OrgRole } | undefined;
   try { membership = await people.membershipOf(personId); } catch { return undefined; }
@@ -64,7 +64,7 @@ async function liveMemberRole(people: DeployedPeople, companyId: OrgId, personId
 }
 
 /** The person's live project grant, read fresh. A failed read is no grant. */
-async function liveGrant(people: DeployedPeople, personId: string, project: string): Promise<"developer" | "administrator" | undefined> {
+export async function liveGrant(people: DeployedPeople, personId: string, project: string): Promise<"developer" | "administrator" | undefined> {
   try {
     const role = await people.projectGrantRole(personId, project);
     return role === "developer" || role === "administrator" ? role : undefined;

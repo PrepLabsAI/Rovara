@@ -118,6 +118,8 @@ export interface ServiceRunnerStartInput {
   /** Owner-approved images by `svc/<name>@sha256:<digest>` (see `StartHelpersInput.imageReferences`). Absent: the registry names them. */
   imageReferences?: ReadonlyMap<string, string> | undefined;
   maxMemMiB: number;
+  /** What the guard allows on this computer (service-helpers.ts `limits`), from the worker's configuration. */
+  limits?: { containers: number; helperMemMiB: number };
   helpers: readonly HelperRequest[];
   /**
    * The run's directory seam (service-env.ts `createRunDirectoryFiles`). `stop()` removes the files the helpers need (kept for a `restart` reset until then); it does NOT remove the directory: whoever created it removes it
@@ -223,6 +225,7 @@ export function createDockerServiceRunner(docker: DockerCli): ServiceRunner {
       try {
         started = await startHelpers(docker, network, {
           registry: input.registry, edition: input.edition, probeImage: input.probeImage, maxMemMiB: input.maxMemMiB, helpers: input.helpers, files: input.files,
+          ...(input.limits === undefined ? {} : { limits: input.limits }),
           ...(input.imageReferences === undefined ? {} : { imageReferences: input.imageReferences }),
           ...(input.signal === undefined ? {} : { signal: input.signal }), ...(input.now === undefined ? {} : { now: input.now }), ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
         });

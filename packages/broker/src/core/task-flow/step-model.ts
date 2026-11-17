@@ -25,7 +25,7 @@ export type StepModelOutcome =
   | { ok: false; sentence: string };
 
 /** The operations whose model a checking stage checks, by workflow mode: the plan's for the plan check, the build's for the reviews. */
-const CHECKED_MODES: Readonly<Partial<Record<StageId, readonly string[]>>> = { plan_check: ["PLAN", "SPEC_WRITE", "SETUP_DRAFT", "SETUP_AGENT"], code_review: ["IMPLEMENT"], security_review: ["IMPLEMENT"] };
+const CHECKED_MODES: Readonly<Partial<Record<StageId, readonly string[]>>> = { plan_check: ["PLAN", "SPEC_WRITE", "SETUP_DRAFT", "SETUP_AGENT", "WIKI_BUILD"], code_review: ["IMPLEMENT"], security_review: ["IMPLEMENT"] };
 
 const selectionOf = (choice: OperationModelChoice): ModelSelection => ({ provider: choice.model.provider, modelId: choice.model.modelId, ...(choice.thinkingLevel === undefined ? {} : { thinkingLevel: choice.thinkingLevel }) });
 

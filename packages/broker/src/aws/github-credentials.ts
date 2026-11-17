@@ -1,8 +1,8 @@
 // The GitHub App credentials as the broker and the plan evidence job build them: one definition, from the same environment
 // (GITHUB_APP_CREDENTIAL_REF, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN) and the same secret.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { AgentXError, agentXError, GITHUB_DISCONNECTED_MESSAGE, IMPLICIT_COMPANY_ID, OrgIdSchema, type ClientRepositoriesResponse } from "@agentx/contracts";
-import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { AgentXError, agentXError, companyScoped, GITHUB_DISCONNECTED_MESSAGE, IMPLICIT_COMPANY_ID, OrgIdSchema, REPOSITORY_ACCESS_STATES, type ClientRepositoriesResponse, type RepositoryAccessState } from "@agentx/contracts";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { boundedCompanyReads } from "./company-check.js";
 import { isConditional } from "./broker-shared.js";
@@ -122,6 +122,32 @@ const companyInstallationRow = (companyId: string, row: { installationId: number
 });
 const companyInstallationSchema = z.object({ entityType: z.literal("GITHUB_COMPANY_INSTALLATION"), companyId: OrgIdSchema, installationId: installationIdSchema,
   accountLogin: bindingText, boundAt: z.iso.datetime(), boundBy: bindingText });
+/**
+ * DEC 254zc(1): a repository GitHub says is no longer the company's to reach (moved to another owner, or taken off the App's repository list). One row per company and full name, in the
+ * company's own partition (ORG#<company>#GITHUB_REPOSITORY_MOVED / REPO#<lowercase owner/name>), written only by a verified `installation_repositories` or `repository` webhook for an installation
+ * that company holds. The project setup-status read puts it on the repos row. Nothing here carries a token, a payload or a person's words.
+ */
+export const repositoryFullName = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(300);
+export const repositoryMovedKey = (companyId: string, fullName: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "GITHUB_REPOSITORY_MOVED"), sk: `REPO#${repositoryFullName.parse(fullName).toLowerCase()}` });
+const repositoryMovedSchema = z.object({ entityType: z.literal("GITHUB_REPOSITORY_MOVED"), companyId: OrgIdSchema, fullName: repositoryFullName, reason: z.enum(REPOSITORY_ACCESS_STATES),
+  installationId: installationIdSchema, at: z.iso.datetime(), deliveryId: z.string().regex(/^[0-9a-f-]{36}$/) });
+/** At most this many repositories one webhook delivery may name; more refuses the whole delivery (never a part of it). */
+export const REPOSITORY_MOVES_MAX = 100;
+/**
+ * Which of `fullNames` the company has marked, as a map of lowercase name to reason. Each name is one consistent read of this company's own key; a row that names another company, another
+ * name or is not a mark is unreadable (throws), never applied.
+ */
+export async function readRepositoryMoves(client: { send(command: unknown): Promise<unknown> }, tableName: string, companyId: string, fullNames: readonly string[]): Promise<Map<string, RepositoryAccessState>> {
+  const found = new Map<string, RepositoryAccessState>();
+  for (const name of new Set(fullNames.map((entry) => entry.toLowerCase()))) {
+    const item = (await client.send(new GetCommand({ TableName: tableName, Key: repositoryMovedKey(companyId, name), ConsistentRead: true })) as { Item?: unknown }).Item;
+    if (item === undefined) continue;
+    const row = repositoryMovedSchema.parse(item);
+    if (row.companyId !== companyId || row.fullName.toLowerCase() !== name) throw agentXError("RUNTIME_UNAVAILABLE", "repository state unavailable");
+    found.set(name, row.reason);
+  }
+  return found;
+}
 /** At most this many installations are listed for one company; more refuses the whole read. */
 export const COMPANY_INSTALLATIONS_MAX = 100;
 const PersonIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -276,6 +302,51 @@ export class GithubInstallationBindings {
       }
       throw githubBindingRefusal();
     });
+  }
+
+  /**
+   * DEC 254zc(1): GitHub's signed webhook says repositories left this installation (`installation_repositories` removed: reason "removed") or moved to another owner (`repository`
+   * transferred: reason "transferred"). The company is the installation's, found by the installation id alone (its binding; before the backfill marker, the implicit company), so one
+   * company's event never marks another's. Each name gets one mark in the company's own partition; a "removed" never replaces a "transferred" (the more exact word stays). When the
+   * event names the installation's account (`accountLogin`) it must be the binding's, else nothing is written (a body signed for another event, replayed). An unbound installation
+   * writes nothing. More than REPOSITORY_MOVES_MAX names refuses the whole delivery.
+   */
+  async markRepositories(installationId: number, moves: ReadonlyArray<{ fullName: string; reason: RepositoryAccessState }>, deliveryId: string, accountLogin?: string): Promise<{ outcome: "unbound" | "unchanged" } | { outcome: "marked"; companyId: string; count: number }> {
+    return this.run(async (send) => {
+      const owner = await this.repositoryOwner(send, installationId, deliveryId, accountLogin, moves.length);
+      if (typeof owner === "string") return { outcome: owner };
+      const at = new Date(this.clock()).toISOString();
+      for (const move of moves) {
+        const reason = z.enum(REPOSITORY_ACCESS_STATES).parse(move.reason);
+        const fullName = repositoryFullName.parse(move.fullName);
+        const item = { ...repositoryMovedKey(owner.companyId, fullName), entityType: "GITHUB_REPOSITORY_MOVED", companyId: owner.companyId, fullName, reason, installationId, at, deliveryId: deliveryId.toLowerCase() };
+        try {
+          await send(new PutCommand({ TableName: this.tableName, Item: item,
+            ...(reason === "removed" ? { ConditionExpression: "attribute_not_exists(pk) OR #reason <> :transferred", ExpressionAttributeNames: { "#reason": "reason" }, ExpressionAttributeValues: { ":transferred": "transferred" } } : {}) }));
+        } catch (error) { if (!isConditional(error)) throw error; }
+      }
+      return { outcome: "marked", companyId: owner.companyId, count: moves.length };
+    });
+  }
+
+  /** DEC 254zc(1): `installation_repositories` added: the company's marks for these names go (GitHub shows the repository to the App again). Same company and account rules as markRepositories. */
+  async clearRepositories(installationId: number, fullNames: readonly string[], deliveryId: string, accountLogin?: string): Promise<{ outcome: "unbound" | "unchanged" } | { outcome: "cleared"; companyId: string; count: number }> {
+    return this.run(async (send) => {
+      const owner = await this.repositoryOwner(send, installationId, deliveryId, accountLogin, fullNames.length);
+      if (typeof owner === "string") return { outcome: owner };
+      for (const name of fullNames) await send(new DeleteCommand({ TableName: this.tableName, Key: repositoryMovedKey(owner.companyId, repositoryFullName.parse(name)) }));
+      return { outcome: "cleared", companyId: owner.companyId, count: fullNames.length };
+    });
+  }
+
+  /** The company a repository event writes for: the installation's binding (its account must match the event's, when the event names one), else the implicit company before the backfill marker. */
+  private async repositoryOwner(send: (command: unknown) => Promise<{ Item?: unknown }>, installationId: number, deliveryId: string, accountLogin: string | undefined, names: number): Promise<{ companyId: string } | "unbound" | "unchanged"> {
+    installationIdSchema.parse(installationId);
+    if (accountLogin !== undefined) bindingText.parse(accountLogin);
+    if (!DELIVERY.test(deliveryId) || names > REPOSITORY_MOVES_MAX) throw githubBindingRefusal();
+    const row = await this.binding(send, installationId);
+    if (row !== undefined) return accountLogin !== undefined && accountLogin.toLowerCase() !== row.accountLogin.toLowerCase() ? "unchanged" : { companyId: row.companyId };
+    return await this.marker(send) ? "unbound" : { companyId: IMPLICIT_COMPANY_ID };
   }
 
   /**

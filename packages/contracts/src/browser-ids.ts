@@ -11,6 +11,7 @@ export type ChainRunId = z.infer<typeof ChainRunIdSchema>;
 export const SlackTeamIdSchema = z.string().regex(/^[TE][A-Z0-9]{2,31}$/);
 export const SlackChannelIdSchema = z.string().regex(/^[CG][A-Z0-9]{2,31}$/);
 export const SlackMessageTimestampSchema = z.string().regex(/^\d{10}\.\d{6}$/);
+export const SlackUserIdSchema = z.string().regex(/^[UW][A-Z0-9]{2,31}$/);
 
 const LINEAR_ISSUE_ID_MAX = 64;
 const LINEAR_URL_MAX = 2048;

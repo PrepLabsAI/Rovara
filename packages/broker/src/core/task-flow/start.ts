@@ -44,7 +44,7 @@ import { setupAgentPointerItem } from "../setup-agent/agent.js";
 import { developerIdOf } from "../sessions/create.js";
 import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
 import { setupDriftAtStart } from "../setup-agent/recheck.js";
-import type { SetupAgentLimits } from "@agentx/contracts";
+import { PREPARE_PINS_FEATURE, type SetupAgentLimits, type WikiBuildWire } from "@agentx/contracts";
 
 export interface StartResult {
   task: TaskView;
@@ -69,7 +69,13 @@ function parseRequest(value: unknown): StartDeveloperTaskRequest {
  */
 export interface SetupAgentStart { limits: SetupAgentLimits; seenTaskId: string | undefined }
 
-export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, value: unknown, run?: { setupAgent?: SetupAgentStart }): Promise<StartResult> {
+/**
+ * What a wiki build run adds to a start (`core/wiki-build`, W3b): the task is made for building the project's wiki, with these limits and these pinned commits (the preparation carries the same pins, read-only,
+ * and the worker refuses any difference). `itemsFor` gives the writes that must commit WITH the task (the project's build pointer, which holds only while it is the one the caller read, and the notes row).
+ */
+export interface WikiBuildStart { wire: WikiBuildWire; itemsFor(taskId: string): TransactItem[] }
+
+export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, value: unknown, run?: { setupAgent?: SetupAgentStart; wikiBuild?: WikiBuildStart }): Promise<StartResult> {
   const parsedRequest = parseRequest(value);
   const { principal } = caller;
   if (principal.companyId !== deps.companyId) throw agentXError("FORBIDDEN", "this person belongs to another company");
@@ -133,7 +139,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   }
 
   // A project whose own setup check failed starts no work until it is fixed and checked again (a setup run is how it gets fixed, so it is let through). A project nobody checked starts as it always did.
-  if (run?.setupAgent === undefined) {
+  if (run?.setupAgent === undefined && run?.wikiBuild === undefined) {
     const setup = await setupStateOf(deps, request.project, project.definition);
     if (setup.status === "failed") return refused(agentXError("CONFIG_INVALID", setupFailedMessage(setup.failedStep ?? "setup")));
   }
@@ -198,7 +204,15 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   }
   const prepare = buildOperation(deps, {
     workspace, kind: "prepare", requestId: newId(deps), operationId: prepareOperationId, now: receivedAt, recordRequest: false,
-    dispatch: { kind: "prepare", projectRevision: revision, payload: meta.meta === undefined ? {} : { meta: JSON.parse(JSON.stringify(meta.meta)) as JsonValue }, ...(meta.meta === undefined ? {} : { requires: [META_PREPARE_FEATURE] }) },
+    // A wiki build's preparation only clones (read-only: no devcontainer, no setup command) and refuses a repository that is not at the commit the broker pinned.
+    dispatch: {
+      kind: "prepare", projectRevision: revision,
+      payload: {
+        ...(meta.meta === undefined ? {} : { meta: JSON.parse(JSON.stringify(meta.meta)) as JsonValue }),
+        ...(run?.wikiBuild === undefined ? {} : { readOnly: true, pins: run.wikiBuild.wire.pins.map((pin) => ({ repository: pin.repo, commit: pin.commit })) }),
+      },
+      ...(meta.meta === undefined && run?.wikiBuild === undefined ? {} : { requires: [...(meta.meta === undefined ? [] : [META_PREPARE_FEATURE]), ...(run?.wikiBuild === undefined ? [] : ["task.agentRun", PREPARE_PINS_FEATURE])] }),
+    },
     requester: { personId: developerId, provider: principal.provider },
   });
   const task: TaskRecord = {
@@ -212,6 +226,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     createdAt: receivedAt, updatedAt: receivedAt,
     ...(extras?.sessionId === undefined ? {} : { sessionId: extras.sessionId }),
     ...(run?.setupAgent === undefined ? {} : { purpose: "setup_agent" as const, setupAgentLimits: run.setupAgent.limits }),
+    ...(run?.wikiBuild === undefined ? {} : { purpose: "wiki_build" as const, wikiBuild: run.wikiBuild.wire }),
     ...(asWorkflow ? { workflow: createWorkflowSnapshot({
       taskId, ownerId: ownerKey, now: receivedAt, path: workflowPath, checkPolicy: taskWorkflowCheckPolicy(project.definition, testEnvironment?.environment),
       // A 1.1.0 workflow alone may hold the Understand stage: it starts at UNDERSTAND/READY, and says whether the request or Understand chose the path.
@@ -229,6 +244,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     ...(asWorkflow && !understandFirst ? { pendingWorkflowMode: "PLAN" as const } : {}),
     // A setup run's first step is its own, after the preparation: it runs the project's commands in a setup sandbox.
     ...(run?.setupAgent === undefined ? {} : { pendingWorkflowMode: "SETUP_AGENT" as const }),
+    // A wiki build's first step is its own, after the preparation: it reads the pinned commits with read-only tools.
+    ...(run?.wikiBuild === undefined ? {} : { pendingWorkflowMode: "WIKI_BUILD" as const }),
   };
   const steps = (staged: readonly TransactItem[], taskItem: TaskRecord): TransactItem[] => [
     ...chargeItems(charge, limits, taskId, receivedAt),
@@ -248,6 +265,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     ...driftItems,
     ...(testEnvironment?.pin === undefined ? [] : [testEnvironment.pin]),
     ...(run?.setupAgent === undefined ? [] : [setupAgentPointerItem({ orgId: deps.companyId, project: request.project, taskId, requestId: request.requestId, requestedBy: developerIdOf(principal), basedOnRevision: revision, startedAt: receivedAt, limits: run.setupAgent.limits, seenTaskId: run.setupAgent.seenTaskId })]),
+    ...(run?.wikiBuild === undefined ? [] : run.wikiBuild.itemsFor(taskId)),
   ];
   // What the host's admission may set its allowance by: the path (Quick or Full) and the flow options. A task that understands first and was not told the path has none yet: Understand chooses it.
   const admissionTaskStart: AdmissionTaskStart = {

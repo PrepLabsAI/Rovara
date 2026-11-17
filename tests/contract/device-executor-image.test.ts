@@ -11,7 +11,7 @@ const read = (path: string) => readFileSync(path, "utf8");
 const dockerfile = read("environments/device-executor/Dockerfile");
 const e2eDockerfile = read("environments/e2e-executor/Dockerfile");
 const instructions = dockerfile.split("\n").filter((row) => !row.startsWith("#") && row.trim() !== "");
-interface Step { name?: string; run?: string; uses?: string; env?: Record<string, string> }
+interface Step { name?: string; if?: string; run?: string; uses?: string; env?: Record<string, string> }
 interface Job { needs?: unknown; if?: string; "runs-on"?: string; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[] }
 const ci = YAML.parse(read(".github/workflows/ci.yml")) as { permissions: Record<string, string>; jobs: Record<string, Job> };
 const job = ci.jobs["device-runtime"]!;
@@ -85,7 +85,21 @@ describe("the CI job that runs the emulator", () => {
     const test = job.steps.find((step) => (step.run ?? "").includes("tests/linux/device-evidence-emulator.test.ts"))!;
     expect(test.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_DEVICE_IMAGE: "rovara-device-executor:ci" });
     expect(runs).not.toMatch(/--privileged|--cap-add|seccomp=unconfined|continue-on-error|\|\| true/u);
-    expect(JSON.stringify(job)).not.toContain("continue-on-error");
+  });
+
+  it("is quarantined (DEC 254zn): non-blocking unless the plan says the change touches device files, with a plain warning when it fails and the image build and the test both retried", () => {
+    const quarantined = job as Job & { "continue-on-error"?: string };
+    expect(quarantined["continue-on-error"]).toBe("${{ needs.plan.outputs.device_required != 'true' }}");
+    const warn = job.steps.find((step) => step.name === "Say that a failure here is non-blocking")!;
+    expect(warn.if).toBe("failure() && needs.plan.outputs.device_required != 'true'");
+    expect(warn.run).toContain("::warning title=device-runtime is quarantined (non-blocking)::");
+    // the SDK download happens in the image build: up to 3 attempts, ending in an error annotation and a failed step, never a silent pass
+    const build = job.steps.find((step) => step.name === "Build the device executor image")!.run!;
+    expect(build).toMatch(/until docker build -f "\$RUNNER_TEMP\/device-executor\.Dockerfile" -t rovara-device-executor:ci \.; do/u);
+    expect(build).toContain('if [ "$attempt" -ge 3 ]; then');
+    expect(build).toMatch(/::error title=Device executor image build failed::[^\n]*\n\s+exit 1/u);
+    // the test file retries a failed test twice itself (vitest retry), so the job step needs no loop of its own
+    expect(read("tests/linux/device-evidence-emulator.test.ts")).toMatch(/describe\.runIf\(wanted\)\("device evidence: the Android emulator in the device executor", \{ retry: 2 \}, \(\) => \{/u);
   });
 
   it("leaves the emulator test to this job: the ARM Linux job does not run it", () => {

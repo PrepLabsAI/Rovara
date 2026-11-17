@@ -254,6 +254,11 @@ function envTokens(value: string | undefined): string[] {
  */
 export async function resolveOwnerImages(input: {
   service: OwnerImageService; environment: NodeJS.ProcessEnv; docker: DockerRunner; now: () => number; log?: ((entry: Record<string, unknown>) => void) | undefined;
+  /**
+   * `now` (the default): every entry must be on this computer by digest (a missing one is pulled now; one that cannot be is left out). `on-first-use` (DEC 254z-amend3, `rovara up`): nothing is pulled or looked for here;
+   * every pinned entry is in effect and its image is pulled by digest the first time a step needs it (local/lazy-service-images.ts). A tag in the env list is still pinned once either way: naming it is the owner's ask.
+   */
+  pull?: "now" | "on-first-use";
 }): Promise<ResolvedOwnerImages> {
   const log = input.log ?? (() => undefined);
   const tokens = envTokens(input.environment[TEST_SERVICE_IMAGES_VARIABLE]);
@@ -283,6 +288,7 @@ export async function resolveOwnerImages(input: {
   for (const image of stored) if (image.origin === "env" && !tokens.includes(image.requested)) await input.service.remove(image.reference, "env").catch(() => false);
   const entries: OwnerListEntry[] = [];
   const failed: string[] = [];
+  if (input.pull === "on-first-use") return { entries: normalizeOwnerList(wanted), failed, envRequested: tokens };
   for (const entry of normalizeOwnerList(wanted)) {
     if (await ensureImagePresent(input.docker, entry.reference)) entries.push(entry);
     else { failed.push(entry.reference); log({ component: "test-services", event: "test_services.image_not_pulled", reference: entry.reference }); }

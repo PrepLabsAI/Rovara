@@ -3,7 +3,7 @@
 // (as `reviewSameModel` does), keyed by the candidate it is about.
 import { redactText, secondReviewModelKey, type AcceptedFindingRef, SECOND_REVIEW_RESULT_KEY, SecondOpinionSchema, SecondReviewResultSchema, secondReviewDidNotRunLine, secondReviewedByLine, blockingFindings, type SecondOpinion, type SecondOpinionUnavailableReason, type SecondReviewChoice } from "@agentx/contracts";
 import { z } from "zod";
-import { mergeWaitsForSecondReview, secondOpinionOf, secondOpinionPrLines, secondOpinionShownOn, secondOpinionUnavailable, secondReviewAcknowledgement, type SecondReviewPlan } from "./plan.js";
+import { mergeWaitsForSecondReview, secondOpinionOf, secondOpinionPrLines, secondOpinionPrStatus, secondOpinionShownOn, secondOpinionUnavailable, secondReviewAcknowledgement, type SecondReviewPlan } from "./plan.js";
 
 type RunPlan = Extract<SecondReviewPlan, { run: true }>;
 
@@ -97,6 +97,12 @@ export function secondOpinionFromReviewResult(input: SecondOpinionFromResultInpu
 export function secondReviewPullRequestLines(task: { secondOpinion?: unknown }, candidateDigest: string | undefined, accepted?: readonly AcceptedFindingRef[]): string[] {
   const opinion = secondOpinionOfTask(task, candidateDigest);
   return opinion === undefined ? [] : secondOpinionPrLines(opinion, accepted);
+}
+
+/** L4-C: the second review of the code the description holds, as the verdict object reads it (`secondOpinionPrStatus`): undefined for a shadow opinion or none. Never read from the workflow. */
+export function secondReviewPrStatus(task: { secondOpinion?: unknown }, candidateDigest: string | undefined, accepted?: readonly AcceptedFindingRef[]): ReturnType<typeof secondOpinionPrStatus> {
+  const opinion = secondOpinionOfTask(task, candidateDigest);
+  return opinion === undefined ? undefined : secondOpinionPrStatus(opinion, accepted);
 }
 
 /**

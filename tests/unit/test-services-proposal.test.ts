@@ -32,9 +32,10 @@ describe("a draft's dependency candidates", () => {
   });
 
   it("drops the candidates and proposes nothing with tx off (the draft is what it was)", () => {
-    const off = sanitizeTestEnvDraft(draftOf([candidate("postgres")]), options("none", { ROVARA_TEST_ENVIRONMENT: "1" }))!;
+    const off = sanitizeTestEnvDraft(draftOf([candidate("postgres")]), options("none", { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" }))!;
     expect(off).toEqual(sanitizeTestEnvDraft(draftOf())!);
-    expect(sanitizeTestEnvDraft(draftOf([candidate("postgres")]))).toEqual(sanitizeTestEnvDraft(draftOf()));
+    // DEC 254z-amend3: switched on by default, but where the host says it cannot run them (hosted Code today) the draft is the plain one too.
+    expect(sanitizeTestEnvDraft(draftOf([candidate("postgres")]), { env: { ROVARA_TEST_SERVICES_UNAVAILABLE: "workers" } })).toEqual(sanitizeTestEnvDraft(draftOf()));
   });
 
   it("keeps the candidates when it has no catalog to propose from, and says so", () => {
@@ -57,8 +58,8 @@ describe("a draft's dependency candidates", () => {
       return (items[0] as { item: { draft: TestEnvDraft } } | undefined)?.item.draft;
     };
     expect(stored(ON)!.dependencies).toEqual([candidate("postgres")].map((entry) => clean(entry)));
-    expect(stored({ ROVARA_TEST_ENVIRONMENT: "1" })).toEqual(sanitizeTestEnvDraft(draftOf()));
-    expect("dependencies" in stored({ ROVARA_TEST_ENVIRONMENT: "1" })!).toBe(false);
+    expect(stored({ ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toEqual(sanitizeTestEnvDraft(draftOf()));
+    expect("dependencies" in stored({ ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })!).toBe(false);
     // An invalid candidate makes the whole report not a draft: nothing is stored, and the setup draft's own result is untouched.
     expect(stored(ON, [candidate("postgres", { hints: { password: "x" } })])).toBeUndefined();
   });

@@ -296,12 +296,14 @@ export * from "./test-answer-labels.js";
 export * from "./seed-script-lock.js";
 export * from "./generated/aws-emulator-services.js";
 export * from "./aws-emulator-service-keys.js";
+export * from "./test-services-limits.js";
 export * from "./test-services-usage.js";
 export * from "./service-catalog.js";
 export * from "./service-catalog-images.js";
 export * from "./catalog-trust.js";
 export * from "./owner-image-list.js";
 export * from "./owner-starter-images.js";
+export * from "./test-service-mirror.js";
 export * from "./service-catalog-verify.js";
 // TE-F0a (M2): the model catcher foundation. Pure contracts and data with no callers yet; Rovara's own agent-model files (model-providers.ts, model-sources.ts, e2e-model-*.ts) are separate (DECISIONS 157).
 export * from "./model-catalog.js";
@@ -365,6 +367,7 @@ export * from "./eval-files.js";
 export * from "./system-owner.js";
 export * from "./test-id.js";
 export * from "./verification-result.js";
+export * from "./pr-verdict.js";
 export * from "./e2e-model-spend.js";
 
 // Learning v2: the Team record and lessons (R1).
@@ -373,7 +376,15 @@ export * from "./app-lessons.js";
 export * from "./app-lessons-repo-file.js";
 export * from "./lessons-local-tools.js";
 export * from "./lesson-keys.js";
+// Lead 4 W2: the project wiki store contract (rows keyed by company AND project).
+export * from "./wiki-store.js";
+// Lead 4 A1: what a task's agents are given of the project wiki, and the worker's report.
+export * from "./wiki-agents.js";
 export * from "./spec-target.js";
+
+// Wiki W0: the free file map and forecast.
+export * from "./wiki-file-map.js";
+export * from "./wiki-build.js";
 
 // Setup and test health: saved environments (SH3).
 export * from "./saved-env.js";
@@ -399,6 +410,7 @@ export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
 export * from "./company-reads.js";
+export * from "./sign-in-links.js";
 // TE-F8 (M2, 0.5.19): record-then-replay for changed prompts. Additive, no callers; depends on TE-F1a (model-egress) and TE-F4 (prompt-change).
 export * from "./model-record-key.js";
 export * from "./model-record-policy.js";

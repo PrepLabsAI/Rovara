@@ -148,6 +148,8 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     expect(new Set(actions)).toEqual(new Set([
       "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:GetAuthorizationToken", "ecr:BatchImportUpstreamImage", "ecr:CreateRepository",
       "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "logs:CreateLogStream", "logs:PutLogEvents",
+      // DEC 254zm: the read of the install's test-service starter copies (exact repositories: test-service-mirror-infrastructure.test.ts).
+      "ecr:BatchCheckLayerAvailability",
     ]));
     foundation.hasResourceProperties("AWS::Logs::LogGroup", { LogGroupName: "/agentx/staging/worker", RetentionInDays: 30 });
   });

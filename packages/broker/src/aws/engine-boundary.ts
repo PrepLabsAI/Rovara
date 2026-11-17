@@ -33,7 +33,7 @@ export interface EngineStateTable {
 /** The developer task routes, each with the area of the work it touches. The owner is decided by `entryOwner`, not by this area (see the header). */
 export const TASK_ENTRY_AREAS = {
   read: "flow", events: "flow", plan: "flow", messages: "flow", comments: "flow", people: "flow", "people/role": "flow", "people/take-ownership": "flow", "people/requests": "flow",
-  readers: "flow", share: "flow", cancel: "flow", close: "flow", "workflow/decision": "flow", "canvas-closeout/retry": "flow",
+  readers: "flow", share: "flow", cancel: "flow", close: "flow", "workflow/decision": "flow", "canvas-closeout/retry": "flow", answers: "flow",
   continue: "build", "workflow/retry": "build", "workflow/review": "build", "workflow/send-back": "build", "workflow/review-findings": "build",
   diff: "merge", "pull-requests": "merge", "workflow/publish-retry": "merge", "workflow/keep-pull-requests": "merge", "workflow/feedback": "merge", "workflow/feedback-decision": "merge",
   "workflow/feedback-retry": "merge", "e2e-publication-context": "merge",
@@ -260,4 +260,17 @@ export async function startOnCore(entry: CoreTaskEntry | undefined, request: Bro
   if (entry === undefined || !isStart(request)) return undefined;
   const answer = await entry.route(request, caller);
   return answer === undefined ? undefined : { value: coreAnswerValue(answer) };
+}
+
+/**
+ * The developer list of the tasks the caller was added to (`GET /v1/dev/tasks?involved=1`, web task channel C5): the core's own answer. Tasks on the old workflow have no involved list (D6: new
+ * web features are the core's only), so no core entry, a company the core does not serve and a caller the core does not know all read as an empty list, never an error and never the ordinary list.
+ * The core re-checks every task against its live access; anything else it refuses (a bad `limit` or `cursor`) is passed on in its words.
+ */
+export async function involvedOnCore(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller): Promise<unknown> {
+  const none = { involved: true, tasks: [] };
+  if (entry === undefined) return none;
+  const answer = await entry.route(request, caller);
+  if (answer === undefined || answer.statusCode === 401 || answer.statusCode === 404) return none;
+  return coreAnswerValue(answer);
 }

@@ -93,6 +93,22 @@ describe("a model the gateway does not offer (DEC 254g: the gateway is the autho
     }
   });
 
+  it("does not classify the exact gateway answer as not offered for other HTTP statuses", async () => {
+    const details = new Map([[401, "the API key was refused; check that it is valid and has not expired"], [403, "check the API key and its permissions"], [404, "check the model ID and that the key's organization can use it"], [429, "rate limited or out of credits; check the key's usage limits before retrying"], [500, "upstream unavailable; check provider status before retrying"]]);
+    for (const [status, detail] of details) {
+      const { runtime } = await routedRuntime("zai.glm-9", "amazon-bedrock", refusal("This model is not offered on Rovara's AI.", status));
+      const result = await runtime.completeSimple(runtime.getModel("rovara-route", "zai.glm-9")!, plain);
+      expect(result.errorMessage, String(status)).toBe(`Model source request failed; ${detail}`);
+    }
+  });
+
+  it("does not classify the exact 400 answer as not offered on another route API", async () => {
+    const transport = vi.fn(async () => Response.json({ error: { type: "invalid_request", message: "This model is not offered on Rovara's AI." } }, { status: 400 })) as unknown as typeof fetch;
+    const runtime = await createConfiguredModelRuntime({ provider: "amazon-bedrock", modelId: "zai.glm-9" }, { fetch: transport, onUsage: () => undefined, proxy: { baseUrl: "https://gateway.example", apiKey: "task-key", route: { alias: "company-glm", api: "openai-completions", catalog: "zai.glm-9" } } });
+    const result = await runtime.completeSimple(runtime.getModel("rovara-route", "company-glm")!, plain);
+    expect(result.errorMessage).toBe("Model source request failed; the request was refused; check the model's context and output limits");
+  });
+
   it("any other 400 keeps the ordinary refused-request words (the body is matched whole, never echoed)", async () => {
     for (const reply of [refusal("This model is not offered on Rovara's AI. secret-prompt"), refusal("prompt too long"), () => new Response("This model is not offered on Rovara's AI.", { status: 400 })]) {
       const { runtime } = await routedRuntime("zai.glm-9", "amazon-bedrock", reply);
