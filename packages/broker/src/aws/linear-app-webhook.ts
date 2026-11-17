@@ -104,7 +104,7 @@ export async function handleLinearAppWebhook(wiring: LinearWebhookWiring, input:
     const connection = await wiring.connections.connection(companyId);
     if (connection === undefined || connection.status !== "connected" || connection.organizationId !== envelope.data.organizationId) {
       // PR 20: no intake for a company whose connection needs reconnecting or is gone; said once per event, ids only (Cloud shows the notice, PR 13).
-      wiring.log({ companyId, event: "linear.webhook_not_connected", status: connection === undefined ? "not_connected" : connection.status !== "connected" ? connection.status : "other_workspace", type, action });
+      wiring.log({ companyId, event: "linear.webhook_not_connected", reason: connection === undefined ? "not_connected" : connection.status !== "connected" ? connection.status : "other_workspace", type, action });
       return OK;
     }
     const teamId = teamOf(type, parsedBody);

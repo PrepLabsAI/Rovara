@@ -8,7 +8,7 @@ import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harn
 import { fakeLinear, LINEAR_APP, LINEAR_CLIENT_SECRET, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
 import { RecordingStore } from "../support/intake-world.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
-import { LinearConnections, linearConnectionKey, type LinearAppSettings } from "../../packages/broker/src/aws/linear-connections.js";
+import { LinearConnections, linearConnectionKey, linearTeamKey, linearWorkspaceKey, type LinearAppSettings } from "../../packages/broker/src/aws/linear-connections.js";
 import { handleLinearAppWebhook } from "../../packages/broker/src/aws/linear-app-webhook.js";
 import { linearAppIntakeDeliver, linearCompanyTracker, LINEAR_OTHER_COMPANY } from "../../packages/broker/src/aws/linear-app-intake.js";
 import type { IntakePorts } from "../../packages/broker/src/core/intake/engine.js";
@@ -23,6 +23,7 @@ const MEMBER_B = "b".repeat(64);
 const BASE = "/v1/dev/company/linear";
 /** Company B's Linear workspace: its team id is the SAME string as one of A's teams. */
 const WORKSPACE_D: FakeWorkspace = { id: "dddd4444-0000-4000-8000-00000000000d", name: "Delta Linear", urlKey: "delta", teams: [{ id: "team-a-eng", key: "ENG", name: "Engineering" }] };
+const WORKSPACE_C_ID = "cccc3333-0000-4000-8000-00000000000c";
 const PROJECT_SECRET = ["project", "hook", "secret", "canary"].join("-");
 const sign = (raw: string, secret = LINEAR_WEBHOOK_SECRET) => createHmac("sha256", secret).update(Buffer.from(raw, "utf8")).digest("hex");
 
@@ -205,7 +206,7 @@ describe("connection not usable", () => {
       expect(await w.appHook(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }))).toEqual({ status: 200, body: { ok: true } });
       expect(w.intake.started).toEqual([]); expect(w.intake.asked).toEqual([]);
       expect(w.linear.requests.length).toBe(before);
-      expect(w.logs).toContainEqual({ companyId: A, event: "linear.webhook_not_connected", status, type: "Issue", action: "create" });
+      expect(w.logs).toContainEqual({ companyId: A, event: "linear.webhook_not_connected", reason: status, type: "Issue", action: "create" });
       // The intake's own check, for an event routed before the status changed.
       await w.deliverInto({ companyId: A, project: "alpha", teamId: "team-a-eng", type: "Issue", action: "create", body: {}, organizationId: WORKSPACE_A.id, delivery: { rawBody: "{}", headers: {} } });
       expect(w.logs).toContainEqual({ event: "linear.intake_skipped", companyId: A, project: "alpha", type: "Issue", action: "create", reason: status });
@@ -225,12 +226,51 @@ describe("connection not usable", () => {
     await deliver({ companyId: A, project: "alpha", teamId: "team-a-eng", type: "Issue", action: "create", body: {}, organizationId: WORKSPACE_A.id, delivery: { rawBody: "{}", headers: {} } });
     expect(logs).toEqual([{ event: "linear.intake_not_wired", companyId: A, project: "alpha", type: "Issue", action: "create" }]);
   });
-  it("a signature that is not the app's secret is refused by the intake's own check too (the delivery is verified again)", async () => {
+  it("a signature that is not the app's secret is refused by the intake's own check too (the delivery is verified again): logged by code, not retried", async () => {
     const w = await world();
     const raw = JSON.stringify(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }));
-    await expect(w.deliverInto({ companyId: A, project: "alpha", teamId: "team-a-eng", type: "Issue", action: "create", body: JSON.parse(raw), organizationId: WORKSPACE_A.id,
-      delivery: { rawBody: raw, headers: { "linear-signature": sign(raw, PROJECT_SECRET) } } })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+    await w.deliverInto({ companyId: A, project: "alpha", teamId: "team-a-eng", type: "Issue", action: "create", body: JSON.parse(raw) as unknown, organizationId: WORKSPACE_A.id,
+      delivery: { rawBody: raw, headers: { "linear-signature": sign(raw, PROJECT_SECRET) } } });
+    expect(w.logs).toContainEqual({ event: "linear.intake_failed", companyId: A, project: "alpha", type: "Issue", action: "create", code: "CALLBACK_FORBIDDEN", retry: false });
     expect(w.intake.started).toEqual([]);
+  });
+  it("the team is the project's STORED pick, re-read at intake: a pick changed after routing starts nothing for the old team; a pick removed is skipped", async () => {
+    const w = await world();
+    const raw = JSON.stringify(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }));
+    const event = { companyId: A, project: "alpha", teamId: "team-a-eng", type: "Issue" as const, action: "create", body: JSON.parse(raw) as unknown, organizationId: WORKSPACE_A.id,
+      delivery: { rawBody: raw, headers: { "linear-signature": sign(raw) } } };
+    const key = linearTeamKey(A, "alpha");
+    const pick = w.h.db.get(key.pk, key.sk) as Record<string, unknown>;
+    w.h.db.set({ ...pick, teamId: "team-a-ops" });
+    await w.deliverInto(event);
+    expect(w.logs).toContainEqual(expect.objectContaining({ event: "linear.intake_failed", code: "CALLBACK_FORBIDDEN", retry: false }));
+    w.h.db.delete(key.pk, key.sk);
+    await w.deliverInto(event);
+    expect(w.logs).toContainEqual({ event: "linear.intake_skipped", companyId: A, project: "alpha", type: "Issue", action: "create", reason: "no_team_pick" });
+    expect(w.intake.started).toEqual([]);
+  });
+  it("an app event from a workspace bound to the company while its connection is on another workspace: not connected, nothing starts", async () => {
+    const w = await world();
+    const binding = w.h.db.get(linearWorkspaceKey(WORKSPACE_A.id).pk, linearWorkspaceKey(WORKSPACE_A.id).sk) as Record<string, unknown>;
+    w.h.db.set({ ...binding, ...linearWorkspaceKey(WORKSPACE_C_ID), organizationId: WORKSPACE_C_ID });
+    await w.appHook({ ...issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }), organizationId: WORKSPACE_C_ID });
+    expect(w.logs).toContainEqual({ companyId: A, event: "linear.webhook_not_connected", reason: "other_workspace", type: "Issue", action: "create" });
+    expect(w.intake.started).toEqual([]); expect(w.intake.asked).toEqual([]);
+  });
+  it("end to end: the connection's workspace key is not the issue link's (the token moved): nothing starts, a 503 so Linear retries, logged by code", async () => {
+    const w = await world();
+    const row = w.h.db.get(linearConnectionKey(A).pk, "META") as Record<string, unknown>;
+    w.h.db.set({ ...row, urlKey: "elsewhere" });
+    expect((await w.appHook(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }))).status).toBe(503);
+    expect(w.intake.started).toEqual([]);
+    expect(w.logs).toContainEqual({ event: "linear.intake_failed", companyId: A, project: "alpha", type: "Issue", action: "create", code: "RUNTIME_UNAVAILABLE", retry: true });
+  });
+  it("an issue read whose link is in another workspace than the connection's is no issue", async () => {
+    const w = await world();
+    const tracker = linearCompanyTracker({ connections: w.connections, companyId: A, fetch: w.linear.fetch, workspace: "delta" });
+    await expect(tracker.readItem({ tracker: "linear", id: "ENG-1" }, { orgId: A })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    const own = linearCompanyTracker({ connections: w.connections, companyId: A, fetch: w.linear.fetch, workspace: "acme" });
+    expect((await own.readItem({ tracker: "linear", id: "ENG-1" }, { orgId: A })).title).toBe("Fix the login (acme)");
   });
   it("the app's settings gone between routing and intake: a retryable failure (503), nothing starts", async () => {
     const w = await world();
