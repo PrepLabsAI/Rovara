@@ -77,6 +77,7 @@ import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
+import type { CompanyInviteStore } from "./company-invites.js";
 import type { SelectedCompanyIssuer } from "./company-issuer.js";
 import { companyOperator, type CompanyOperatorRequest, type CompanyOperatorResponse } from "./company-operator.js";
 
@@ -97,6 +98,8 @@ export interface DeveloperIdentityDependencies {
   /** Lane ID part 2: the factors Code owns for a step-up. Absent: a step-up is refused for everyone (no code is issued), and every other sign-in is as before. */
   stepUp?: StepUpDependencies;
   company?: CompanySignInStore;
+  /** DEC 254a, 253z: invite codes and self-serve create (with `company` only). Absent: those events answer unavailable, and nobody signs in with no company. */
+  companyInvites?: CompanyInviteStore;
   companyIssuer?: (companyId: string) => Promise<SelectedCompanyIssuer | undefined>;
   companyDirectory?: (companyId: string) => SlackDirectory | undefined;
   slackTeamCompany?: (teamId: string) => string | undefined | Promise<string | undefined>;
@@ -246,10 +249,22 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         const joined = await deps.company.join({ personId, companyId: IMPLICIT_COMPANY_ID });
         if (joined.ok) member = joined.membership;
       }
+      // DEC 253z: no membership row at all, no company asked for, the web app: a session with no company, rechecked here at each mint.
+      if (member === undefined && companyId === undefined) return await companylessMayMint(personId, amr, registered);
       // Company is live membership; a registered audience cannot cross its owner.
       return member !== undefined && member.revokedAt === undefined && member.companyId === candidate
         && (registered === undefined || registered.installLevel === true || member.companyId === (registered.companyId ?? IMPLICIT_COMPANY_ID));
     } catch { return false; }
+  }
+  /**
+   * DEC 253z: a person with no company may hold a session only from the install's own OIDC sign-in, to the install-level web app with full access,
+   * with no membership row (a removed member keeps theirs, and stays refused) and no sign-in record from before (a legacy person joins the built-in
+   * company instead). Every company route still refuses such a session; only the access check and company create read it.
+   */
+  async function companylessMayMint(personId: string, amr: DeveloperSignInMethod, registered: SignInClientRecord | undefined): Promise<boolean> {
+    if (deps.company === undefined || deps.companyInvites === undefined || amr !== "oidc") return false;
+    if (registered === undefined || registered.installLevel !== true || registered.fullAccess !== true || registered.webApp !== true) return false;
+    return deps.companyInvites.companylessEligible(personId);
   }
 
   /** Spec 063 FR-002: a registered client's session gets tokens addressed to that client, which Rovara's API refuses. */
@@ -533,6 +548,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return client({ error: "access_denied", error_description: "your AgentX sign-in was turned off by an admin; contact an admin" });
     }
     let companyId: string | undefined;
+    let companyless = false;
     if (deps.company !== undefined) {
       let candidate: string | undefined;
       try { candidate = method === "slack" ? await slackCompany() : request.companyId ?? IMPLICIT_COMPANY_ID; } catch { candidate = undefined; }
@@ -541,17 +557,20 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const joined = candidate === undefined || !OrgIdSchema.safeParse(candidate).success || (request.companyId !== undefined && request.companyId !== candidate) || !clientAllowed
         ? { ok: false as const, reason: "not_invited" as const }
         : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
-      if (!joined.ok) {
+      // DEC 253z: not invited anywhere, no company asked for, signing in to the web app: a session with no company (it can only create one).
+      companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined && request.stepUp !== true
+        && await companylessMayMint(developerId, method, registered);
+      if (!joined.ok && !companyless) {
         const text = { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
         deps.log({ event: "signin.refused", reason: joined.reason, developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: text }) : browserReturn(request.browserReturnTo, false);
       }
-      companyId = joined.membership.companyId;
+      if (joined.ok) companyId = joined.membership.companyId;
     }
     let slackUserId = identity.slackUserId;
     // ProviderIdentity.email is set only for a verified email (providers.ts), so only a verified
-    // email is ever looked up in Slack.
-    const directory = companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
+    // email is ever looked up in Slack. A person with no company is looked up in no company's Slack.
+    const directory = companyless ? undefined : companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
     if (slackUserId === undefined && identity.email !== undefined && directory !== undefined) {
       const link = await directory.lookupByEmail(identity.email);
       slackUserId = link === "unavailable" ? (companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? existing?.slackUserId : undefined) : link === "none" ? undefined : link.userId;
@@ -560,7 +579,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
       ...(identity.email === undefined ? {} : { email: identity.email }),
       ...(slackUserId === undefined ? {} : { slackUserId }),
-    }, companyId);
+    }, companyId, companyless ? { companyless: true } : {});
     if (request.browserReturnTo !== undefined) {
       if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined)) return browserReturn(request.browserReturnTo, false);
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
@@ -579,7 +598,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
       // FR-005: only a company sign-in can make an administrator; only the install issuer can make an install-wide administrator (T3).
-      ...(method === "oidc" && request.companyId === undefined && identity.administrator === true ? { administrator: true as const } : {}),
+      ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless ? { administrator: true as const } : {}),
     };
     if (request.stepUp === true) {
       // Lane ID part 2: a company sign-in's own re-authentication counts when it says when it happened (auth_time) and that is inside the window. A Slack round trip never counts.
@@ -823,7 +842,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse> => {
     if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
-      if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, clients: store, now: deps.now, log: deps.log }, event);
+      if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, ...(deps.companyInvites === undefined ? {} : { invites: deps.companyInvites }), clients: store, now: deps.now, log: deps.log }, event);
       // ID-STEPUP-FOLLOWUPS: the factor email and passkeys. Each checks the caller's own live session (and, for a change, its fresh step-up) in this table.
       if (event.kind === "list-passkeys") return factorAdmin.listPasskeys(event);
       if (event.kind === "remove-passkey") return factorAdmin.removePasskey(event);

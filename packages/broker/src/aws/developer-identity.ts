@@ -19,6 +19,7 @@ import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js"
 import { DeveloperSignInStore, methodSince } from "../developer/store.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { companyIssuerProvider } from "../developer/company-issuer.js";
+import { CompanyInviteStore } from "../developer/company-invites.js";
 import type { StepUpDependencies } from "../developer/step-up.js";
 import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
@@ -260,7 +261,9 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       tableName,
       now,
     }),
-    ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }) }),
+    ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
+      // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
+      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company }) }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
     extraPublicKeys: extraPublicKeysFromEnvironment(env, new KMSClient(region)),
     providers: {

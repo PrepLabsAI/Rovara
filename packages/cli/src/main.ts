@@ -20,6 +20,9 @@ import {
   CLIENT_SCOPES,
   type SignInClientRegistration,
   type SignInClientView,
+  CompanyInviteCodeIdSchema,
+  newCompanyInviteCode,
+  type AdminChangeInput,
 } from "@agentx/contracts";
 import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
@@ -37,6 +40,7 @@ import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { showTaskE2EReplays, startTaskE2EReplay } from "./admin/task-e2e-replay.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
+import { describeCompanyInvite, inviteExpiryHours, listCompanyInvites } from "./admin/company-invites.js";
 import { describeSignInClient, listSignInClients, newClientSecret, signInClientId, signInClientRegistration, signInClientUpdate, type SignInClientAddOptions, type SignInClientUpdateOptions } from "./admin/sign-in-clients.js";
 import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
 import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
@@ -774,6 +778,62 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         write: (line) => { services.stderr.write(`${line}\n`); },
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, clientId }, globals.json));
+    });
+
+  // DEC 254a: company invite codes for self-serve company sign-up. A change shows its effect and asks first, as sign-in clients do.
+  const adminCompanyInvite = admin.command("company-invite").description("invite codes that let one person create their own company (self-serve sign-up)");
+  const runInviteChange = async (command: Command, change: AdminChangeInput, yes: boolean) => {
+    const globals = globalOptions(command);
+    const confirm = changeConfirmer(yes);
+    const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+    const result = await runCliChange({
+      controlPlaneUrl: settings.controlPlaneUrl, accessToken, cliVersion: CLI_VERSION, change,
+      confirm: () => confirm("Apply this change?"),
+      write: (line) => { services.stderr.write(`${line}\n`); },
+    }, services.fetchImplementation);
+    return { globals, result };
+  };
+  adminCompanyInvite
+    .command("create")
+    .description("make a single-use invite code; it is shown once, and Rovara keeps only its hash; shows the change and asks first")
+    .requiredOption("--expires-in-hours <hours>", "how long it can be used, from 1 to 720 hours")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (options: { expiresInHours: string; yes: boolean }, command: Command) => {
+      const expiresInHours = inviteExpiryHours(options.expiresInHours);
+      const made = newCompanyInviteCode();
+      const { globals, result } = await runInviteChange(command, { kind: "create_company_invite", codeHash: made.codeHash, expiresInHours }, options.yes);
+      const applied = result.outcome === "applied";
+      // The code goes to the operator's own terminal only once the change applied, and never into a record.
+      if (applied && !globals.json) services.stderr.write(`Invite code (shown once; give it to the person, Rovara keeps only its hash):\n${made.code}\n`);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, codeId: made.codeId, ...(applied && globals.json ? { inviteCode: made.code } : {}) }, globals.json));
+    });
+  adminCompanyInvite
+    .command("list")
+    .description("list the invite codes (their ids, status and times, never the codes) and whether self-serve sign-up is open")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const list = await listCompanyInvites({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation);
+      services.stdout.write(globals.json ? formatSuccess(list, true)
+        : `Self-serve company sign-up is ${list.selfServe}.\n${list.invites.length === 0 ? "No invite codes.\n" : `${list.invites.map(describeCompanyInvite).join("\n")}\n`}${list.more ? "More codes are not shown.\n" : ""}`);
+    });
+  adminCompanyInvite
+    .command("revoke <code-id>")
+    .description("revoke a live invite code by the id list shows; shows the change and asks first")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (codeId: string, options: { yes: boolean }, command: Command) => {
+      if (!CompanyInviteCodeIdSchema.safeParse(codeId).success) throw agentXError("CONFIG_INVALID", "give the code id agentx admin company-invite list shows (16 characters, 0-9 and a-f)");
+      const { globals, result } = await runInviteChange(command, { kind: "revoke_company_invite", codeId }, options.yes);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, codeId }, globals.json));
+    });
+  adminCompanyInvite
+    .command("self-serve <state>")
+    .description("open or close self-serve company sign-up (on or off); closed refuses every code; shows the change and asks first")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (state: string, options: { yes: boolean }, command: Command) => {
+      if (state !== "on" && state !== "off") throw agentXError("CONFIG_INVALID", "say on or off");
+      const { globals, result } = await runInviteChange(command, { kind: "set_company_self_serve", open: state === "on" }, options.yes);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, selfServe: state === "on" ? "open" : "closed" }, globals.json));
     });
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");

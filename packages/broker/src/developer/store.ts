@@ -306,7 +306,11 @@ export class DeveloperSignInStore {
     return item === undefined ? undefined : strip(item);
   }
 
-  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string): Promise<DeveloperRecord> {
+  /**
+   * `companyless` (DEC 253z): a sign-in with no company. Its record is marked, so it never reads as a legacy person's (who would join the built-in
+   * company), and its email goes in no company's email index.
+   */
+  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string, options: { companyless?: true } = {}): Promise<DeveloperRecord> {
     // One atomic update, not a read-then-overwrite: a concurrent revocation (or another sign-in)
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
@@ -322,6 +326,7 @@ export class DeveloperSignInStore {
       // ID-STEPUP-FOLLOWUPS (a): a mark only the write that first sets it holds (two sign-ins in one millisecond have different marks).
       "firstSignInMark = if_not_exists(firstSignInMark, :mark)",
       "revoked = if_not_exists(revoked, :false)",
+      ...(options.companyless === true ? ["companyless = :true"] : []),
     ];
     const removeClauses: string[] = [];
     const values: Record<string, unknown> = {
@@ -332,6 +337,7 @@ export class DeveloperSignInStore {
       ":at": at,
       ":false": false,
       ":mark": mark,
+      ...(options.companyless === true ? { ":true": true } : {}),
     };
     if (profile.email === undefined) removeClauses.push("email");
     else { setClauses.push("email = :email"); values[":email"] = profile.email; }
@@ -355,7 +361,7 @@ export class DeveloperSignInStore {
     }
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
-      await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+      if (options.companyless !== true) await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
       // ID-STEPUP-FOLLOWUPS (a): the factor email is captured on the FIRST sign-in only. Both conditions hold only for the write that created the record: if_not_exists keeps an earlier
       // first sign-in's time and mark (a record from before the mark has an older time), so a later sign-in, with whatever email the provider now says, never sets or moves it.
       try {

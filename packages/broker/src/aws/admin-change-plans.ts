@@ -18,7 +18,7 @@ import {
 import { adminSlackScope, adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
 import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
-import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, companyInviteCodeId } from "@agentx/contracts";
 import { resolveCompany } from "./company-check.js";
 
 export interface AdminChangeHandlers {
@@ -476,6 +476,60 @@ const planRemoveSignInClient: Planner = async (deps, identity, input) => {
   };
 };
 
+/** DEC 254a: the install's invite codes, or NOT_FOUND where the company layer is off. */
+function companyInviteRegistry(deps: PlanDependencies) {
+  const registry = deps.actions.companyInvites;
+  if (registry === undefined) throw agentXError("NOT_FOUND", "company sign-up is not set up in this deployment");
+  return registry;
+}
+
+/** DEC 254a: a new single-use code. The CLI made it and holds it; the change carries only its hash, and shows only its id. */
+const planCreateCompanyInvite: Planner = async (deps, identity, input) => {
+  if (input.kind !== "create_company_invite") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = companyInviteRegistry(deps);
+  const codeId = companyInviteCodeId(input.codeHash);
+  return {
+    effect: `Make company invite code ${codeId}: one person may use it once, within ${input.expiresInHours} hours, to create their own company. Rovara keeps only its hash.`,
+    details: { codeId, expiresInHours: input.expiresInHours },
+    snapshot: { codeId },
+    apply: async (applier) => ({ codeId: await registry.create(input.codeHash, input.expiresInHours, applier.ownerKey) }),
+  };
+};
+
+const planRevokeCompanyInvite: Planner = async (deps, identity, input) => {
+  if (input.kind !== "revoke_company_invite") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = companyInviteRegistry(deps);
+  // No list read: a code beyond the first page, or an unreadable row elsewhere, never stops a revoke. The apply's conditional write decides.
+  return {
+    effect: `Revoke company invite code ${input.codeId}: nobody can use it.`,
+    details: { codeId: input.codeId },
+    snapshot: { codeId: input.codeId },
+    apply: async (applier) => {
+      if (!await registry.revoke(input.codeId, applier.ownerKey)) throw agentXError("NOT_FOUND", "no live company invite code has that id");
+      return { codeId: input.codeId, revoked: true };
+    },
+  };
+};
+
+const planCompanySelfServe: Planner = async (deps, identity, input) => {
+  if (input.kind !== "set_company_self_serve") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = companyInviteRegistry(deps);
+  // The switch must work even when the code list cannot be read (the operator's kill switch): the current state is shown when it can be.
+  let current: "open" | "closed" | "unknown";
+  try { current = (await registry.list()).selfServe; } catch { current = "unknown"; }
+  return {
+    effect: input.open
+      ? "Open self-serve company sign-up: a person with a live invite code can create their own company."
+      : "Close self-serve company sign-up: nobody can create a company, whatever code they hold. Codes are kept.",
+    details: { current, next: input.open ? "open" : "closed" },
+    snapshot: { selfServe: current },
+    apply: async (applier) => { await registry.setSelfServe(input.open, applier.ownerKey); return { selfServe: input.open ? "open" : "closed" }; },
+  };
+};
+
 /** How many people at or over the new limit the effect names; details carry the full count. */
 const EFFECT_PEOPLE_MAX = 10;
 
@@ -618,6 +672,9 @@ export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
   set_chatgpt: planChatGpt,
   register_sign_in_client: planRegisterSignInClient,
   remove_sign_in_client: planRemoveSignInClient,
+  create_company_invite: planCreateCompanyInvite,
+  revoke_company_invite: planRevokeCompanyInvite,
+  set_company_self_serve: planCompanySelfServe,
 };
 
 /**
