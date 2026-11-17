@@ -100,11 +100,11 @@ describe("golden: an API-key project's own hook keeps its own secret", () => {
   it("the per-project hook verifies its own delivery and maps it exactly as before; the app's secret does not verify it", async () => {
     const tracker = linearTracker({ hook: async () => ({ hook, secret: HOOK_SECRET }) });
     const scope = SCOPE;
-    expect(await tracker.events!.normalise(signed(HOOK_SECRET), scope)).toEqual([{
+    expect(await tracker.events!.normalise!(signed(HOOK_SECRET), scope)).toEqual([{
       eventId: expect.stringMatching(/^linear:issue:i-1:create:label:[0-9a-f]{16}$/) as string, tracker: "linear", item: { tracker: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1" },
       type: "item.labelled", label: "rovara", occurredAt: new Date(NOW).toISOString(),
     }]);
-    await expect(tracker.events!.normalise(signed(LINEAR_WEBHOOK_SECRET), scope)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+    await expect(tracker.events!.normalise!(signed(LINEAR_WEBHOOK_SECRET), scope)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
   });
   it("the app route does not accept a delivery signed with a project's hook secret", async () => {
     const answer = await handleLinearAppWebhook({ connections: {} as never, app: async () => ({ ...LINEAR_APP }), now: () => NOW, log: () => undefined }, signed(HOOK_SECRET));

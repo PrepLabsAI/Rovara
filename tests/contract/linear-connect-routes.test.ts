@@ -234,7 +234,7 @@ describe("two companies", () => {
     const [aGrant, bGrant] = w.linear.grants;
     w.linear.requests.length = 0;
     const access = linearCompanyApiAccess(w.connections, B, w.linear.fetch);
-    await access.readIssue(B, "WEB-1").catch(() => undefined);
+    await access.readIssue!(B, "WEB-1").catch(() => undefined);
     const graph = w.linear.requests.filter((r) => r.url === "https://api.linear.app/graphql");
     expect(graph.length).toBeGreaterThan(0);
     for (const request of graph) expect([...bGrant!.access].map((t) => `Bearer ${t}`)).toContain(request.authorization);
