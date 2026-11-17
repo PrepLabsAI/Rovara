@@ -50,7 +50,7 @@ function wiring(): SlackCompanyWiring {
     tokenForEvent: async (team: string) => ({ companyId: team === INSTALL ? A : B, token: "token" }),
     tokenForCompany: async () => "token",
   };
-  return { legacyTeamId: INSTALL, workspaces, companies: { companyOf: async () => A }, forget: vi.fn() } as unknown as SlackCompanyWiring;
+  return { legacyTeamId: INSTALL, workspaces, companies: { companyOf: async () => A }, forget: vi.fn() };
 }
 
 describe("the tenant read", () => {
@@ -169,7 +169,7 @@ describe("switch-off parity (golden)", () => {
   });
   it("fully configured: wiring for the install's team", () => {
     const w = channelApiSlackCompany({ SLACK_COMPANY_WORKSPACES: "enabled", COMPANY_SIGNIN: "enabled", BROKER_FUNCTION_NAME: "broker", STATE_TABLE_NAME: "state", AGENTX_ENV: "staging", SLACK_TEAM_ID: INSTALL, AWS_REGION: "us-west-2" });
-    expect(w?.legacyTeamId).toBe(INSTALL); expect(w?.workspaces.linkNotice).toBeTypeOf("function");
+    expect(w?.legacyTeamId).toBe(INSTALL); expect(Object.keys(w?.workspaces ?? {})).toContain("linkNotice");
   });
   it("the Lambda, off: the finish is today's (made with no argument) and its answer is passed back unchanged; no company wiring is asked twice", async () => {
     const { m, made } = makers(); const companyOf = vi.fn(() => undefined);
@@ -188,14 +188,14 @@ describe("switch-off parity (golden)", () => {
 
 describe("switch on", () => {
   it("each piece is two: today's with the install-only rule, and the company's with the binding", async () => {
-    const { m, made, routers, presses } = makers(); const w = wiring();
+    const { m, made, routers, presses } = makers(); const w = wiring(); const forget = vi.spyOn(w, "forget");
     const pieces = channelApiSlackPieces(m, w);
     const router = pieces.router(), press = pieces.presses(), finish = pieces.finish();
     expect(made.router).toEqual([[{ slackInstallTeamOnly: INSTALL }], [expect.objectContaining({ workspaces: w.workspaces, companies: w.companies })]]);
     expect(made.presses).toEqual([[{ slackInstallTeamOnly: INSTALL }], [expect.objectContaining({ workspaces: w.workspaces, companies: w.companies })]]);
     expect(made.finish).toEqual([[{ slackInstallTeamOnly: INSTALL }], [expect.objectContaining({ workspaces: w.workspaces })]]);
     (made.router[1]![0] as { onWorkspaceRemoved: (team: string) => void }).onWorkspaceRemoved(OTHER);
-    expect(w.forget).toHaveBeenCalledWith(OTHER);
+    expect(forget).toHaveBeenCalledWith(OTHER);
     expect((await router(message(), { projectName: "p" })).body).toBe("router-0");
     expect((await router(message(OTHER), { projectName: "p" })).body).toBe("router-1");
     expect((await press(action(), {}))?.body).toBe("presses-0");
