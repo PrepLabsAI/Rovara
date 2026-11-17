@@ -12,7 +12,7 @@
 import { AgentXError, errorStatus, orgProjectCatalogPk, type AgentXErrorCode, OrgIdSchema, PROJECT_CATALOG_PK, REPOSITORY_CHOICES_PAGE_DEFAULT, type BulkCreateClientProjectsResponse,
   type BulkProjectRefusal, type ClientRepositoriesResponse, type ClientRepositoryChoicesResponse } from "@agentx/contracts";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { boundedCompanyReads, recordInCompany } from "./company-check.js";
+import { recordInCompany, type boundedCompanyReads } from "./company-check.js";
 import type { GithubInstallationBindings } from "./github-credentials.js";
 
 /** The one answer for a repository the caller's company may not use (multi-repository create). Names no repository and no cause. */
@@ -24,7 +24,13 @@ export const REPOSITORY_CHOICES_UNAVAILABLE = "the repositories could not be rea
 
 /** How many repositories are looked up at once, how long a bulk create may start new projects, and how many it builds at once. */
 export const LOOKUP_CONCURRENCY = 8;
-export const BULK_DEADLINE_MS = 20_000;
+export const BULK_DEADLINE_MS = 10_000;
+/**
+ * One wall-clock limit for a whole create request (API Gateway gives up at about 29 seconds): a project is registered only when its registration
+ * starts within this many milliseconds of the request's start; later, nothing is written for it (multi: 503 unavailable; bulk: that row `unavailable`).
+ * Registration itself is a few store reads and one transaction (its GitHub lookups are cached by then).
+ */
+export const COMMIT_DEADLINE_MS = 15_000;
 export const BULK_CONCURRENCY = 4;
 /** The most projects of one company the picker reads to mark repositories; a company with more is refused the marks whole (never a partial mark). */
 export const PICKER_PROJECTS_MAX = 500;

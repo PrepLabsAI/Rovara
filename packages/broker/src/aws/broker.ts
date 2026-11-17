@@ -284,7 +284,7 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { bulkCreate, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { bulkCreate, COMMIT_DEADLINE_MS, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -14470,7 +14470,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
    * Guided onboarding PR 6: one project from `repositories`, for `companyId` (the caller's, from membership). Every repository is checked against the
    * company's bindings with GitHub's live answer before any token is made for any of them; one that fails refuses the whole create, in one fixed answer.
    */
-  const createFromRepositories = async (developerId: string, companyId: string | undefined, repositories: readonly string[], options: { name?: string; setupCommands?: string[]; testCommands?: string[] }) => {
+  const createFromRepositories = async (developerId: string, companyId: string | undefined, repositories: readonly string[], options: { name?: string; setupCommands?: string[]; testCommands?: string[] }, commitBy: number) => {
     const urls = repositories.map((repository) => `https://github.com/${repository}.git`);
     const budget = boundedCompanyReads(dependencies.documentClient);
     if (!await onCompanyInstallations(rules, companyId, urls, budget)) throw notAvailable();
@@ -14493,9 +14493,12 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
     });
     const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
+    const runtimeBinding = await clientProjects.workerBinding();
+    // One wall-clock limit for the whole request: too late to register safely before the gateway gives up, so nothing is written.
+    if (Date.now() > commitBy) throw unavailable();
     try {
       // Registration checks every repository's binding once more (its own budget), in the transaction's company.
-      await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) } });
+      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) } });
     } catch (error) {
       if (await projectExists(name).catch(() => false)) throw nameTaken(name);
       if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
@@ -14558,17 +14561,19 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       return { name, latestRevision: 1 };
     },
     async createClientProjects(developerId, input) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
       const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
       return createFromRepositories(developerId, companyId, input.repositories, {
         ...(input.name === undefined ? {} : { name: input.name }), ...(input.setupCommands === undefined ? {} : { setupCommands: input.setupCommands }),
         ...(input.testCommands === undefined ? {} : { testCommands: input.testCommands }),
-      });
+      }, commitBy);
     },
     async createClientProjectsBulk(developerId, input) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
       const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
       return bulkCreate(input.repositories, {
         now: Date.now, nameOf: (repository) => projectRepositoryName(repository.split("/")[1]!),
-        create: async (repository) => (await createFromRepositories(developerId, companyId, [repository], {})).name,
+        create: async (repository) => (await createFromRepositories(developerId, companyId, [repository], {}, commitBy)).name,
       });
     },
   };

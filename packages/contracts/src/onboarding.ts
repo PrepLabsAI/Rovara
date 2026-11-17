@@ -37,7 +37,7 @@ const REPOSITORIES_MAX = 32;
 export const CreateProjectsBodySchema = z.object({
   requestId: z.string().uuid(),
   repositories: z.array(CreateProjectBodySchema.shape.repository).min(1).max(REPOSITORIES_MAX)
-    .refine((list) => new Set(list.map((value) => value.toLowerCase())).size === list.length, "repositories must be different"),
+    .refine((list) => new Set(list.map((value) => value.toLowerCase().replace(/\.git$/, ""))).size === list.length, "repositories must be different"),
   separate: z.boolean().optional(),
   name: AgentXNameSchema.optional(),
 }).strict().refine((body) => !(body.separate === true && body.name !== undefined), { path: ["name"], message: "separate projects are named after their repositories" });

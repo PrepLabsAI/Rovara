@@ -118,6 +118,8 @@ describe("contract schemas", () => {
     expect(CreateProjectsBodySchema.safeParse({ ...app, separate: true }).success).toBe(true);
     expect(CreateProjectsBodySchema.safeParse({ ...app, separate: true, name: "x" }).success).toBe(false);
     expect(CreateProjectsBodySchema.safeParse({ ...app, repositories: ["o/a", "o/A"] }).success).toBe(false);
+    expect(CreateProjectsBodySchema.safeParse({ ...app, repositories: ["o/a", "o/a.git"] }).success).toBe(false);
+    expect(CreateProjectsBodySchema.safeParse({ ...app, companyId: A }).success).toBe(false);
   });
   it("a refusal is an AgentXError with its reason", () => {
     const error = notAvailable();

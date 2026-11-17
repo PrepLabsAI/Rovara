@@ -157,10 +157,26 @@ describe("one project from several repositories", () => {
     expect((await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-a/api"], name: "both" })).statusCode).toBe(200);
   });
 
+  it("writes nothing when registration would start after the request's wall-clock limit", async () => {
+    const h = await world();
+    const real = Date.now.bind(Date);
+    let skew = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => real() + skew);
+    try {
+      h.clientProjects.repositoryDefaults.mockImplementation(async (url: string) => { skew = 16_000; const [, owner, name] = /^https:\/\/github\.com\/([^/]+)\/(.+)\.git$/.exec(url)!; return { owner: owner!, name: name!, defaultBranch: "main" }; });
+      const late = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-a/api"] });
+      expect(late.statusCode).toBe(503);
+      expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+      skew = 0;
+      expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/web"] })).results).toEqual([{ repository: "acme-a/web", outcome: "refused", reason: "unavailable" }]);
+      expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    } finally { now.mockRestore(); }
+  });
+
   it("validates the body whole: 1 to 32, no repeats, not with repository, each owner/name", async () => {
     const h = await world();
     const many = Array.from({ length: 33 }, (_, index) => `acme-a/r${index}`);
-    for (const body of [{ repositories: [] }, { repositories: many }, { repositories: ["acme-a/web", "ACME-A/WEB"] }, { repositories: ["acme-a/web"], repository: "acme-a/web" },
+    for (const body of [{ repositories: [] }, { repositories: many }, { repositories: ["acme-a/web", "ACME-A/WEB"] }, { repositories: ["acme-a/web", "acme-a/web.git"] }, { repositories: ["acme-a/web"], repository: "acme-a/web" },
       { repositories: ["not a repo"] }, { repositories: "acme-a/web" }, { repositories: ["acme-a/web"], companyId: A }]) {
       const response = await h.call("/v1/dev/client/projects", body);
       expect(response.statusCode).toBe(400);
@@ -253,6 +269,34 @@ describe("the repository picker", () => {
     for (const leak of ["storefront", "acme-a", A]) expect(response.body).not.toContain(leak);
   });
 
+  it("never lists a suspended installation's repositories, even one bound to the company", async () => {
+    const h = await withProjects();
+    h.clientProjects.repositories.mockResolvedValue([installation(77, "acme-a", [repo("acme-a/web", 1)]), installation(66, "paused", [repo("paused/aaa", 9)], "suspended")]);
+    const response = await h.call("/v1/dev/client/repositories/available");
+    expect((json(response).repositories as Array<{ fullName: string }>).map((row) => row.fullName)).toEqual(["acme-a/web"]);
+    expect(response.body).not.toContain("paused");
+  });
+
+  it("ignores a catalog row from another partition, a revision naming another project, and refuses more than 500 projects whole", async () => {
+    const h = await withProjects();
+    h.db.set({ ...orgProjectCatalogKey(A, "renamed"), entityType: "PROJECT_CATALOG" });
+    h.db.set({ pk: "PROJECT#renamed", sk: "REV#000000000001", entityType: "PROJECT", companyId: A, definition: { name: "other", revision: 1, repositories: [{ name: "docs", url: "https://github.com/acme-a/docs.git" }] } });
+    const docs = (json(await h.call("/v1/dev/client/repositories/available")).repositories as Array<{ fullName: string; projects: string[] }>).find((row) => row.fullName === "acme-a/docs");
+    expect(docs?.projects).toEqual([]);
+    const query = h.db.send.bind(h.db);
+    const spy = vi.spyOn(h.db, "send").mockImplementation(async (command: unknown) => {
+      const answer = await query(command as never) as { Items?: Array<Record<string, unknown>> };
+      const input = (command as { input?: { ExpressionAttributeValues?: Record<string, unknown> } }).input;
+      if (input?.ExpressionAttributeValues?.[":pk"] === `ORG#${A}#PROJECT_CATALOG` && answer.Items !== undefined) answer.Items = answer.Items.map((item) => ({ ...item, pk: `ORG#${B}#PROJECT_CATALOG` }));
+      return answer;
+    });
+    expect((await h.call("/v1/dev/client/repositories/available")).statusCode).toBe(503);
+    spy.mockRestore();
+    for (let index = 0; index < 501; index++) h.db.set({ ...orgProjectCatalogKey(A, `p${index}`), entityType: "PROJECT_CATALOG" });
+    const many = await h.call("/v1/dev/client/repositories/available");
+    expect(many.statusCode).toBe(503);
+  });
+
   it("searches and pages, with a page cap", async () => {
     const h = await withProjects();
     expect((json(await h.call("/v1/dev/client/repositories/available?q=AP")).repositories as Array<{ fullName: string }>).map((row) => row.fullName)).toEqual(["acme-a/api"]);
@@ -293,6 +337,16 @@ describe("who may create", () => {
 });
 
 describe("the single-repository create", () => {
+  it("keeps its golden bytes with the live lookup wired, as in production", async () => {
+    const { readFileSync } = await import("node:fs");
+    const h = await world();
+    h.repositoryInstallation.mockImplementation(async () => ({ installationId: 77, suspended: false }));
+    h.extra.githubPullRequests.installationIdFor.mockImplementation(async () => 77);
+    const created = await h.call("/v1/dev/client/projects", { repository: "example/demo" });
+    expect(JSON.stringify(created) + "\n").toBe(readFileSync("tests/fixtures/github-company-goldens/client-create-legacy.json", "utf8"));
+    expect(JSON.stringify(await h.call("/v1/dev/client/projects", {})) + "\n").toBe(readFileSync("tests/fixtures/github-company-goldens/client-missing-field-legacy.json", "utf8"));
+  });
+
   it("now also refuses a suspended installation, in its own unchanged words", async () => {
     const h = await world();
     const refused = await h.call("/v1/dev/client/projects", { repository: "paused/y" });

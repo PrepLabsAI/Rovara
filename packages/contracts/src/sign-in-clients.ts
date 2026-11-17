@@ -171,7 +171,7 @@ export type CreateClientProjectRequest = z.infer<typeof CreateClientProjectReque
 export const CLIENT_PROJECT_REPOSITORIES_MAX = 32;
 const ClientRepositoryNameSchema = CreateClientProjectRequestSchema.shape.repository;
 const uniqueRepositories = z.array(ClientRepositoryNameSchema).min(1).max(CLIENT_PROJECT_REPOSITORIES_MAX)
-  .refine((list) => new Set(list.map((name) => name.toLowerCase())).size === list.length, "repositories must be different");
+  .refine((list) => new Set(list.map((name) => name.toLowerCase().replace(/\.git$/, ""))).size === list.length, "repositories must be different");
 /**
  * Guided onboarding PR 6: `POST /v1/dev/client/projects` with `repositories` (instead of `repository`): ONE project holding every named repository
  * (1 to 32, each `owner/name` as the single form checks, no repeats ignoring case). Every repository must be on a GitHub App installation bound to the
@@ -218,7 +218,7 @@ export interface ClientRepositoryChoicesResponse {
   incomplete: boolean;
 }
 export const RepositoryChoicesQuerySchema = z.object({
-  q: z.string().max(100).regex(/^[A-Za-z0-9_.\/-]*$/).optional(),
+  q: z.string().max(100).regex(/^[A-Za-z0-9_./-]*$/).optional(),
   limit: z.coerce.number().int().min(1).max(REPOSITORY_CHOICES_PAGE_MAX).optional(),
   after: z.string().min(3).max(201).regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/).optional(),
 }).strict();
