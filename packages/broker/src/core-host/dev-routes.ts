@@ -12,10 +12,10 @@
 //     old workflow routes' request and answer (`{ task }`), so Cloud's Send back and Accept findings work for a task of either engine. Served only when the deployment wires the money
 //     cap per round (`taskActions.roundCap`) AND the company's owner rule (`TaskAccess.ownerActing` on the runtime's access): without that seam the flow would use Code's laptop rule
 //     (the install's owner role), which a hosted company never uses for who owns a task;
-//   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project;
+//   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-PB, DEC 254zzj);
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
-//     only for a person the company lets read that project; proposing and approving are not on the core here (no hosted approval path for a test environment yet);
+//     for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-B3c); proposing and approving are not on the core here (no hosted approval path for a test environment yet);
 //   - approving that environment (`POST /v1/app/projects/<p>/test-environment/approve`, L4-B3b): a fresh step-up, the person's right to read the project, then the risk-based approver rule (a company owner or admin, or
 //     the project's maintainer for low and medium risk; high risk a company owner or admin only), read live again inside the decision, with the approvers point's own proof; served only where the deployment wires it;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
@@ -278,6 +278,19 @@ async function projectExistsIn(target: Mounted, companyId: string, project: stri
 }
 
 /**
+ * Whether the caller may READ a project's how-we-work or test environment state: a live company owner or admin (the role is the membership's, read for this request) of a project that exists in THEIR company, or
+ * a person the company lets read that project (the grant). A grant read that fails is "no". Reads only: nothing that writes, decides or makes a credential uses this.
+ */
+async function mayReadProject(target: Mounted, caller: DeployedCaller, membership: CompanyMembership, project: string): Promise<boolean> {
+  if ((membership.role === "owner" || membership.role === "admin") && await projectExistsIn(target, membership.companyId, project)) return true;
+  try {
+    return await target.wiring.canReadProject!(caller.principal.personId, project);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The state answer of a project's test environment on the deployed API: the laptop's view (the same core reader, over the company's own records: every row is under the company's project key) plus the catalog
  * the install would pin from, while test services are switched on. The company is the membership's (the runtime's), never the request's.
  */
@@ -513,8 +526,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {
           if (target.playbook === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          // A project the person may not read, and one that does not exist, answer the same words.
-          if (!(await target.wiring.canReadProject(caller.principal.personId, playbook[1]!).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          // A project the person may not read, and one that does not exist, answer the same words. A live company owner or admin needs no grant on a project of THEIR company (GET only: a write is the old broker's).
+          if (!(await mayReadProject(target, caller, membership, playbook[1]!))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           const answer = (await target.playbook.routes(request)) ?? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND));
           return answer.statusCode === 404 ? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND)) : answer;
         }
@@ -542,8 +555,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           const project = testEnvironment[1]!;
           // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it. A live company owner or admin (the role is membership's, read for this request)
           // needs no grant on a project of THEIR company (the same reach as approving; the project must exist in that company); anyone else needs the grant.
-          const mayRead = ((membership.role === "owner" || membership.role === "admin") && await projectExistsIn(target, companyId, project)) || await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false);
-          if (!mayRead) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          if (!(await mayReadProject(target, caller, membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           return json(200, await testEnvironmentAnswer(target, wired, project));
         }
         const tokens = SCRIPT_TOKENS.exec(path);
