@@ -1,7 +1,5 @@
 import { slackCompanyPerson, slackCompanyProject, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
 import { slackWorkspaceToken } from "./slack-workspace-tokens.js";
-import { slackWorkspaceRemovalOf, type SlackWorkspaceRemovedEvent } from "./slack-workspace-removal.js";
-import { awsRovaraHandOffRunner, isRovaraHandOff, type RovaraHandOff } from "./slack-rovara-front.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -99,24 +97,8 @@ export interface SlackSecrets {
 
 export type SlackIngressLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
 
-/** Guided onboarding PR 4: hands a verified app_uninstalled / tokens_revoked to the broker; throws when the broker did not take it (Slack then retries). */
-export type SlackWorkspaceRemovedHandOff = (removal: SlackWorkspaceRemovedEvent) => Promise<void>;
-
-/** Guided onboarding PR 4: the answer to a verified removal. Without a hand-off (no broker here) it is ignored, as before. */
-async function answerRemoval(handOff: SlackWorkspaceRemovedHandOff | undefined, removal: SlackWorkspaceRemovedEvent, log: SlackIngressLog): Promise<HttpResponse> {
-  if (handOff === undefined) return ignore(log, "workspace_removal_not_handled");
-  try { await handOff(removal); }
-  catch (error) {
-    log("workspace.removal_failed", { reason: removal.reason, errorName: errorName(error) });
-    return respond(500, { error: "removal could not be handed on" });
-  }
-  log("workspace.removal_handed_off", { reason: removal.reason });
-  return respond(200, { ok: true });
-}
-
 export interface SlackIngressDependencies extends SlackCompanyDependencies {
   secrets: () => Promise<SlackSecrets>;
-  workspaceRemoved?: SlackWorkspaceRemovedHandOff;
   getBinding: (teamId: string, channelId: string) => Promise<SlackChannelBinding | undefined>;
   claimEvent: (eventId: string, expiresAtSeconds: number) => Promise<boolean>;
   releaseEvent: (eventId: string) => Promise<void>;
@@ -336,8 +318,6 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       return respond(200, { challenge: typeof payload.challenge === "string" ? payload.challenge : "" });
     }
     if (payload.type !== "event_callback") return ignore(log, "not_event_callback");
-    const removal = slackWorkspaceRemovalOf(payload);
-    if (removal !== undefined) return answerRemoval(dependencies.workspaceRemoved, removal, log);
 
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
@@ -360,7 +340,6 @@ export function createSlackAdapterFront(deps: {
   now?: () => number;
   log?: SlackIngressLog;
   postEphemeral?: SlackIngressDependencies["postEphemeral"];
-  workspaceRemoved?: SlackWorkspaceRemovedHandOff;
 } & SlackCompanyDependencies) {
   const now = deps.now ?? Date.now;
   const log: SlackIngressLog = deps.log ?? (() => undefined);
@@ -380,8 +359,6 @@ export function createSlackAdapterFront(deps: {
     }
     if (payload.type === "url_verification") return respond(200, { challenge: typeof payload.challenge === "string" ? payload.challenge : "" });
     if (payload.type !== "event_callback") return ignore(log, "not_event_callback");
-    const removal = slackWorkspaceRemovalOf(payload);
-    if (removal !== undefined) return answerRemoval(deps.workspaceRemoved, removal, log);
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
     if (mention.kind === "message") {
@@ -1493,24 +1470,9 @@ function cachedSlackSecrets(): () => Promise<SlackSecrets> {
   };
 }
 
-/** Guided onboarding PR 4: a verified removal goes to the broker by a direct invoke (it already lets this Lambda invoke it); none without a broker. */
-function brokerWorkspaceRemoved(): { workspaceRemoved?: SlackWorkspaceRemovedHandOff } {
-  const functionName = process.env.BROKER_FUNCTION_NAME;
-  if (functionName === undefined || functionName === "") return {};
-  const lambda = new LambdaClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION });
-  return {
-    async workspaceRemoved(removal) {
-      const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "RequestResponse", Payload: Buffer.from(JSON.stringify(removal)) }));
-      if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("broker removal failed");
-      const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as BrokerReply;
-      if (reply.statusCode !== 200) throw new Error("broker removal failed");
-    },
-  };
-}
-
 export function createAwsSlackIngressHandler(company: SlackCompanyDependencies = {}) {
   const secrets = cachedSlackSecrets();
-  return createSlackIngressHandler({ secrets, ...awsSlackRouterDependencies(slackDirectTransport(secrets, company), company), ...brokerWorkspaceRemoved() });
+  return createSlackIngressHandler({ secrets, ...awsSlackRouterDependencies(slackDirectTransport(secrets, company), company) });
 }
 
 /** Slack's interactivity request URL path (spec 014): button presses, and 14d's Details view. */
@@ -1532,7 +1494,6 @@ export function createAwsSlackAdapterFront(company: SlackCompanyDependencies = {
   const secrets = cachedSlackSecrets();
   return createSlackAdapterFront({
     ...company,
-    ...brokerWorkspaceRemoved(),
     postEphemeral: async (input) => chatPostEphemeral(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
     secrets,
     ...(company.workspaces === undefined ? {} : { getBinding: awsSlackRouterDependencies(slackDirectTransport(secrets, company), company).getBinding }),
@@ -1579,15 +1540,8 @@ let awsChannelCommandsHandler: ReturnType<typeof createAwsSlackChannelCommandsHa
 let awsAdapterBotToken: (() => Promise<string>) | undefined;
 let awsAdapterFront: ReturnType<typeof createSlackAdapterFront> | undefined;
 let awsForward: ((message: InboundMessage | ChannelAction) => Promise<void>) | undefined;
-let awsRovara: ((handOff: RovaraHandOff) => Promise<void>) | undefined;
 
-return async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish | HandedOffSlackMessage | RovaraHandOff): Promise<HttpResponse> => {
-  // Guided onboarding PR 5: a verified `/rovara` command or press the interactivity front handed on; the broker answers, then the person is answered privately.
-  if (isRovaraHandOff(event)) {
-    awsRovara ??= awsRovaraHandOffRunner();
-    await awsRovara(event);
-    return respond(200, { ok: true });
-  }
+return async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish | HandedOffSlackMessage): Promise<HttpResponse> => {
   // Phase 7c2: a handed-off message goes to the channel API; a throw has Lambda try it again (then its failure queue).
   if (isHandedOffSlackMessage(event)) {
     awsForward ??= slackChannelForwarderFromEnvironment(new SecretsManagerClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION }));

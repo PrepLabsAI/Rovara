@@ -1,5 +1,4 @@
 import { slackCompanyPerson, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
-import { createRovaraFront, type RovaraHandOff } from "./slack-rovara-front.js";
 import { slackWorkspaceToken } from "./slack-workspace-tokens.js";
 import { slackActionClass, SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -126,8 +125,6 @@ export interface SlackActionHandler {
 
 export interface SlackInteractivityDependencies extends SlackCompanyDependencies {
   secrets: () => Promise<SlackSecrets>;
-  /** Guided onboarding PR 5 (slack-rovara-front.ts): `/rovara` and its Link / Unlink presses, given the raw body only after Slack's signature verified. Undefined: not ours. */
-  rovara?: (rawBody: string) => Promise<HttpResponse | undefined>;
   handlers: readonly SlackActionHandler[];
   /** Answers the clicking member privately when no handler matches the button (an old button after a rollback). */
   respondEphemeral?: (responseUrl: string, text: string) => Promise<void>;
@@ -404,11 +401,6 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
     if (!validSignature(secrets.signingSecret, headers["x-slack-request-timestamp"], headers["x-slack-signature"], rawBody, now())) {
       log("interaction.rejected", { reason: "invalid_signature" });
       return respond(401, { error: "invalid Slack signature" });
-    }
-    // Guided onboarding PR 5: `/rovara` and its presses decide company and person in the broker themselves, before the company gate below.
-    if (dependencies.rovara !== undefined) {
-      const answered = await dependencies.rovara(rawBody);
-      if (answered !== undefined) return answered;
     }
     let payload: Record<string, unknown>;
     try {
@@ -1104,8 +1096,6 @@ export function createAwsSlackInteractivityHandler(company: SlackCompanyDependen
     ...company,
     secrets,
     log,
-    // Guided onboarding PR 5: `/rovara`, handed to an asynchronous invoke of this Lambda, which asks the broker (slack-rovara-front.ts).
-    ...(brokerFunctionName === undefined ? {} : { rovara: createRovaraFront({ handOff: (handOff) => handOffRovaraToSelf(lambda, handOff), log }) }),
     ...(viaChannel ? { routePress, routeSubmission, routeAdminChange } : {}),
     ...(brokerFunctionName === undefined ? {} : {
       chatgptSubmission: (payload: Record<string, unknown>) => chatGptSubmission({ handOff: (event) => handOffToSelf(lambda, event) }, payload),
@@ -1189,7 +1179,7 @@ export function createAwsSlackInteractivityHandler(company: SlackCompanyDependen
 const HANDED_OFF_START_TIMEOUT_MS = 7_000;
 
 /** This Lambda's own name, as Lambda sets it; a Quick or Full start is handed to an asynchronous invoke of it. */
-async function handOffToSelf(lambda: LambdaClient, event: HandedOffWorkflowStart | HandedOffChatGptFinish | RovaraHandOff): Promise<void> {
+async function handOffToSelf(lambda: LambdaClient, event: HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<void> {
   const functionName = process.env.AWS_LAMBDA_FUNCTION_NAME;
   if (functionName === undefined) throw new Error("AWS_LAMBDA_FUNCTION_NAME is not set");
   const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(event)) }));
@@ -1197,11 +1187,6 @@ async function handOffToSelf(lambda: LambdaClient, event: HandedOffWorkflowStart
 }
 
 interface WorkflowActionValue { taskId: string; revision: number; digest: string; decision: "APPROVE" | "REQUEST_CHANGES"; workBreakdownDigest?: string }
-
-/** Guided onboarding PR 5: a verified `/rovara` command or press, to this same Lambda's asynchronous half. */
-function handOffRovaraToSelf(lambda: LambdaClient, handOff: RovaraHandOff): Promise<void> {
-  return handOffToSelf(lambda, handOff);
-}
 
 class WorkflowInteractionRefusal extends Error {
   constructor(message: string) { super(message); this.name = "WorkflowInteractionRefusal"; }
