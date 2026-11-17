@@ -173,6 +173,12 @@ describe("a failure to make an event never fails a step", () => {
     expect(flowWorkEventItems({ ...input, orgId: "nope", project: "alpha", after: snapshot() })).toEqual([]);
   });
 
+  it("the pure function itself never throws on a snapshot it cannot read", () => {
+    expect(() => flowEventsOf(was(), snapshot({ pullRequests: 5 }), { orgId: A, project: "alpha" })).not.toThrow();
+    expect(flowEventsOf(was(), snapshot({ pullRequests: 5 }), { orgId: A, project: "alpha" })).toEqual([]);
+    expect(flowEventsOf(was(), undefined as never, { orgId: A, project: "alpha" })).toEqual([]);
+  });
+
   it("the skips are told, never their content", () => {
     const skips: string[] = [];
     flowWorkEventItems({ enabled: true, orgId: "nope", project: "alpha", before: was(), after: snapshot(), room: 50, onSkip: (reason) => skips.push(reason) });

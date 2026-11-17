@@ -72,6 +72,13 @@ describe("the time split, attributed", () => {
     expect(fold([started(at(9)), wait(at(9), "agent"), wait(at(9, 30), "none")], at(11))).toMatchObject({ workingMs: 30 * MIN, decisionsMs: 0, waitingSystemMs: 0 });
   });
 
+  it("the fold itself ignores an event of another company, even one for the same task id", () => {
+    const task = { taskId: id(1), project: "alpha", orgId: A };
+    const mine = [started(at(9)), wait(at(9), "agent")].map((one) => event(A, id(1), "alpha", one));
+    const strayWait = event(B, id(1), "alpha", wait(at(9, 10), "person", "plan_approval"));
+    expect(foldTimes([...mine, strayWait], task, Date.parse(at(10)), NOW)).toMatchObject({ workingMs: 60 * MIN, decisionsMs: 0 });
+  });
+
   it("an event after the end is not counted, and an open task runs to now", async () => {
     const task = { taskId: id(1), project: "alpha", orgId: A };
     const spec = [started(at(9)), wait(at(9), "agent"), wait(at(11), "person", "pr_review"), wait(at(13), "agent")];
