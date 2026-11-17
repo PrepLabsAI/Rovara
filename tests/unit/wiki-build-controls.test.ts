@@ -350,3 +350,17 @@ describe("Delete wiki: W2's deleteWiki AND A1's deleteWikiUse AND the build's ow
     await expect(deleteProjectWiki({ store, companyId: COMPANY_A, now: () => T0 }, "../x")).rejects.toBeDefined();
   });
 });
+
+describe("the answers match the contract the setup page reads", () => {
+  it("every state answer parses with WikiControlsViewSchema, in each status", async () => {
+    const { WikiControlsViewSchema } = await import("@agentx/contracts");
+    const w = world();
+    expect(WikiControlsViewSchema.parse(await wikiControlsView(w.controls, ADMIN, "beacon"))).toMatchObject({ status: "none" });
+    const running = await startWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
+    expect(WikiControlsViewSchema.parse(running.view)).toMatchObject({ status: "running" });
+    const stopped = await stopWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
+    expect(WikiControlsViewSchema.parse(stopped.view)).toMatchObject({ status: "stopped", stop: "stopped_by_person" });
+    const missing = world({ deps: { aiKey: async () => "missing" } });
+    expect(WikiControlsViewSchema.parse(await wikiControlsView(missing.controls, ADMIN, "beacon"))).toMatchObject({ aiKey: "missing", connectKey: WIKI_BUILD_WORDS.connectKey });
+  });
+});

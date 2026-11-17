@@ -3,7 +3,7 @@
 // What the schemas guarantee: every body is strict (a request id and the one choice the person made; limits, payer, commits and goal never come from a client), and every sentence a person is
 // told is fixed here (never a model's, a worker's or a repository's words). The answers are built from the build run's own view (`WikiBuildView`) plus what the setup page also shows.
 import { z } from "zod";
-import { WIKI_BUILD_WORDS } from "./wiki-build.js";
+import { WIKI_BUILD_WORDS, WIKI_BUILD_END_WORDS, WikiBuildLimitsSchema, WikiBuildSummarySchema } from "./wiki-build.js";
 
 /** "Give the wiki to agents": a person's choice, on or off. Off until a person turns it on. */
 export const WikiAgentSwitchBodySchema = z.object({ requestId: z.string().uuid(), on: z.boolean() }).strict();
@@ -42,3 +42,40 @@ export const WikiControlsExtraSchema = z.object({
   wiki: z.object({ pages: z.number().int().min(0).max(10_000), refreshPages: z.number().int().min(0).max(10_000) }).strict(),
 }).strict();
 export type WikiControlsExtra = z.infer<typeof WikiControlsExtraSchema>;
+
+// ---- Routes and answers (the contract the setup page reads) ----------------------------------------------------------------------------------------------------------------------------
+
+/** The route family, under a project. GET reads the state; every other act is a POST with a strict body. Hosted and laptop serve the same paths and answers. */
+export const WIKI_BUILD_ROUTES = {
+  state: { method: "GET", path: "/v1/app/projects/{project}/wiki-build" },
+  start: { method: "POST", path: "/v1/app/projects/{project}/wiki-build" },
+  continue: { method: "POST", path: "/v1/app/projects/{project}/wiki-build/continue" },
+  stop: { method: "POST", path: "/v1/app/projects/{project}/wiki-build/stop" },
+  refresh: { method: "POST", path: "/v1/app/projects/{project}/wiki-build/refresh" },
+  agents: { method: "POST", path: "/v1/app/projects/{project}/wiki-build/agents" },
+  delete: { method: "POST", path: "/v1/app/projects/{project}/wiki-build/delete" },
+} as const;
+
+/**
+ * The state every route answers with (start, continue, stop, refresh and the agents switch answer it too: 202 when a run was started or stopped, 200 otherwise and for a repeat of a request id).
+ * `limits.budgetCents` is the build's own hard cap and `summary.spentCents` what it spent, in cents; both are placeholders until the first measured build, so the page shows PAGES (`summary`) and
+ * only names the cap once priced. `payer` is always the project's monthly limit. Every sentence (`message`, `connectKey`) is fixed.
+ */
+export const WikiControlsViewSchema = z.object({
+  status: z.enum(["none", "running", "built", "stopped"]),
+  limits: WikiBuildLimitsSchema,
+  taskId: z.string().optional(),
+  startedAt: z.string().optional(),
+  stop: z.enum(WIKI_BUILD_END_WORDS).optional(),
+  message: z.string().optional(),
+  summary: WikiBuildSummarySchema.optional(),
+  /** A stopped build with pages left: "Continue" (or "Raise cap and continue" when `stop` is `budget_used`). */
+  canContinue: z.boolean().optional(),
+  payer: z.literal("project"),
+  stoppedBy: z.object({ name: z.string(), at: z.string() }).strict().optional(),
+}).strict().and(WikiControlsExtraSchema);
+export type WikiControlsViewAnswer = z.infer<typeof WikiControlsViewSchema>;
+
+/** The answer of Delete wiki. */
+export const WikiDeleteAnswerSchema = z.object({ deleted: z.literal(true), message: z.string(), view: WikiControlsViewSchema }).strict();
+export type WikiDeleteAnswer = z.infer<typeof WikiDeleteAnswerSchema>;
