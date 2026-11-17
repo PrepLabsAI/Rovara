@@ -797,7 +797,11 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
-    if (props?.naming !== undefined) new apigwv2.CfnRoute(this, "CoreModelAccessRoute", {
+    // Logical ID "ModelAccessRoute" on purpose (switch-over incident 2026-11-16): the 0.5.18 staging stack already holds this
+    // route key under that ID. A new ID made CloudFormation create a second GET /v1/internal/model-access route before its
+    // cleanup deleted the old one, and the update failed with 409 AlreadyExists. Keeping the ID updates it in place.
+    // Pinned by tests/unit/collision-check.test.ts; check new previews with scripts/collision-check.ts.
+    if (props?.naming !== undefined) new apigwv2.CfnRoute(this, "ModelAccessRoute", {
       apiId: api.ref,
       routeKey: "GET /v1/internal/model-access",
       target: `integrations/${integration.ref}`,
