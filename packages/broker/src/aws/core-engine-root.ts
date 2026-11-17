@@ -70,6 +70,7 @@ import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wi
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
+import type { HostedWikiMapWiring } from "../core-host/wiki-map-routes.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
@@ -556,6 +557,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       wiring: async (runtime) => {
         // Lane L11: the session levels, the decision cards and how we work, from the company's own records (membership and the broker's project grants).
         const registry = await app.registry();
+        // Wiki W0 and W4 share ONE file map wiring (and so one kept map): the free map and the build that plans from it.
+        const wikiMapWiring: HostedWikiMapWiring = {
+          standing: setupRunStanding,
+          hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }),
+        };
         return {
           origin: inputs.origin,
           sessionCapSeconds: hostedSessionCapSeconds(),
@@ -576,9 +582,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             displayName: displayNameOf,
           },
           // Wiki W0: the free file map reads the company's own code host (company-bound, listings only) and uses the setup run's live standing; no model key is involved.
-          wikiMap: {
+          wikiMap: wikiMapWiring,
+          // Lead 4 W4: the wiki build controls. The same live standing, the same code host and the SAME file map wiring (one kept map), the install's model gateway for the run. The task flow's wiki
+          // build starter (W3b's `createWikiBuildStarter`) is the one seam left to fill (`starter`); until it is, Build says "not set up in this deployment" and the other controls work.
+          wikiBuild: {
             standing: setupRunStanding,
-            hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }),
+            modelAccessConfigured: () => { try { return modelGateway() !== undefined; } catch { return false; } },
+            map: wikiMapWiring,
+            displayName: displayNameOf,
           },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {

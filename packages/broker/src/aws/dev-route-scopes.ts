@@ -205,6 +205,15 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/wiki", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
+  // Lead 4 W4: the wiki build controls (core-host/wiki-build-routes.ts): full access only, then any live role on the project reads the state; a live company owner or admin, or the project's
+  // administrator, builds, continues, stops, refreshes, gives the wiki to agents and deletes it.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki-build", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/continue", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/stop", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/refresh", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/agents", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/delete", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

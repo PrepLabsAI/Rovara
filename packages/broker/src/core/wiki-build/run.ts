@@ -14,7 +14,7 @@
 //   `submitWikiPage` takes the worker's answer for the granted page only, re-checks every citation (check.ts) and writes what survived through the page sink. A page is "done" only once the
 //                    sink wrote it (or nothing on it survived), so a stop at any point keeps every finished page and a continue never writes them again.
 import {
-  WIKI_BUILD_PAYER_KIND, WIKI_BUILD_WORDS, WikiBuildPinsSchema, WikiPageDraftSchema, agentXError, change, effectiveWikiBuildLimits, oneLineText, when, wikiPageFits,
+  WIKI_BUILD_PAYER_KIND, WIKI_BUILD_WORDS, WIKI_CONTROLS_WORDS, WikiBuildPinsSchema, WikiPageDraftSchema, agentXError, change, effectiveWikiBuildLimits, oneLineText, when, wikiPageFits,
   type DocumentStore, type JsonValue, type OrgId, type TransactItem, type WikiBuildEndWord, type WikiBuildLimits, type WikiBuildPins, type WikiBuildRecord, type WikiBuildSummary, type WikiFileMap,
   type WikiPagePlan, type WikiPageSink,
 } from "@agentx/contracts";
@@ -273,7 +273,11 @@ async function launch(
 /**
  * Start a fresh build: plan from the file map, pin the default branches now, start the task. A repeat of the request id answers the first request. One run at a time.
  */
-export async function startWikiBuild(deps: WikiBuildDeps, personId: string, project: string, rawBody: unknown): Promise<{ status: 200 | 202; view: WikiBuildView }> {
+export async function startWikiBuild(
+  deps: WikiBuildDeps, personId: string, project: string, rawBody: unknown,
+  /** W4 "Refresh now": the run writes only the planned pages `include` accepts (the changed, the marked wrong and the not yet written), and is a refresh even when there was no earlier run. */
+  options?: { refresh?: { include(page: WikiPagePlan): boolean } },
+): Promise<{ status: 200 | 202; view: WikiBuildView }> {
   const parsed = WikiBuildStartBodySchema.safeParse(rawBody);
   if (!parsed.success) throw bodyError();
   await requireManager(deps, personId, project);
@@ -289,8 +293,11 @@ export async function startWikiBuild(deps: WikiBuildDeps, personId: string, proj
   if (pins === undefined) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.noRepositories);
   const limits = effectiveWikiBuildLimits(await deps.limitSetting?.(project), await deps.limitLock?.());
   const notes = cleanWikiNotes(parsed.data.notes);
-  const plan = planWikiPages({ map, repositories: pins.map((pin) => pin.repo), pages: limits.pages, chipsOn: parsed.data.chipsOn, notes }).pages;
-  await launch(deps, personId, project, parsed.data.requestId, { pins, plan, keptFromEarlier: [], notes, buildKind: before === undefined ? "first" : "refresh", spentEarlierCents: 0 }, before?.taskId);
+  const planned = planWikiPages({ map, repositories: pins.map((pin) => pin.repo), pages: limits.pages, chipsOn: parsed.data.chipsOn, notes }).pages;
+  const refresh = options?.refresh;
+  const plan = refresh === undefined ? planned : planned.filter((page) => refresh.include(page));
+  if (refresh !== undefined && plan.length === 0) throw agentXError("CONFIG_INVALID", WIKI_CONTROLS_WORDS.nothingToRefresh);
+  await launch(deps, personId, project, parsed.data.requestId, { pins, plan, keptFromEarlier: [], notes, buildKind: before === undefined && refresh === undefined ? "first" : "refresh", spentEarlierCents: 0 }, before?.taskId);
   await recordNow(deps, project);
   return { status: 202, view: await wikiBuildState(deps, project) };
 }

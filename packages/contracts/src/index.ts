@@ -382,6 +382,8 @@ export * from "./spec-target.js";
 // Wiki W0: the free file map and forecast.
 export * from "./wiki-file-map.js";
 export * from "./wiki-build.js";
+// Lead 4 W4: the wiki build controls (bodies and fixed words).
+export * from "./wiki-controls.js";
 
 // Setup and test health: saved environments (SH3).
 export * from "./saved-env.js";
