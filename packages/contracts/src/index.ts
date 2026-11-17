@@ -322,6 +322,8 @@ export * from "./side-by-side-judge.js";
 export * from "./side-by-side-judge-pin.js";
 export * from "./side-by-side-run.js";
 export * from "./side-by-side-render.js";
+// Option B (2026-11-16): the vendor-family check, moved out of the side-by-side lane so other contracts need not import it.
+export * from "./vendor-family.js";
 export * from "./model-serve.js";
 // TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
 export * from "./model-sse-named.js";
