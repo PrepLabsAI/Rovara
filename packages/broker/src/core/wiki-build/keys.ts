@@ -19,4 +19,11 @@ export const WIKI_DONE_SK_PREFIX = "DONE#";
 export const wikiPageDoneKey = (scope: WikiRunScope, pageId: string): DocumentKey => ({ pk: wikiBuildPartition(scope), sk: `${WIKI_DONE_SK_PREFIX}${scope.taskId}#${pageId}` });
 export const wikiCheckCacheKey = (scope: WikiBuildScope, hash: string): DocumentKey => ({ pk: wikiBuildPartition(scope), sk: `CHECK#${hash}` });
 
+/** A row of the build's partition by its sort key (for a delete of what a query of the partition gave back): the sort key must be one of this slice's families (RUN, NOTES#, DONE#, CHECK#). */
+const BUILD_SK = /^(?:RUN|NOTES#[A-Za-z0-9-]{1,64}|DONE#[A-Za-z0-9-]{1,64}#[a-z0-9-]{1,120}|CHECK#[A-Za-z0-9]{8,128})$/u;
+export function wikiBuildRowKey(scope: WikiBuildScope, sk: string): DocumentKey {
+  if (!BUILD_SK.test(sk)) throw new Error("not a wiki build row's sort key");
+  return { pk: wikiBuildPartition(scope), sk: `${sk}` };
+}
+
 export const wikiExpiryOf = (nowMs: number): { [INDEX_EXPIRY_ATTRIBUTE]: number } => ({ [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + WIKI_BUILD_KEEP_SECONDS });

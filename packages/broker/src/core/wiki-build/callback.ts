@@ -21,6 +21,11 @@ export interface WikiBuildCallbackDeps {
   standing(personId: string, project: string): Promise<WikiBuildStanding>;
   /** The code host's file read at a commit, for the citation re-read. Absent: no citation is found, so no claim is kept. */
   read: CitationFileReader | undefined;
+  /**
+   * W4: the same read made for ONE project (a repository name is only a name inside a project: two projects of a company can use the same name for different repositories). When it is given
+   * it is used instead of `read`, with the run's own project taken from the operation, never from the body.
+   */
+  readFor?: ((project: string) => CitationFileReader) | undefined;
   fileVersion?: ((repo: string, path: string, commit: string) => Promise<string | undefined>) | undefined;
   /** The wiki store's write seam for ONE project of this company (W2 `WikiStore.pageSink(project)`). */
   sinkFor(project: string): WikiPageSink;
@@ -58,7 +63,7 @@ export async function handleWikiBuildCallback(deps: WikiBuildCallbackDeps, opera
   const parsed = WikiBuildCallbackBodySchema.safeParse(rawBody);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "the wiki build callback body is not one of its shapes");
   const loop: WikiPageLoopDeps = {
-    store: deps.store, companyId: deps.companyId, now: deps.now, standing: (personId, project) => deps.standing(personId, project), read: deps.read, fileVersion: deps.fileVersion,
+    store: deps.store, companyId: deps.companyId, now: deps.now, standing: (personId, project) => deps.standing(personId, project), read: deps.readFor === undefined ? deps.read : deps.readFor(run.project), fileVersion: deps.fileVersion,
     // The sink is made for the run's own project, from the operation: a sink of any other company or project is refused by the loop.
     sink: deps.sinkFor(run.project),
     ...(deps.recordBuild === undefined ? {} : { recordBuild: (record: WikiBuildRecord) => deps.recordBuild!(run.project, record) }),
