@@ -373,7 +373,8 @@ export class DeveloperSignIn extends Construct {
     } else {
       broker.addEnvironment("DEVELOPER_API_SCOPE", "linking");
     }
-    fn.grantInvoke(broker);
+    // Named: the control plane grants this with the plan evidence job's invoke, in one statement (control-plane.ts, ENV-ROOM 2's IAM room). Legacy: as before.
+    if (!named) fn.grantInvoke(broker);
     // Spec 025 25e: EMAIL# is the email index resolveDeveloper reads to name a developer by email.
     // Spec 063: SIGNIN_CLIENTS holds the registered clients the access check authenticates.
     broker.addToRolePolicy(new iam.PolicyStatement({

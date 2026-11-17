@@ -30,6 +30,8 @@ export const projectSettingsKey = (companyId: string, projectName: string) => ({
 });
 const rowsOf = (row: SettingsRow | undefined): PolicyRows => row === undefined ? {} : { ...(row.preset === undefined ? {} : { preset: row.preset }), project: row.overrides };
 /** Fixed words (no field, no value): a cost or approval setting is changed on the page, right after a fresh step-up. */
+/** L2-5 (b): a company owner or admin who is not one of the project's administrators may change only the project's per-task spending limit. Fixed words. */
+export const COMPANY_ADMIN_BUDGET_ONLY = "Company owners and admins can change only this project's per-task spending limit here. Other project settings need one of the project's admins.";
 export const SETTINGS_CHANGE_ON_THE_PAGE = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that only holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "policy_unavailable");
 
@@ -70,6 +72,25 @@ export function createProjectSettingsPolicySource(
   return { source: policy, scope, snapshot: () => snapshot, propose: (row: SettingsRow) => { proposed = row; } };
 }
 
+/**
+ * L2-5 (b): the core engine's reader of a project's own per-task limit (`model_budget_usd`), in micros, rounded down; undefined when the resolved value is none (null).
+ * It resolves exactly as the settings page does: the project's stored choice through the same rows reader, then the company's rules service when the install has one (`hook`, read
+ * each time, no grace), so the limit enforced is the limit the page shows (a company limit lowers a preset's "none" and an older, higher override). A row that does not read, a
+ * rules service that does not answer, or a value that is not a non-negative number throws (the caller refuses). `hook` is required (pass `undefined` explicitly only where the
+ * host has no rules-service signer), so a caller cannot drop the company's limit by leaving it out.
+ */
+export function projectTaskCapReader(deps: Pick<DeveloperRouteDependencies, "documentClient" | "tableName" | "now">, hook: (() => ProjectSettingsHook | undefined) | undefined): (companyId: string, project: string) => Promise<number | undefined> {
+  return async (companyId, project) => {
+    const policy = createProjectSettingsPolicySource(deps, { companyId, projectName: project }, hook?.());
+    const value = (await policy.source.resolve(policy.scope, {})).values["model_budget_usd"]?.value;
+    if (value === null) return undefined;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw unavailable();
+    // A limit above any install cap (installs cap a task at $1,000 at most) lowers nothing: kept whole, never wrapped past the safe integer range.
+    if (value >= 1_000_000) return Number.MAX_SAFE_INTEGER;
+    return Math.floor(Math.round(value * 1e9) / 1e3);
+  };
+}
+
 /** The page's values, one per field, in the words the page shows. The project page and the company admin view both use this one function. */
 function displayValues(resolved: ResolvedPolicy) {
   return Object.fromEntries(Object.entries(resolved.values).map(([field, entry]) => [field, { ...entry,
@@ -106,6 +127,90 @@ async function settingsView(policy: ReturnType<typeof createProjectSettingsPolic
   return { row, resolved, stored: await storedResolution(policy.scope, row) };
 }
 
+// ---- Where a company's projects live (shared by the settings page and the S3 compliance list). ----
+type Sender = { send(command: unknown): Promise<unknown> };
+const catalogFlag = z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) });
+const positiveRevision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+
+/** A catalog row or selected revision that does not read as this company's: fixed words, and the one drift event under only the caller's company. */
+function catalogDrift(companyId: string): never {
+  companyLog(companyId, (line) => console.warn(JSON.stringify(line)))({ event: "project_catalog.index_drift" });
+  throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+}
+
+/** A named company's projects live only in its own partition (ORG#<company>#PROJECT_CATALOG and ORG#<company>#PROJECT#<name> REV# rows): that partition is authoritative and is read
+ * without any flag. Only the implicit company (Code's legacy single-company data, D1) may still have its projects in the install-wide shared catalog; it reads its partition once the
+ * controller has verified and marked it (PROJECT_CATALOG_INDEX), and the shared rows before that. */
+async function readsOwnPartition(client: Sender, tableName: string, companyId: string): Promise<boolean> {
+  if (companyId !== IMPLICIT_COMPANY_ID) return true;
+  const flag = await client.send(new GetCommand({ TableName: tableName, Key: orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX"), ConsistentRead: true })) as { Item?: unknown };
+  if (flag.Item !== undefined && !catalogFlag.safeParse(flag.Item).success) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
+  return flag.Item !== undefined;
+}
+
+/** The company's own catalog row for one name, as stored (undefined: the company has no project of that name). */
+async function readCatalogRow(client: Sender, tableName: string, companyId: string, name: string): Promise<Record<string, unknown> | undefined> {
+  const response = await client.send(new GetCommand({ TableName: tableName, Key: orgProjectCatalogKey(companyId, name), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  return response.Item;
+}
+
+/** The name and selected revision a catalog row of the company's own partition points at, or undefined when the row is not a well-formed pointer of THIS company. */
+function catalogPointer(item: Record<string, unknown>, companyId: string): { name: string; revision: number } | undefined {
+  const name = typeof item["sk"] === "string" ? AgentXNameSchema.safeParse(item["sk"].slice("PROJECT#".length)) : undefined;
+  const latest = positiveRevision.safeParse(item["latestRevision"]);
+  if (name?.success !== true || item["pk"] !== orgProjectCatalogPk(companyId) || item["sk"] !== `PROJECT#${name.data}`
+    || item["entityType"] !== "PROJECT_CATALOG" || !ownPartitionRow(item, companyId) || (Object.hasOwn(item, "name") && item["name"] !== name.data)
+    || !latest.success) return undefined;
+  return { name: name.data, revision: latest.data };
+}
+
+/** Whether the revision a catalog row selects is this company's project of that name at that revision, in the same partition. */
+async function selectedRevisionHolds(client: Sender, tableName: string, companyId: string, name: string, revision: number): Promise<boolean> {
+  const key = projectRevisionKey(companyId, name, revision);
+  const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  const row = response.Item;
+  // A setup approval moves the catalog onto its candidate revision and leaves `candidate: true` on that row (setup-agent/apply.ts), as the engine's own reader accepts.
+  const definition = row?.["definition"] as { name?: unknown; revision?: unknown } | null | undefined;
+  return row !== undefined && row["pk"] === key.pk && row["sk"] === key.sk && row["entityType"] === "PROJECT" && ownPartitionRow(row, companyId)
+    && typeof definition === "object" && definition !== null && definition.name === name && definition.revision === revision;
+}
+
+/** The person's grant on a project of a company that keeps its projects in its own partition. The grant row is the broker's (`MEMBER#<person>` / `PROJECT#<id>`, written without a
+ * company by registration and the core backfill); the project id is globally unique and was just proven to be this company's, so the row is this company's grant unless it names
+ * another company (or a malformed one), which is refused. Rows of the implicit company's legacy path keep `projectGrant`'s stored-company rule.
+ * INVARIANT this relies on: project ids are globally unique (registration's conditional write of the shared catalog key; L2-1 keeps company-created ids unique with a random
+ * suffix). If ids ever stop being unique across companies, grant rows must carry their company and this exception must go. */
+async function partitionProjectGrant(client: Sender, tableName: string, project: string, personId: string, companyId: string): Promise<{ role: "developer" | "administrator" } | undefined> {
+  const key = { pk: `MEMBER#${personId}`, sk: `PROJECT#${project}` };
+  const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  const row = response.Item;
+  if (row === undefined || row["pk"] !== key.pk || row["sk"] !== key.sk || !ownPartitionRow(row, companyId) || (Object.hasOwn(row, "projectName") && row["projectName"] !== project)) return undefined;
+  const role = row["role"];
+  return role === "developer" || role === "administrator" ? { role } : undefined;
+}
+
+/** The caller's LIVE role in `companyId` (their membership row in the sign-in table, read now); undefined when it does not read, names another company or person, or was revoked. */
+async function liveCompanyRole(client: Sender, signInTableName: string, personId: string, companyId: string): Promise<string | undefined> {
+  const response = await client.send(new GetCommand({ TableName: signInTableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
+  const member = MembershipRole.safeParse(response.Item);
+  if (!member.success || member.data.personId !== personId || member.data.companyId !== companyId || member.data.revokedAt !== undefined) return undefined;
+  const role = OrgRoleSchema.safeParse(member.data.role);
+  return role.success ? role.data : undefined;
+}
+
+/** L2-5 (b): whether a request changes nothing but `model_budget_usd`: the same preset (or none sent), and every other override present and equal exactly as stored. */
+function onlyBudgetChanges(current: SettingsRow | undefined, input: z.infer<typeof requestSchema>): boolean {
+  if (input.preset !== undefined && input.preset !== current?.preset) return false;
+  if (input.overrides === undefined) return true;
+  const before = (current?.overrides ?? {}) as Record<string, unknown>;
+  const after = input.overrides as Record<string, unknown>;
+  for (const field of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (field === "model_budget_usd") continue;
+    if (Object.hasOwn(before, field) !== Object.hasOwn(after, field) || canonicalJson(before[field]) !== canonicalJson(after[field])) return false;
+  }
+  return true;
+}
+
 async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, encodedName: string) {
   const budget = boundedCompanyReads(deps.documentClient);
   const client = budget.client;
@@ -115,15 +220,37 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
   // Settings always require live membership, including installs that have not enabled other R4 routes.
   const companyId = await budget.read(() => resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId));
   if (companyId === undefined) throw agentXError("AUTH_REQUIRED", "company membership required");
-  const project = await client.send(new QueryCommand({ TableName: deps.tableName,
-    KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)", ExpressionAttributeValues: { ":pk": `PROJECT#${projectName}`, ":rev": "REV#" },
-    ConsistentRead: true, ScanIndexForward: false, Limit: 1,
-  })) as { Items?: unknown[] };
-  const projectRow = project.Items?.[0];
-  if (projectRow === undefined || !recordInCompany(projectRow, companyId)) throw agentXError("NOT_FOUND", "project not found");
+  // The project must be this company's, read from where the company's projects live (the same rule as the S3 compliance list): a named company's own partition (its catalog
+  // pointer and the selected revision), the implicit company's partition once it is marked, else the implicit company's legacy shared rows. Another company's project, an
+  // unknown one and a shared-only row of a named company are one answer: "project not found".
+  const partition = await readsOwnPartition(client, deps.tableName, companyId);
+  if (partition) {
+    const pointer = await readCatalogRow(client, deps.tableName, companyId, projectName);
+    if (pointer === undefined) throw agentXError("NOT_FOUND", "project not found");
+    const selected = catalogPointer(pointer, companyId);
+    if (selected === undefined || selected.name !== projectName || !await selectedRevisionHolds(client, deps.tableName, companyId, selected.name, selected.revision)) catalogDrift(companyId);
+  } else {
+    const project = await client.send(new QueryCommand({ TableName: deps.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)", ExpressionAttributeValues: { ":pk": `PROJECT#${projectName}`, ":rev": "REV#" },
+      ConsistentRead: true, ScanIndexForward: false, Limit: 1,
+    })) as { Items?: unknown[] };
+    const projectRow = project.Items?.[0];
+    if (projectRow === undefined || !recordInCompany(projectRow, companyId)) throw agentXError("NOT_FOUND", "project not found");
+  }
+  // Who may change (L2-5 b, DEC 254n's rule as #839's lifecycleAccess): the project's administrator changes any setting; a live company owner or admin who is not one may change
+  // only the per-task spending limit (checked below, once the body and the stored row are read); anyone else is refused before the body is read.
+  let basis: "project-admin" | "company-owner" | "company-admin" | undefined;
   if (request.method === "PUT") {
-    const grant = await projectGrant({ documentClient: client, tableName: deps.tableName }, projectName, caller.developerId, companyId);
-    if (grant?.role !== "administrator") throw agentXError("FORBIDDEN", "project administrator required");
+    const grant = partition
+      ? await partitionProjectGrant(client, deps.tableName, projectName, caller.developerId, companyId)
+      : await projectGrant({ documentClient: client, tableName: deps.tableName }, projectName, caller.developerId, companyId);
+    if (grant?.role === "administrator") basis = "project-admin";
+    else {
+      const role = await liveCompanyRole(client, deps.developer.signInTableName, caller.developerId, companyId);
+      if (role === "owner") basis = "company-owner";
+      else if (role === "admin") basis = "company-admin";
+      else throw agentXError("FORBIDDEN", "project administrator required");
+    }
   }
   let input: z.infer<typeof requestSchema> | undefined;
   if (request.method === "PUT") {
@@ -137,6 +264,7 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
   const { row: current, resolved: before, stored: storedBefore } = view;
   if (input === undefined) { budget.check(); return responseOf(current, before, storedBefore); }
   if (input.expectedRevision !== (current?.revision ?? 0)) throw agentXError("PROJECT_REVISION_MISMATCH", "settings revision conflict");
+  if (basis !== "project-admin" && !onlyBudgetChanges(current, input)) throw agentXError("FORBIDDEN", COMPANY_ADMIN_BUDGET_ONLY);
   const preset = input.preset ?? current?.preset;
   const row: SettingsRow = { companyId, projectName, ...(preset === undefined ? {} : { preset }),
     overrides: (input.overrides ?? current?.overrides ?? {}) as SettingsRow["overrides"], revision: input.expectedRevision + 1,
@@ -188,7 +316,7 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
         ConditionExpression: input.expectedRevision === 0 ? "attribute_not_exists(pk)" : "#revision = :expected",
         ...(input.expectedRevision === 0 ? {} : { ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":expected": input.expectedRevision } }) } },
       { Put: { TableName: deps.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${row.updatedAt}#${randomUUID()}`, entityType: "COMPANY_LOG",
-        event: "project_settings_changed", companyId, personId: caller.developerId, projectName, changes, revision: row.revision, ...presetNamed }, ConditionExpression: "attribute_not_exists(pk)" } },
+        event: "project_settings_changed", companyId, personId: caller.developerId, projectName, changes, revision: row.revision, ...presetNamed, ...(basis === "project-admin" ? {} : { basis }) }, ConditionExpression: "attribute_not_exists(pk)" } },
     ] }));
   } catch (error) {
     const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | undefined)?.CancellationReasons;
@@ -267,9 +395,6 @@ function complianceQuery(url: URL, partition: boolean, companyId: string): { lim
 }
 
 const complianceCursor = (companyId: string, after: string) => "c2." + Buffer.from(canonicalJson({ v: 2, companyId, after })).toString("base64url");
-const catalogFlag = z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) });
-const positiveRevision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
-
 async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: DeveloperCaller, url: URL) {
   const startedAt = deps.now();
   // The budget and the row deadline run on the same clock.
@@ -287,20 +412,12 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
   } catch { throw agentXError("AUTH_REQUIRED", "company membership required"); }
   const checkedRole = OrgRoleSchema.safeParse(role);
   if (!checkedRole.success || (checkedRole.data !== "admin" && checkedRole.data !== "owner")) throw agentXError("FORBIDDEN", "company administrator required");
-  // A named company's projects live only in its own partition (ORG#<company>#PROJECT_CATALOG and ORG#<company>#PROJECT#<name> REV# rows): that partition is authoritative and is
-  // read without any flag. Only the implicit company (Code's legacy single-company data, D1) may still have its projects in the install-wide shared catalog; it reads its partition
-  // once the controller has verified and marked it (PROJECT_CATALOG_INDEX), and the shared catalog before that.
-  let partition = companyId !== IMPLICIT_COMPANY_ID;
-  if (!partition) {
-    const flag = await client.send(new GetCommand({ TableName: deps.tableName, Key: orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX"), ConsistentRead: true })) as { Item?: unknown };
-    partition = flag.Item !== undefined;
-    if (partition && !catalogFlag.safeParse(flag.Item).success) throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
-  }
+  // Where the company's projects live: see readsOwnPartition.
+  const partition = await readsOwnPartition(client, deps.tableName, companyId);
   const query = complianceQuery(url, partition, companyId);
   if (query.base !== undefined && partition) {
     try {
-      const own = await client.send(new GetCommand({ TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, query.base), ConsistentRead: true })) as { Item?: unknown };
-      if (own.Item === undefined) throw invalidCompliance();
+      if (await readCatalogRow(client, deps.tableName, companyId, query.base) === undefined) throw invalidCompliance();
     } catch { throw invalidCompliance(); }
   }
   if (query.base !== undefined && !partition) {
@@ -316,30 +433,12 @@ async function checkedComplianceRoute(deps: DeveloperRouteDependencies, caller: 
   let base = query.base; let skip = query.skip; let toSkip = query.skip; let examined = 0; let exhausted = false;
   let nextCursor: string | null;
   if (partition) {
-    const drift = () => {
-      companyLog(companyId, (line) => console.warn(JSON.stringify(line)))({ event: "project_catalog.index_drift" });
-      throw agentXError("RUNTIME_UNAVAILABLE", "settings unavailable");
-    };
+    const drift = () => catalogDrift(companyId);
     const page = await client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
       ExpressionAttributeValues: { ":pk": orgProjectCatalogPk(companyId), ":prefix": "PROJECT#" }, ConsistentRead: true, Limit: query.limit,
       ...(query.base === undefined ? {} : { ExclusiveStartKey: orgProjectCatalogKey(companyId, query.base) }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
-    const candidates = (page.Items ?? []).map((item) => {
-      const name = typeof item["sk"] === "string" ? AgentXNameSchema.safeParse(item["sk"].slice("PROJECT#".length)) : undefined;
-      const latest = positiveRevision.safeParse(item["latestRevision"]);
-      if (name?.success !== true || item["pk"] !== orgProjectCatalogPk(companyId) || item["sk"] !== `PROJECT#${name.data}`
-        || item["entityType"] !== "PROJECT_CATALOG" || !ownPartitionRow(item, companyId) || (Object.hasOwn(item, "name") && item["name"] !== name.data)
-        || !latest.success) return drift();
-      return { name: name.data, revision: latest.data };
-    });
-    const selected = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async ({ name, revision }) => {
-      const key = projectRevisionKey(companyId, name, revision);
-      const response = await client.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
-      const row = response.Item;
-      // A setup approval moves the catalog onto its candidate revision and leaves `candidate: true` on that row (setup-agent/apply.ts), as the engine's own reader accepts.
-      const definition = row?.["definition"] as { name?: unknown; revision?: unknown } | null | undefined;
-      return row !== undefined && row["pk"] === key.pk && row["sk"] === key.sk && row["entityType"] === "PROJECT" && ownPartitionRow(row, companyId)
-        && typeof definition === "object" && definition !== null && definition.name === name && definition.revision === revision;
-    });
+    const candidates = (page.Items ?? []).map((item) => catalogPointer(item, companyId) ?? drift());
+    const selected = await inBatches(candidates, COMPLIANCE_READS_AT_ONCE, async ({ name, revision }) => selectedRevisionHolds(client, deps.tableName, companyId, name, revision));
     if (selected.some(own => !own)) drift();
     names.push(...candidates.map(({ name }) => name));
     if (page.LastEvaluatedKey !== undefined && names.length === 0) drift();

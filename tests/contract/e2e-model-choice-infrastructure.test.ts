@@ -17,7 +17,7 @@ const resourcesOf = (template: Template) => template.toJSON().Resources as Recor
 const ofType = (template: Template, type: string) => Object.entries(resourcesOf(template)).filter(([, resource]) => resource.Type === type);
 const brokerEnvironment = (template: Template) => {
   const [, broker] = ofType(template, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/.test(id))!;
-  return unpackedBrokerVariables((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables);
+  return unpackedBrokerVariables((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables, template.toJSON() as never);
 };
 const statements = (template: Template): Statement[] => ofType(template, "AWS::IAM::Policy").flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement);
 

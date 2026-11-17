@@ -334,10 +334,10 @@ export class SessionLifecycle extends Construct {
    * callbacks with the callback signing key, as the broker does. It reads the thread's activeTurn by
    * key (THREAD# items only) and posts the thread's note with the bot token (the Slack secret alone).
    */
-  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKey: string): void {
+  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKeySecretName: string): void {
     this.reconciler.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
     this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
-    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY", callbackSigningKey);
+    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY_SECRET_ID", callbackSigningKeySecretName);
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({
       sid: "ReadThreadWaiters",
       actions: ["dynamodb:GetItem"],
@@ -376,7 +376,8 @@ export class SessionLifecycle extends Construct {
     // ENV-ROOM (broker-names.ts): a named environment's broker gets the two state machines' names packed; the legacy template passes the ARNs whole, as before.
     addBrokerName(broker, this.naming, "provisionerStateMachine", this.provisioner.stateMachineName, this.provisioner.stateMachineArn);
     addBrokerName(broker, this.naming, "deleterStateMachine", this.deleter.stateMachineName, this.deleter.stateMachineArn);
-    this.deleter.grantStartExecution(broker);
+    // Named: the control plane grants this with the broker's other StartExecution, in one statement (control-plane.ts, ENV-ROOM 2's IAM room). Legacy: as before.
+    if (this.naming.env === undefined) this.deleter.grantStartExecution(broker);
   }
 
   private connectExecutions(fn: lambda.Function): void {

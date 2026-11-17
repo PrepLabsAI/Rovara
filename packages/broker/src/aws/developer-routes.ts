@@ -4,7 +4,7 @@ import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/con
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
-import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
+import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -16,6 +16,9 @@ import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } from "./github-connect-routes.js";
+import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
+import { routeHostedIntake } from "./hosted-intake-routes.js";
+import type { HostedIntake } from "./hosted-intake.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
@@ -129,7 +132,7 @@ import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 import type { CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
-import type { CompanyImportRegistry } from "./company-import-forwarding.js";
+import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
 
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
@@ -173,7 +176,7 @@ export interface DeveloperApiConfiguration {
   /** Spec 025 E9: an admin ends a developer's sign-in sessions, through DeveloperIdentity (the broker only reads the sign-in table). */
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
   /** #634: a person sets their own name, through DeveloperIdentity (the broker only reads the sign-in table). */
-  setDisplayName?: (request: SetDisplayNameRequest) => Promise<SetDisplayNameResponse>;
+  setDisplayName?: (request: SetDisplayNameRequest) => Promise<SetDisplayNameResponse>; /** DEC 254w: connected sign-ins, through DeveloperIdentity. Absent: those routes answer not set up. */ signInLinks?: SignInLinkForward;
   /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
   signInClients?: SignInClientRegistry;
   companies?: CompanyMembershipReader;
@@ -193,6 +196,10 @@ export interface DeveloperApiConfiguration {
   slackInstall?: SlackInstallWiring;
   /** Guided onboarding PR 5: a project's Slack channel (slack-channel-link.ts). Absent (or no company layer): those routes are unknown. */
   slackChannels?: SlackChannelWiring;
+  /** Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts). Absent (or no company layer): those routes are unknown. */
+  linearConnect?: LinearConnectWiring;
+  /** L2-4: a project's waiting tickets on the core (hosted-intake-routes.ts), set only while the core switch serves and Linear is wired. Absent (or no company layer): those routes are unknown. */
+  coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
   companyEngineModel?: CompanyEngineModelWiring;
   /**
@@ -1391,7 +1398,7 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
   });
 }
-const CLIENT_SETUP_STATUS = /^\/v1\/dev\/client\/projects\/([^/]+)\/setup-status(\/skips)?$/;
+const CLIENT_SETUP_STATUS = /^\/v1\/dev\/client\/projects\/([^/]+)\/setup-status(\/skips|\/eval-none)?$/;
 
 /** The project's Slack channel links from the existing binding rows (ids; names only where the company's workspace can be asked, as the access check does). */
 async function projectChannelLinks(deps: DeveloperRouteDependencies, project: string, companyId: string | undefined): Promise<Array<{ channelId: string; name?: string; isPrivate?: boolean }>> {
@@ -1410,7 +1417,7 @@ async function projectChannelLinks(deps: DeveloperRouteDependencies, project: st
  * Guided onboarding PR 8: `GET /v1/dev/client/projects/{project}/setup-status` (any member of the project's company) and `PUT .../setup-status/skips` (a company owner or admin, or the project's
  * administrator). The company is the caller's live membership; another company's project, an unknown one and an unreadable name all answer "project not found". See project-setup-status.ts.
  */
-async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, skips: boolean, route: DevRoute): Promise<unknown> {
+async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, change: "/skips" | "/eval-none" | undefined, route: DevRoute): Promise<unknown> {
   const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
   requireRouteScope(route, person);
   const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
@@ -1439,7 +1446,14 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   const projectAdmin = own?.role === "administrator";
   const companyAdmin = companyId === undefined ? person.administrator : role === "admin" || role === "owner";
   const effectiveCompany = companyId ?? IMPLICIT_COMPANY_ID;
-  if (skips) {
+  if (change === "/eval-none") {
+    if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
+    const changed = await putEvalNone({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, revision: definition.revision, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: () => jsonBody(request) });
+    scope.check();
+    logDeveloperEvent({ event: "client.project_setup_eval_none_changed", clientId: person.client.clientId, by: person.developerId, project, noEvals: changed.noEvals ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
+    return changed;
+  }
+  if (change === "/skips") {
     if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
     const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: () => jsonBody(request) });
     scope.check();
@@ -1580,7 +1594,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   if (settings !== null && (request.method === "GET" || request.method === "PUT")) return routeClientCodeSettings(deps, request, settings[1]!, route);
   // Guided onboarding PR 8: a project's setup status, and the skipped optional rows.
   const setupStatus = CLIENT_SETUP_STATUS.exec(url.pathname);
-  if (setupStatus !== null && (request.method === "GET" || request.method === "PUT")) return routeClientSetupStatus(deps, request, setupStatus[1]!, setupStatus[2] !== undefined, route);
+  if (setupStatus !== null && (request.method === "GET" || request.method === "PUT")) return routeClientSetupStatus(deps, request, setupStatus[1]!, setupStatus[2] as "/skips" | "/eval-none" | undefined, route);
   const read = CLIENT_PROJECT.exec(url.pathname);
   if (read !== null && request.method === "GET") {
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
@@ -1877,10 +1891,11 @@ export function developerTaskRouteDependencies(
       const dependencies = await identityDependencies(task);
       const resolved = await resolveTaskPickerPersonWithId(dependencies, task, slackUserId);
       const proof = await checkTaskPersonIdentity(dependencies, task, resolved.identity.developerId);
-      if (!proof.eligible || proof.identity.developerId !== resolved.identity.developerId || proof.identity.slackUserId !== resolved.identity.slackUserId) {
+      const resolvedSlackUserId = resolved.identity.slackUserId;
+      if (!proof.eligible || proof.identity.developerId !== resolved.identity.developerId || resolvedSlackUserId === undefined || proof.identity.slackUserId !== resolvedSlackUserId) {
         throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
       }
-      return { personId: resolved.personId, developerId: resolved.identity.developerId, slackUserId: resolved.identity.slackUserId, channelMember: proof.channelMember };
+      return { personId: resolved.personId, developerId: resolved.identity.developerId, slackUserId: resolvedSlackUserId, channelMember: proof.channelMember };
     },
     taskPeopleChannel: async (taskId) => {
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
@@ -1905,9 +1920,10 @@ export function developerTaskRouteDependencies(
       admission.assertOpen();
       const bySlack = new Map(answer.users.map((user) => [user.id, user]));
       return identities.map((identity) => {
-        const user = bySlack.get(identity.slackUserId);
-        if (user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
-        return { subject: { developerId: identity.developerId, slackUserId: identity.slackUserId }, identity, eligible: true,
+        const slackUserId = identity.slackUserId;
+        const user = slackUserId === undefined ? undefined : bySlack.get(slackUserId);
+        if (slackUserId === undefined || user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+        return { subject: { developerId: identity.developerId, slackUserId }, identity, eligible: true,
           channelMember: task.share === undefined || user.memberOf.includes(task.share.channelId) };
       });
       },
@@ -2077,6 +2093,42 @@ async function slackChannelLinkRoute(deps: DeveloperRouteDependencies, request: 
   return routeSlackChannelLink({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url);
 }
 
+/** Guided onboarding PR 7: the Linear connect routes. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function linearConnectRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.linearConnect;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // The step-up the verified token carries travels beside the caller, for disconnect (its age is checked there).
+  const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeLinearConnect({
+    documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, now: deps.now, wiring,
+    projectInCompany: async (project, company) => (await projectsWithPolicy(deps, [project], company)).has(project),
+    projectRole: async (project, personId, company) => (await projectGrant(memberActions(deps), project, personId, company))?.role,
+  }, caller, companyId, request, url, stepUp);
+}
+
+/** L2-4: a project's waiting tickets (hosted-intake-routes.ts parses what this matched). */
+export const HOSTED_INTAKE_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/intake(?:\/([^/]+)\/(start|dismiss))?$/u;
+
+/** L2-4: the waiting-ticket routes. Unknown, before anyone is authenticated, without the company layer or the core's intake. */
+async function hostedIntakeRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL, match: RegExpExecArray): Promise<unknown> {
+  const intake = deps.developer.coreIntake;
+  if (deps.companies === undefined || intake === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  const { caller } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeHostedIntake({
+    documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, intake,
+    projectInCompany: async (project, company) => (await projectsWithPolicy(deps, [project], company)).has(project),
+    projectRole: async (project, personId, company) => (await projectGrant(memberActions(deps), project, personId, company))?.role,
+  }, caller, companyId, request, { project: match[1]!, itemId: match[2], act: match[3] });
+}
+
 /** Guided onboarding PR 14: the company engine model route. Unknown, before anyone is authenticated, without the company layer or the wiring. */
 async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const wiring = deps.developer.companyEngineModel;
@@ -2095,6 +2147,9 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
   if (isSlackChannelLinkPath(url.pathname)) return slackChannelLinkRoute(deps, request, url);
   if (isSlackInstallPath(url.pathname)) return slackInstallRoute(deps, request, url);
+  if (isLinearConnectPath(url.pathname)) return linearConnectRoute(deps, request, url);
+  const intakeMatch = HOSTED_INTAKE_ROUTES.exec(url.pathname);
+  if (intakeMatch !== null) return hostedIntakeRoute(deps, request, url, intakeMatch);
   if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company") return companySelfCreateRoute(deps, request, url);
@@ -2181,6 +2236,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   }
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
+  if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
   // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
   if (LESSONS_API_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);

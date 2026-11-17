@@ -1,11 +1,13 @@
 // The broker's environment, compacted in a named environment (ENV-ROOM; core switch-on blocker, 2026-11-15). packages/contracts/src/broker-environment.ts
-// says what is packed, what is derived and why; packages/broker/src/aws/broker-environment.ts puts it back. The legacy install passes every variable whole, as before: its
+// says what is packed, what is derived and why; packages/broker/src/aws/broker-environment.ts puts it back. Since ENV-ROOM 2 (2026-11-17) the packed names are written to one SSM
+// String parameter, not the function's environment, and packages/broker/src/aws/broker-handler.ts reads them before the broker loads. The legacy install passes every variable whole, as before: its
 // template does not change.
-import { CfnParameter, Fn, Lazy, Stack, Token } from "aws-cdk-lib";
-import type { aws_lambda as lambda } from "aws-cdk-lib";
+import { createHash } from "node:crypto";
+import { Aws, CfnParameter, Fn, Lazy, Stack, Token } from "aws-cdk-lib";
+import { aws_ssm as ssm, type aws_lambda as lambda } from "aws-cdk-lib";
 import {
-  BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE, DERIVED_BROKER_VARIABLES,
-  type BrokerNameKey, type BrokerSettingKey,
+  BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_REVISION_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE,
+  DERIVED_BROKER_VARIABLES, brokerNamesParameterName, encodeBrokerNamesParameterPrefix, type BrokerNameKey, type BrokerSettingKey,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 
@@ -97,27 +99,71 @@ class PackedList<K extends string> {
   }
 }
 
-/** A named environment's broker: AGENTX_NAMES, AGENTX_SETTINGS and AGENTX_ACCOUNT_ID, given to the function once. */
+/**
+ * The revision of the broker's names as written: the sha256 of the format and of the list's CloudFormation expression (each code and the resource it names), so a template that
+ * packs a name differently, adds one or drops one writes a new revision, and the function, which carries it too, changes with it. It does not see a name's value, which only
+ * CloudFormation knows: a resource replaced under the same logical id gets a new generated name under the same revision, and the old name, never reused, fails where it is used.
+ */
+/** The ARN of a named environment's broker names parameter, which the broker may read (ssm:GetParameters) and nothing more. */
+export function brokerNamesParameterArn(env: string): string {
+  return `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${brokerNamesParameterName(env)}`;
+}
+
+export function brokerNamesRevision(resolvedList: unknown): string {
+  return createHash("sha256").update(JSON.stringify({ format: "v1", names: resolvedList })).digest("hex");
+}
+
+/**
+ * A named environment's broker: AGENTX_SETTINGS and AGENTX_ACCOUNT_ID in the function's environment, and AGENTX_NAMES in its own SSM String parameter (ENV-ROOM 2,
+ * packages/contracts/src/broker-environment.ts), with the parameter's name and the revision written in the environment; given to the function once.
+ */
 class BrokerEnvironment {
   private static readonly byBroker = new WeakMap<lambda.Function, BrokerEnvironment>();
   readonly names: PackedList<BrokerNameKey>;
   readonly settings: PackedList<BrokerSettingKey>;
+  private written?: { revision: string; value: string };
+  private readonly stack: Stack;
 
-  private constructor(broker: lambda.Function, includeNames: boolean) {
+  private constructor(broker: lambda.Function, env: string | undefined) {
     const stack = Stack.of(broker);
+    this.stack = stack;
     this.names = new PackedList<BrokerNameKey>(stack, "the broker's name", (key) => BROKER_NAMES[key].code, LITERAL_NAME);
     this.settings = new PackedList<BrokerSettingKey>(stack, "the broker's setting", (key) => BROKER_SETTINGS[key].code, BROKER_SETTING_VALUE);
-    if (includeNames) {
+    if (env !== undefined) {
+      const parameterName = brokerNamesParameterName(env);
+      // Standard tier, plain String: names only, no secret (a SecureString would need a key grant and a decrypt on every cold start for nothing).
+      const parameter = new ssm.CfnParameter(stack, "BrokerNamesParameter", {
+        type: "String",
+        tier: "Standard",
+        name: parameterName,
+        description: "The broker's CloudFormation-generated resource names (AGENTX_NAMES); no secrets. Written by the control plane stack only.",
+        value: Lazy.string({ produce: () => this.namesWritten().value }),
+      });
       broker.addEnvironment(BROKER_ACCOUNT_VARIABLE, stack.account);
-      broker.addEnvironment(BROKER_NAMES_VARIABLE, Lazy.string({ produce: () => this.names.joined() }));
+      broker.addEnvironment(BROKER_NAMES_PARAMETER_VARIABLE, parameterName);
+      broker.addEnvironment(BROKER_NAMES_REVISION_VARIABLE, Lazy.string({ produce: () => this.namesWritten().revision }));
+      // The parameter is written before the function changes, so a running broker keeps its names and a cold start of the old revision refuses (the revisions differ) until
+      // the function is updated. Only the function itself depends on it: its role is referenced by resources whose names the parameter holds.
+      (broker.node.defaultChild as lambda.CfnFunction).addDependency(parameter);
+      // The read grant is this parameter's ARN (brokerNamesParameterArn) in the broker's one ssm:GetParameters statement (control-plane.ts): no path reads, no history, no other parameter.
     }
     broker.addEnvironment(BROKER_SETTINGS_VARIABLE, Lazy.string({ produce: () => this.settings.joined() }));
   }
 
-  static of(broker: lambda.Function, includeNames = true): BrokerEnvironment {
+  /** The list, and its revision, once every construct has added its names (at synthesis). */
+  private namesWritten(): { revision: string; value: string } {
+    if (this.written === undefined) {
+      const joined = this.names.joined();
+      const revision = brokerNamesRevision(this.stack.resolve(joined));
+      this.written = { revision, value: `${encodeBrokerNamesParameterPrefix(revision)}${joined}` };
+    }
+    return this.written;
+  }
+
+  static of(broker: lambda.Function, env: string | undefined): BrokerEnvironment {
     const existing = BrokerEnvironment.byBroker.get(broker);
     if (existing !== undefined) return existing;
-    const created = new BrokerEnvironment(broker, includeNames);
+    const created = new BrokerEnvironment(broker, env);
     BrokerEnvironment.byBroker.set(broker, created);
     return created;
   }
@@ -129,25 +175,25 @@ class BrokerEnvironment {
  */
 export function addBrokerName(broker: lambda.Function, naming: AgentXNaming, key: BrokerNameKey, bare: string, whole: string): void {
   if (naming.env === undefined) broker.addEnvironment(BROKER_NAMES[key].variable, whole);
-  else BrokerEnvironment.of(broker).names.add(key, bare);
+  else BrokerEnvironment.of(broker, naming.env).names.add(key, bare);
 }
 
 /** The broker's dead-letter queues for the health route: named, each queue's name in AGENTX_NAMES; legacy, the one JSON variable of URLs, as before. */
 export function addBrokerDeadLetterQueues(broker: lambda.Function, naming: AgentXNaming, queues: ReadonlyArray<readonly [BrokerNameKey, { queueName: string; queueUrl: string }]>, legacyJson: () => string): void {
   for (const [key] of queues) if (BROKER_NAMES[key].kind !== "deadLetterQueue") throw new Error(`the broker's name ${key} is not a dead-letter queue`);
   if (naming.env === undefined) broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", legacyJson());
-  else for (const [key, queue] of queues) BrokerEnvironment.of(broker).names.add(key, queue.queueName);
+  else for (const [key, queue] of queues) BrokerEnvironment.of(broker, naming.env).names.add(key, queue.queueName);
 }
 
 /** A constrained setting the broker reads as `BROKER_SETTINGS[key].variable`: named, in AGENTX_SETTINGS; legacy, the variable whole. */
 export function addBrokerSetting(broker: lambda.Function, naming: AgentXNaming, key: BrokerSettingKey, value: string): void {
   if (naming.env === undefined) broker.addEnvironment(BROKER_SETTINGS[key].variable, value);
-  else BrokerEnvironment.of(broker).settings.add(key, value);
+  else BrokerEnvironment.of(broker, naming.env).settings.add(key, value);
 }
 
 /** Add a setting to the packed list on any named Lambda without adding the broker-only name/account variables. */
 export function addPackedSetting(fn: lambda.Function, key: BrokerSettingKey, value: string): void {
-  BrokerEnvironment.of(fn, false).settings.add(key, value);
+  BrokerEnvironment.of(fn, undefined).settings.add(key, value);
 }
 
 /**
@@ -159,5 +205,5 @@ export function addDerivedBrokerVariable(broker: lambda.Function, naming: AgentX
   const entry = DERIVED_BROKER_VARIABLES.find((candidate) => candidate.variable === variable);
   if (entry === undefined || entry.kind !== "text") throw new Error(`${variable} is not a variable the broker derives as text`);
   if (Token.isUnresolved(value) || entry.value(naming.env) !== value) throw new Error(`the broker would derive ${variable} differently from the value the infrastructure has for it`);
-  BrokerEnvironment.of(broker);
+  BrokerEnvironment.of(broker, naming.env);
 }

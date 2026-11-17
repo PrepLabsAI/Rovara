@@ -314,17 +314,18 @@ describe("the dispatcher's router", () => {
 describe("the core on the dispatcher", () => {
   const env = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => ({
     [CORE_ENGINE_VARIABLE]: `on:${COMPANY_A}`, CORE_DISPATCH_QUEUE_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch",
-    CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State", CALLBACK_SIGNING_KEY: "k".repeat(48),
+    CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State",
     ARTIFACT_BUCKET_NAME: "artifacts", AWS_REGION: "us-west-2", EC2_WORKER_SUBNETS: "us-west-2a=subnet-0aaaaaaaaaaaaaaaa", EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-0123456789abcdef0", ...overrides,
   });
-  const inputs = (environment: NodeJS.ProcessEnv) => {
+  // The callback signing key is an input (the dispatcher reads it from Secrets Manager), never part of the environment.
+  const inputs = (environment: NodeJS.ProcessEnv, callbackSigningKey = "k".repeat(48)) => {
     const world = createSessionMachinesWorld();
     let clock = Date.now();
     const log = vi.fn();
     return {
       world,
       inputs: {
-        env: environment, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
+        env: environment, callbackSigningKey, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
         machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined },
         changeVisibility: async () => undefined, log, now: () => new Date(clock),
       } as Parameters<typeof createDispatcherCoreHost>[0],
@@ -343,10 +344,13 @@ describe("the core on the dispatcher", () => {
   });
 
   it("refuses to build without the core queue's URLs, the State table, the callback signing key, the artifacts bucket or the workers' placement, in fixed words", () => {
-    for (const missing of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "STATE_TABLE_NAME", "CALLBACK_SIGNING_KEY", "ARTIFACT_BUCKET_NAME", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
+    for (const missing of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "STATE_TABLE_NAME", "ARTIFACT_BUCKET_NAME", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
       expect(() => createDispatcherCoreHost(inputs(env({ [missing]: undefined })).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
       expect(() => createDispatcherCoreHost(inputs(env({ [missing]: " " })).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
     }
+    // The key is an input, not an environment value: none (or a blank one) refuses, and a plain CALLBACK_SIGNING_KEY in the environment is not taken for it.
+    for (const key of ["", " "]) expect(() => createDispatcherCoreHost(inputs(env(), key).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
+    expect(() => createDispatcherCoreHost(inputs(env({ CALLBACK_SIGNING_KEY: "k".repeat(48) }), "").inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
     // A malformed placement refuses too, before anything runs (and its value is not echoed).
     const bad = (() => { try { createDispatcherCoreHost(inputs(env({ EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-secret-ish; rm" })).inputs); return undefined; } catch (error) { return error as Error; } })();
     expect(bad?.message).toBe(DISPATCHER_CORE_NOT_CONFIGURED);
