@@ -15,7 +15,7 @@
 //   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-PB, DEC 254zzj);
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
-//     only for a person the company lets read that project; proposing and approving are not on the core here (no hosted approval path for a test environment yet);
+//     for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-B3c); proposing and approving are not on the core here (no hosted approval path for a test environment yet);
 //   - approving that environment (`POST /v1/app/projects/<p>/test-environment/approve`, L4-B3b): a fresh step-up, the person's right to read the project, then the risk-based approver rule (a company owner or admin, or
 //     the project's maintainer for low and medium risk; high risk a company owner or admin only), read live again inside the decision, with the approvers point's own proof; served only where the deployment wires it;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the

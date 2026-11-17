@@ -2,7 +2,7 @@
 // without a project grant (the same shortcut as the test environment state read, L4-B3c); everyone else needs the grant; a missing, foreign or unreadable project answers the same words. Writes are unchanged:
 // a PUT or POST is not the core's here (the old broker's editor), and a script token is refused.
 import { describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
@@ -56,6 +56,7 @@ async function setup() {
     playbook: {
       state: async (project: string) => {
         stateCalls.push(`${runtime.companyId}/${project}`);
+        if (project === "ghost") throw agentXError("NOT_FOUND", "There is no project named that here.");
         // A valid view (the route re-reads it through the strict schema); the company and project ride in the process agent id and the playbook's revision-free default process.
         return { view: { project, playbookRevision: 0, process: { kind: "builtin", agentId: `${runtime.companyId}:${project}` }, stages: [], rules: [], modelsEditable: false }, playbook: { revision: 0, defaultProcess: { kind: "builtin" }, steps: [`${runtime.companyId}:${project}`] } } as never;
       },
@@ -66,7 +67,8 @@ async function setup() {
   return { world, app, routes, callerOf, allowed, stateCalls, grantCalls, members, companyOf, wiringOf };
 }
 type H = Awaited<ReturnType<typeof setup>>;
-const bodyOf = (answer: { body: string } | undefined) => JSON.parse(answer!.body) as Record<string, any>;
+interface Body { playbook?: unknown; process?: { agentId?: string }; error?: { message?: string } }
+const bodyOf = (answer: { body: string } | undefined): Body => JSON.parse(answer!.body) as Body;
 /** The words a person who may not read a project gets: exactly a project that is not there. */
 const MISSING = (h: H) => h.routes.route(get(PB("nothere")), h.callerOf(FAKE_COMPANY, "member", "reader-of-nothing"));
 
@@ -76,10 +78,10 @@ describe("how we work read by company role (owner or admin without a project gra
     const caller = h.callerOf(FAKE_COMPANY, role, `${role}-no-grant`);
     const pb = await h.routes.route(get(PB("payments")), caller);
     expect(pb?.statusCode).toBe(200);
-    expect(bodyOf(pb)["playbook"]).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
+    expect(bodyOf(pb).playbook).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
     const hww = await h.routes.route(get(HWW("payments")), caller);
     expect(hww?.statusCode).toBe(200);
-    expect(bodyOf(hww)["process"]["agentId"]).toBe(`${FAKE_COMPANY}:payments`);
+    expect(bodyOf(hww).process?.agentId).toBe(`${FAKE_COMPANY}:payments`);
   });
 
   it("a member with no grant gets exactly the missing-project 404 and nothing of the project is read; the same member WITH the grant reads", async () => {
@@ -117,16 +119,16 @@ describe("how we work read by company role (owner or admin without a project gra
     expect(await h.routes.route(get(HWW("ledger")), theirs)).toEqual(missing);
     expect(await h.routes.route(get(PB("vault")), mine)).toEqual(missing);
     h.stateCalls.length = 0;
-    expect(bodyOf(await h.routes.route(get(PB("payments")), mine))["playbook"]).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
-    expect(bodyOf(await h.routes.route(get(PB("payments")), theirs))["playbook"]).toMatchObject({ steps: [`${OTHER}:payments`] });
+    expect(bodyOf(await h.routes.route(get(PB("payments")), mine)).playbook).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
+    expect(bodyOf(await h.routes.route(get(PB("payments")), theirs)).playbook).toMatchObject({ steps: [`${OTHER}:payments`] });
     expect(h.stateCalls).toEqual([`${FAKE_COMPANY}/payments`, `${OTHER}/payments`]);
   });
 
   it("two projects: an owner reads each project's own view, and a member granted one project cannot read the other", async () => {
     const h = await setup();
     const owner = h.callerOf(FAKE_COMPANY, "owner", "o2");
-    expect(bodyOf(await h.routes.route(get(PB("payments")), owner))["playbook"]).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
-    expect(bodyOf(await h.routes.route(get(PB("ledger")), owner))["playbook"]).toMatchObject({ steps: [`${FAKE_COMPANY}:ledger`] });
+    expect(bodyOf(await h.routes.route(get(PB("payments")), owner)).playbook).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
+    expect(bodyOf(await h.routes.route(get(PB("ledger")), owner)).playbook).toMatchObject({ steps: [`${FAKE_COMPANY}:ledger`] });
     h.allowed.add("payments");
     const member = h.callerOf(FAKE_COMPANY, "member", "m3");
     expect((await h.routes.route(get(PB("payments")), member))?.statusCode).toBe(200);
@@ -167,13 +169,23 @@ describe("how we work read by company role (owner or admin without a project gra
     expect(await failing.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "member", "m6"))).toEqual(await MISSING(h));
   });
 
+  it("a project the playbook service does not know answers the same words even for a grant holder or an owner with a grant", async () => {
+    const h = await setup();
+    const missing = await MISSING(h);
+    h.allowed.add("ghost");
+    for (const [role, personId] of [["member", "g-member"], ["owner", "g-owner"]] as const) {
+      for (const path of [PB("ghost"), HWW("ghost")]) expect(await h.routes.route(get(path), h.callerOf(FAKE_COMPANY, role, personId)), `${role} ${path}`).toEqual(missing);
+    }
+    expect(h.stateCalls).toEqual([`${FAKE_COMPANY}/ghost`, `${FAKE_COMPANY}/ghost`, `${FAKE_COMPANY}/ghost`, `${FAKE_COMPANY}/ghost`]);
+  });
+
   it("an owner is not served where the access check is not wired (the shortcut adds no way around that), nor a playbook the deployment has not wired", async () => {
     const h = await setup();
-    const noCheck = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: (runtime) => { const { canReadProject: _drop, ...rest } = h.wiringOf(runtime); return rest; } });
+    const noCheck = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: (runtime) => { const w = h.wiringOf(runtime); delete w.canReadProject; return w; } });
     const answer = await noCheck.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "owner", "o7"));
-    expect(bodyOf(answer)["error"]["message"]).toBe(NOT_ON_THE_CORE_YET);
-    const noPlaybook = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: (runtime) => { const { playbook: _drop, ...rest } = h.wiringOf(runtime); return rest; } });
-    expect(bodyOf(await noPlaybook.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "owner", "o7")))["error"]["message"]).toBe(NOT_ON_THE_CORE_YET);
+    expect(bodyOf(answer).error?.message).toBe(NOT_ON_THE_CORE_YET);
+    const noPlaybook = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: (runtime) => { const w = h.wiringOf(runtime); delete w.playbook; return w; } });
+    expect(bodyOf(await noPlaybook.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "owner", "o7"))).error?.message).toBe(NOT_ON_THE_CORE_YET);
   });
 
   it("a script token is still refused for an owner (the shortcut is for a signed-in person only)", async () => {
@@ -182,7 +194,7 @@ describe("how we work read by company role (owner or admin without a project gra
     for (const path of [PB("payments"), HWW("payments")]) {
       const token = await h.routes.route(get(path), { ...owner, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
       expect(token?.statusCode, path).toBe(403);
-      expect(bodyOf(token)["error"]["message"]).toBe(NOT_FOR_SCRIPT_TOKENS);
+      expect(bodyOf(token).error?.message).toBe(NOT_FOR_SCRIPT_TOKENS);
     }
     expect(h.stateCalls).toEqual([]);
   });
