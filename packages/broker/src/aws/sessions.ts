@@ -178,9 +178,15 @@ export class SessionManager {
     }));
   }
 
-  async markInstance(workspaceId: string, generation: number, instanceId: string, privateIp: string): Promise<void> {
+  /**
+   * Records the launched instance. DEC 254zb: `launched.instanceType` is the type it launched as (kept, like `launchedAt`, for the machine time it used), and
+   * `launched.machineFallback` the fixed reason when the chosen size fell back to the default; a reported launch without one clears an earlier generation's reason.
+   */
+  async markInstance(workspaceId: string, generation: number, instanceId: string, privateIp: string, launched: { instanceType?: string; machineFallback?: "size-unavailable" } = {}): Promise<void> {
     await this.dependencies.documentClient.send(new UpdateCommand(this.update(workspaceId, {
-      set: { instanceId, privateIp, launchedAt: this.now() },
+      set: { instanceId, privateIp, launchedAt: this.now(), ...(launched.instanceType === undefined ? {} : { instanceType: launched.instanceType }), ...(launched.machineFallback === undefined ? {} : { machineFallback: launched.machineFallback }) },
+      // Only a provisioner that reports the type also reports the reason, so only its launches clear an earlier one (an older provisioner's write is unchanged).
+      ...(launched.instanceType !== undefined && launched.machineFallback === undefined ? { remove: ["machineFallback" as const] } : {}),
       when: { state: "PROVISIONING", generation },
     })));
   }

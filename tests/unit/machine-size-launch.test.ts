@@ -1,0 +1,56 @@
+// DEC 254zb (TE-C5 part C): the machine size rows map to exactly one EC2 type each, and nothing else can be launched from a stored row.
+import { describe, expect, it } from "vitest";
+import {
+  MACHINE_SIZE_ROWS,
+  MACHINE_LAUNCH_TYPES,
+  MACHINE_LAUNCH_INSTANCE_TYPES,
+  MACHINE_LAUNCH_AMI_PARAMETERS,
+  machineLaunchOf,
+} from "../../packages/contracts/src/index.js";
+
+describe("machine size launch table", () => {
+  it("maps every listed row, and only those, to one instance type of the row's chip and shape", () => {
+    expect(Object.keys(MACHINE_LAUNCH_TYPES).sort()).toEqual(MACHINE_SIZE_ROWS.map((row) => row.id).sort());
+    expect(MACHINE_LAUNCH_TYPES).toEqual({
+      "arm64-2-8": { instanceType: "m6g.large", chip: "arm64" },
+      "arm64-4-16": { instanceType: "m6g.xlarge", chip: "arm64" },
+      "arm64-8-32": { instanceType: "m6g.2xlarge", chip: "arm64" },
+      "x86_64-2-8": { instanceType: "m6i.large", chip: "x86_64" },
+      "x86_64-4-16": { instanceType: "m6i.xlarge", chip: "x86_64" },
+      "x86_64-8-32": { instanceType: "m6i.2xlarge", chip: "x86_64" },
+    });
+    for (const row of MACHINE_SIZE_ROWS) expect(MACHINE_LAUNCH_TYPES[row.id]!.chip).toBe(row.chip);
+  });
+
+  it("lists the allowed instance types once each, including today's default m6g.large", () => {
+    expect([...MACHINE_LAUNCH_INSTANCE_TYPES].sort()).toEqual(["m6g.2xlarge", "m6g.large", "m6g.xlarge", "m6i.2xlarge", "m6i.large", "m6i.xlarge"]);
+    expect(new Set(MACHINE_LAUNCH_INSTANCE_TYPES).size).toBe(MACHINE_LAUNCH_INSTANCE_TYPES.length);
+  });
+
+  it("names the public Amazon Linux 2023 parameter of each chip", () => {
+    expect(MACHINE_LAUNCH_AMI_PARAMETERS).toEqual({
+      arm64: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+      x86_64: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
+    });
+  });
+
+  it("resolves an arm64 row to its type", () => {
+    expect(machineLaunchOf("arm64-4-16", { x86: false })).toEqual({ ok: true, machine: { instanceType: "m6g.xlarge", chip: "arm64" } });
+  });
+
+  it("resolves an x86 row only when the install can run x86", () => {
+    expect(machineLaunchOf("x86_64-8-32", { x86: true })).toEqual({ ok: true, machine: { instanceType: "m6i.2xlarge", chip: "x86_64" } });
+    expect(machineLaunchOf("x86_64-8-32", { x86: false })).toEqual({ ok: false, reason: "x86-unavailable" });
+  });
+
+  it("returns a fresh object, so a caller cannot change the table", () => {
+    const first = machineLaunchOf("arm64-2-8", { x86: false });
+    if (!first.ok) throw new Error("expected a machine");
+    (first.machine as { instanceType: string }).instanceType = "p5.48xlarge";
+    expect(machineLaunchOf("arm64-2-8", { x86: false })).toEqual({ ok: true, machine: { instanceType: "m6g.large", chip: "arm64" } });
+  });
+
+  it.each([undefined, null, "", "arm64-2-8 ", "ARM64-2-8", "m6g.large", "p5.48xlarge", "toString", "__proto__", "constructor", 42, {}, ["arm64-2-8"]])("refuses %j as an unknown size, never guessing", (value) => {
+    expect(machineLaunchOf(value, { x86: true })).toEqual({ ok: false, reason: "unknown-size" });
+  });
+});

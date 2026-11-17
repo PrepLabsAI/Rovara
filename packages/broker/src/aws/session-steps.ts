@@ -5,7 +5,7 @@ import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
+import { InstanceTypeSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, MachineFallbackSchema, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager } from "./sessions.js";
 
@@ -29,7 +29,11 @@ const volumeId = z.string().regex(/^vol-[0-9a-f]{8,17}$/);
 export const SessionStepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("launchConfiguration"), workspaceId: uuid, generation, volumeId, expectNewVolume: z.boolean() }).strict(),
   z.object({ action: z.literal("recordVolume"), workspaceId: uuid, generation, volumeId }).strict(),
-  z.object({ action: z.literal("recordInstance"), workspaceId: uuid, generation, instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/), privateIp: z.ipv4() }).strict(),
+  // DEC 254zb: the type the instance launched as, and the fixed reason when a chosen size fell back to the default. Optional: an older provisioner sends neither.
+  z.object({
+    action: z.literal("recordInstance"), workspaceId: uuid, generation, instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/), privateIp: z.ipv4(),
+    instanceType: InstanceTypeSchema.optional(), machineFallback: MachineFallbackSchema.nullable().optional(),
+  }).strict(),
   z.object({ action: z.literal("probePing"), privateIp: z.ipv4() }).strict(),
   z.object({ action: z.literal("markReady"), workspaceId: uuid, generation }).strict(),
   z.object({ action: z.literal("markFailed"), workspaceId: uuid, generation, error: z.string().max(16_384) }).strict(),
@@ -143,7 +147,14 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
         await dependencies.sessions.markVolume(step.workspaceId, step.generation, step.volumeId);
         return {};
       case "recordInstance":
-        await dependencies.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp);
+        if (step.instanceType === undefined) {
+          await dependencies.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp);
+        } else {
+          await dependencies.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp, {
+            instanceType: step.instanceType,
+            ...(step.machineFallback === undefined || step.machineFallback === null ? {} : { machineFallback: step.machineFallback }),
+          });
+        }
         return {};
       case "probePing": {
         let ping: WorkerPing | undefined;

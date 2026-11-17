@@ -56,6 +56,11 @@ export const WORKER_FEATURE_MAX_CHARS = 100;
  * same partition as the workspace's OPERATION# items. `generation` counts provisioning attempts and
  * fences every write that belongs to one of them.
  */
+/** An EC2 instance type name (`m7g.large`). */
+export const InstanceTypeSchema = z.string().regex(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/, "invalid instance type");
+/** DEC 254zb: the one reason a session records when its chosen machine size fell back to the default size. */
+export const MachineFallbackSchema = z.literal("size-unavailable");
+
 export const WorkspaceSessionSchema = z
   .object({
     workspaceId: z.string().uuid(),
@@ -66,7 +71,9 @@ export const WorkspaceSessionSchema = z
     subnetId: SubnetIdSchema.optional(),
     instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/, "invalid instance ID").optional(),
     /** The type the instance launched as (`m7g.large`); kept, like `launchedAt`, once the instance is gone, for the machine time it used. */
-    instanceType: z.string().regex(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/, "invalid instance type").optional(),
+    instanceType: InstanceTypeSchema.optional(),
+    /** DEC 254zb: set when this generation's chosen machine size could not launch and the default size launched instead (the task says so). */
+    machineFallback: MachineFallbackSchema.optional(),
     privateIp: z.ipv4().optional(),
     launchedAt: z.string().datetime().optional(),
     readyAt: z.string().datetime().optional(),

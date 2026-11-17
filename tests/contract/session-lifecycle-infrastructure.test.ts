@@ -87,6 +87,32 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect(create.Condition).toEqual({ StringEquals: { "aws:RequestTag/DeploymentMode": "ec2-ebs", "aws:RequestTag/Environment": "production" } });
   });
 
+  // DEC 254zb: a chosen machine size changes the launched type, so the provisioner may launch only the size rows' types, and only from the template.
+  it("launches only the machine size rows' instance types, in one statement with the launch template condition", () => {
+    const [, machine] = ofType("AWS::StepFunctions::StateMachine").find(([id]) => id.startsWith("SessionsProvisioner"))!;
+    const roleId = (machine.Properties.RoleArn as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    const statements = roleStatements(roleId);
+    const launch = statements.find((s) => s.Sid === "LaunchFromTemplate")!;
+    expect(Object.keys(launch.Condition!).sort()).toEqual(["ArnEquals", "StringEquals"]);
+    expect(launch.Condition!.StringEquals).toEqual({ "ec2:InstanceType": ["m6g.large", "m6g.xlarge", "m6g.2xlarge", "m6i.large", "m6i.xlarge", "m6i.2xlarge"] });
+    expect(launch.Resource).toEqual({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ec2:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":instance/*"]] });
+    // Every grant that can create an instance carries the type condition: no other RunInstances statement names instance/*.
+    const instanceGrants = statements.filter((s) => [s.Action].flat().includes("ec2:RunInstances") && JSON.stringify(s.Resource).includes("instance/*"));
+    expect(instanceGrants.map((s) => s.Sid)).toEqual(["LaunchFromTemplate"]);
+  });
+
+  it("lets the provisioner resolve exactly the two public Amazon Linux AMI parameters, arm64 and x86_64", () => {
+    const [, machine] = ofType("AWS::StepFunctions::StateMachine").find(([id]) => id.startsWith("SessionsProvisioner"))!;
+    const roleId = (machine.Properties.RoleArn as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    const resolve = roleStatements(roleId).find((s) => s.Sid === "ResolveWorkerAmi")!;
+    expect([resolve.Action].flat().sort()).toEqual(["ssm:GetParameter", "ssm:GetParameters"]);
+    const resources = [resolve.Resource].flat().map((r) => JSON.stringify(r));
+    expect(resources).toHaveLength(2);
+    expect(resources[0]).toContain("::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64\"");
+    expect(resources[1]).toContain("::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64\"");
+    for (const resource of resources) expect(resource).not.toContain("*");
+  });
+
   it("runs the idle reaper every minute in the VPC, terminating only its own instances (#85)", () => {
     const [reaperId, reaper] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("SessionsReaper"))!;
     // Reserving concurrency fails in an account whose limit is Lambda's minimum unreserved pool of 10.

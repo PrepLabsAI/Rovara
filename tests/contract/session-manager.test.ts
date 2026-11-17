@@ -114,6 +114,28 @@ describe("session manager: first provisioning", () => {
   });
 });
 
+describe("session manager: launched machine size (DEC 254zb)", () => {
+  it("keeps the launched type and the fallback reason, and a later reported launch without a fallback clears the reason", async () => {
+    const { sessions, workspaceId, session } = setup();
+    await sessions.ensureSession({ workspaceId, binding });
+    await sessions.markVolume(workspaceId, 1, "vol-0123456789abcdef0");
+    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    expect(session()).toMatchObject({ instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    expect(sessionFromItem(session()!)).toMatchObject({ instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef1", "10.42.128.11", { instanceType: "m6g.xlarge" });
+    expect(session()).toMatchObject({ instanceType: "m6g.xlarge" });
+    expect(session()).not.toHaveProperty("machineFallback");
+  });
+
+  it("leaves an older provisioner's record exactly as before: no type, no reason touched", async () => {
+    const { sessions, workspaceId, session } = setup();
+    await sessions.ensureSession({ workspaceId, binding });
+    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10");
+    expect(session()).toMatchObject({ instanceType: "m6g.large", machineFallback: "size-unavailable" });
+  });
+});
+
 describe("session manager: ready", () => {
   it("never unparks task-access-paused work when compute becomes ready", async () => {
     const { db, sessions, workspaceId, session } = setup();

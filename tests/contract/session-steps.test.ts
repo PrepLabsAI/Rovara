@@ -103,6 +103,21 @@ describe("session steps", () => {
     expect(sessions.markDeleted).toHaveBeenCalledWith(workspaceId);
   });
 
+  // DEC 254zb: the provisioner reports the launched type and, when a chosen size fell back, the fixed reason. An older provisioner reports neither (call unchanged).
+  it("records the launched type and the size fallback reason, and only the one fixed reason", async () => {
+    const { handler, sessions } = setup();
+    const base = { action: "recordInstance", workspaceId, generation: 2, instanceId: "i-0123456789abcdef0", privateIp: "10.42.128.10" };
+    await handler({ ...base, instanceType: "m6g.xlarge", machineFallback: null });
+    expect(sessions.markInstance).toHaveBeenLastCalledWith(workspaceId, 2, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.xlarge" });
+    await handler({ ...base, instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    expect(sessions.markInstance).toHaveBeenLastCalledWith(workspaceId, 2, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    const calls = sessions.markInstance.mock.calls.length;
+    for (const bad of [{ machineFallback: "anything" }, { instanceType: "M6G LARGE" }, { instanceType: "" }, { instanceType: 7 }, { extra: 1 }]) {
+      await expect(handler({ ...base, instanceType: "m6g.large", ...bad })).rejects.toThrow();
+    }
+    expect(sessions.markInstance.mock.calls.length).toBe(calls);
+  });
+
   const pingCases: ReadonlyArray<[string, SessionStepsDependencies["ping"], { healthy: boolean; status: string }]> = [
     ["Healthy", async () => ({ status: "Healthy" }), { healthy: true, status: "Healthy" }],
     ["HealthyBusy", async () => ({ status: "HealthyBusy" }), { healthy: true, status: "HealthyBusy" }],
