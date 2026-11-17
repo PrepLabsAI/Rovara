@@ -658,3 +658,22 @@ it("posts concurrent identical thread addresses with their company tokens, never
   await expect(post({ ...place, workspace: { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0BBBBBBB" } }, "private")).rejects.toThrow("This Slack workspace is not available.");
   expect(calls).toHaveLength(2); expect(legacy).not.toHaveBeenCalled();
 });
+
+it("L2-2 18d: in company mode only the install's own scope (implicit company, install team) posts the way it does today; unscoped stays refused", async () => {
+  const legacyPost = vi.fn(async () => ({ ts: "1695500000.000001" }));
+  const company = vi.fn(async () => new Response(JSON.stringify({ ok: true, ts: "1695500000.000001" })));
+  const post = createSlackThreadPoster({ legacyToken: async () => ["xoxb", "legacy"].join("-"), legacyPost, legacyTeamId: "T0INSTALL0", workspaces: {
+    requireCompany: async (team) => (team === "T0INSTALL0" ? "org_00000000000000000000" : "org_bbbbbbbbbbbbbbbbbbbb"),
+    tokenForCompany: async () => ["xoxb", "b"].join("-"),
+  }, fetch: company });
+  const place = { channelId: "C0SHARED", threadTs: "1695500000.000001" };
+  await post({ ...place, workspace: { companyId: "org_00000000000000000000", teamId: "T0INSTALL0" } }, "own");
+  expect(legacyPost).toHaveBeenCalledExactlyOnceWith({ channel: "C0SHARED", threadTs: "1695500000.000001", text: "own" });
+  expect(company).not.toHaveBeenCalled();
+  await post({ ...place, workspace: { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0BBBBBBB" } }, "other");
+  expect(company).toHaveBeenCalledTimes(1);
+  await expect(post(place, "unscoped")).rejects.toThrow("This Slack workspace is not available.");
+  // The install's team under another company is not the install's.
+  await expect(post({ ...place, workspace: { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0INSTALL0" } }, "x")).rejects.toThrow();
+  expect(legacyPost).toHaveBeenCalledTimes(1);
+});

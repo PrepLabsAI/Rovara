@@ -31,7 +31,10 @@ describe("the eval batch tick's infrastructure (spec 052 FR-006, FR-011)", () =>
     const tick = resources[tickId()]!;
     expect(tick.Properties.Timeout).toBe(90);
     const environment = (tick.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(Object.keys(environment)).toEqual(expect.arrayContaining(["STATE_TABLE_NAME", "ARTIFACT_BUCKET_NAME", "CALLBACK_SIGNING_KEY", "SWEBENCH_SETTINGS_PREFIX"]));
+    expect(Object.keys(environment)).toEqual(expect.arrayContaining(["STATE_TABLE_NAME", "ARTIFACT_BUCKET_NAME", "CALLBACK_SIGNING_KEY_SECRET_ID", "SWEBENCH_SETTINGS_PREFIX"]));
+    // The key itself is never an environment value: the tick gets the name of its secret (and may read it by the secret's own policy: callback-signing-key-infrastructure.test.ts).
+    expect(environment).not.toHaveProperty("CALLBACK_SIGNING_KEY");
+    expect(environment.CALLBACK_SIGNING_KEY_SECRET_ID).toBe("agentx/production/callback-key");
     expect(environment.SWEBENCH_SETTINGS_PREFIX).toBe("/agentx/production/");
     const schedules = Object.values(resources).filter((r) => r.Type === "AWS::Scheduler::Schedule" && JSON.stringify(r.Properties.Target).includes(tickId()));
     expect(schedules).toHaveLength(1);

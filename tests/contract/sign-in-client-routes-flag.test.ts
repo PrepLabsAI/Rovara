@@ -2,13 +2,13 @@
 // SIGN_IN_CLIENT_ROUTES to exactly "enabled" (developerConfiguration() in the broker entry). Only the value "enabled"
 // opens them: unset, empty, "true", "disabled" and anything else leave them as 404, so a typo or a lookalike never opens them.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { stubCallbackSigningKeySecret } from "../support/callback-key.js";
 
 const BASE_ENVIRONMENT: Record<string, string> = {
   AWS_REGION: "us-east-1",
   STATE_TABLE_NAME: "unused",
   ARTIFACT_BUCKET_NAME: "unused",
   OIDC_ISSUER: "https://identity.example.test",
-  CALLBACK_SIGNING_KEY: "c".repeat(64),
   GITHUB_APP_PRIVATE_KEY_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:test",
   GITHUB_APP_CREDENTIAL_REF: "github-app",
   GITHUB_APP_ACCOUNT: "example",
@@ -26,11 +26,14 @@ async function clientRouteStatus(flag: string | undefined): Promise<number> {
   vi.resetModules();
   for (const [name, value] of Object.entries(BASE_ENVIRONMENT)) vi.stubEnv(name, value);
   vi.stubEnv("SIGN_IN_CLIENT_ROUTES", flag);
+  // The broker reads its callback signing key from Secrets Manager on its first request; a fresh module registry means a fresh copy of the loader, so stub after the reset.
+  const secret = stubCallbackSigningKeySecret();
   const { handler } = await import("../../packages/broker/src/aws/broker.js");
   const response = await handler({
     version: "2.0", rawPath: "/v1/dev/client/repositories", headers: {},
     requestContext: { requestId: "r", http: { method: "GET" } },
   });
+  secret.restore();
   return response.statusCode;
 }
 
