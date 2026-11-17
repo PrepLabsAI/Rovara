@@ -115,8 +115,10 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
   // task allow (`effectiveLevel`). At `status_only` nothing below changes: it is the code that was here before the levels.
   if (settings.comments) {
     let level = await effectiveLevel(deps, { tracker, orgId, taskId: milestone.taskId, level: ticketUpdateLevelOf(settings) });
-    if (level !== "status_only" && await originTicketOf(deps, { orgId, project, taskId: milestone.taskId, sessionId }, { strict: true }) === undefined) level = "status_only";
-    if (level !== "status_only") return sendThreadMilestone(deps, { milestone, moment, task, ticket, tracker, orgId, project, settings, settingsAt, level, status, key: claimKeyOf(milestone, moment) });
+    const strictTicket = level === "status_only" ? undefined : await originTicketOf(deps, { orgId, project, taskId: milestone.taskId, sessionId }, { strict: true });
+    if (strictTicket === undefined) level = "status_only";
+    // The thread goes to the ticket that names THIS task, whichever other ticket the session was bound to.
+    if (level !== "status_only" && strictTicket !== undefined) return sendThreadMilestone(deps, { milestone, moment, task, ticket: strictTicket, tracker, orgId, project, settings, settingsAt, level, status, key: claimKeyOf(milestone, moment) });
   }
   const key = claimKeyOf(milestone, moment);
   const claimed = await claim(deps, milestone.taskId, key);
