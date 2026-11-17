@@ -264,7 +264,7 @@ describe("the People view says how each person signs in", () => {
     await h.add("commenter", 1);
     const requestRow = h.db.find((item) => String(item.sk).startsWith("PEOPLE_REQUEST#") && item.requestId === uuid(1))[0]!;
     const outcome = requestRow.outcome as { people: Array<Record<string, unknown>> };
-    const older = { ...requestRow, outcome: { ...outcome, people: outcome.people.map(({ method: _method, ...rest }) => rest) } };
+    const older = { ...requestRow, outcome: { ...outcome, people: outcome.people.map((entry) => Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "method"))) } };
     h.db.set(older);
     await expect(confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, uuid(1))).resolves.toMatchObject({ status: "COMMITTED" });
   });

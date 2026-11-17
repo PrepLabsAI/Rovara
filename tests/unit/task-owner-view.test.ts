@@ -79,7 +79,7 @@ describe("the core's task view", () => {
   });
 
   it("shows no owner when the stored record has no person owner", async () => {
-    const { h, task } = await started(IMPLICIT_COMPANY_ID as OrgId);
+    const { h, task } = await started(IMPLICIT_COMPANY_ID);
     const stored = (await h.store.get(taskKey(task.taskId)))!;
     await h.store.put({ item: { ...stored, developerId: `sysowner_${HEX}` } });
     const view = await h.flow.get({ ...h.owner, principal: { ...h.owner.principal, personId: `sysowner_${HEX}` } }, task.taskId).catch(() => undefined);
