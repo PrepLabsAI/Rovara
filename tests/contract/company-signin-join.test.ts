@@ -111,11 +111,15 @@ it.each([null, [], "company-create", 1, undefined].map((event) => [event]))("com
   expect(await h.handler(event as never)).toEqual({ ok: false, error: "invalid_request" });
 });
 
-it("an unbound Slack workspace never defaults to the implicit company", async () => {
+// DEC 254e replaces the old rule ("an unbound Slack workspace never defaults to the implicit company"): the workspace, bound or not, never
+// decides the company; only membership or an invite does. An invite to the built-in company admits; with no invite, nothing is written.
+it("a Slack workspace never decides the company: an unbound one joins only by an invite", async () => {
   const h = world(); h.deps.company = h.company; h.deps.slackTeamCompany = () => undefined;
-  await h.invoke({ kind: "company-preapprove", companyId: IMPLICIT_COMPANY_ID, email, role: "member", expiresInHours: 24 });
   expect((await h.signIn("slack", "U0SHARED")).searchParams.get("error_description")).toBe("not invited");
   expect(h.db.find((row) => row.entityType === "DEVELOPER")).toEqual([]);
+  await h.invoke({ kind: "company-preapprove", companyId: IMPLICIT_COMPANY_ID, email, role: "member", expiresInHours: 24 });
+  expect((await h.signIn("slack", "U0SHARED")).searchParams.get("code")).not.toBeNull();
+  expect(h.db.find((row) => row.entityType === "COMPANY_MEMBERSHIP")).toEqual([expect.objectContaining({ companyId: IMPLICIT_COMPANY_ID, joinedVia: "preapproval" })]);
 });
 
 it("the browser review path also refuses before upsert or session creation", async () => {

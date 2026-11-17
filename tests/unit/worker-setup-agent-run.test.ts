@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_HOST_WAIT_MAX_HOURS } from "../../packages/contracts/src/index.js";
+import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_HOST_WAIT_MAX_HOURS, SetupEvalDiscoveryReportSchema } from "../../packages/contracts/src/index.js";
 import { assertCommitsMatch, hostAnswerNote, runSetupAgent, serialize, setupRepositoriesOf, type SetupRunInput, type SetupRunPorts } from "../../packages/worker/src/setup-agent-run.js";
 import { createSetupSandbox, type TrackedFilesVerdict } from "../../packages/worker/src/setup-agent.js";
 import { helperRunArgs, networkCreateArgs, setupWorkspaceKey, setupNetworkAddresses, setupNetworkName, setupNetworkSlot, startRunNetwork } from "../../packages/worker/src/setup-network.js";
@@ -678,5 +678,57 @@ describe("F5: the invocation of a stopped run ends cancelled and carries its rep
     expect(stopped).toBeInstanceOf(WorkerOperationCancelledError);
     expect(stopped?.setupRunResult).toBe(result);
     expect(cancelledWithReport(controller, "22222222-2222-4222-8222-222222222222", result)).toBeUndefined();
+  });
+});
+
+describe("DEC 253q(a): the eval the agent drafts goes to the broker through the run's own setup callback", () => {
+  const IMAGE = `registry.example/worker@sha256:${"e".repeat(64)}`;
+  const EVAL = { suites: [{ selection: "evals/demo", questions: [{ id: "q1", category: "ordinary", path: "evals/demo/q1.txt" }], command: { executable: "node", args: ["evals/run.js"], cwd: "." },
+    report: { cwd: ".", argument: "rovara-measures.json" }, model: "gemini-2.5-flash", modelVersion: "gemini-2.5-flash-001", judge: { kind: "rule", scoringPath: "evals/demo/score.txt" }, subsetSupported: false, maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 5 }] };
+  const tracked = new Map([["web", new Set(["package.json", ".github/workflows/ci.yml", "evals/demo/q1.txt", "evals/demo/score.txt"])]]);
+  const scan = { repositories: [], setup: [], tests: [], checks: [], knowledge: [], sources: [], foundNotUsed: [], notes: [] };
+  const evalWorld = async (options: { final?: string; image?: string; files?: TrackedFilesVerdict[] } = {}) => {
+    const t = await world({ final: options.final ?? block({ ...ANSWER, eval: EVAL }), ...(options.files === undefined ? {} : { files: options.files }) });
+    t.input.ports.beforeStart = async () => ({ scan, tracked });
+    t.input.evalImage = options.image ?? IMAGE;
+    t.input.discoverEvals = async () => ({ status: "found", candidates: [{ path: "evals/demo", label: "x", tool: "eval folder" }], omitted: [], message: "" });
+    return t;
+  };
+  const sent = (t: { w: World }) => t.w.callbacks.filter((body) => (body as { kind: string }).kind === "eval_discovery") as Array<{ report: { suites: Array<Record<string, unknown>> } }>;
+  it("a run that proposed sends one schema-valid eval_discovery report, after its journal, and still reports its proposal", async () => {
+    const t = await evalWorld();
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
+    expect(sent(t)).toHaveLength(1);
+    expect(SetupEvalDiscoveryReportSchema.safeParse(sent(t)[0]!.report).success).toBe(true);
+    expect(sent(t)[0]!.report.suites[0]).toMatchObject({ selection: "evals/demo", image: IMAGE, catalogRowId: "gemini" });
+    expect(t.w.callbacks.at(-1)).toMatchObject({ kind: "eval_discovery" });
+    expect(JSON.stringify(result.setupProposal)).not.toContain("evals/demo");
+  });
+  it("sends nothing when the agent drafted no eval, the draft fails a rule, the worker image is not pinned, the run ended without a proposal or asked for a code change (mutant: the proposed-only gate)", async () => {
+    for (const t of [await evalWorld({ final: block(ANSWER) }), await evalWorld({ final: block({ ...ANSWER, eval: { suites: [{ ...EVAL.suites[0], judgePin: "b".repeat(64) }] } }) }),
+      await evalWorld({ image: "worker:latest" }), await evalWorld({ files: [{ ok: false, reason: "tracked_files_changed" }] }),
+      await evalWorld({ final: `NEEDS CODE CHANGE: the lockfile is broken\n${block({ ...ANSWER, eval: EVAL })}` })]) {
+      await runSetupAgent(t.input);
+      expect(sent(t)).toEqual([]);
+    }
+  });
+  it("a draft it could not use is said in fixed words on the run's live view, never the draft or a path (mutant: the progress line)", async () => {
+    const t = await evalWorld({ final: block({ ...ANSWER, eval: { suites: [{ ...EVAL.suites[0], questions: [{ id: "q1", category: "ordinary", path: "evals/demo/secret-canary.txt" }] }] } }) });
+    await runSetupAgent(t.input);
+    expect(t.w.progress).toContain("Rovara did not use the eval the setup drafted (a file it names is not in the repository).");
+    expect(t.w.progress.join("\n")).not.toContain("secret-canary");
+    const none = await evalWorld({ final: block(ANSWER) });
+    await runSetupAgent(none.input);
+    expect(none.w.progress.join("\n")).not.toContain("did not use the eval");
+  });
+  it("a broker that refuses the report does not fail the run", async () => {
+    const t = await evalWorld();
+    const ports = t.input.ports;
+    const callback = (body: unknown) => ports.callback(body);
+    t.input.ports = { ...ports, callback: async (body) => { if ((body as { kind: string }).kind === "eval_discovery") throw new Error("refused"); return callback(body); } };
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
+    expect(result.setupProposal).toBeDefined();
   });
 });

@@ -382,8 +382,10 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { companyPreapprovalsThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
+import { companyInvitesThroughLambda, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
+import { companyImportThroughLambda } from "./company-import-forwarding.js";
+import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -804,6 +806,8 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
       ...(developer?.endDeveloperSessions === undefined ? {} : { endDeveloperSessions: developer.endDeveloperSessions }),
       ...(signIn?.signInClients === undefined ? {} : { signInClients: signIn.signInClients }),
       ...(signIn?.companies === undefined ? {} : { companies: signIn.companies }),
+      ...(developer?.companyInvites === undefined ? {} : { companyInvites: developer.companyInvites }),
+      ...(developer?.companyImport === undefined ? {} : { companyImport: developer.companyImport }),
       now: Date.now,
     },
     handlers: adminChangeHandlers(dependencies),
@@ -1611,6 +1615,24 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const registry = (dependencies.developer ?? dependencies.linking)?.signInClients;
         if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json({ clients: await registry.list(await resolveCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey)) }, request.requestId);
+      }
+      // DEC 254a: the install's invite codes (ids, status and times only) and the self-serve switch, for an install administrator.
+      if (request.method === "GET" && url.pathname === "/v1/admin/company-invites") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const invites = dependencies.developer?.companyInvites;
+        if (invites === undefined) throw agentXError("NOT_FOUND", "company sign-up is not set up in this deployment");
+        return json(await invites.list(), request.requestId);
+      }
+      // DEC 254b (b): the preview of an import of the install's old company layout into Code's company records (or of its undo). Reads only; ids, never emails.
+      if (request.method === "GET" && url.pathname === "/v1/admin/company-import") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const developer = dependencies.developer;
+        if (developer?.companyImport === undefined) throw agentXError("NOT_FOUND", "company import is not set up in this deployment");
+        const companyId = OrgIdSchema.safeParse(url.searchParams.get("companyId"));
+        const mode = url.searchParams.get("mode") ?? "import";
+        if (!companyId.success || (mode !== "import" && mode !== "undo")) throw agentXError("CONFIG_INVALID", "give the install's company id (org_ and 20 letters or digits), and the mode import or undo");
+        const reads = { documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName: developer.signInTableName };
+        return json((mode === "undo" ? await planCompanyImportUndo(reads, companyId.data) : await planCompanyImport(reads, companyId.data)).preview, request.requestId);
       }
       // #343: Sign in with ChatGPT, for rovara doctor.
       if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
@@ -15279,9 +15301,14 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     endDeveloperSessions: endDeveloperSessionsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     setDisplayName: setDisplayNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     ...(process.env.COMPANY_SIGNIN === "enabled" ? { companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      // DEC 253z, 254a: self-serve company create and the install's invite codes, through the same sign-in Lambda, which owns those writes.
+      companySelfCreate: companySelfCreateThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      companyInvites: companyInvitesThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
       companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // DEC 254b (b): the operator's company import runs BEFORE COMPANY_SIGNIN is switched on, so it is wired with the company layer on or off.
+    companyImport: companyImportThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
     channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),

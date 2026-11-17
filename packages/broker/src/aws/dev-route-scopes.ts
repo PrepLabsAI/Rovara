@@ -28,6 +28,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "PUT", path: "/v1/dev/projects/{name}/settings", requires: "full" },
   // M4a slice 3 (TE-D8): the company administrator's read of every project against the company's bounds.
   { method: "GET", path: "/v1/dev/company/settings-compliance", requires: "full" },
+  // DEC 253z, 254a: a person with no company makes their own with an operator's invite code; the web app only (the route checks it).
+  { method: "POST", path: "/v1/dev/company", requires: "full" },
   // Spec 063 FR-004: a registered service's own route, authenticated by its secret or the person's token.
   { method: "POST", path: "/v1/dev/access", requires: "none" },
   // #634: the person chooses their own name.

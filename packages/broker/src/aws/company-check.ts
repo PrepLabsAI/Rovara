@@ -10,7 +10,9 @@ const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> aga
 export const Membership = z.object({
   entityType: z.literal("COMPANY_MEMBERSHIP"), personId: z.string(), companyId: OrgIdSchema,
   role: OrgRoleSchema, joinedAt: z.iso.datetime(),
-  joinedVia: z.enum(["preapproval", "legacy"]).optional(),
+  // DEC 253z: "self-serve" is the first owner of a company they made with an invite code. DEC 254b (b): "import" was copied from the install's old
+  // company layout by an operator (company-import.ts). Older rows still read.
+  joinedVia: z.enum(["preapproval", "legacy", "self-serve", "import"]).optional(),
   revokedAt: z.iso.datetime().optional(), revokedBy: z.string().min(1).max(256).optional(),
 });
 export const membershipKey = (personId: string) => ({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY" });

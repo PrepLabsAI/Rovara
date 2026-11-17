@@ -5,33 +5,12 @@
 import { createHash } from "node:crypto";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { buildSideBySideJudgeCall, serializeSideBySideJudgeInput } from "./side-by-side-judge.js";
+import { modelBelongsToFamily, vendorFamilyOf, type VendorFamily } from "./vendor-family.js";
 
 // ---- vendor families ----
 
-/** The closed list of vendor families. An API format (`anthropic_messages`, `openai_compatible`, `vertex`, `bedrock`) is NOT a vendor family and is never accepted as one. */
-export const SIDE_BY_SIDE_VENDOR_FAMILIES = ["anthropic", "google", "openai", "cohere", "meta", "mistral", "amazon", "xai", "deepseek"] as const;
-export type SideBySideVendorFamily = (typeof SIDE_BY_SIDE_VENDOR_FAMILIES)[number];
-/** The words that name a vendor family; `claude` and `anthropic` are one family. */
-const FAMILY_WORDS: Readonly<Record<string, SideBySideVendorFamily>> = Object.freeze({
-  anthropic: "anthropic", claude: "anthropic", google: "google", gemini: "google", gemma: "google", openai: "openai", gpt: "openai", cohere: "cohere", command: "cohere", meta: "meta", llama: "meta", mistral: "mistral", mixtral: "mistral",
-  amazon: "amazon", nova: "amazon", titan: "amazon", xai: "xai", grok: "xai", deepseek: "deepseek",
-});
-/** The model-name stems of each family: the stem is at the start of the name or after a `.`, `/` or `:` (a vendor or Bedrock prefix). */
-const FAMILY_MODELS: Readonly<Record<SideBySideVendorFamily, RegExp>> = {
-  anthropic: /(?:^|[./:])claude/iu, google: /(?:^|[./:])(?:gemini|gemma)/iu, openai: /(?:^|[./:])(?:gpt|chatgpt|o\d)/iu, cohere: /(?:^|[./:])(?:command|c4ai)/iu, meta: /(?:^|[./:])(?:llama|meta-llama)/iu,
-  mistral: /(?:^|[./:])(?:mistral|mixtral|codestral|ministral)/iu, amazon: /(?:^|[./:])(?:nova|titan|amazon)/iu, xai: /(?:^|[./:])grok/iu, deepseek: /(?:^|[./:])deepseek/iu,
-};
-
-/** The vendor family a word names, or undefined for anything not on the list. */
-export function vendorFamilyOf(value: unknown): SideBySideVendorFamily | undefined {
-  if (typeof value !== "string" || value.length > 40) return undefined;
-  const word = value.trim().toLowerCase();
-  return Object.hasOwn(FAMILY_WORDS, word) ? FAMILY_WORDS[word] : undefined;
-}
-/** Whether a model name belongs to the family it is said to be from. */
-export function modelBelongsToFamily(model: unknown, family: SideBySideVendorFamily): boolean {
-  return typeof model === "string" && model.length <= 128 && FAMILY_MODELS[family].test(model);
-}
+/** The judge's vendor family: the neutral list in vendor-family.ts (moved there unchanged so callers outside this lane need not import it). */
+export type SideBySideVendorFamily = VendorFamily;
 
 // ---- the pin and the spot check ----
 

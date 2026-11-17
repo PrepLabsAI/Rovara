@@ -2,7 +2,7 @@
 // audience), which Rovara's own API never accepts unless the client has full access (spec 066), and may ask Rovara what
 // a signed-in person can do.
 import { z } from "zod";
-import { OrgIdSchema } from "./company-scope.js";
+import { OrgIdSchema, OrgRoleSchema } from "./company-scope.js";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE } from "./developer.js";
 import { publicHttpsUrlProblem } from "./mcp-connector.js";
 
@@ -117,7 +117,24 @@ export const AccessCheckResponseSchema = z.object({
   /** `administrator` (spec 065): a project the person administers, which task access alone does not list. */
   projects: z.array(z.object({ name: z.string().min(1), access: z.enum(["granted", "channel", "administrator"]) }).strict()),
   notices: z.array(z.string()),
-}).strict();
+  /**
+   * DEC 253z/254: the person's company and company role, read from LIVE membership on this call (never a token claim or anything the caller sent), and the
+   * company's name when it has a stored profile. All absent on a Code with no company records. `companyRole` is the company role (owner, admin, member),
+   * not `administrator` (install administrator).
+   */
+  companyId: OrgIdSchema.optional(),
+  companyRole: OrgRoleSchema.optional(),
+  companyName: z.string().min(1).max(80).optional(),
+  /**
+   * DEC 254b (f): true only when THIS session's own sign-in joined the company by consuming a live pre-approval (an invite) for the session's company.
+   * Recorded by Code's sign-in server on the session when it was minted; never from a claim, a request or an access rule. Absent otherwise (already a
+   * member, a legacy join, a session with no company, a check by developer id, a Code with no company layer). Sent only with the company.
+   * It describes the whole session (every check on it, also after refreshes), not "just joined". Absent does NOT mean "not the invited person": a
+   * sign-in that spent the invite but then failed (an expired code, a refused step-up) leaves the person a member, and later sign-ins never carry it.
+   */
+  joinedByInvite: z.boolean().optional(),
+}).strict().refine((answer) => (answer.companyId === undefined) === (answer.companyRole === undefined) && (answer.companyName === undefined || answer.companyId !== undefined)
+  && (answer.joinedByInvite === undefined || answer.companyId !== undefined), "a company comes with its role, and a name or an invite join only with a company");
 export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;
 
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----
