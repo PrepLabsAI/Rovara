@@ -34,7 +34,7 @@ import { constants as fsConstants, readFileSync } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
-  CATALOG_REGISTRY_ROOT, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, AWS_EMULATOR_ENGINE_VERSION, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
+  CATALOG_REGISTRY_ROOT, TEST_SERVICES_LIMIT_DEFAULTS, TEST_SERVICES_OVER_LIMIT_SENTENCE, TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE, TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, AWS_EMULATOR_ENGINE_VERSION, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
   type CatalogEdition, type CatalogEntry, type ServiceCatalog, type TaskAwsResource, type TaskDependencyPlan, type TestEnvTaskPlan, type TestServicesStartFailure, type TestServicesUsageRecord,
 } from "@agentx/contracts";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, type TaskSandbox } from "./task-sandbox.js";
@@ -97,7 +97,7 @@ const MODES_WITH_SERVICES: ReadonlySet<string | undefined> = new Set([undefined,
 // ---- errors
 
 export type TestServicesFailureReason =
-  | "not_configured" | "unsupported" | "nightly" | "init_file" | "catalog" | "mismatch" | "sealed_unavailable" | "pull_failed" | "start_failed" | "not_healthy" | "seed_failed" | "seed_changed" | "seed_meta_command" | "seed_program" | "seed_not_allowed" | "setup_failed" | "fixtures";
+  | "not_configured" | "unsupported" | "nightly" | "init_file" | "catalog" | "mismatch" | "sealed_unavailable" | "pull_failed" | "start_failed" | "over_limit" | "not_healthy" | "seed_failed" | "seed_changed" | "seed_meta_command" | "seed_program" | "seed_not_allowed" | "setup_failed" | "fixtures";
 
 /** The one sentence for an image the worker cannot use: it is not one of the digests pinned INSIDE this worker image, or it was not pre-pulled onto this worker at boot. The worker never pulls. */
 export const PULL_FAILED_SENTENCE = "Dependency image not available on this worker";
@@ -112,6 +112,7 @@ const SENTENCES: Record<TestServicesFailureReason, string> = {
   sealed_unavailable: "This worker cannot run sealed check rounds, so it did not start the test services",
   pull_failed: PULL_FAILED_SENTENCE,
   start_failed: "The test services could not be started",
+  over_limit: TEST_SERVICES_OVER_LIMIT_SENTENCE,
   not_healthy: "A test service did not become healthy",
   seed_failed: "A test service's seeds did not complete",
   seed_changed: "A test service's seed file changed since the test environment was approved; check it works and approve it again",
@@ -189,6 +190,8 @@ export interface TestServicesConfig {
   /** The worker's own image from AGENTX_WORKER_IMAGE (pinned), for the sealed round's resolver guard: a root NET_ADMIN container that must never run a sandbox image (check-sandbox.ts, "THE GUARD'S IMAGE"). */
   guardImage: string;
   maxMemMiB: number;
+  /** DEC 254zm 2: the guard's ceilings the broker told this worker (service containers at once, memory for one helper). Always set from the environment, with the defaults when it holds none. */
+  limits?: { containers: number; helperMemMiB: number };
   /** A directory on the worker's tmpfs, at the same path on the host (Docker bind-mounts from it), where each run's directory is made. */
   runDirectoryParent: string;
   /** The worker's verified catalog (`loadSignedCatalog`), or the owner list's catalog (`ownerCatalogOf`) on a laptop. */
@@ -259,8 +262,10 @@ export function testServicesConfigFromEnvironment(
   if (notPulledRepositories(environment) === "all") return undefined;
   const edition = environment[TEST_SERVICES_EDITION_ENVIRONMENT] === "enterprise" ? "enterprise" : "public";
   const mem = Number(environment[TEST_SERVICES_MAX_MEM_ENVIRONMENT] ?? DEFAULT_MAX_MEM_MIB);
+  const whole = (name: string, fallback: number): number => { const raw = environment[name]; return raw !== undefined && /^[1-9][0-9]{0,5}$/u.test(raw) ? Number(raw) : fallback; };
   return {
     docker, registry, catalogEnv, edition, probeImage, guardImage, runDirectoryParent, maxMemMiB: Number.isSafeInteger(mem) && mem > 0 ? mem : DEFAULT_MAX_MEM_MIB,
+    limits: { containers: whole(TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE, TEST_SERVICES_LIMIT_DEFAULTS.containers), helperMemMiB: whole(TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE, TEST_SERVICES_LIMIT_DEFAULTS.helperMemoryMiB) },
     catalog: ownerList === undefined ? () => loadBakedCatalog() : () => ownerCatalog(ownerList),
     ...(ownerList === undefined ? {} : { imageReferences: ownerImageReferences(ownerList) }),
     ...(roundPorts === undefined ? {} : { sealedRound: roundPorts }),
@@ -687,13 +692,14 @@ export interface StartTestServicesInput {
 
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 
-function failureOf(error: unknown): TestServicesError {
+export function failureOf(error: unknown): TestServicesError {
   if (error instanceof TestServicesError) return error;
   if (error instanceof HelperStartError) {
     const failures = new Map<string, TestServicesStartFailure>();
     const failure: TestServicesStartFailure = error.reason === "health_timeout" || error.reason === "exited" ? "not_healthy" : "start_failed";
     if (error.dependencyId !== undefined) failures.set(error.dependencyId, failure);
-    return new TestServicesError(failure === "not_healthy" ? "not_healthy" : "start_failed", failures);
+    // DEC 254zm 2: a run that cannot fit under the ceilings says so, in the one fixed sentence (the usage record's own closed list still reads it as a failed start).
+    return new TestServicesError(failure === "not_healthy" ? "not_healthy" : error.reason === "over_limit" ? "over_limit" : "start_failed", failures);
   }
   return new TestServicesError("start_failed");
 }
@@ -811,6 +817,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
   const registry = `${config.registry}/${CATALOG_REGISTRY_ROOT}/${config.catalogEnv}`;
   const startInput = (phaseRunId: string, resolved: readonly Resolved[], phaseFiles: HelperFiles, extra: Partial<Parameters<ServiceRunner["start"]>[0]>): Parameters<ServiceRunner["start"]>[0] => ({
     runId: phaseRunId, workspace, roundBudgetMs: TEST_SERVICES_RUN_LIFETIME_MS, registry, edition: config.edition, probeImage: config.probeImage, maxMemMiB: config.maxMemMiB,
+    ...(config.limits === undefined ? {} : { limits: config.limits }),
     ...(config.imageReferences === undefined ? {} : { imageReferences: config.imageReferences }),
     helpers: resolved.map((item) => item.request), files: phaseFiles, resetHooks: createResetHooks({ http: { files: phaseFiles, probeImage: config.probeImage } }),
     ...(config.now === undefined ? {} : { now: config.now }), ...(config.sleep === undefined ? {} : { sleep: config.sleep }), ...extra,

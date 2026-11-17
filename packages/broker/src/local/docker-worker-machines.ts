@@ -28,6 +28,8 @@ import {
   ANSWERED_INVOCATION_KINDS,
   BUILD_SYSTEM_PROFILES_ENV,
   MachineError,
+  TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE,
+  TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE,
   WORKER_PING_FEATURES_FIELD,
   serializeBuildSystemProfiles,
   type BuildSystemProfile,
@@ -63,6 +65,11 @@ export const GATEWAY_ADDRESS_LABEL = "rovara.local.gwaddr";
 /** The label the worker puts on the sandboxes it starts (`TASK_SANDBOX_WORKSPACE_LABEL`). */
 /** The guard's folder for the copies of a worker's run files: next to the run folder, never inside it. */
 const bindDirectoryOf = (runDirectory: string): string => `${runDirectory}-binds`;
+/** What the guard is told about the resource ceilings: the owner's limits when the install resolved them (DEC 254zm 2), otherwise only the old per-worker helper memory knob. Nothing else: the guard's defaults apply. */
+function guardLimitsOf(services: LocalTestServices): { maxContainers?: number; maxMemoryMiB?: number; maxMemoryPercent?: number } {
+  if (services.limits !== undefined) return { maxContainers: services.limits.containers, maxMemoryMiB: services.limits.helperMemoryMiB, maxMemoryPercent: services.limits.memoryPercent };
+  return services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: services.maxMemoryMiB };
+}
 
 const SANDBOX_WORKSPACE_LABEL = "agentx.workspace";
 const MACHINE_NAME = /^rovara-worker-[0-9a-f]{24}$/;
@@ -131,6 +138,8 @@ const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_TEST_SERVICES_RUN_DIR",
   "AGENTX_TEST_SERVICES_EDITION",
   "AGENTX_TEST_SERVICES_MAX_MEM_MIB",
+  TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE,
+  TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE,
   "AGENTX_TEST_SERVICES_NOT_PULLED",
   "AGENTX_TEST_SERVICES_OWNER_IMAGES",
   "AGENTX_WORKER_IMAGE",
@@ -400,7 +409,7 @@ export class DockerWorkerMachines implements WorkerMachines {
       await createGuard(run, {
         image, labels: [...baseLabels, gatewayLabel], names, socketPath: this.#socket, socketGroup: group, workspaceDirectory,
         workspaceKey: createHash("sha256").update(resolve(workspaceDirectory)).digest("hex").slice(0, 16), owner: hash, sandboxDns: addresses.sandbox,
-        ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : { services: { images: services.images, guardImage: imageId, runDirectory, bindDirectory: bindDirectoryOf(runDirectory), socketGroup: Number(group), ...(services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: services.maxMemoryMiB }) } }),
+        ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : { services: { images: services.images, guardImage: imageId, runDirectory, bindDirectory: bindDirectoryOf(runDirectory), socketGroup: Number(group), ...guardLimitsOf(services) } }),
         devcontainerRegistries: this.#devcontainerRegistries(),
         ...(browserExecutor === undefined ? {} : { browserEvidence: { image: browserExecutor.imageId, seccomp: browserExecutor.seccomp } }),
       });

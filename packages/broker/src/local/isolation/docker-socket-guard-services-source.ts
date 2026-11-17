@@ -37,6 +37,8 @@
 // code, not a boundary against a worker that is itself compromised. Run networks are bridges WITHOUT a host address (`inhibit_ipv4`, forced by the guard), so a container on one has no route to a service of the host
 // or the VM; the guard does not rely on a Docker version to refuse the gateway.
 // Everything is JavaScript with no template strings inside (this file is a template string itself).
+import { TEST_SERVICES_LIMIT_BOUNDS, TEST_SERVICES_LIMIT_DEFAULTS, TEST_SERVICES_LIMIT_SENTENCES } from "@agentx/contracts";
+
 export const DOCKER_SOCKET_GUARD_SERVICES_SOURCE = String.raw`
 // ---- test services (policy.services; unset: nothing below is reachable)
 const fs = require("fs");
@@ -64,13 +66,16 @@ const RESOLVER_COMMANDS = { "check-guard": ["-w", "5", "-I", "OUTPUT", "1", "-d"
 const PINNED_IMAGE = /^(?:[a-z0-9][a-z0-9._\/:-]{0,199}@sha256:[a-f0-9]{64}|sha256:[a-f0-9]{64})$/;
 const CHECK_HOSTNAME = "check";
 const MIB = 1048576;
+// The resource ceilings (DEC 254zm 2). Defaults and bounds are the contract's (contracts/test-services-limits.ts); the owner's settings reach here through the policy and can only raise them up to the old hard limits.
+const CEILING_WORDS = ${JSON.stringify(TEST_SERVICES_LIMIT_SENTENCES)};
+function ceilingSetting(value, bounds, fallback) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.max(bounds.min, Math.min(bounds.max, Math.floor(value))) : fallback; }
 const SVC_LIMITS = {
   networks: SVC === null ? 0 : Math.max(1, Math.min(32, SVC.maxNetworks || 4)),
-  containers: SVC === null ? 0 : Math.max(1, Math.min(96, SVC.maxContainers || 48)),
-  helperMemory: SVC === null ? 0 : Math.max(64, Math.min(16384, SVC.maxMemoryMiB || 3072)) * MIB,
+  containers: SVC === null ? 0 : ceilingSetting(SVC.maxContainers, ${JSON.stringify(TEST_SERVICES_LIMIT_BOUNDS.containers)}, ${String(TEST_SERVICES_LIMIT_DEFAULTS.containers)}),
+  helperMemory: SVC === null ? 0 : ceilingSetting(SVC.maxMemoryMiB, ${JSON.stringify(TEST_SERVICES_LIMIT_BOUNDS.helperMemoryMiB)}, ${String(TEST_SERVICES_LIMIT_DEFAULTS.helperMemoryMiB)}) * MIB,
   programMemory: 512 * MIB,
-  // All the service containers of one worker together may be given this much memory: what the SVC says, never more than three quarters of what the machine has.
-  totalMemory: SVC === null ? 0 : Math.min(Math.floor(MEMORY_CEILING * 0.75), (SVC.maxTotalMemoryMiB ? Math.max(256, Math.min(65536, SVC.maxTotalMemoryMiB)) : 65536) * MIB),
+  // All the service containers of one worker together (the sealed check sandbox apart: the sandbox rule sizes it) may be given this share of what the machine has, never more than the old hard limit of three quarters.
+  totalMemory: SVC === null ? 0 : Math.min(Math.floor(MEMORY_CEILING * ceilingSetting(SVC.maxMemoryPercent, ${JSON.stringify(TEST_SERVICES_LIMIT_BOUNDS.memoryPercent)}, ${String(TEST_SERVICES_LIMIT_DEFAULTS.memoryPercent)}) / 100), (SVC.maxTotalMemoryMiB ? Math.max(256, Math.min(65536, SVC.maxTotalMemoryMiB)) : 65536) * MIB),
   nanoCpus: 4000000000,
   pids: 4096,
   binds: 12,
@@ -207,7 +212,8 @@ async function countOwnedContainers() {
   const answer = await ask("GET", "/containers/json?all=1&filters=" + encodeURIComponent(JSON.stringify(filters)));
   try { return JSON.parse(answer.body).length; } catch (error) { return Infinity; }
 }
-// How many service containers this worker has, and how much memory they are allowed in all (a container without the guard's memory label counts as a plain sandbox's default).
+// How many service containers this worker has, and how much memory they are allowed in all (a container without the guard's memory label counts as a plain sandbox's default). The sealed check sandbox counts as a container
+// but adds no memory here: the sandbox rule sizes it (about what the machine has less a reserve), and it takes the place of the working sandbox the round detaches, so the share for services is for the helpers and programs.
 async function ownedServiceUsage() {
   const filters = { label: {} };
   filters.label[OWNER + "=" + policy.owner] = true;
@@ -216,7 +222,11 @@ async function ownedServiceUsage() {
   try {
     const rows = JSON.parse(answer.body);
     let memory = 0;
-    rows.forEach(function (row) { const own = Number((row.Labels || {})[MEMORY_LABEL]); memory += Number.isFinite(own) && own > 0 ? own : DEFAULT_MEMORY; });
+    rows.forEach(function (row) {
+      if ((row.Labels || {})[PROFILE_LABEL] === "check") return;
+      const own = Number((row.Labels || {})[MEMORY_LABEL]);
+      memory += Number.isFinite(own) && own > 0 ? own : DEFAULT_MEMORY;
+    });
     return { count: rows.length, memory: memory };
   } catch (error) { return { count: Infinity, memory: Infinity }; }
 }
@@ -473,9 +483,10 @@ function serviceEndpoint(netName, network, body, required) {
   if (aliases.length > 0) out.Aliases = aliases;
   return { address: address, endpoint: out };
 }
-function serviceLimits(host, ceiling) {
+function serviceLimits(host, ceiling, overWords) {
   const memory = numberOr(host.Memory, 0, "Memory");
   const swap = numberOr(host.MemorySwap, 0, "MemorySwap");
+  if (memory > ceiling && memory <= MEMORY_CEILING && overWords !== undefined) deny(overWords);
   if (memory <= 0 || memory > ceiling || memory > MEMORY_CEILING) deny("a service container has a memory limit within its ceiling");
   if (swap !== memory) deny("a service container's swap is its memory limit");
   const cpus = numberOr(host.NanoCpus, 0, "NanoCpus");
@@ -608,7 +619,7 @@ async function buildServiceBody(name, text) {
     if (host.CapAdd !== undefined && host.CapAdd !== null && !(Array.isArray(host.CapAdd) && host.CapAdd.length === 0)) deny("no capability may be added");
     if (host.NetworkMode !== netName) deny("a service container joins its own run network and no other");
     const ceiling = fromWorker ? SVC_LIMITS.programMemory : SVC_LIMITS.helperMemory;
-    const limits = serviceLimits(host, ceiling);
+    const limits = serviceLimits(host, ceiling, fromWorker ? undefined : CEILING_WORDS.helperMemory);
     const sysctls = serviceSysctls(host.Sysctls);
     const binds = serviceBinds(host.Binds, undefined);
     const tmpfs = serviceTmpfs(host.Tmpfs);
@@ -663,13 +674,13 @@ async function serviceCreate(request, response, query) {
     const usage = await ownedServiceUsage();
     if (usage.count >= SVC_LIMITS.containers) {
       response.writeHead(429, { "content-type": "application/json" });
-      return response.end(JSON.stringify({ message: "rovara: too many service containers at once" }));
+      return response.end(JSON.stringify({ message: "rovara: " + CEILING_WORDS.containers }));
     }
     let wanted = DEFAULT_MEMORY;
     try { wanted = Number(JSON.parse(body).HostConfig.Memory) || DEFAULT_MEMORY; } catch (error) { wanted = DEFAULT_MEMORY; }
-    if (usage.memory + wanted > SVC_LIMITS.totalMemory) {
+    if (parts[2] !== "check" && usage.memory + wanted > SVC_LIMITS.totalMemory) {
       response.writeHead(429, { "content-type": "application/json" });
-      return response.end(JSON.stringify({ message: "rovara: the service containers together may not be given more memory" }));
+      return response.end(JSON.stringify({ message: "rovara: " + CEILING_WORDS.memory }));
     }
     const created = new URLSearchParams();
     created.set("name", name);

@@ -6,7 +6,7 @@
 //     LAZY (DEC 254z-amend3): nothing is pulled at start-up (a tag in `ROVARA_TEST_SERVICE_IMAGES` is still pinned once, as the owner asked by naming it). An image is pulled by digest the first time a step needs it
 //     (`DockerWorkerMachines.deliver`, local/lazy-service-images.ts); the worker still refuses, in its fixed words, a dependency whose image is not on this computer when the run starts.
 import { networkInterfaces } from "node:os";
-import { OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, catalogSigningKeysCompiledIn, ownerCatalogOf, ownerListReferences, type VerifiedCatalog } from "@agentx/contracts";
+import { OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, catalogSigningKeysCompiledIn, ownerCatalogOf, ownerListReferences, resolveTestServicesLimits, testServicesLimitInvalidSentence, type TestServicesLimits, type VerifiedCatalog } from "@agentx/contracts";
 import type { DockerRunner } from "./docker-runner.js";
 import { NO_IMAGES_SENTENCE, resolveOwnerImages, type OwnerImageService } from "./test-services-owner-list.js";
 import type { ServiceCatalogSource } from "../core/test-env/dependency-plan.js";
@@ -64,17 +64,21 @@ export async function prepareLocalTestServices(input: {
   const mode = signed ? "signed" as const : "owner" as const;
   const refuse = (sentence: string, reason: string): LocalTestServicesInstall => {
     log({ component: "test-services", event: "test_services.unavailable", reason, message: sentence });
-    return { services: undefined, catalog: undefined, unavailable: sentence, unavailableReason: reason === "range_in_use" ? "network" : "images", mode, ...(signed || input.ownerImages === undefined ? {} : { ownerImages: input.ownerImages }) };
+    return { services: undefined, catalog: undefined, unavailable: sentence, unavailableReason: reason === "range_in_use" ? "network" : reason === "invalid_limit" ? "other" : "images", mode, ...(signed || input.ownerImages === undefined ? {} : { ownerImages: input.ownerImages }) };
   };
   if (hostUsesRunRange(input.interfaces)) return refuse(RANGE_IN_USE_SENTENCE, "range_in_use");
-  if (!signed) return prepareFromOwnerList(input, refuse, log);
+  // DEC 254zm 2: the owner's ceiling settings. One that is not a whole number in its range stops test services with a fixed sentence naming the setting (never a silent default, never a clamp).
+  const resolvedLimits = resolveTestServicesLimits(input.environment);
+  if (!resolvedLimits.ok) return refuse(testServicesLimitInvalidSentence(resolvedLimits.variable), "invalid_limit");
+  const limits = resolvedLimits.limits;
+  if (!signed) return prepareFromOwnerList(input, refuse, log, limits);
   const registry = input.environment[TEST_SERVICES_REGISTRY_VARIABLE]?.trim();
   if (registry === undefined || registry === "") return refuse(NO_REGISTRY_SENTENCE, "no_registry");
   const loaded = await (input.loadCatalog ?? loadLocalServiceCatalog)(shippedCatalogDirectory(input.environment));
   if (!loaded.ok) return refuse(loaded.sentence, loaded.reason);
   const catalogEnv = input.environment[TEST_SERVICES_CATALOG_ENV_VARIABLE]?.trim() || "local";
   const prepared = await prepareTestServiceImages({ docker: input.docker, catalog: loaded.catalog, registry, catalogEnv, stateDirectory: input.stateDirectory });
-  const services = localTestServicesFrom({ registry, catalogEnv, prepared });
+  const services = localTestServicesFrom({ registry, catalogEnv, prepared, limits });
   if (services === undefined) return { services: undefined, catalog: loaded.catalog, unavailable: "Test services are not available: none of the catalog's images could be pulled to this computer.", unavailableReason: "images", catalogSource: releaseServiceCatalogSource(input.environment), mode };
   return { services, catalog: loaded.catalog, unavailable: undefined, catalogSource: releaseServiceCatalogSource(input.environment), mode };
 }
@@ -87,6 +91,7 @@ async function prepareFromOwnerList(
   input: { environment: NodeJS.ProcessEnv; docker: DockerRunner; ownerImages?: OwnerImageService | undefined; now?: (() => number) | undefined },
   refuse: (sentence: string, reason: string) => LocalTestServicesInstall,
   log: (entry: Record<string, unknown>) => void,
+  limits: TestServicesLimits,
 ): Promise<LocalTestServicesInstall> {
   const service = input.ownerImages;
   if (service === undefined) return refuse(NO_IMAGES_SENTENCE, "no_owner_list");
@@ -94,7 +99,7 @@ async function prepareFromOwnerList(
   service.setInEffect(resolved.entries.map((entry) => entry.reference), resolved.envRequested);
   const catalog = ownerCatalogOf(resolved.entries);
   if (catalog === undefined) return refuse(NO_IMAGES_SENTENCE, "no_owner_images");
-  const services: LocalTestServices = { registry: OWNER_LIST_REGISTRY, catalogEnv: OWNER_LIST_CATALOG_ENV, images: ownerListReferences(resolved.entries), ownerImages: resolved.entries, lazyPulls: true };
+  const services: LocalTestServices = { registry: OWNER_LIST_REGISTRY, catalogEnv: OWNER_LIST_CATALOG_ENV, images: ownerListReferences(resolved.entries), ownerImages: resolved.entries, lazyPulls: true, limits };
   return { services, catalog, unavailable: undefined, catalogSource: async () => catalog, mode: "owner", ownerImages: service };
 }
 
