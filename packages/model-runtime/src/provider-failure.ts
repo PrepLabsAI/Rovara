@@ -12,11 +12,6 @@ type Cls = E2EModelFailureClass;
 
 /** The signal of a model the account has not enabled (Amazon Bedrock's agreement for it is not in place): class `key-rejected`, shown to the owner with its own words. */
 export const MODEL_NOT_ENABLED_SIGNAL = MODEL_NOT_ENABLED_CODE;
-/**
- * DEC 254g: Rovara's own token for a model the model gateway does not offer the company (its 400 refusal, read by model-runtime). The worker sets it only from model-runtime's own fixed
- * sentence (model-call-monitor.ts), never from a provider's facts: classifyProviderFailure does not grant it.
- */
-export const MODEL_NOT_OFFERED_SIGNAL = "ModelNotOffered";
 
 /** A signal is one token: a Bedrock error type is letters only, a keyed provider's error type or code is lower-case letters, digits and underscores. */
 export const BEDROCK_SIGNAL_PATTERN = /^[A-Za-z]{1,64}$/;
@@ -83,8 +78,7 @@ export function classifyProviderFailure(facts: ProviderFailureFacts): E2EModelFa
   if (status === undefined && facts.networkCode !== undefined && isNetworkCode(facts.networkCode)) return { class: "unreachable", signal: facts.networkCode };
   if (facts.timedOut === true) return { class: "provider-outage", signal: "timeout" };
   // DR-KEY-1 (B): Rovara's own ModelNotEnabled token (from the model proxy's 403 for a model the account may not use) is the same on every provider's route: the proxy may be spoken to as Anthropic or as Bedrock.
-  // A provider's own "ModelNotOffered" is never Rovara's token (DEC 254g): it is dropped, so the class is the status's.
-  const signal = facts.signal === MODEL_NOT_OFFERED_SIGNAL ? null : facts.signal === MODEL_NOT_ENABLED_SIGNAL ? MODEL_NOT_ENABLED_SIGNAL
+  const signal = facts.signal === MODEL_NOT_ENABLED_SIGNAL ? MODEL_NOT_ENABLED_SIGNAL
     : typeof facts.signal === "string" && signalPattern(facts.provider).test(facts.signal) && E2E_MODEL_FAILURE_SIGNAL_PATTERN.test(facts.signal) ? facts.signal : null;
   const bySignal = signal === null ? undefined : signal === MODEL_NOT_ENABLED_SIGNAL ? "key-rejected" : SIGNALS[facts.provider].get(signal);
   if (bySignal !== undefined) return { class: bySignal, signal };

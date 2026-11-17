@@ -19,9 +19,8 @@ import { secretFromSource, type Prompter, type SecretSource } from "../init/prom
 import { alertsTopicArn, ensureSubscribed, type AlertsApi } from "../setup/alerts.js";
 import { CLI_VERSION } from "../version.js";
 import type { DeployPart } from "../deploy/parameters.js";
-import { requireGatewayOffers } from "./gateway-offered.js";
 import { CONFIG_KEYS, configKey, whereText, type ConfigKey, type ModelRole } from "./keys.js";
-import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, eligibleE2EAgentModel, isClaudeAgentModel, isKeyedModelProvider, type ModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, eligibleE2EAgentModel, isKeyedModelProvider, type ModelProvider } from "@agentx/contracts";
 
 export interface ConfigServices {
   store: ParameterStore;
@@ -320,10 +319,6 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   const settings = await installed(services, env);
   const role = entry.model;
   if (entry.e2eAgentModel === true) checkE2eAgentChoice(env, settings, value);
-  // DEC 254g: a non-Claude core agent model must be one the model gateway offers now (live, fail closed); a Claude id keeps its catalog rule.
-  if (entry.gatewayOffered === true && value !== "" && !isClaudeAgentModel(value)) {
-    await requireGatewayOffers({ key: entry.key, env, value, session: await services.adminSession?.(env), fetch: services.fetch ?? fetch });
-  }
   if (entry.corePairedWith !== undefined) await notePairedCoreSetting(services, env, entry, entry.corePairedWith, value);
   const targets = [{ part: target.part, parameter: target.parameter }, ...(target.also ?? [])];
   const currents = await Promise.all(targets.map((where) => stackParameterValue(services, env, where, entry.defaultValue)));
