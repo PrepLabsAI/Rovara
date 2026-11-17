@@ -259,7 +259,7 @@ export interface DeveloperTaskRouteDependencies {
   /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
   checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<{
     subject: { developerId: string; slackUserId?: string };
-    identity: { developerId: string; slackUserId: string; name: string; method: DeveloperSignInMethod; issuer: string; subject: string };
+    identity: { developerId: string; slackUserId?: string; name: string; method: DeveloperSignInMethod; issuer: string; subject: string };
     eligible: boolean;
     channelMember: boolean;
   }>;

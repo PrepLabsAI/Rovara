@@ -127,6 +127,16 @@ describe("a project's members, as the signed-in person (FR-003 to FR-005)", () =
     expect((await call("GET", "/v1/dev/client/projects/payments/members", await token())).body).toMatchObject({ members: [] });
   });
 
+  it("lists a GitHub member by a clean name (DEC 254p (a)), and a company sign-in member's name as stored", async () => {
+    await call("PUT", `/v1/dev/client/projects/payments/members/${CY}`, await token());
+    db.set({ ...db.get(`DEVELOPER#${CY}`, "META")!, provider: "github", issuer: "https://github.com", subject: "2001", displayName: `<img src=x onerror=alert(1)>[a](https://evil.example) ${"c".repeat(400)}` });
+    const hostile = (await call("GET", "/v1/dev/client/projects/payments/members", await token())).body as { members: Array<{ name: string }> };
+    expect(hostile.members[0]!.name).not.toMatch(/[<>[\]`*]/u);
+    expect(Array.from(hostile.members[0]!.name).length).toBeLessThanOrEqual(80);
+    db.set({ ...db.get(`DEVELOPER#${CY}`, "META")!, provider: "oidc", displayName: "<b>Cy</b>" });
+    expect((await call("GET", "/v1/dev/client/projects/payments/members", await token())).body).toMatchObject({ members: [{ name: "<b>Cy</b>" }] });
+  });
+
   it("lets a project's own administrator manage it, and no one else", async () => {
     const bo = await token({ sub: BO, sid: "s-bo" });
     expect((await call("GET", "/v1/dev/client/projects/payments/members", bo)).status).toBe(403);

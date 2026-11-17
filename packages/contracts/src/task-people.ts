@@ -1,4 +1,50 @@
 import { z } from "zod";
+import { SlackUserIdSchema } from "./browser-ids.js";
+import { BUILT_IN_SIGN_IN_METHODS } from "./outside-account.js";
+
+/**
+ * Web task channel C1 (plan 4.1, decisions D1, D2, D4): how a task person proves who they are, fixed when they are registered.
+ * `slack`: a Slack sign-in, or an OIDC or GitHub sign-in linked to a Slack account; proved fresh through Slack, exactly as before.
+ * `web`: any other built-in sign-in (cloud, saml, or oidc or github with no Slack link). It carries no Slack account id.
+ */
+export const TaskPersonIdentityKindSchema = z.enum(["slack", "web"]);
+export type TaskPersonIdentityKind = z.infer<typeof TaskPersonIdentityKindSchema>;
+
+/** D4 (no account linking): the words that tell two identities of one name apart, by sign-in method. */
+export const TASK_PERSON_METHOD_LABELS = {
+  slack: "Slack", oidc: "OIDC", github: "GitHub", cloud: "Cloud", saml: "SAML",
+} as const satisfies Record<(typeof BUILT_IN_SIGN_IN_METHODS)[number], string>;
+
+const CHAT_ACCOUNT_FIELD = "slackUserId";
+const isBuiltInMethod = (value: unknown): value is (typeof BUILT_IN_SIGN_IN_METHODS)[number] =>
+  typeof value === "string" && (BUILT_IN_SIGN_IN_METHODS as readonly string[]).includes(value);
+
+/**
+ * The kind of a stored task person identity (a PERSON row, or an identity built from one), or undefined when it is malformed.
+ * The chat account field is read by key presence, never guessed: present means `slack` and it must be a valid Slack user id
+ * on a `slack`, `oidc` or `github` method (DEC 254n 2: a GitHub sign-in linked to Slack is checked like an OIDC one); absent means `web` and the method must not be `slack`. Anything else is undefined, which
+ * every caller treats as a fixed refusal, never as the other kind.
+ */
+export function taskPersonIdentityKind(fields: Readonly<Record<string, unknown>>): TaskPersonIdentityKind | undefined {
+  const method = fields["method"];
+  if (!isBuiltInMethod(method)) return undefined;
+  if (!Object.hasOwn(fields, CHAT_ACCOUNT_FIELD)) return method === "slack" ? undefined : "web";
+  if (!SlackUserIdSchema.safeParse(fields[CHAT_ACCOUNT_FIELD]).success) return undefined;
+  return method === "slack" || method === "oidc" || method === "github" ? "slack" : undefined;
+}
+
+/**
+ * The kind of one PEOPLE list entry, or undefined when it is malformed. An entry written before C1 has a chat account id and
+ * no method, and is `slack` exactly as before. A `web` entry has a method and no chat account id. An entry with both, or
+ * with neither, is undefined.
+ */
+export function taskPeopleEntryKind(entry: Readonly<Record<string, unknown>>): TaskPersonIdentityKind | undefined {
+  const hasAccount = Object.hasOwn(entry, CHAT_ACCOUNT_FIELD);
+  const hasMethod = Object.hasOwn(entry, "method");
+  if (hasAccount && !hasMethod) return SlackUserIdSchema.safeParse(entry[CHAT_ACCOUNT_FIELD]).success ? "slack" : undefined;
+  if (!hasAccount && hasMethod) return taskPersonIdentityKind(entry) === "web" ? "web" : undefined;
+  return undefined;
+}
 
 export const TaskPeopleRoleSchema = z.enum(["owner", "commenter", "viewer", "denied"]);
 export type TaskPeopleRole = z.infer<typeof TaskPeopleRoleSchema>;

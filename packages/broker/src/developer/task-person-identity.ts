@@ -18,10 +18,11 @@ import { ownerKeyForSubject } from "../aws/lambda.js";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRecord } from "./task-records.js";
 import type { DeveloperRecord } from "./store.js";
+import { TASK_PERSON_UNNAMED, isSlackTaskPerson, parseTaskPersonIdentity } from "./task-person-rows.js";
 
 export interface TaskPersonIdentity {
   developerId: string;
-  slackUserId: string;
+  slackUserId?: string; // C1: present = a `slack` identity (slack, or oidc/github linked to Slack); absent = `web` (cloud, saml, unlinked oidc or github). See task-person-rows.ts.
   name: string;
   method: DeveloperSignInMethod;
   issuer: string;
@@ -77,7 +78,6 @@ const conditional = (error: unknown) => error instanceof Error && (error.name ==
 const taskPk = (taskId: string) => `DEVTASK#${taskId}`;
 const personSk = (personId: string) => `PERSON#${personId}`;
 const subjectSk = (developerId: string) => `PERSON_SUBJECT#${developerId}`;
-
 const safeName = (name: string, fallback: string): string => cleanDisplayName(redactAndCap(name, 80).text) ?? fallback;
 
 async function getItem(deps: TaskPersonIdentityDependencies, pk: string, sk: string): Promise<Record<string, unknown> | undefined> {
@@ -85,28 +85,25 @@ async function getItem(deps: TaskPersonIdentityDependencies, pk: string, sk: str
   return isRecord(result.Item) ? result.Item : undefined;
 }
 
+/** DEC 254n (2): the record-backed methods. A GitHub person is checked exactly as an OIDC person is: their own sign-in record, its Slack link and the same Slack proof. */
+const recordMethod = (method: unknown): method is "oidc" | "github" => method === "oidc" || method === "github";
+
 async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string): Promise<DeveloperTaskRecord> {
   if (!UUID.test(taskId)) return refuse();
   const item = await getItem(deps, taskPk(taskId), "META");
   if (item?.pk !== taskPk(taskId) || item.sk !== "META" || item.entityType !== "DEVELOPER_TASK" || item.taskId !== taskId
-    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || (item.provider !== "slack" && item.provider !== "oidc")) return refuse();
+    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || (item.provider !== "slack" && !recordMethod(item.provider))) return refuse();
   return item as unknown as DeveloperTaskRecord;
 }
 
-function parsedIdentity(item: Record<string, unknown>): TaskPersonIdentity | undefined {
-  if (!HEX64.test(String(item.developerId)) || !SlackUserIdSchema.safeParse(item.slackUserId).success || typeof item.name !== "string"
-    || safeName(item.name, String(item.slackUserId)) !== item.name || (item.method !== "slack" && item.method !== "oidc")
-    || typeof item.issuer !== "string" || item.issuer.length === 0 || item.issuer.length > 2048
-    || typeof item.subject !== "string" || item.subject.length === 0 || item.subject.length > 512) return undefined;
-  return {
-    developerId: String(item.developerId),
-    slackUserId: String(item.slackUserId),
-    name: item.name,
-    method: item.method,
-    issuer: item.issuer,
-    subject: item.subject,
-  };
-}
+const parsedIdentity = parseTaskPersonIdentity;
+
+/**
+ * C1: the web proof (plan 4.1 rule, decision D1) is not built yet, so a `web` identity is always unavailable, which every caller
+ * turns into a refusal. It makes no Slack call (a registry person makes no further read; an unlinked OIDC creator costs the one
+ * sign-in record read that builds its identity). C2 replaces this with the web proof.
+ */
+const webIdentityUnavailable = (): never => unavailable();
 
 async function registryByPerson(deps: TaskPersonIdentityDependencies, taskId: string, personId: string): Promise<TaskPersonIdentity> {
   if (!UUID.test(personId)) return refuse();
@@ -296,17 +293,18 @@ export async function registerTaskChannelPeople(
 
 async function storedIdentityStatus(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<"current" | "ineligible"> {
   if (identity.method === "slack") {
-    if (identity.issuer !== SLACK_OIDC_ISSUER || identity.subject !== identity.slackUserId || identity.developerId !== developerIdForSlackUser(identity.slackUserId)) return refuse();
+    if (identity.slackUserId === undefined || identity.issuer !== SLACK_OIDC_ISSUER || identity.subject !== identity.slackUserId
+      || identity.developerId !== developerIdForSlackUser(identity.slackUserId)) return refuse();
     return "current";
   }
-  if (identity.issuer === SLACK_OIDC_ISSUER || identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
+  if (!recordMethod(identity.method) || identity.issuer === SLACK_OIDC_ISSUER || identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
   let record: DeveloperRecord | undefined;
   try {
     record = await deps.developerRecord(identity.developerId);
   } catch {
     return unavailable();
   }
-  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== "oidc" || record.developerId !== identity.developerId
+  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== identity.method || record.developerId !== identity.developerId
     || record.issuer !== identity.issuer || record.subject !== identity.subject || record.slackUserId !== identity.slackUserId
     || ownerKeyForSubject(record.issuer, record.subject) !== record.developerId) return refuse();
   return record.revoked ? "ineligible" : "current";
@@ -341,27 +339,42 @@ export async function checkTaskPersonIdentity(
     if (caller?.developerId === developerId && caller.amr === "slack" && SlackUserIdSchema.safeParse(caller.slackUserId).success
       && developerIdForSlackUser(caller.slackUserId!) === developerId) {
       identity = nativeIdentity(caller.slackUserId!, safeName(caller.name, caller.slackUserId!));
-    } else if (developerId !== stored.developerId || !SlackUserIdSchema.safeParse(stored.slackUserId).success) {
+    } else if (developerId !== stored.developerId) {
       return refuse();
     } else if (stored.provider === "slack") {
-      if (developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
+      if (!SlackUserIdSchema.safeParse(stored.slackUserId).success || developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
       identity = nativeIdentity(stored.slackUserId!, safeName(stored.developerName, stored.slackUserId!));
     } else {
+      // A record-backed task creator (oidc or github, DEC 254n 2): linked to Slack when the task stored a Slack user id (as before), else a `web` identity (C1, plan 3 item 3).
+      const method = stored.provider;
+      if (!recordMethod(method)) return refuse();
+      const linked = stored.slackUserId !== undefined;
+      if (linked && !SlackUserIdSchema.safeParse(stored.slackUserId).success) return refuse();
       let record: DeveloperRecord | undefined;
       try {
         record = await deps.developerRecord(developerId);
       } catch {
         return unavailable();
       }
-      if (record === undefined || record.provider !== "oidc" || record.developerId !== developerId || typeof record.issuer !== "string"
-        || typeof record.subject !== "string" || !SlackUserIdSchema.safeParse(record.slackUserId).success
-        || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return refuse();
-      identity = {
-        developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
-        method: "oidc", issuer: record.issuer, subject: record.subject,
-      };
+      if (record === undefined || record.provider !== method || record.developerId !== developerId || typeof record.issuer !== "string"
+        || typeof record.subject !== "string" || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return refuse();
+      if (linked) {
+        if (!SlackUserIdSchema.safeParse(record.slackUserId).success) return refuse();
+        identity = {
+          developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
+          method, issuer: record.issuer, subject: record.subject,
+        };
+      } else {
+        if (record.slackUserId !== undefined) return refuse();
+        identity = {
+          developerId, name: typeof record.displayName === "string" ? safeName(record.displayName, TASK_PERSON_UNNAMED) : TASK_PERSON_UNNAMED,
+          method, issuer: record.issuer, subject: record.subject,
+        };
+      }
     }
   }
+  // C1: the one place a check branches on identity kind. `slack` keeps today's proof (D2); `web` is unavailable until C2 (D1).
+  if (!isSlackTaskPerson(identity)) return webIdentityUnavailable();
   const status = await storedIdentityStatus(deps, identity);
   const subject = { developerId, slackUserId: identity.slackUserId };
   if (status === "ineligible") return { subject, identity, eligible: false, channelMember: false };
@@ -378,6 +391,8 @@ export async function resolveTaskPersonId(
 ): Promise<TaskPersonIdentity> {
   const task = await currentTask(deps, taskId);
   const identity = await registryByPerson(deps, taskId, personId);
+  // C1: a `web` person resolves only once C2 adds its proof; until then it is a refusal, with no read and no Slack call.
+  if (!isSlackTaskPerson(identity)) return refuse();
   await verifyStoredIdentity(deps, identity);
   await qualify(deps, task, { developerId: identity.developerId, slackUserId: identity.slackUserId });
   return identity;

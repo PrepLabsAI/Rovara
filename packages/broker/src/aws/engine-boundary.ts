@@ -14,6 +14,7 @@ import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointe
 //
 // A stamp is written once, with the core task, in the start's own transaction, and never changes; a task without one never gets one. So a verdict about a task that EXISTS is fixed for
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
+import { randomUUID } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXErrorCodeSchema, OrgIdSchema, agentXError } from "@agentx/contracts";
 import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
@@ -151,6 +152,23 @@ export async function ownerOfWorkspace(table: EngineStateTable, workspaceId: str
 /** The core's handlers for a developer task request, as the deployment composes them (the core host's dev routes over its caller mapping). Undefined: the core does not serve it. */
 export interface CoreTaskEntry {
   route(request: BrokerRequest, caller: CoreEntryCaller): Promise<BrokerResponse | undefined>;
+  /**
+   * S2: the install administrator's cancel of a core task's workspace. The company is the workspace's own (its discovery pointer and scoped record), the task the one that workspace holds;
+   * `authorize` is the admin route's own project check, asked with the task's project. Throws the missing workspace's words for a workspace that is no core task's of a company on the core.
+   * Absent: the deployment does not serve it (the admin route keeps its answer for a core workspace).
+   */
+  stopWorkspaceForAdmin?(workspaceId: string, administrator: { id: string }, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }>;
+}
+
+/**
+ * S2: a Stop that reached the broker from somewhere other than the developer route (Slack's thread stop and Stop button), for a task the core owns: the core's own authorized stop
+ * (`POST /v1/dev/tasks/{id}/cancel`, the task's owner or a live owner/admin of its company), as this caller, with a new request id. `stopped` only for the core's 200; any refusal, an
+ * unreadable answer and a deployment without a core entry are `refused` (the caller says what a missing or not-yours task says), never the workflow's stop.
+ */
+export async function stopCoreTaskAs(entry: CoreTaskEntry | undefined, caller: CoreEntryCaller, taskId: string): Promise<"stopped" | "refused"> {
+  if (entry === undefined || !TASK_ID.test(taskId)) return "refused";
+  const answer = await entry.route({ method: "POST", path: `/v1/dev/tasks/${taskId}/cancel`, headers: {}, body: JSON.stringify({ requestId: randomUUID() }) }, caller);
+  return answer?.statusCode === 200 ? "stopped" : "refused";
 }
 
 /**
