@@ -137,11 +137,14 @@ export class LinearConnections {
     return ((await this.deps.documentClient.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true }))) as { Item?: unknown }).Item;
   }
   private log(companyId: string, entry: Record<string, unknown>) { companyLog(companyId, this.deps.log)(entry); }
-  private auditItem(companyId: string, action: string, actor: string, fields: Record<string, unknown>) {
-    const at = new Date(this.deps.now()).toISOString();
-    return { Put: { TableName: this.table, Item: { ...linearAuditKey(companyId, at, action, this.random(8).toString("hex")), entityType: "LINEAR_CONNECTION_AUDIT", companyId, action, actor, at, ...fields },
+  private auditKeyFor(companyId: string, action: string) {
+    return linearAuditKey(companyId, new Date(this.deps.now()).toISOString(), action, this.random(8).toString("hex"));
+  }
+  private auditItem(companyId: string, action: string, actor: string, fields: Record<string, unknown>, key = this.auditKeyFor(companyId, action)) {
+    return { Put: { TableName: this.table, Item: { ...key, entityType: "LINEAR_CONNECTION_AUDIT", companyId, action, actor, at: new Date(this.deps.now()).toISOString(), ...fields },
       ConditionExpression: "attribute_not_exists(pk)" } };
   }
+
 
   /** A connect start for this company, person and session: the state (returned once) and the PKCE verifier (sealed, kept here). */
   async mintState(who: { companyId: string; personId: string; sessionId: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
@@ -399,7 +402,8 @@ export class LinearConnections {
       if (row.sealedAccess !== undefined) access = await this.deps.sealer.open(row.sealedAccess, tokenContext(companyId, row.organizationId, "access"));
       if (row.sealedRefresh !== undefined) refresh = await this.deps.sealer.open(row.sealedRefresh, tokenContext(companyId, row.organizationId, "refresh"));
     } catch { /* A token that does not open is not revoked; the connection still goes. */ }
-    const audit = this.auditItem(companyId, "disconnect", personId, { organizationId: row.organizationId, projects: picks.map((pick) => pick.project).slice(0, 100) });
+    const auditKey = this.auditKeyFor(companyId, "disconnect");
+    const audit = this.auditItem(companyId, "disconnect", personId, { organizationId: row.organizationId, projects: picks.map((pick) => pick.project).slice(0, 100) }, auditKey);
     try {
       await this.deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
         { Delete: { TableName: this.table, Key: linearConnectionKey(companyId), ConditionExpression: "version = :version AND organizationId = :org",
@@ -410,7 +414,7 @@ export class LinearConnections {
     } catch (error) {
       if (!isConditional(error)) throw error;
       // Lost a race: our own audit row says whether it committed.
-      if (await this.get({ pk: audit.Put.Item.pk, sk: audit.Put.Item.sk }) === undefined) {
+      if (await this.get(auditKey) === undefined) {
         if (await this.connection(companyId) === undefined) return { outcome: "not_found" };
         throw unavailable();
       }
