@@ -49,7 +49,7 @@ function harness(options: Options = {}) {
   const company = "company" in options ? options.company : COMPANY_A;
   const memberOf = options.memberOf ?? COMPANY_A;
   const db = new FakeDynamoDb();
-  db.set({ ...taskRecord(company), ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }) } as unknown as Record<string, unknown>);
+  db.set({ ...taskRecord(company), ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }) });
   db.set({ pk: `DEVTASK#${TASK_A}`, sk: `PERSON#${P_GALE}`, schemaVersion: 1, personId: P_GALE, developerId: GALE_ID, name: "Gale GitHub", method: "github", issuer: GH, subject: "gh-1234", createdAt: CREATED });
   db.set({ pk: `DEVTASK#${TASK_A}`, sk: `PERSON_SUBJECT#${GALE_ID}`, schemaVersion: 1, personId: P_GALE, developerId: GALE_ID, createdAt: CREATED });
   db.set({ pk: `DEVTASK#${TASK_A}`, sk: "PEOPLE", schemaVersion: 1, ...(options.people ?? { revision: 3, orphaned: false, people: [GALE("owner")] }) });
@@ -240,9 +240,9 @@ describe("the row People writes is the row the readers use", () => {
     await h.add("owner");
     const { store, load } = readerStore(h);
     await load();
-    await expect(involvedTaskIds({ store, companyId: COMPANY_A as never }, { companyId: COMPANY_A, personId: WREN_ID })).resolves.toEqual([TASK_A]);
-    await expect(involvedTaskIds({ store, companyId: COMPANY_B as never }, { companyId: COMPANY_B, personId: WREN_ID })).resolves.toEqual([]);
-    await expect(involvedTaskIds({ store, companyId: COMPANY_A as never }, { companyId: COMPANY_A, personId: IVY_ID })).resolves.toEqual([]);
-    await expect(involvedTaskIds({ store, companyId: COMPANY_A as never }, { companyId: COMPANY_B, personId: WREN_ID })).resolves.toEqual([]);
+    await expect(involvedTaskIds({ store, companyId: COMPANY_A }, { companyId: COMPANY_A, personId: WREN_ID })).resolves.toEqual([TASK_A]);
+    await expect(involvedTaskIds({ store, companyId: COMPANY_B }, { companyId: COMPANY_B, personId: WREN_ID })).resolves.toEqual([]);
+    await expect(involvedTaskIds({ store, companyId: COMPANY_A }, { companyId: COMPANY_A, personId: IVY_ID })).resolves.toEqual([]);
+    await expect(involvedTaskIds({ store, companyId: COMPANY_A }, { companyId: COMPANY_B, personId: WREN_ID })).resolves.toEqual([]);
   });
 });
