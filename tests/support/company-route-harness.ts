@@ -5,7 +5,7 @@ import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 
 export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects",
-  "GET /v1/dev/client/repositories", "POST /v1/dev/client/projects",
+  "GET /v1/dev/client/repositories", "POST /v1/dev/client/projects", "POST /v1/dev/client/projects/bulk", "GET /v1/dev/client/repositories/available",
   "GET /v1/dev/client/projects/{id}", "POST /v1/dev/access",
   "GET /v1/dev/tasks/{taskId}/events", "GET /v1/dev/tasks/{taskId}/readers",
   "GET /v1/dev/tasks/{taskId}/messages", "GET /v1/dev/tasks/{taskId}/comments", "GET /v1/dev/tasks/{taskId}/diff",

@@ -24,6 +24,13 @@ import {
   AGENTX_CLI_CLIENT_ID,
   CLIENT_SCOPES,
   CreateClientProjectRequestSchema,
+  CreateClientProjectsRequestSchema,
+  BulkCreateClientProjectsRequestSchema,
+  RepositoryChoicesQuerySchema,
+  type CreateClientProjectsRequest,
+  type BulkCreateClientProjectsRequest,
+  type BulkCreateClientProjectsResponse,
+  type ClientRepositoryChoicesResponse,
   type CreateClientProjectRequest,
   type ClientRepositoriesResponse,
   type ClientProjectMemberChangeResponse,
@@ -200,6 +207,12 @@ export interface DeveloperRouteDependencies {
   createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
   clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
+  /** Guided onboarding PR 6: one project from several repositories (all on the caller's company's installations, or nothing is created). */
+  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest) => Promise<{ name: string; latestRevision: number }>;
+  /** Guided onboarding PR 6: one project per repository, with one result row each. */
+  createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest) => Promise<BulkCreateClientProjectsResponse>;
+  /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
+  clientRepositoryChoices?: (developerId: string, query: { q?: string | undefined; limit?: number | undefined; after?: string | undefined }) => Promise<ClientRepositoryChoicesResponse>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -1115,6 +1128,9 @@ async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: s
 }
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
+/** Guided onboarding PR 6: one project per repository, and the repository picker. */
+const CLIENT_PROJECTS_BULK = "/v1/dev/client/projects/bulk";
+const CLIENT_REPOSITORY_CHOICES = "/v1/dev/client/repositories/available";
 const CLIENT_CODE_SETTINGS = /^\/v1\/dev\/client\/projects\/([^/]+)\/code-settings$/;
 
 /**
@@ -1174,16 +1190,46 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
-  if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
+  // Guided onboarding PR 6: one project per repository, and the repository picker; the same scope and the same role as creating one.
+  const bulk = url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST";
+  const choosing = url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET";
+  if (creating || bulk || choosing || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
     const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
     requireRouteScope(route, creator);
     if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+    if (choosing) {
+      if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
+      if (!query.success || new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) throw agentXError("CONFIG_INVALID", "invalid repository search: use q, limit (1 to 100) and after, once each");
+      return await deps.clientRepositoryChoices(creator.developerId, query.data) satisfies ClientRepositoryChoicesResponse;
+    }
+    if (bulk) {
+      if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
+      if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+      const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data);
+      logDeveloperEvent({ event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
+        ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
+        created: answer.results.filter((row) => row.outcome === "created").length });
+      return answer satisfies BulkCreateClientProjectsResponse;
+    }
     if (!creating) {
       if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
     }
+    const body = jsonBody(request);
+    // Guided onboarding PR 6: a body naming `repositories` makes one project of them all; any other body is the single-repository create, as before.
+    if (body !== null && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "repositories")) {
+      if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      const many = CreateClientProjectsRequestSchema.safeParse(body);
+      if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
+      const created = await deps.createClientProjects(creator.developerId, many.data);
+      logDeveloperEvent({ event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
+        ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }) });
+      return readClientProject(deps, creator.developerId, created.name, creator.companyId);
+    }
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-    const parsed = CreateClientProjectRequestSchema.safeParse(jsonBody(request));
+    const parsed = CreateClientProjectRequestSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     const created = await deps.createClientProject(creator.developerId, parsed.data);
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));

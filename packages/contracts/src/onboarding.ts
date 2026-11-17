@@ -28,6 +28,19 @@ export const CreateProjectBodySchema = z.object({
     if (body[single] !== undefined && body[list] !== undefined) context.addIssue({ code: "custom", path: [list], message: `give ${single} or ${list}, not both` });
   }
 });
+/**
+ * Guided onboarding PR 6: the app's several-repository create (CreateProjectBodySchema stays the one-repository create, unchanged). `separate` absent
+ * or false: ONE project holding every repository (Code's POST /v1/dev/client/projects with `repositories`), named `name` or after the first one;
+ * true: one project per repository, each named after it (Code's POST /v1/dev/client/projects/bulk), with no `name`. 1 to 32 repositories, no repeats.
+ */
+const REPOSITORIES_MAX = 32;
+export const CreateProjectsBodySchema = z.object({
+  requestId: z.string().uuid(),
+  repositories: z.array(CreateProjectBodySchema.shape.repository).min(1).max(REPOSITORIES_MAX)
+    .refine((list) => new Set(list.map((value) => value.toLowerCase())).size === list.length, "repositories must be different"),
+  separate: z.boolean().optional(),
+  name: AgentXNameSchema.optional(),
+}).strict().refine((body) => !(body.separate === true && body.name !== undefined), { path: ["name"], message: "separate projects are named after their repositories" });
 export const CreateOrganizationInviteBodySchema = z.object({ requestId: z.string().uuid(), role: z.enum(["admin", "member"]), email: z.string().trim().email().max(254).optional() }).strict();
 export const OrganizationInviteResponseSchema = z.object({ inviteUrl: z.string() });
 export const GithubConnectResponseSchema = z.object({ installUrl: z.string(), expiresAt: z.string(), orgName: z.string().optional(), ownerName: z.string().optional() });
