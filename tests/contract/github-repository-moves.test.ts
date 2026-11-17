@@ -106,6 +106,15 @@ describe("installation_repositories removed", () => {
     expect((await send("installation_repositories", removed(101, "acme", ...names.slice(0, REPOSITORY_MOVES_MAX)), { delivery: D(2) })).statusCode).toBe(200);
     expect(marks(db, A)).toHaveLength(REPOSITORY_MOVES_MAX);
   });
+  it("added clears more repositories than the limit that removed may mark (in chunks), and one odd project address does not make the repos row unreadable", async () => {
+    const { db, bindings } = await bound(); const send = webhook(db, bindings);
+    const names = Array.from({ length: REPOSITORY_MOVES_MAX + 50 }, (_, index) => `acme/r${index}`);
+    for (let from = 0; from < names.length; from += REPOSITORY_MOVES_MAX) await send("installation_repositories", removed(101, "acme", ...names.slice(from, from + REPOSITORY_MOVES_MAX)), { delivery: D(10 + from / REPOSITORY_MOVES_MAX) });
+    expect(marks(db, A)).toHaveLength(names.length);
+    expect((await send("installation_repositories", added(101, "acme", ...names), { delivery: D(2) })).statusCode).toBe(200);
+    expect(marks(db, A)).toEqual([]);
+    for (const url of ["https://github.com/acme/web?tab=readme", "https://github.com/acme/web#x", "https://github.com/acme/web!"]) expect((await repos(db, A, "alpha", url)).items[0]).not.toHaveProperty("access");
+  });
   it("before the backfill marker, an unbound installation is the implicit company's, as for pull request webhooks", async () => {
     const db = new FakeDynamoDb({ seed: 22 }); const bindings = new GithubInstallationBindings(db, "State", () => NOW);
     expect((await webhook(db, bindings)("installation_repositories", removed(404, "legacy", "legacy/web"))).statusCode).toBe(200);

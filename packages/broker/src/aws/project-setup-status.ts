@@ -34,7 +34,7 @@ import { journalKey, setupPartition } from "../core/setup-agent/keys.js";
 import { taskKey, taskPointerKey } from "../core/task-flow/keys.js";
 import { taskPointerKey as legacyTaskPointerKey } from "../developer/task-records.js";
 import { recordInCompany } from "./company-check.js";
-import { readRepositoryMoves } from "./github-credentials.js";
+import { readRepositoryMoves, repositoryFullName } from "./github-credentials.js";
 import { projectSettingsKey } from "./project-settings.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
@@ -161,7 +161,7 @@ async function reposRow(input: SetupStatusInput, client: Client, companyId: OrgI
     return [{ name: repository["name"], defaultBranch: repository["defaultBranch"], ...(full === undefined ? {} : { fullName: full }) }];
   }).slice(0, 32);
   // A mark that cannot be read, or does not read back as this company's own, refuses the whole read (the fixed unreadable answer), never a guess.
-  const moves = await readRepositoryMoves(client, input.tableName, companyId, items.flatMap((item) => (item.fullName === undefined ? [] : [item.fullName]))).catch(() => { throw unreadable(); });
+  const moves = await readRepositoryMoves(client, input.tableName, companyId, items.flatMap((item) => (item.fullName === undefined || !repositoryFullName.safeParse(item.fullName).success ? [] : [item.fullName]))).catch(() => { throw unreadable(); });
   const marked = items.map((item) => { const access = item.fullName === undefined ? undefined : moves.get(item.fullName.toLowerCase()); return access === undefined ? item : { ...item, access }; });
   return { state: marked.length > 0 ? "done" : "needs_you", count: marked.length, items: marked };
 }

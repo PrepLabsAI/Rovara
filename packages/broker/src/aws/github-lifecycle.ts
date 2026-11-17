@@ -68,7 +68,7 @@ type LifecycleBindings = Pick<GithubInstallationBindings, "markLifecycle" | "mar
  * `repository` (transferred marks the old name). Order: size, signature (GITHUB_WEBHOOK_SIGNATURE_INVALID, so the route's secret re-read applies), delivery id, payload; then the write. A storage
  * fault answers 503 (GitHub does not redeliver App webhooks on its own; an operator may redeliver it, and the delivery id keeps a binding mark single; a repository mark is a plain overwrite).
  * Known limit: deliveries are applied in arrival order, so a suspend and unsuspend that arrive reversed leave the binding suspended until a claim (fails safe: tasks refused), and a repository
- * "removed" arriving after its "added" leaves the mark until the next "added". Answers ACCEPTED with the delivery id whatever the outcome, and logs ids and counts only.
+ * "removed" arriving after its "added" leaves the mark until the next "added" (a mark is also left when the App is reinstalled; it is display only). Answers ACCEPTED with the delivery id whatever the outcome, and logs ids and counts only.
  */
 export async function handleGithubInstallationWebhook(input: {
   rawBody: string;
@@ -105,7 +105,8 @@ async function handleRepositoriesListed(input: { bindings: LifecycleBindings; lo
   const event = parsed.data;
   const listed = event.action === "removed" ? event.repositories_removed : event.repositories_added;
   if (listed === undefined) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
-  if (listed.length > REPOSITORY_MOVES_MAX) throw new GithubWebhookRefusal("GitHub webhook names too many repositories");
+  // Marking more than the limit refuses the whole delivery (never a part of it). Clearing is safe at any size (the body is capped at 1 MB), so it goes in chunks of the limit.
+  if (event.action === "removed" && listed.length > REPOSITORY_MOVES_MAX) throw new GithubWebhookRefusal("GitHub webhook names too many repositories");
   const names = [...new Set(listed.map((entry) => entry.full_name.toLowerCase()))];
   if (names.length === 0) return { status: "ACCEPTED", deliveryId };
   const account = event.installation.account.login;
@@ -114,8 +115,11 @@ async function handleRepositoriesListed(input: { bindings: LifecycleBindings; lo
       const outcome = await input.bindings.markRepositories(event.installation.id, names.map((fullName) => ({ fullName, reason: "removed" as const })), deliveryId, account);
       if (outcome.outcome === "marked") companyLog(outcome.companyId, input.log)({ event: "github.repositories_marked", installationId: event.installation.id, reason: "removed", count: outcome.count, actor: "github", deliveryId });
     } else {
-      const outcome = await input.bindings.clearRepositories(event.installation.id, names, deliveryId, account);
-      if (outcome.outcome === "cleared") companyLog(outcome.companyId, input.log)({ event: "github.repositories_cleared", installationId: event.installation.id, count: outcome.count, actor: "github", deliveryId });
+      for (let from = 0; from < names.length; from += REPOSITORY_MOVES_MAX) {
+        const chunk = names.slice(from, from + REPOSITORY_MOVES_MAX);
+        const outcome = await input.bindings.clearRepositories(event.installation.id, chunk, deliveryId, account);
+        if (outcome.outcome === "cleared") companyLog(outcome.companyId, input.log)({ event: "github.repositories_cleared", installationId: event.installation.id, count: outcome.count, actor: "github", deliveryId });
+      }
     }
   } catch { throw new GithubWebhookRetryableError("GitHub repository state could not be saved"); }
   return { status: "ACCEPTED", deliveryId };
