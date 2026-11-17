@@ -136,6 +136,17 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/github", requires: "full" },
   // Guided onboarding PR 3: disconnect one installation (live owner, fresh step-up, refused while the company's projects use it).
   { method: "DELETE", path: "/v1/dev/company/github/{installationId}", requires: "full" },
+  // Guided onboarding PR 4: Add to Slack (live owner/admin; disconnect owner + step-up) and the company's Slack connection (any member).
+  { method: "POST", path: "/v1/dev/company/slack/install", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/slack/install/complete", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/slack/disconnect", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/slack", requires: "full" },
+  // Guided onboarding PR 5: a project's Slack channel (live owner/admin or the project's admin to link, unlink and pick; any member to read).
+  { method: "GET", path: "/v1/dev/company/slack/channels", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/slack/projects/{project}/channel/check", requires: "full" },
   // Guided onboarding PR 14 (DEC 254n item 1): the company's own engine model (read: any member; change: live owner/admin, checked against the gateway's live list for the company).
   { method: "GET", path: "/v1/dev/company/engine-model", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/engine-model", requires: "full" },
@@ -183,6 +194,12 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // How we work (read only): no named scope reads a project's settings, so full access only.
   { method: "GET", path: "/v1/app/projects/{project}/how-we-work", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/playbook", requires: "full" },
+  // Guided onboarding L2-3: a project's setup run (it spends model money and runs the repository's commands): full access only, then a live company owner or admin, or the project's
+  // administrator, to change; a project user may read it.
+  { method: "GET", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/stop", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
