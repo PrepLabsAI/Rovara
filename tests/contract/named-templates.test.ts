@@ -2,7 +2,7 @@ import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
-import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
@@ -245,7 +245,8 @@ describe("named environment templates", () => {
       const template = normalizedTemplate(stack);
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutDnsFirewall(template)
         : stack.stackName === "agentx-staging-access" ? withoutDnsFirewallAccess(template)
-        : stack.stackName === "agentx-staging-control-plane" ? withoutGithubSignIn(withoutSwitchoverControlPlaneParity(template), "staging") : template;
+        // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
+        : stack.stackName === "agentx-staging-control-plane" ? withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(template)), "staging") : template;
       expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
     }, 120_000);
   }

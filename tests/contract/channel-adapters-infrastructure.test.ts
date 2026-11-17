@@ -43,7 +43,7 @@ describe("channel adapters infrastructure", () => {
     // DEC 254h: a named broker has the flag packed in AGENTX_SETTINGS (ca), not as a variable of its own.
     const brokerVariables = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
     expect(brokerVariables).not.toHaveProperty("CHANNEL_ADAPTERS");
-    expect(unpackedBrokerVariables(brokerVariables).CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
+    expect(unpackedBrokerVariables(brokerVariables, named as never).CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
   });
 
   it("gives the legacy stack the built-in Slack adapter and (spec 064) the registry behind ChannelAdapters, off by default", () => {

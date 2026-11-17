@@ -50,7 +50,7 @@ import { build as bundle } from "esbuild";
 import { LAMBDA_BUNDLE_OPTIONS, checkLambdaBundles, lambdaLoadError } from "./lambda-load-check.js";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
 import { environmentE2eFeatureRuntimeCatalogId, environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
-import { BROKER_NAMES_VARIABLE } from "../packages/contracts/src/broker-environment.js";
+import { BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_VARIABLE } from "../packages/contracts/src/broker-environment.js";
 import { E2E_AGENT_RECOMMENDED_MODELS, eligibleE2EAgentModel } from "../packages/contracts/src/e2e-agent-models.js";
 import { KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, isKeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest } from "../packages/model-runtime/src/e2e-route-derive.js";
@@ -280,7 +280,7 @@ interface LambdaSpec {
  * installer's setup page is in another stack and is not here; a unit test keeps this list equal to the infra's entries.
  */
 export const CONTROL_PLANE_LAMBDAS = {
-  broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker.ts" },
+  broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker-handler.ts" },
   dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/broker/src/aws/dispatcher.ts" },
   "plan-evidence": { logicalId: "PlanEvidence3615C4CB", entry: "packages/broker/src/aws/plan-evidence-handler.ts" },
   "outbox-publisher": { logicalId: "OutboxPublisherD572F72E", entry: "packages/broker/src/aws/outbox-publisher.ts" },
@@ -906,7 +906,7 @@ export function liftDeclaredSettings(
     const deployedVariables = asRecord(asRecord(deployedResource.Properties?.Environment)?.Variables) ?? {};
     const headVariables = asRecord(asRecord(headResource.Properties?.Environment)?.Variables);
     // ENV-ROOM: a head Broker whose environment is packed derives its prefixes from AGENTX_ENV, so there is no variable to lift; that needs the control-plane stack whole.
-    if (headVariables !== undefined && !(variable in headVariables) && BROKER_NAMES_VARIABLE in headVariables) throw new Error(`head's ${logicalId} derives ${variable} from its environment's name (its environment is packed, ENV-ROOM), so it cannot be lifted alone; deploy the control-plane stack whole instead`);
+    if (headVariables !== undefined && !(variable in headVariables) && (BROKER_NAMES_VARIABLE in headVariables || BROKER_NAMES_PARAMETER_VARIABLE in headVariables)) throw new Error(`head's ${logicalId} derives ${variable} from its environment's name (its environment is packed, ENV-ROOM), so it cannot be lifted alone; deploy the control-plane stack whole instead`);
     if (headVariables === undefined || !(variable in headVariables)) throw new Error(`head's ${logicalId} does not set ${variable}; stop for review`);
     const { [variable]: headValue, ...headRest } = headVariables;
     const { [variable]: deployedValue, ...deployedRest } = deployedVariables;
@@ -1936,7 +1936,8 @@ export function deployedFeatureCatalogId(deployed: CfnTemplate, env: string): st
   const variables = (deployed.Resources?.[CONTROL_PLANE_LAMBDAS.broker.logicalId]?.Properties?.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables;
   const literal = variables?.[CATALOG_ID_VARIABLE];
   if (typeof literal === "string") return literal;
-  if (literal === undefined && variables?.[BROKER_NAMES_VARIABLE] !== undefined) return environmentE2eFeatureRuntimeCatalogId(env);
+  // ENV-ROOM 2: a broker whose names are in their SSM parameter is packed too.
+  if (literal === undefined && (variables?.[BROKER_NAMES_VARIABLE] !== undefined || variables?.[BROKER_NAMES_PARAMETER_VARIABLE] !== undefined)) return environmentE2eFeatureRuntimeCatalogId(env);
   throw new Error(`the deployed Broker has no literal ${CATALOG_ID_VARIABLE}, so the feature-verifier catalog cannot be found`);
 }
 

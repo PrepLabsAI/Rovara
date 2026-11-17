@@ -1,4 +1,5 @@
-// ENV-ROOM (core switch-on blocker, 2026-11-15): a named environment's broker is given its names packed (AGENTX_NAMES), its constrained settings packed (AGENTX_SETTINGS) and
+// ENV-ROOM (core switch-on blocker, 2026-11-15): a named environment's broker is given its names packed (AGENTX_NAMES, since ENV-ROOM 2 in its SSM parameter, read by the
+// handler), its constrained settings packed (AGENTX_SETTINGS) and
 // nothing it can derive from the environment's name, and hydrateBrokerEnvironment puts every value back. This proves, on the synthesized named template, that what the broker
 // ends up with is exactly what CloudFormation would have put in each variable before:
 //  - each packed name's piece is followed back to its resource, and the variable is compared with that resource's Ref or attribute as CloudFormation gives it (the resolver's
@@ -9,11 +10,13 @@
 //  - the hydrated broker has every variable the legacy template's broker is given, so no reader goes without.
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
-import { describe, expect, it } from "vitest";
-import { BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, DERIVED_BROKER_VARIABLES, coreDispatchDeadLetterName, coreDispatchQueueName, type BrokerNameSpec } from "@agentx/contracts";
+import { beforeAll, describe, expect, it } from "vitest";
+import { BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, DERIVED_BROKER_VARIABLES, coreDispatchDeadLetterName, coreDispatchQueueName, type BrokerNameSpec } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { hydrateBrokerEnvironment, type MutableEnvironment } from "../../packages/broker/src/aws/broker-environment.js";
+import { loadBrokerNamesParameter } from "../../packages/broker/src/aws/broker-names-parameter.js";
+import { brokerNamesParameterOf } from "../support/broker-environment-template.js";
 import { DEPLOY_PARAMETER_VALUES, RESOLVER_ACCOUNT, RESOLVER_REGION, controlPlaneOf } from "../support/lambda-environment-size.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -75,8 +78,14 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
     const given: MutableEnvironment = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, resolver.text(value)]));
     const env0 = { ...given, AWS_REGION: RESOLVER_REGION };
     const hydrated: MutableEnvironment = { ...env0 };
-    hydrateBrokerEnvironment(hydrated);
-    const names = packedPieces(raw[BROKER_NAMES_VARIABLE]);
+    // ENV-ROOM 2: the names come from their SSM parameter, as the handler reads it (its value resolved the way CloudFormation writes it), then hydration runs as before.
+    const parameter = brokerNamesParameterOf(template as never, String(raw[BROKER_NAMES_PARAMETER_VARIABLE]));
+    const parameterValue = resolver.text((template.Resources[parameter.id]!.Properties as { Value: unknown }).Value);
+    beforeAll(async () => {
+      await loadBrokerNamesParameter(hydrated, async () => ({ type: "String", value: parameterValue }));
+      hydrateBrokerEnvironment(hydrated);
+    });
+    const names = packedPieces(parameter.names);
     const settings = packedPieces(raw[BROKER_SETTINGS_VARIABLE]);
     const naming = environmentNaming(env);
 

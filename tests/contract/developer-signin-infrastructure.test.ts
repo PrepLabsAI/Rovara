@@ -9,7 +9,7 @@ import { withoutCoreModelAccessRoute } from "../support/core-model-access-templa
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
-import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 
 skipLambdaBundling();
@@ -288,7 +288,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
   it("passes the developer configuration to the broker and DeveloperIdentity", () => {
     const functions = Object.fromEntries(ofType(named, "AWS::Lambda::Function").map(([id, resource]) => [
       // ENV-ROOM: the broker's packed variables, unpacked (tests/support/broker-environment-template.ts).
-      withoutHash(id), Object.keys(unpackedBrokerVariables((resource.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables ?? {})),
+      withoutHash(id), Object.keys(unpackedBrokerVariables((resource.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables ?? {}, named as never)),
     ]));
     expect(functions.Broker).toEqual(expect.arrayContaining(["DEVELOPER_TOKEN_ISSUER", "AGENTX_ENV", "DEVELOPER_SIGNIN_TABLE_NAME", "DEVELOPER_IDENTITY_FUNCTION_ARN", "SLACK_TEAM_ID", "DEVELOPER_SIGNIN_SLACK", "DEVELOPER_OIDC_ISSUER"]));
     expect(functions.Broker).not.toContain("SLACK_SECRET_ARN");
@@ -298,7 +298,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
       "DEVELOPER_OIDC_DISPLAY_NAME", "DEVELOPER_OIDC_SECRET_ID",
     ]));
     // FR-045: both functions get each method's enabled-since cutoff straight from its parameter.
-    const variables = (prefix: string) => unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables);
+    const variables = (prefix: string) => unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named as never);
     expect(variables("Broker")).toMatchObject({
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
       AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
@@ -559,7 +559,7 @@ describe("task-token key and membership IAM", () => {
     expect(JSON.stringify(legacy)).not.toContain("TaskTokenKey");
     expect(JSON.stringify(legacy)).not.toContain("TASK_TOKEN_KEY_ARN");
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
-      const variables = unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables);
+      const variables = unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named as never);
       // ENV-ROOM: the broker is given the key's id packed and builds the same ARN (tests/contract/broker-environment.test.ts); the sign-in function gets the ARN whole.
       expect(variables.TASK_TOKEN_KEY_ARN).toEqual(prefix === "Broker" ? { Ref: id } : roleArn(id));
       if (prefix === "DeveloperSignInFunction") expect(variables.DEVELOPER_TOKEN_KEY_ARN).toEqual(roleArn(signingKey(named, "DeveloperSignInTokenKey")[0]));
@@ -567,7 +567,8 @@ describe("task-token key and membership IAM", () => {
   });
 
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
-    const remainder = structuredClone(named);
+    // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
+    const remainder = withoutBrokerNamesParameter(structuredClone(named));
     withoutCoreModelAccessRoute(remainder);
     const [taskId] = signingKey(remainder, "DeveloperSignInTaskTokenKey");
     delete remainder.Resources[taskId];
@@ -700,6 +701,8 @@ describe("task key deployment boundary coverage", () => {
       "AWS::SecretsManager::Secret": "secretsmanager", "AWS::SNS::Topic": "sns", "AWS::SNS::TopicPolicy": "sns", "AWS::CloudWatch::Alarm": "cloudwatch",
       "AWS::ApiGatewayV2::Api": "apigateway", "AWS::ApiGatewayV2::Integration": "apigateway", "AWS::ApiGatewayV2::Authorizer": "apigateway",
       "AWS::ApiGatewayV2::Route": "apigateway", "AWS::ApiGatewayV2::Stage": "apigateway", "AWS::Scheduler::Schedule": "scheduler", "AWS::Scheduler::ScheduleGroup": "scheduler", "AWS::StepFunctions::StateMachine": "states",
+      // ENV-ROOM 2: the broker names parameter.
+      "AWS::SSM::Parameter": "ssm",
     };
     for (const type of new Set(Object.values(named.Resources).map((r) => r.Type))) {
       let action: string;
@@ -1491,8 +1494,10 @@ function probe(tuples: AccessTuple[], principal: string, action: string, resourc
 }
 
 const BROKER_ARN_ESTIMATE = 144;
-const BROKER_RESOLVED_INLINE_SIZE = 6114; // All inline documents after realistic ARN expansion.
-const BROKER_INLINE_ESTIMATE = 7492; // This replaces the R3R4 pin.
+// ENV-ROOM 2 (2026-11-17): the names parameter's ARN joins the GetParameters statement (+147 estimated), paid for by merging the broker's two lambda:InvokeFunction and two
+// states:StartExecution statements (-68 each) and dropping the two inert stream actions from the State statement (-50). Was 6114 / 7492.
+const BROKER_RESOLVED_INLINE_SIZE = 6026; // All inline documents after realistic ARN expansion.
+const BROKER_INLINE_ESTIMATE = 7453; // This replaces the R3R4 pin.
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
   r2: 600, // State stream reads and callback-key read; EC2 belongs to the dispatcher.
@@ -1610,9 +1615,16 @@ const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).l
 const githubSignInTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/developer-github-??????","{}"],
 ];
+/**
+ * ENV-ROOM 2 (2026-11-17): the broker may read its names parameter (one exact ARN, by the action its other settings use), and no longer holds dynamodb:GetRecords and
+ * dynamodb:GetShardIterator on the State table and its indexes: those actions act only on a stream ARN, so on these resources they granted nothing. The merged invoke and
+ * StartExecution statements give exactly the tuples they gave before.
+ */
+const envRoom2Added: AccessTuple[] = [["role:BrokerServiceRole", "Allow", "ssm:GetParameters", "arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/broker-names", "{}"]];
+const envRoom2Removed = new Set(["dynamodb:GetRecords", "dynamodb:GetShardIterator"].flatMap((action) => ["table:State", "table:State/index/*"].map((resource) => JSON.stringify(["role:BrokerServiceRole", "Allow", action, resource, "{}"]))));
 const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
-].sort(byText);
+].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple))).concat(envRoom2Added).sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {

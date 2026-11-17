@@ -39,7 +39,7 @@ import { CoreEngine } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
-import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
+import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { REQUALIFY_CONTEXT_KEY, REQUALIFY_DEFAULT_HOUR_UTC, RuntimeRequalify } from "./runtime-requalify.js";
@@ -195,7 +195,8 @@ export class ControlPlaneStack extends Stack {
 
     // ENV-ROOM (infra/lib/broker-names.ts): a named environment's broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides; the legacy
     // template passes every variable whole, as before.
-    const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker.ts", {
+    // ENV-ROOM 2: the entry reads a named environment's broker names from their SSM parameter before it loads broker.ts (packages/broker/src/aws/broker-handler.ts).
+    const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker-handler.ts", {
       ...(naming.env !== undefined ? {} : {
         STATE_TABLE_NAME: state.tableName,
         AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
@@ -223,9 +224,10 @@ export class ControlPlaneStack extends Stack {
     }
     const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     if (naming.env !== undefined) {
-      // Exactly the two grantReadWriteData statements' action/resource cross product.
+      // The two grantReadWriteData statements' action/resource cross product, less dynamodb:GetRecords and dynamodb:GetShardIterator (ENV-ROOM 2, IAM room for the names
+      // parameter): those act only on a stream ARN (`table/<name>/stream/<label>`), which neither resource here is, so on these resources they granted nothing.
       broker.addToRolePolicy(new iam.PolicyStatement({
-        actions: ["dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:GetRecords", "dynamodb:GetShardIterator"],
+        actions: ["dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable"],
         resources: [state.tableArn, `${state.tableArn}/index/*`],
       }));
       // Keep the existing grantReadWrite action strings and both resources verbatim.
@@ -274,14 +276,18 @@ export class ControlPlaneStack extends Stack {
       ...Object.entries(WORKER_SETTING_PARAMETERS).filter(([key]) => key !== "e2eAgentModel" && key !== "modelFallback").map(([, name]) => `${naming.ec2.workerSettingsPrefix}${name}`),
     ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
     const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
+    // ENV-ROOM 2: a named broker reads its names from their one SSM parameter (infra/lib/broker-names.ts) with this same action, so the parameter's ARN joins this statement
+    // rather than adding one (the broker's inline policy has little room: tests/contract/developer-signin-infrastructure.test.ts, broker IAM headroom).
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: naming.env === undefined ? swebenchParameterArns : [...swebenchParameterArns, brokerNamesParameterArn(naming.env)] }));
+    // Named: the broker's two StartExecution grants (this and the session deleter's, sessions.connectBroker) are one statement, for the same room. Legacy: as before.
+    if (naming.env === undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
     // Spec 061: a stored plan's cited code is read from GitHub in the background, with retries, so a slow or failing
     // GitHub never holds up the plan. The broker starts the job right after the plan commits (an async invoke), and
     // its recovery sweep starts any row that is due; the job needs nothing from the broker. 150 seconds: the code is
     // read inside 120, and the rest is for attaching the bundle and cleaning up. 1,024 MB: files are read in memory.
     // Developer tasks, and so their plans, exist only in named environments; the legacy templates gain nothing.
+    let planEvidenceFunction: lambda.Function | undefined;
     if (naming.env !== undefined) {
       const planEvidence = packagedFunction(this, "PlanEvidence", "packages/broker/src/aws/plan-evidence-handler.ts", {
         STATE_TABLE_NAME: state.tableName,
@@ -317,7 +323,8 @@ export class ControlPlaneStack extends Stack {
       planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvidenceBundles", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("private/*/plan-documents/*.evidence.*.json")] }));
       // The GitHub App's key, to read files as the broker does.
       planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "GitHubAppKey", actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
-      planEvidence.grantInvoke(broker);
+      // Named only (this block): the broker's invoke of this function and of the sign-in function are one statement, added with the sign-in function below (ENV-ROOM 2 room).
+      planEvidenceFunction = planEvidence;
       addBrokerName(broker, naming, "planEvidenceFunction", planEvidence.functionName, planEvidence.functionName);
     }
 
@@ -939,6 +946,13 @@ export class ControlPlaneStack extends Stack {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
+      // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
+      // The same resources CDK's grantInvoke gives each: the function and its versions and aliases.
+      if (naming.env !== undefined) {
+        if (planEvidenceFunction === undefined) throw new Error("a named control plane has the plan evidence function");
+        const invoked = [planEvidenceFunction, developerSignIn.function];
+        broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: invoked.flatMap((fn) => [fn.functionArn, `${fn.functionArn}:*`]) }));
+      }
       // Spec 063 FR-005: the admin client's own rule for who is an administrator, read at company sign-in.
       developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
@@ -1215,6 +1229,7 @@ export class ControlPlaneStack extends Stack {
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
+    if (naming.env !== undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [sessions.deleter.stateMachineArn, swebenchStateMachineArn] }));
     // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (named environments only: the core engine construct exists only there, so the legacy template is unchanged).
     const coreEngine = this.node.tryFindChild("CoreEngineJobs");
     if (naming.env !== undefined && coreEngine instanceof CoreEngine) {

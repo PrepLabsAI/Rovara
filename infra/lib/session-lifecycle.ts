@@ -376,7 +376,8 @@ export class SessionLifecycle extends Construct {
     // ENV-ROOM (broker-names.ts): a named environment's broker gets the two state machines' names packed; the legacy template passes the ARNs whole, as before.
     addBrokerName(broker, this.naming, "provisionerStateMachine", this.provisioner.stateMachineName, this.provisioner.stateMachineArn);
     addBrokerName(broker, this.naming, "deleterStateMachine", this.deleter.stateMachineName, this.deleter.stateMachineArn);
-    this.deleter.grantStartExecution(broker);
+    // Named: the control plane grants this with the broker's other StartExecution, in one statement (control-plane.ts, ENV-ROOM 2's IAM room). Legacy: as before.
+    if (this.naming.env === undefined) this.deleter.grantStartExecution(broker);
   }
 
   private connectExecutions(fn: lambda.Function): void {
