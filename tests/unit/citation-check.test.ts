@@ -372,6 +372,14 @@ describe("review fixes (REVIEW-1)", () => {
     expect(codeNamesOf("Then orderTotal runs.")).toEqual(["orderTotal"]);
   });
 
+  it("REVIEW-2 M-A: a run of name characters longer than the shapes' 200-character bound drops the sentence; a non-string sentence is not a sentence", async () => {
+    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
+    const cite10 = [ref(10, quoteOf(10))];
+    const claims = [`${"a".repeat(250)}Limit`, `${"a".repeat(250)}_x`, `${"a".repeat(250)}.ts`, `${"a".repeat(250)}()`].map((name) => ({ sentence: `See ${name} here.`, citations: cite10 }));
+    const result = await checkClaims(read, [...claims, { sentence: 42 as unknown as string, citations: cite10 }, { sentence: `${"a".repeat(200)} ok`, citations: cite10 }], { commits, now: fixedNow });
+    expect(result.claims.map((claim) => claim.dropped ?? "kept")).toEqual(["code_name_too_long", "code_name_too_long", "code_name_too_long", "code_name_too_long", "not_a_sentence", "kept"]);
+  });
+
   it("L5: a hostile repository name is inert when shown", () => {
     const shown = shownCitation({ repo: "@everyone <img src=x> https://evil.example", path: "a.ts", commit: SHA, line: 1, quote: quoteOf(1) });
     expect(shown.repo).not.toMatch(/@everyone|<img|https:\/\/evil/u);

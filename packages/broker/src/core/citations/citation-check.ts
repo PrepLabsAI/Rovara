@@ -361,7 +361,7 @@ export function hasCodeToken(quote: string, name: string): boolean {
 export interface ClaimToCheck { sentence: string; citations: readonly CitationRef[] }
 
 /** Why a sentence was dropped; fixed words, never the sentence's or the file's text. */
-export type ClaimDropReason = "uncited" | "source_not_found" | "unreadable" | "code_name_not_in_quote" | "too_many_code_names" | "sentence_too_long";
+export type ClaimDropReason = "uncited" | "not_a_sentence" | "source_not_found" | "unreadable" | "code_name_not_in_quote" | "too_many_code_names" | "code_name_too_long" | "sentence_too_long";
 
 /** A sentence survives only when it has at least one citation, every source was found, and (prose) every code name it mentions is in one of its quotes. Sentences are returned as given: the caller makes them inert for the surface it shows them on. */
 export interface ClaimResult { sentence: string; kept: boolean; dropped?: ClaimDropReason; results: CitationResult[] }
@@ -375,15 +375,17 @@ export interface ClaimsCheck {
 
 /** Why a claim cannot stand, or undefined when it can. */
 function dropReasonOf(claim: ClaimToCheck, results: readonly CitationResult[], prose: boolean): ClaimDropReason | undefined {
+  if (typeof claim.sentence !== "string") return "not_a_sentence";
   if (results.length === 0) return "uncited";
   if (results.some((result) => result.outcome === "unreadable")) return "unreadable";
   if (results.some((result) => result.outcome !== "source_found")) return "source_not_found";
   if (!prose) return undefined;
-  if (typeof claim.sentence !== "string" || claim.sentence.length > PROSE_SENTENCE_MAX_CHARS) return "sentence_too_long";
+  if (claim.sentence.length > PROSE_SENTENCE_MAX_CHARS) return "sentence_too_long";
+  // The code-name shapes stop at 200 characters, so a longer run of name characters could hide a name from them: such a sentence is not kept. (Linear: one character class.)
+  if (/[A-Za-z0-9_$./-]{201}/u.test(visibleText(claim.sentence))) return "code_name_too_long";
   const names = codeNamesOf(claim.sentence);
   if (names.length > PROSE_CODE_NAMES_MAX) return "too_many_code_names";
   const quotes = claim.citations.map((citation) => asText(citation.quote));
-  // (`claim.sentence` is a string here: the length check above refuses anything else.)
   return names.every((name) => quotes.some((quote) => hasCodeToken(quote, name))) ? undefined : "code_name_not_in_quote";
 }
 
