@@ -9,7 +9,6 @@ import { ticketSessionStartExtras } from "../../../packages/broker/src/aws/hoste
 import { claimIntakeItem, markIntakeStarted } from "../../../packages/broker/src/core/intake/store.js";
 import { saveTicketUpdates, THREAD_ROOT_EDIT_GAP_MS } from "../../../packages/broker/src/core/ticket-updates/index.js";
 import { answerEntriesOf, appendTaskLog, createTaskLogHooks, questionEntriesOf, readTaskLog } from "../../../packages/broker/src/core/task-log/index.js";
-import { taskSessionId } from "../../../packages/broker/src/core/sessions/create.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
 import { linearCommentIdFor } from "../../../packages/broker/src/plugins/tracker/linear/api.js";
 
@@ -27,7 +26,7 @@ function fakeLinear() {
   const companyOfToken = (header: string): string => header.replace("Bearer tok-", "");
   const impl: typeof fetch = async (_input, init) => {
     const company = companyOfToken(String((init?.headers as Record<string, string>)["authorization"] ?? (init?.headers as Record<string, string>)["Authorization"] ?? ""));
-    const body = JSON.parse(String(init?.body)) as { query: string; variables: Record<string, any> };
+    const body = JSON.parse(init?.body as string) as { query: string; variables: Record<string, never> };
     const reply = (data: unknown) => new Response(JSON.stringify({ data }), { status: 200 });
     const q = body.query;
     if (q.includes("issue(id:")) {
@@ -62,13 +61,15 @@ async function world(options: { planSummary?: boolean } = {}) {
   const linear = fakeLinear();
   const clock = { now: Date.parse("2026-11-17T12:00:00.000Z") };
   const logs: Array<Record<string, unknown>> = [];
-  const hooks = { [A]: createTaskLogHooks(), [B]: createTaskLogHooks() };
+  const hookTable = new Map<string, ReturnType<typeof createTaskLogHooks>>([[A, createTaskLogHooks()], [B, createTaskLogHooks()]]);
+  const hook = (company: OrgId) => hookTable.get(company)!;
   const summaries: Array<[string, string]> = [];
   const handlersOf = (company: OrgId) => hostedTicketUpdates({
-    companyId: company, store, connections: { accessToken: async (asked: string) => `tok-${asked}` }, fetch: linear.fetch, now: () => clock.now, log: (entry) => logs.push(entry), taskLog: hooks[company],
+    companyId: company, store, connections: { accessToken: async (asked: string) => `tok-${asked}` }, fetch: linear.fetch, now: () => clock.now, log: (entry) => logs.push(entry), taskLog: hook(company),
     ...(options.planSummary === true ? { planSummaryOf: async (org: OrgId, taskId: string) => { summaries.push([org, taskId]); return { revision: 1, needed: "Add a cap to campaigns", lines: ["Add a field", "Check it"], risk: "medium", estimate: "$4 to $10" }; } } : {}),
   });
-  const handlers = { [A]: handlersOf(A), [B]: handlersOf(B) };
+  const handlerTable = new Map<string, ReturnType<typeof handlersOf>>([[A, handlersOf(A)], [B, handlersOf(B)]]);
+  const handlersFor = (company: OrgId) => handlerTable.get(company)!;
   const at = (): string => new Date(clock.now).toISOString();
   const setLevel = (company: OrgId, project: string, level: TicketUpdateLevel | undefined) => saveTicketUpdates({ store, now: () => clock.now }, {
     orgId: company, project, requestId: randomUUID(), by: "owner", settings: { comments: true, changeStatus: false, statuses: {}, ...(level === undefined ? {} : { level }) },
@@ -84,16 +85,16 @@ async function world(options: { planSummary?: boolean } = {}) {
     await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, companyId: company, project, sessionId, title: "Refunds fail", developerId: principal.personId } });
     const table = { store, now: () => clock.now };
     const itemId = intakeItemIdOf("linear", key);
-    await claimIntakeItem(table, { orgId: company, project, itemId, channel: "tracker", system: "linear", id: key, url, title: "Refunds fail", requester: { display: "Dana", standing: "unlinked" }, state: "starting", startedBy: "holder" });
-    await markIntakeStarted(table, company, project, itemId, { holder: "holder", taskId, sessionId, requester: { display: "Dana", standing: "unlinked" } });
-    if (options.shared === true) await store.put({ item: { ...agentSessionKey(company, sessionId as never, "SHARE#1"), principal: { kind: "org" }, level: "view", sharedBy: { developerId: "a".repeat(64), name: "Owner" }, sharedAt: at() } });
+    await claimIntakeItem(table, { orgId: company, project, itemId, channel: "tracker", system: "linear", id: key, url, title: "Refunds fail", requester: { display: "Dana", standing: "outsider" }, state: "starting", startedBy: "holder" });
+    await markIntakeStarted(table, company, project, itemId, { holder: "holder", taskId, sessionId, requester: { display: "Dana", standing: "outsider" } });
+    if (options.shared === true) await store.put({ item: { ...agentSessionKey(company, sessionId, "SHARE#1"), principal: { kind: "org" }, level: "view", sharedBy: { developerId: "a".repeat(64), name: "Owner" }, sharedAt: at() } });
     const milestone = (kind: CodeMilestone["kind"], over: Partial<CodeMilestone> = {}): CodeMilestone => ({ kind, orgId: company, taskId, sessionId, at: at(), text: "x", ...over });
     const log = (entries: Parameters<typeof appendTaskLog>[1]["entries"]) => appendTaskLog(store, { orgId: company, taskId, entries });
-    const send = async (m: CodeMilestone) => { for (const handler of handlers[company]) await handler.on(m); };
+    const send = async (m: CodeMilestone) => { for (const handler of handlersFor(company)) await handler.on(m); };
     return { taskId, sessionId, milestone, log, send, company };
   }
   const roots = (company: OrgId) => [...linear.comments.values()].filter((c) => c.company === company && c.parent === undefined);
-  return { store, linear, clock, logs, hooks, handlers, setLevel, task, at, roots, summaries };
+  return { store, linear, clock, logs, hook, handlersFor, setLevel, task, at, roots, summaries };
 }
 type World = Awaited<ReturnType<typeof world>>;
 const qa = (w: World, round = 1) => [...questionEntriesOf({ round, at: w.at(), questions: QUESTIONS }), ...answerEntriesOf({ round, at: w.at(), by: "Ana Ruiz", surface: "slack", questions: QUESTIONS, answers: [{ questionId: "q1", optionId: "a" }] })];
@@ -109,7 +110,7 @@ describe("hosted: status only is today's one-shot comment, byte for byte", () =>
       expect(w.linear.writes).toEqual([{ company: A, kind: "create", id: linearCommentIdFor(A, `ticket_update:${t.taskId}:started`), parent: undefined, body: 'Rovara started work on this ticket: "Refunds fail".' }]);
       // No thread row, no root, no edit; the log entries never reach the ticket.
       expect(await w.store.get({ pk: `DEVTASK#${t.taskId}`, sk: "TICKET_THREAD" })).toBeUndefined();
-      await w.hooks[A].changed(t.taskId);
+      await w.hook(A).changed(t.taskId);
       expect(w.linear.writes).toHaveLength(1);
     }
   });
@@ -123,10 +124,10 @@ describe("hosted: a task only its owner can see never goes above status only", (
       const t = await w.task(A, "payments", "ENG-1");
       await t.log(qa(w));
       await t.send(t.milestone("started"));
-      await w.hooks[A].changed(t.taskId);
+      await w.hook(A).changed(t.taskId);
       w.clock.now += THREAD_ROOT_EDIT_GAP_MS + 1;
       await t.log(questionEntriesOf({ round: 2, at: w.at(), questions: QUESTIONS }));
-      await w.hooks[A].changed(t.taskId);
+      await w.hook(A).changed(t.taskId);
       await t.send(t.milestone("merged"));
       expect(w.linear.writes.map((write) => write.kind)).toEqual(["create", "create"]);
       expect(w.linear.writes.map((write) => write.parent)).toEqual([undefined, undefined]);
@@ -146,7 +147,7 @@ describe("hosted: a shared task goes up to the project's level", () => {
     expect(w.linear.writes[0]).toMatchObject({ company: A, kind: "create", parent: undefined });
     await t.log(qa(w));
     w.clock.now += THREAD_ROOT_EDIT_GAP_MS + 1;
-    await w.hooks[A].changed(t.taskId);
+    await w.hook(A).changed(t.taskId);
     const all = [...w.linear.comments.values()];
     expect(all.filter((c) => c.parent === undefined)).toHaveLength(1);
     expect(all.filter((c) => c.parent !== undefined).map((c) => c.body).join("\n")).toContain("Ana Ruiz");
@@ -205,8 +206,8 @@ describe("hosted: two companies and two projects", () => {
     await ta.log(qa(w));
     await tb.log(qa(w));
     w.clock.now += THREAD_ROOT_EDIT_GAP_MS + 1;
-    await w.hooks[A].changed(ta.taskId);
-    await w.hooks[B].changed(tb.taskId);
+    await w.hook(A).changed(ta.taskId);
+    await w.hook(B).changed(tb.taskId);
     expect(w.roots(A)).toHaveLength(1);
     expect(w.roots(B)).toHaveLength(1);
     expect(new Set(w.linear.writes.map((write) => write.company))).toEqual(new Set([A, B]));
@@ -220,8 +221,8 @@ describe("hosted: two companies and two projects", () => {
     const tb = await w.task(B, "payments", "ENG-1", { shared: true });
     await tb.log(qa(w));
     const before = (await readTaskLog(w.store, B, tb.taskId)).length;
-    for (const handler of w.handlers[A]) await handler.on(tb.milestone("started"));
-    await w.hooks[A].changed(tb.taskId);
+    for (const handler of w.handlersFor(A)) await handler.on(tb.milestone("started"));
+    await w.hook(A).changed(tb.taskId);
     expect(w.linear.writes).toEqual([]);
     expect((await readTaskLog(w.store, B, tb.taskId)).length).toBe(before);
     expect(await w.store.get({ pk: `DEVTASK#${tb.taskId}`, sk: "TICKET_THREAD" })).toBeUndefined();
@@ -231,7 +232,7 @@ describe("hosted: two companies and two projects", () => {
     const w = await world();
     await w.setLevel(B, "payments", "full");
     const tb = await w.task(B, "payments", "ENG-1", { shared: true });
-    for (const handler of w.handlers[A]) await handler.on({ ...tb.milestone("started"), orgId: A });
+    for (const handler of w.handlersFor(A)) await handler.on({ ...tb.milestone("started"), orgId: A });
     expect(w.linear.writes).toEqual([]);
   });
 
@@ -255,13 +256,13 @@ describe("hosted: the log's hook", () => {
     await saveTicketUpdates({ store: w.store, now: () => w.clock.now }, { orgId: A, project: "payments", requestId: randomUUID(), by: "owner", settings: { comments: false, changeStatus: false, statuses: {}, level: "full" } });
     const t = await w.task(A, "payments", "ENG-1", { shared: true });
     await t.log(qa(w));
-    await w.hooks[A].changed(t.taskId);
+    await w.hook(A).changed(t.taskId);
     expect(w.linear.writes).toEqual([]);
   });
 
   it("a hook told of a task that does not exist writes nothing and does not throw", async () => {
     const w = await world();
-    await expect(w.hooks[A].changed(randomUUID())).resolves.toBeUndefined();
+    await expect(w.hook(A).changed(randomUUID())).resolves.toBeUndefined();
     expect(w.linear.writes).toEqual([]);
   });
 });

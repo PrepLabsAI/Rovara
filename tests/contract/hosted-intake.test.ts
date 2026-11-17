@@ -2,9 +2,9 @@
 // (`intakePortsOf` over a memory store) through `createHostedIntake`, the real developer dispatcher for the waiting-ticket routes, and a fake Linear behind the fetch seam.
 // Two companies throughout: company B's Linear workspace has a team id and a Linear user id that are the SAME strings as company A's.
 import { createHmac, randomUUID } from "node:crypto";
-import { DEFAULT_TICKET_UPDATES, NEW_HOSTED_TICKET_UPDATES } from "@agentx/contracts";
+import { DEFAULT_TICKET_UPDATES, NEW_HOSTED_TICKET_UPDATES, ticketUpdatesSettingsKey } from "@agentx/contracts";
 import { readTicketUpdates, saveTicketUpdates } from "../../packages/broker/src/core/ticket-updates/index.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { intakeItemIdOf, type AuditEvent, type OrgId, type Principal } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
@@ -442,7 +442,7 @@ describe("L4-LP2: a project's first tracker team saves the new-hosted ticket-upd
   });
 
   it("two companies: the same project name in each is seeded separately; a company whose tasks do not start on the core saves nothing", async () => {
-    const w = await world({ onCore: [A] } as never);
+    const w = await world({ onCore: [A] });
     expect(await w.intake.seedTicketUpdates(A, "hotel", MAYA)).toBe("seeded");
     expect(await w.intake.seedTicketUpdates(B, "hotel", BO)).toBe("no_intake");
     expect((await settingsOf(w, B, "hotel")).revision).toBe(0);
@@ -451,5 +451,27 @@ describe("L4-LP2: a project's first tracker team saves the new-hosted ticket-upd
     expect(await both.intake.seedTicketUpdates(B, "hotel", BO)).toBe("seeded");
     expect((await settingsOf(both, A, "hotel")).revision).toBe(1);
     expect((await settingsOf(both, B, "hotel")).revision).toBe(1);
+  });
+
+  it("a team read that fails counts as 'had a team' (nothing is seeded); a seed that fails never fails the team PUT; an item that does not parse is kept, not overwritten", async () => {
+    const w = await world();
+    w.as(PERSON);
+    const real = w.connections.teamPick.bind(w.connections);
+    w.connections.teamPick = async () => { throw new Error("unreadable"); };
+    await w.project("india", A);
+    expect((await settingsOf(w, A, "india")).revision).toBe(0);
+    w.connections.teamPick = real;
+    const seeded = vi.spyOn(w.intake, "seedTicketUpdates").mockRejectedValue(new Error("store down"));
+    {
+      await w.project("juliet", A);
+      expect(seeded).toHaveBeenCalledTimes(1);
+      expect((await settingsOf(w, A, "juliet")).revision).toBe(0);
+      expect((await w.call("GET", `${BASE}/projects/juliet`)).status).toBe(200);
+    }
+    seeded.mockRestore();
+    const key = ticketUpdatesSettingsKey(A, "kilo");
+    await w.store.put({ item: { ...key, entityType: "TICKET_UPDATES", orgId: A, project: "kilo", settings: { level: "nonsense" }, revision: 4 } });
+    expect(await w.intake.seedTicketUpdates(A, "kilo", MAYA)).toBe("kept");
+    expect((await w.store.get(key))!["revision"]).toBe(4);
   });
 });

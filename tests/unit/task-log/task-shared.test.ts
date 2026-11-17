@@ -1,7 +1,7 @@
 // L4-LP2: whether a hosted task is shared beyond its owner (`taskSharedOf`), from the company's own session and People records. It is the seam that keeps an owner-only task at `status_only` on a tracker whose comments
 // everyone on the ticket sees. Fail closed: only a plain "someone else was given this task" is true.
 import { describe, expect, it } from "vitest";
-import { agentSessionKey, type OrgId } from "@agentx/contracts";
+import { agentSessionKey, type JsonValue, type OrgId } from "@agentx/contracts";
 import { taskSharedOf } from "../../../packages/broker/src/core/task-log/index.js";
 import { taskSessionId } from "../../../packages/broker/src/core/sessions/create.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
@@ -12,13 +12,13 @@ const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const OTHER_TASK = "9c68ac5c-fbb8-4c03-98cd-7eb97ca8d0f7";
 const DEV = (n: string): string => n.repeat(64);
 
-async function put(store: MemoryDocumentStore, taskId: string, company: OrgId, over: Record<string, unknown> = {}): Promise<void> {
+async function put(store: MemoryDocumentStore, taskId: string, company: OrgId, over: Record<string, JsonValue> = {}): Promise<void> {
   await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, companyId: company, project: "web", sessionId: taskSessionId(taskId), title: "t", ...over } });
 }
 const people = (store: MemoryDocumentStore, taskId: string, entries: Array<{ developerId: string; role: string }>, over: Record<string, unknown> = {}) =>
   store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: entries, ...over } });
 const share = (store: MemoryDocumentStore, company: OrgId, taskId: string, n: number, principal: Record<string, unknown>) =>
-  store.put({ item: { ...agentSessionKey(company, taskSessionId(taskId) as never, `SHARE#${String(n)}`), principal, level: "view", sharedBy: { developerId: DEV("a"), name: "Owner" }, sharedAt: "2026-11-17T10:00:00.000Z" } });
+  store.put({ item: { ...agentSessionKey(company, taskSessionId(taskId), `SHARE#${String(n)}`), principal, level: "view", sharedBy: { developerId: DEV("a"), name: "Owner" }, sharedAt: "2026-11-17T10:00:00.000Z" } });
 
 describe("a task is shared beyond its owner only when the company's records say someone else has it", () => {
   it("an owner-only task is not shared: no People list, no share, no takeover", async () => {

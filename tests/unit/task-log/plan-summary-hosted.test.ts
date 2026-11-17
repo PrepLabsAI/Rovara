@@ -42,16 +42,16 @@ const gate = (risk = "medium") => ({ requirement: async () => ({ requirement: { 
 describe("the plan summary source reads the task's own plan only", () => {
   it("gives what the card says (needed, lines, the gate's risk, the estimate) for this company's open task at the plan review", async () => {
     const w = await world();
-    const facts = await planSummarySourceOf({ store: w.store, artifacts: w.blobs as never, gate: gate("medium") })(A, TASK);
+    const facts = await planSummarySourceOf({ store: w.store, artifacts: w.blobs, gate: gate("medium") })(A, TASK);
     expect(facts).toMatchObject({ needed: "Add a cap to campaigns", lines: ["Add a spend field", "Refuse a start above it", "Show the cap on the page"], risk: "medium", estimate: "$4 to $10" });
   });
 
   it("is nothing for a closed task, another company's task, or a task that waits on nothing", async () => {
     const closed = await world({ closed: true });
-    expect(await planSummarySourceOf({ store: closed.store, artifacts: closed.blobs as never, gate: gate() })(A, TASK)).toBeUndefined();
+    expect(await planSummarySourceOf({ store: closed.store, artifacts: closed.blobs, gate: gate() })(A, TASK)).toBeUndefined();
     const other = await world({ company: B });
-    expect(await planSummarySourceOf({ store: other.store, artifacts: other.blobs as never, gate: gate() })(A, TASK)).toBeUndefined();
-    expect(await planSummarySourceOf({ store: new MemoryDocumentStore(), artifacts: other.blobs as never, gate: gate() })(A, TASK)).toBeUndefined();
+    expect(await planSummarySourceOf({ store: other.store, artifacts: other.blobs, gate: gate() })(A, TASK)).toBeUndefined();
+    expect(await planSummarySourceOf({ store: new MemoryDocumentStore(), artifacts: other.blobs, gate: gate() })(A, TASK)).toBeUndefined();
   });
 
   it("never reads an object that is not the task's own: a pointer to another owner's document (on a bucket several companies share) reads nothing", async () => {
@@ -59,17 +59,17 @@ describe("the plan summary source reads the task's own plan only", () => {
     const w = await world({ objectKey: foreign });
     const reads: string[] = [];
     const blobs = { get: async (key: string) => { reads.push(key); return new TextEncoder().encode(MARKDOWN); } };
-    expect(await planSummarySourceOf({ store: w.store, artifacts: blobs as never, gate: gate() })(A, TASK)).toBeUndefined();
+    expect(await planSummarySourceOf({ store: w.store, artifacts: blobs, gate: gate() })(A, TASK)).toBeUndefined();
     expect(reads).toEqual([]);
     // The same document under the task's own prefix is read (a positive control: the read path ran).
     const own = await world();
-    expect(await planSummarySourceOf({ store: own.store, artifacts: { get: async (key: string) => { reads.push(key); return new TextEncoder().encode(MARKDOWN); } } as never, gate: gate() })(A, TASK)).toBeDefined();
+    expect(await planSummarySourceOf({ store: own.store, artifacts: { get: async (key: string) => { reads.push(key); return new TextEncoder().encode(MARKDOWN); } }, gate: gate() })(A, TASK)).toBeDefined();
     expect(reads).toEqual([OWN_KEY]);
   });
 
   it("is nothing when the document does not match its digest", async () => {
     const w = await world({ stored: { [OWN_KEY]: "# Something else\n- changed\n- bytes\n" } });
-    expect(await planSummarySourceOf({ store: w.store, artifacts: w.blobs as never, gate: gate() })(A, TASK)).toBeUndefined();
+    expect(await planSummarySourceOf({ store: w.store, artifacts: w.blobs, gate: gate() })(A, TASK)).toBeUndefined();
   });
 });
 
