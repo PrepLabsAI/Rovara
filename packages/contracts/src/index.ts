@@ -293,6 +293,8 @@ export * from "./sagemaker-words.js";
 export * from "./pii-scan.js";
 export * from "./sagemaker-recording.js";
 export * from "./test-answer-labels.js";
+// TE-A6 (DEC 254zt): which change most likely broke each failing test, the pure join.
+export * from "./failure-attribution.js";
 export * from "./seed-script-lock.js";
 export * from "./generated/aws-emulator-services.js";
 export * from "./aws-emulator-service-keys.js";
