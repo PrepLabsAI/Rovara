@@ -8,6 +8,8 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
 import { PENDING_PK, attentionRecipients, inboxPartition, queueAttention, type PeopleRecipients } from "../../packages/broker/src/core/notify/index.js";
+import { createNoticeService } from "../../packages/broker/src/services/notices.js";
+import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { PEOPLE_RECIPIENTS_MAX, taskPeopleRecipients } from "../../packages/broker/src/aws/task-people-recipients.js";
 
@@ -168,5 +170,27 @@ describe("taskPeopleRecipients (the hosted core's reader of the task's People)",
     await w.move("IMPLEMENT", "RUNNING", { workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" });
     expect(await w.pending()).toEqual(sorted([OWNER_ID, idOf(BOB), idOf(CAT)]));
     expect(await w.inbox(idOf(EVE))).toBe(0);
+  });
+});
+
+describe("the notice service passes the People reader to the queue", () => {
+  const through = async (peopleOf?: () => Promise<PeopleRecipients>) => {
+    const store = new MemoryDocumentStore();
+    await store.transact(createTaskSessionItems({ orgId: ORG, sessionId: SESSION, taskId: TASK, project: "web", agent: AGENT, title: "Add retry", owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 }));
+    const notices = createNoticeService({ store, registry: createAdapterRegistry(), now: () => new Date(NOW), log: () => undefined, inbox: true, ...(peopleOf === undefined ? {} : { peopleOf }) });
+    const facts: { value: SessionTaskFacts } = { value: { companyId: ORG, taskId: TASK, project: "web", ownerDeveloperId: OWNER_ID, runStatus: "RUNNING", workflow: { stage: "IMPLEMENT", state: "RUNNING" }, step: "Coding", updatedAt: T0 } };
+    let ms = NOW - 3_600_000;
+    const deps: SummaryDependencies = { store, facts: { read: async () => facts.value }, cost: { costUsd: async () => 0 }, now: () => new Date(ms), log: () => undefined, onChange: [async (change) => { await notices.queue(change); }] };
+    for (const [stage, state] of [["IMPLEMENT", "RUNNING"], ["PLAN_REVIEW", "WAITING"]] as const) { facts.value = { ...facts.value, workflow: { stage, state } }; ms += 1_000; await refreshSessionSummary(deps, ORG, SESSION); }
+    return (inbox: string) => store.query({ pk: inboxPartition(ORG, inbox) }).then((page) => page.items.length);
+  };
+
+  it("keeps a co-owner's inbox row on the hosted core (nothing can message anyone), and none when no reader is given", async () => {
+    const inbox = await through(async () => PEOPLE);
+    expect(await inbox(idOf(BOB))).toBe(1);
+    expect(await inbox(OWNER_ID)).toBe(1);
+    const plain = await through();
+    expect(await plain(idOf(BOB))).toBe(0);
+    expect(await plain(OWNER_ID)).toBe(1);
   });
 });
