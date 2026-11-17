@@ -816,6 +816,13 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // Guided onboarding PR 7: the Linear OAuth app signs its webhook bodies itself; the broker verifies the HMAC, the timestamp and the workspace's binding. Named environments only.
+    if (naming.env !== undefined) new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
+      apiId: api.ref,
+      routeKey: "POST /v1/linear/webhooks",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
     // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
     new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
       apiId: api.ref,

@@ -136,6 +136,15 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/github", requires: "full" },
   // Guided onboarding PR 3: disconnect one installation (live owner, fresh step-up, refused while the company's projects use it).
   { method: "DELETE", path: "/v1/dev/company/github/{installationId}", requires: "full" },
+  // Guided onboarding PR 7: connect Linear by OAuth (live owner/admin), the connection's status (any member), disconnect (live owner, fresh step-up), and a project's Linear team
+  // (owner/admin or the project's admin).
+  { method: "POST", path: "/v1/dev/company/linear/connect", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/linear/complete", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   // Guided onboarding PR 14 (DEC 254n item 1): the company's own engine model (read: any member; change: live owner/admin, checked against the gateway's live list for the company).
   { method: "GET", path: "/v1/dev/company/engine-model", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/engine-model", requires: "full" },

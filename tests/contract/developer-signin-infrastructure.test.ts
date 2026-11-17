@@ -566,6 +566,9 @@ describe("task-token key and membership IAM", () => {
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     const remainder = structuredClone(named);
     withoutCoreModelAccessRoute(remainder);
+    // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
+    expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });
+    delete remainder.Resources["LinearWebhookRoute"];
     const [taskId] = signingKey(remainder, "DeveloperSignInTaskTokenKey");
     delete remainder.Resources[taskId];
     const aliases = ofType(remainder, "AWS::KMS::Alias").filter(([, r]) => r.Properties.AliasName === "alias/agentx/staging/task-tokens");
