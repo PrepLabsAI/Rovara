@@ -160,7 +160,7 @@ describe("PEOPLE for a task with no Slack share", () => {
       errorOf(getTaskPeople(refused.peopleDeps, GALE_CALLER, TASK_A)),
     ]);
     expect(new Set(answers.map((error) => `${error.code}|${error.message}`)).size).toBe(1);
-    expect(answers[0]!.code).toBe("RUNTIME_UNAVAILABLE");
+    expect(answers[0].code).toBe("RUNTIME_UNAVAILABLE");
   });
 
   it("makes an unshared task's list only while the task is still unshared", async () => {
@@ -298,7 +298,7 @@ describe("Slack identities on a Slack-shared task keep needing the channel to ow
     createTaskPeopleDisplayAdmission: () => ({
       assertOpen: () => undefined, admitIdentity: () => undefined, noteNativeIdentity: () => undefined, close: () => undefined,
       proof: async () => { throw new Error("not used"); }, directory: async () => { throw new Error("not used"); },
-    }) as TaskPeopleDisplayAdmission,
+    }),
     listTaskPeople: async () => [],
   });
 
