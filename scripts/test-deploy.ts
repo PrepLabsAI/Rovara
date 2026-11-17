@@ -1439,7 +1439,6 @@ function assertRepositoryExists(context: ApplyContext, repository: string): void
   }
 }
 
-/** Builds the repo, then bundles and loads each Lambda `units` moves (scripts/lambda-load-check.ts); throws, changing nothing, if one does not load. */
 /** What the load check bundles and loads for these Lambdas: each entry, and each module it loads only later (`<unit>:<module file>`). */
 export function lambdaLoadEntries(units: readonly LambdaUnit[]): Array<{ name: string; entry: string }> {
   return units.flatMap((unit) => {
@@ -1448,6 +1447,7 @@ export function lambdaLoadEntries(units: readonly LambdaUnit[]): Array<{ name: s
   });
 }
 
+/** Builds the repo, then bundles and loads each Lambda `units` moves (scripts/lambda-load-check.ts); throws, changing nothing, if one does not load. */
 export async function assertLambdasLoad(context: ApplyContext, units: readonly DeployUnit[], requalifyIsInstalled = false): Promise<void> {
   runNpmBuild(context);
   // `requalify-infra` adds the renewal's Lambda with its own change set, but it runs from this bundle all the same.
