@@ -20,6 +20,8 @@ describe("taskOwnerView", () => {
   it("cleans and caps the name like a People name: no address, at most 80 characters, a fixed word when nothing readable is left", () => {
     expect(taskOwnerView({ developerId: HEX, developerName: "x".repeat(300) })!.name.length).toBeLessThanOrEqual(80);
     expect(JSON.stringify(taskOwnerView({ developerId: HEX, developerName: "maya@example.com" }))).not.toContain("@");
+    // An address the cap would cut in half is hidden whole before the cap, never left as a half address.
+    expect(JSON.stringify(taskOwnerView({ developerId: HEX, developerName: `${"x".repeat(72)} maya@example.com` }))).not.toContain("@");
     expect(taskOwnerView({ developerId: HEX, developerName: "   " })).toStrictEqual({ developerId: HEX, name: TASK_OWNER_UNNAMED });
     expect(taskOwnerView({ developerId: HEX, developerName: 7 })).toStrictEqual({ developerId: HEX, name: TASK_OWNER_UNNAMED });
   });
