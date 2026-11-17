@@ -8,7 +8,7 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, RepositoryEdgesSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText, EvidenceBaselineSchema,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, FAILURE_CAUSES_ARTIFACT, FAILURE_CAUSES_FILE_MAX_BYTES, FailureCausesFileSchema, EvidenceRawCheckSchema, type FailureCauses, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, RepositoryEdgesSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText, EvidenceBaselineSchema,
   addBrowserEvidenceToPack, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening, type EvidenceBaseline, type RawBaseline, type RawRepositoryBaseline,
 } from "@agentx/contracts";
@@ -18,7 +18,7 @@ import { browserEvidenceCapturedDigests, browserEvidenceStoredRefs, storeBrowser
 import type { EvidenceBlobStore } from "./evidence-blob-store.js";
 import type { PinnedDependency } from "./dependency-evidence.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
-import { NO_PROD_DENY, dataGuardScanWorks, guardPack, guardRaw, guardV2Parts, type DataGuardScan } from "./evidence-guard.js";
+import { NO_PROD_DENY, dataGuardScanWorks, evidenceFindings, guardPack, guardRaw, guardV2Parts, type DataGuardScan } from "./evidence-guard.js";
 import { kindOfRawCheck } from "./evidence-risk.js";
 
 export interface EvidenceTask { ownerKey: string; workspaceId: string; taskId: string }
@@ -185,6 +185,46 @@ function withWeakeningFacts(raw: EvidenceRaw, facts: ReadonlyMap<string, TestPro
   return merged.success ? merged.data : raw;
 }
 
+/**
+ * TE-A6 (DEC 254zt): the change that most likely broke each failing test of a check, read from the operation's `failure-causes.json`: an object under the operation's own key prefix, bounded, parsed against its schema and bound
+ * to this code's digest. Informational and UNTRUSTED like the raw file: the caller merges it into the raw file BEFORE the data guard and the builder, so both check its test ids and paths like every other text. Anything else is none.
+ */
+async function readFailureCauses(deps: KeepEvidenceDeps, input: KeepEvidenceInput): Promise<ReadonlyMap<string, FailureCauses>> {
+  // A fixed word says why a file that was there was not used; a fault never says anything else (nothing from the file).
+  const unused = (reason: "unreadable" | "other_code"): ReadonlyMap<string, FailureCauses> => { deps.log?.("evidence.failure_causes_not_used", { reason }); return new Map(); };
+  try {
+    const artifact = (await deps.actions.artifacts(input.task.workspaceId, input.operationId)).find((entry) => entry.name === FAILURE_CAUSES_ARTIFACT);
+    const prefix = `private/${input.task.ownerKey}/${input.task.workspaceId}/${input.operationId}/`;
+    if (artifact === undefined) return new Map();
+    if (!artifact.objectKey.startsWith(prefix)) return unused("unreadable");
+    const text = await deps.actions.readArtifact(artifact.objectKey, FAILURE_CAUSES_FILE_MAX_BYTES + 1);
+    if (Buffer.byteLength(text, "utf8") > FAILURE_CAUSES_FILE_MAX_BYTES) return unused("unreadable");
+    const parsed = FailureCausesFileSchema.safeParse(JSON.parse(text) as unknown);
+    if (!parsed.success) return unused("unreadable");
+    if (parsed.data.candidateDigest !== input.candidateDigest) return unused("other_code");
+    return new Map(parsed.data.checks.map((check) => [check.checkId, check.causes] as const));
+  } catch {
+    return unused("unreadable");
+  }
+}
+
+/**
+ * The raw file with each check's causes put into its `tests` part, each check on its own: a check whose causes do not fit (a cause for a test it does not show failing, a missing one) keeps none, and the others are not
+ * affected. A check that already has some keeps them. The data guard then looks at what was merged: a cause with a finding in it is taken out alone, leaving the check's test names, tail and coverage as they were.
+ */
+function withFailureCauses(raw: EvidenceRaw, causes: ReadonlyMap<string, FailureCauses>, deny: TestEnvProdDeny, scan: DataGuardScan): { raw: EvidenceRaw; guarded: number } {
+  if (causes.size === 0) return { raw, guarded: 0 };
+  let guarded = 0;
+  const checks = raw.checks.map((check) => {
+    const found = causes.get(check.checkId);
+    if (check.tests === undefined || found === undefined || check.tests.failureCauses !== undefined) return check;
+    if (evidenceFindings(found, deny, scan).length > 0) { guarded += 1; return check; }
+    const merged = EvidenceRawCheckSchema.safeParse({ ...check, tests: { ...check.tests, failureCauses: found } });
+    return merged.success ? merged.data : check;
+  });
+  return { raw: { ...raw, checks }, guarded };
+}
+
 /** Assembles and keeps the pack for a verification run. Never throws. */
 export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceInput): Promise<KeepEvidenceResult> {
   // TE-H1: deletes the browser evidence pictures this keep stored, for every way out that writes no pack.
@@ -217,6 +257,9 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     if (parsedRaw !== undefined) {
       // TE-B3: the facts from the run on the original code join the raw file first, so the data guard and the builder check them like every other test name.
       parsedRaw = withWeakeningFacts(parsedRaw, await readWeakeningFacts(deps, input));
+      const withCauses = withFailureCauses(parsedRaw, await readFailureCauses(deps, input), deny, deps.scan);
+      parsedRaw = withCauses.raw;
+      guarded += withCauses.guarded;
       const guard = guardRaw(parsedRaw, deny, deps.scan);
       guarded += guard.dropped.parts;
       rawText = JSON.stringify(guard.raw);
