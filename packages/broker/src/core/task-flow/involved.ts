@@ -1,8 +1,8 @@
 // Web task channel (C5): the "involved" index and the read side of "tasks I'm involved in".
 //
-// A person who was ADDED to someone else's task (a co-owner, a commenter, a viewer) must find it. When People adds a person it writes one involved row for them (`writeInvolvedRow`, called by
-// the People change that makes the person an owner, `developer/task-people.ts`) and deletes it when the person is denied or removed (`deleteInvolvedRow`). The row is only a pointer: it carries ids and the task's creation time, never a
-// title, a project or a status, so a stale row cannot show anything.
+// A person who was ADDED to someone else's task as a co-owner must find it (the list and the decision cards show what a person may act on, the live owner rule). The People change that makes a person an owner
+// puts one involved row for them in its own transaction (`involvedRowPut`, `developer/task-people.ts`) and deletes it when they stop being an owner or are denied (`involvedRowDelete`). The row is only a pointer: it
+// carries ids and the task's creation time, never a title, a project or a status, so a stale row cannot show anything.
 //
 // The read (`GET /v1/dev/tasks?involved=1`) trusts nothing the row says. For every row it reads the live task and asks the live task access (the rule the core's own task read uses for this caller,
 // People roles included) whether this caller may see it now; a person who lost access, was denied, or whose row is stale sees nothing of that task and the row is skipped, never shown. The company comes
