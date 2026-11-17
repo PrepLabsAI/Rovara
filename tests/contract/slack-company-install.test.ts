@@ -608,3 +608,48 @@ describe("review round 1", () => {
     expect(workspaceSecrets(w)).toEqual([]);
   });
 });
+
+describe("review round 2 (removal races)", () => {
+  it("a repeat removal re-drops a token a failed drop left behind, without a second audit row", async () => {
+    const w = world();
+    await w.connect("acme-code");
+    const ctx = { documentClient: w.db, tableName: "State", now: w.nowMs, wiring: w.wiring };
+    const event = { source: "agentx.slack-workspace-removed" as const, teamId: "T0ACME", reason: "app_uninstalled" as const, eventTime: Math.floor(w.nowMs() / 1000) };
+    expect(await handleSlackWorkspaceRemoved(ctx, event)).toEqual({ outcome: "disconnected" });
+    w.sm.store.set(secretName(A, "T0ACME"), JSON.stringify({ botToken: tokenOf("acme-code") }));
+    expect(await handleSlackWorkspaceRemoved(ctx, event)).toEqual({ outcome: "ignored" });
+    expect(await w.tokens.tokenForCompany(A, "T0ACME")).toBeUndefined();
+    expect([...w.db.items.values()].filter((row) => row.entityType === "SLACK_WORKSPACE_AUDIT" && row.actor === "slack")).toHaveLength(1);
+  });
+  it("a reconnect landing between the mark and the drop keeps its new token", async () => {
+    const w = world();
+    await w.connect("acme-code");
+    const later = "2026-11-14T12:00:05.000Z";
+    const racing = { send: async (command: unknown) => {
+      const answer = await w.db.send(command as never);
+      if ((command as { constructor: { name: string } }).constructor.name === "UpdateCommand") {
+        const row = w.db.get(companyInstallKey(A).pk, "WORKSPACE")!;
+        w.db.set({ ...row, status: "connected", connectedAt: later });
+        w.sm.store.set(secretName(A, "T0ACME"), JSON.stringify({ botToken: tokenOf("acme-again") }));
+      }
+      return answer;
+    } };
+    const ctx = { documentClient: racing, tableName: "State", now: w.nowMs, wiring: w.wiring };
+    expect(await handleSlackWorkspaceRemoved(ctx, { source: "agentx.slack-workspace-removed", teamId: "T0ACME", reason: "app_uninstalled", eventTime: Math.floor(w.nowMs() / 1000) }))
+      .toEqual({ outcome: "ignored" });
+    expect(await w.tokens.tokenForCompany(A, "T0ACME")).toBe(tokenOf("acme-again"));
+  });
+  it("disconnecting an operator-bound workspace fails closed if a person's connect record lands meanwhile", async () => {
+    const w = world();
+    await createSlackWorkspaceBindings({ client: w.db, tableName: "State" }).bind(A, "T0ACME", "operator");
+    w.as(PERSON, A, "owner", "session", Math.floor(Date.parse(TIME) / 1000));
+    const secrets = w.identity.secrets;
+    w.identity.secrets = { ...secrets, readToken: async (company, team) => {
+      w.db.set({ ...companyInstallKey(A), entityType: "SLACK_COMPANY_WORKSPACE", companyId: A, teamId: "T0ACME", status: "connected", connectedAt: TIME, connectedBy: PERSON });
+      w.identity.secrets = secrets;
+      return secrets.readToken(company, team);
+    } };
+    expect((await w.disconnect()).status).toBe(503);
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toMatchObject({ companyId: A });
+  });
+});
