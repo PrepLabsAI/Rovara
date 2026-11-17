@@ -11,9 +11,10 @@
 //   modelGateway  the broker's core callback layer mints the task token (the task key in KMS, purpose `task`) and answers the gateway's address.
 //
 // Settings (the function's environment, both the broker and the dispatcher): ROVARA_CORE_MODEL_GATEWAY_URL (the gateway's https origin) and
-// ROVARA_CORE_AGENT_MODEL (an Anthropic model id). Both absent: nothing is built and the model-keys point stays empty, so the registry refuses the switch
+// ROVARA_CORE_AGENT_MODEL (a well-formed model id, DEC 254g: a Claude engine name, or the exact Bedrock id of any model the gateway offers; the gateway is the authority on which it offers and
+// refuses any other at run time). Both absent: nothing is built and the model-keys point stays empty, so the registry refuses the switch
 // by name, as before. One without the other, or either malformed, refuses in fixed words (no value is echoed).
-import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, TASK_KEY_PURPOSE, type InvocationModelRoute, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
+import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, TASK_KEY_PURPOSE, isCoreAgentModelId, type InvocationModelRoute, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
 import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
 import type { ModelGateway } from "../core/model-gateway/route.js";
 import type { TaskTokenDescriber } from "../core/model-gateway/token.js";
@@ -34,9 +35,18 @@ export interface GatewayModelAccessSettings {
 /** Fixed refusal words: they name the variables, never their values. */
 export const GATEWAY_SETTINGS_PARTIAL = `the core engine's model gateway settings are incomplete: set both ${CORE_MODEL_GATEWAY_URL_VARIABLE} and ${CORE_AGENT_MODEL_VARIABLE}, or neither`;
 export const GATEWAY_URL_INVALID = `${CORE_MODEL_GATEWAY_URL_VARIABLE} is not an https origin`;
-export const AGENT_MODEL_INVALID = `${CORE_AGENT_MODEL_VARIABLE} is not an Anthropic model id`;
+export const AGENT_MODEL_INVALID = `${CORE_AGENT_MODEL_VARIABLE} is not a well-formed model id`;
 
-const AGENT_MODEL = /^claude-[a-z0-9][a-z0-9.-]{0,99}$/u;
+/** The gateway's https origin from ROVARA_CORE_MODEL_GATEWAY_URL: `undefined` when unset, or `{ problem }` (fixed words) when it is not exactly an https origin. */
+export function readGatewayUrl(env: NodeJS.ProcessEnv): string | { problem: string } | undefined {
+  const rawUrl = env[CORE_MODEL_GATEWAY_URL_VARIABLE]?.trim() ?? "";
+  if (rawUrl === "") return undefined;
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return { problem: GATEWAY_URL_INVALID }; }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || rawUrl.length > 512
+    || (rawUrl !== url.origin && rawUrl !== `${url.origin}/`)) return { problem: GATEWAY_URL_INVALID };
+  return url.origin;
+}
 
 /** The settings, `undefined` when neither is set, or `{ problem }` in fixed words. */
 export function readGatewayModelAccess(env: NodeJS.ProcessEnv): GatewayModelAccessSettings | { problem: string } | undefined {
@@ -44,12 +54,12 @@ export function readGatewayModelAccess(env: NodeJS.ProcessEnv): GatewayModelAcce
   const rawModel = env[CORE_AGENT_MODEL_VARIABLE]?.trim() ?? "";
   if (rawUrl === "" && rawModel === "") return undefined;
   if (rawUrl === "" || rawModel === "") return { problem: GATEWAY_SETTINGS_PARTIAL };
-  let url: URL;
-  try { url = new URL(rawUrl); } catch { return { problem: GATEWAY_URL_INVALID }; }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || rawUrl.length > 512
-    || (rawUrl !== url.origin && rawUrl !== `${url.origin}/`)) return { problem: GATEWAY_URL_INVALID };
-  if (!AGENT_MODEL.test(rawModel)) return { problem: AGENT_MODEL_INVALID };
-  return { gatewayUrl: url.origin, route: { alias: rawModel, api: "anthropic-messages", catalog: rawModel } };
+  const gatewayUrl = readGatewayUrl(env);
+  if (gatewayUrl === undefined || typeof gatewayUrl !== "string") return { problem: GATEWAY_URL_INVALID };
+  // DEC 254g: any well-formed id (a Claude engine name, or the exact Bedrock id of a model the gateway offers, such as zai.glm-5) on the same Anthropic Messages route; the gateway
+  // translates a non-Claude id to Bedrock Converse, and refuses an id it does not offer (the step then fails as "model not offered"). Code holds no list of its own.
+  if (!isCoreAgentModelId(rawModel)) return { problem: AGENT_MODEL_INVALID };
+  return { gatewayUrl, route: { alias: rawModel, api: "anthropic-messages", catalog: rawModel } };
 }
 
 /** As `readGatewayModelAccess`, but a problem throws its fixed words (a root must never run half-configured). */
