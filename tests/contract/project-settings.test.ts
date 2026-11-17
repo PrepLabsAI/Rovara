@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, it, vi } from "vitest";
-import { resolvePolicy, companyScoped, AgentXError, POLICY_FIELDS, POLICY_FIELD_SURFACES, policyFieldPageOnly } from "@agentx/contracts";
+import { resolvePolicy, companyScoped, AgentXError, IMPLICIT_COMPANY_ID, POLICY_FIELDS, POLICY_FIELD_SURFACES, orgProjectCatalogKey, orgSettingsKey, policyFieldPageOnly, projectRevisionKey } from "@agentx/contracts";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { createProjectSettingsPolicySource } from "../../packages/broker/src/aws/project-settings.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -11,6 +11,11 @@ const now = 1_800_000_000_000;
 const person = "d".repeat(64);
 const path = "/v1/dev/projects/web/settings";
 const install = makeKey("install"); const hookKey = makeKey("hook");
+/** The switch-over layout (staging 2026-11-17): the company's own catalog pointer and selected revision, with NO companyId (the partition key names the company). */
+function partitionProject(db: FakeDynamoDb, companyId: string, name = "web", revision = 1, extra: Record<string, unknown> = {}) {
+  db.set({ ...projectRevisionKey(companyId, name, revision), entityType: "PROJECT", definition: { name, revision } });
+  db.set({ ...orgProjectCatalogKey(companyId, name), entityType: "PROJECT_CATALOG", name, latestRevision: revision, ...extra });
+}
 function world() {
   const db = new FakeDynamoDb();
   let company: string | undefined = COMPANY;
@@ -22,7 +27,11 @@ function world() {
       verifyAccessToken: async () => ({ iss: ISSUER, aud: "agentx-developer", sub: person, amr: "slack", env: "test", sid: "session", iat: now / 1000, exp: now / 1000 + 3600, companyId: COMPANY, ...stepUp }) } };
   db.set({ pk: "SESSION#session", sk: "META", sessionId: "session", developerId: person, amr: "slack", startedAt: new Date(now).toISOString(), endsAt: now / 1000 + 3600 });
   db.set({ pk: `DEVELOPER#${person}`, sk: "META", displayName: "Test", revoked: false });
-  const project = (cid: string) => db.set({ pk: "PROJECT#web", sk: "REV#000000000001", companyId: cid, entityType: "PROJECT", definition: { name: "web", revision: 1 } });
+  // A project in BOTH layouts: the legacy shared row (read only by the implicit company's unmarked path) and the company partition rows, without companyId as the switch-over left them.
+  const project = (cid: string) => {
+    db.set({ pk: "PROJECT#web", sk: "REV#000000000001", companyId: cid, entityType: "PROJECT", definition: { name: "web", revision: 1 } });
+    partitionProject(db, cid);
+  };
   const role = (value = "administrator", cid = COMPANY) => db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", companyId: cid, projectName: "web", role: value });
   project(COMPANY); role();
   const send = vi.spyOn(db, "send");
@@ -132,11 +141,139 @@ it("unreadable and foreign stored settings refuse, never fall back to defaults o
   }
 });
 it("failed project and administrator reads never echo their cause", async () => {
-  for (const command of ["QueryCommand", "GetCommand"]) {
+  // A named company: its catalog pointer, its selected revision and the grant are each a point read.
+  for (const marker of ["PROJECT_CATALOG", "REV#", "MEMBER#"]) {
     const w = world();
+    w.db.injectFault({ command: "GetCommand", match: (input) => JSON.stringify(input).includes(marker), error: { name: "InternalServerError", message: "private-canary" } });
+    await expect(w.call("PUT", { expectedRevision: 0, preset: "balanced" })).rejects.toThrow(/^settings unavailable$/);
+  }
+  // The implicit company's legacy path: the shared project query and its grant read.
+  for (const command of ["QueryCommand", "GetCommand"]) {
+    const w = world(); w.setCompany(IMPLICIT_COMPANY_ID); w.project(IMPLICIT_COMPANY_ID); w.role("administrator", IMPLICIT_COMPANY_ID);
     w.db.injectFault({ command, ...(command === "GetCommand" ? { match: (input) => JSON.stringify(input).includes("MEMBER#") } : {}), error: { name: "InternalServerError", message: "private-canary" } });
     await expect(w.call("PUT", { expectedRevision: 0, preset: "balanced" })).rejects.toThrow(/^settings unavailable$/);
   }
+});
+
+// ---- L2-5 (a): the page reads the company's own partition, like the S3 compliance list (#843). ----
+const STAGING = "/v1/dev/projects/web/settings";
+/** Only the switch-over layout: no shared rows at all, no companyId on any project row, and the broker's grant row without a company (as registration writes it). */
+function stagingWorld(company = COMPANY) {
+  const w = world();
+  for (const row of w.db.find((r) => r.pk === "PROJECT#web" || r.pk === `MEMBER#${person}` || String(r.pk).includes("PROJECT_CATALOG") || String(r.pk).includes("#PROJECT#"))) w.db.delete(String(row.pk), String(row.sk));
+  w.setCompany(company);
+  partitionProject(w.db, company);
+  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator" });
+  return w;
+}
+const drop = (db: FakeDynamoDb, key: { pk: string; sk: string }) => db.delete(key.pk, key.sk);
+const reads = (w: ReturnType<typeof world>) => w.send.mock.calls.map(([c]) => JSON.stringify((c as { input: unknown }).input));
+
+it("a named company with only partition rows (the staging layout) reads and saves its page", async () => {
+  const w = stagingWorld();
+  expect(STAGING).toBe(path);
+  expect(await w.call()).toMatchObject({ revision: 0 });
+  expect(await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).toMatchObject({ revision: 1, overrides: { model_budget_usd: 3 } });
+  expect(await w.call()).toMatchObject({ revision: 1, values: { model_budget_usd: { value: 3, origin: "changed here" } } });
+  // Never the shared project rows, the shared catalog or the implicit company's flag.
+  expect(reads(w).some((input) => /"(:)?pk":"PROJECT#web"/.test(input) || input.includes('"PROJECT_CATALOG"') || input.includes("PROJECT_CATALOG_INDEX"))).toBe(false);
+});
+
+it("a named company never falls back to a shared row: shared-only is the same 'project not found' as unknown", async () => {
+  const w = world();
+  for (const row of w.db.find((r) => String(r.pk).startsWith("ORG#") && (String(r.pk).includes("#PROJECT_CATALOG") || String(r.pk).includes("#PROJECT#")))) w.db.delete(String(row.pk), String(row.sk));
+  w.send.mockClear();
+  for (const method of ["GET", "PUT"]) await expect(w.call(method, { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "NOT_FOUND", statusCode: 404, message: "project not found" });
+  expect(reads(w).some((input) => input.includes("PROJECT_SETTINGS") || /"(:)?pk":"PROJECT#web"/.test(input))).toBe(false);
+});
+
+it("two companies: A never reads or writes B's partition project, and the refusal is the unknown project's", async () => {
+  const w = stagingWorld(B);
+  expect(await w.call()).toMatchObject({ revision: 0 });
+  w.setCompany(COMPANY); w.send.mockClear();
+  const unknown = await w.call("GET").catch((error: unknown) => error);
+  drop(w.db, orgProjectCatalogKey(B, "web"));
+  const missing = await w.call("GET").catch((error: unknown) => error);
+  expect(unknown).toMatchObject({ code: "NOT_FOUND", message: "project not found" });
+  expect(JSON.stringify(unknown)).toBe(JSON.stringify(missing));
+  partitionProject(w.db, B);
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "project not found" });
+  expect(reads(w).some((input) => input.includes(B))).toBe(false);
+  expect(w.db.find((row) => row.entityType === "PROJECT_SETTINGS" || row.entityType === "COMPANY_LOG")).toEqual([]);
+});
+
+it.each([
+  ["a catalog row naming another company", (db: FakeDynamoDb) => partitionProject(db, COMPANY, "web", 1, { companyId: B })],
+  ["a catalog row naming another org", (db: FakeDynamoDb) => partitionProject(db, COMPANY, "web", 1, { orgId: B })],
+  ["a catalog row for another name", (db: FakeDynamoDb) => partitionProject(db, COMPANY, "web", 1, { name: "api" })],
+  ["a catalog row of another kind", (db: FakeDynamoDb) => partitionProject(db, COMPANY, "web", 1, { entityType: "PROJECT" })],
+  ["a catalog row with no selected revision", (db: FakeDynamoDb) => partitionProject(db, COMPANY, "web", 1, { latestRevision: "1" })],
+  ["a selected revision that is missing", (db: FakeDynamoDb) => { partitionProject(db, COMPANY); drop(db, projectRevisionKey(COMPANY, "web", 1)); }],
+  ["a selected revision naming another company", (db: FakeDynamoDb) => { partitionProject(db, COMPANY); db.set({ ...projectRevisionKey(COMPANY, "web", 1), entityType: "PROJECT", companyId: B, definition: { name: "web", revision: 1 } }); }],
+  ["a selected revision of another project", (db: FakeDynamoDb) => { partitionProject(db, COMPANY); db.set({ ...projectRevisionKey(COMPANY, "web", 1), entityType: "PROJECT", definition: { name: "api", revision: 1 } }); }],
+  ["a selected revision at another revision", (db: FakeDynamoDb) => { partitionProject(db, COMPANY); db.set({ ...projectRevisionKey(COMPANY, "web", 1), entityType: "PROJECT", definition: { name: "web", revision: 2 } }); }],
+  ["a selected revision of another kind", (db: FakeDynamoDb) => { partitionProject(db, COMPANY); db.set({ ...projectRevisionKey(COMPANY, "web", 1), entityType: "PROJECT_CATALOG", definition: { name: "web", revision: 1 } }); }],
+])("%s is drift: fixed 503, one drift event under only the caller's company, nothing read or written past it", async (_label, corrupt) => {
+  const w = stagingWorld();
+  corrupt(w.db);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    for (const method of ["GET", "PUT"]) await expect(w.call(method, { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", statusCode: 503, message: "settings unavailable" });
+    expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toEqual([{ companyId: COMPANY, event: "project_catalog.index_drift" }, { companyId: COMPANY, event: "project_catalog.index_drift" }]);
+  } finally { warn.mockRestore(); }
+  expect(reads(w).some((input) => input.includes("PROJECT_SETTINGS") || input.includes("MEMBER#"))).toBe(false);
+});
+
+it("an approved setup's selected revision (it keeps candidate: true) is the project, as the engine reads it", async () => {
+  const w = stagingWorld();
+  w.db.set({ ...projectRevisionKey(COMPANY, "web", 2), entityType: "PROJECT", candidate: true, definition: { name: "web", revision: 2 } });
+  w.db.set({ ...orgProjectCatalogKey(COMPANY, "web"), entityType: "PROJECT_CATALOG", name: "web", latestRevision: 2 });
+  expect(await w.call("PUT", { expectedRevision: 0, preset: "careful" })).toMatchObject({ revision: 1 });
+});
+
+it("PUT on a partition project: the grant row may leave the company out, but one naming another company, another project or a lesser role is refused", async () => {
+  const w = stagingWorld();
+  const grant = (fields: Record<string, unknown>) => w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator", ...fields });
+  for (const fields of [{ companyId: B }, { orgId: B }, { companyId: "not-an-org" }, { projectName: "api" }, { role: "developer" }, { role: "owner" }]) {
+    grant(fields);
+    await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
+  }
+  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
+  expect(w.db.find((row) => row.entityType === "PROJECT_SETTINGS")).toEqual([]);
+  grant({ companyId: COMPANY });
+  expect(await w.call("PUT", { expectedRevision: 0, preset: "careful" })).toMatchObject({ revision: 1 });
+  grant({});
+  expect(await w.call("PUT", { expectedRevision: 1, preset: "balanced" })).toMatchObject({ revision: 2 });
+});
+
+it("the implicit company keeps today's shared path until it is marked, then reads its partition; a malformed mark refuses", async () => {
+  const I = IMPLICIT_COMPANY_ID;
+  const w = world(); w.setCompany(I);
+  // Unmarked: the legacy shared row (no companyId reads as the implicit company's) and the legacy grant rule, exactly as before.
+  w.db.set({ pk: "PROJECT#web", sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "web", revision: 1 } });
+  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", projectName: "web", role: "administrator" });
+  expect(await w.call("PUT", { expectedRevision: 0, preset: "careful" })).toMatchObject({ revision: 1 });
+  expect(reads(w).some((input) => input.includes(`ORG#${I}#PROJECT_CATALOG`))).toBe(false);
+  // The legacy grant rule is projectGrant's, unchanged: only the stored companyId counts (an orgId or projectName on the row is not read there, as before).
+  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", projectName: "other", orgId: B, role: "administrator" });
+  expect(await w.call("PUT", { expectedRevision: 1, preset: "balanced" })).toMatchObject({ revision: 2 });
+  // A grant naming a named company is refused on the legacy path (projectGrant's stored-company rule).
+  w.role("administrator", COMPANY);
+  await expect(w.call("PUT", { expectedRevision: 2, preset: "lightweight" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  // Marked: only the partition counts, so a shared-only project is not found.
+  w.db.set({ ...orgSettingsKey(I, "PROJECT_CATALOG_INDEX"), verifiedAt: new Date(now).toISOString(), count: 1, runId: "run-1" });
+  await expect(w.call()).rejects.toMatchObject({ code: "NOT_FOUND", message: "project not found" });
+  partitionProject(w.db, I);
+  expect(await w.call()).toMatchObject({ revision: 2 });
+  w.db.set({ ...orgSettingsKey(I, "PROJECT_CATALOG_INDEX"), verifiedAt: "private-canary" });
+  await expect(w.call()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "settings unavailable" });
+});
+
+it("a named company ignores a mark row left on it (as the S3 list does)", async () => {
+  const w = stagingWorld();
+  w.db.set({ ...orgSettingsKey(COMPANY, "PROJECT_CATALOG_INDEX"), verifiedAt: "private-canary" });
+  expect(await w.call()).toMatchObject({ revision: 0 });
 });
 it("the largest valid revision is readable after its final conditional write", async () => {
   const w = world();
