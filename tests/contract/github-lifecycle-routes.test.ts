@@ -158,6 +158,24 @@ describe("disconnect", () => {
     expect((await h.disconnect(101)).status).toBe(200);
     expect((await h.disconnect(103)).status).toBe(409);
   });
+  it("an owner without a fresh step-up learns nothing: the same 403 whether the id is in use, another company's, or free", async () => {
+    const h = await world();
+    project(h.db, "web", A, [repo("https://github.com/acme/web", 101)]);
+    for (const id of [101, 202, 999]) expect(await h.disconnect(id)).toEqual(refusal(403, "REAUTH_REQUIRED", DISCONNECT_STEP_UP));
+  });
+  it("probing another company's installation is the 404 even when the caller's own projects use that account (no 404/409 oracle)", async () => {
+    const h = await world(); h.stepUp();
+    project(h.db, "mine-on-beta", A, [repo("https://github.com/beta/x", 202)]);
+    expect(await h.disconnect(202)).toEqual(refusal(404, "NOT_FOUND", CONNECTION_NOT_FOUND));
+    expect(binding(h.db, 202)).toMatchObject({ companyId: B });
+  });
+  it("another installation of the same account that is not active does not take over unpinned repositories", async () => {
+    const h = await world(); h.stepUp();
+    expect(await h.bindings.claimPerson(A, { installationId: 103, accountLogin: "acme" }, OWNER)).toBe("bound");
+    await h.bindings.markLifecycle(103, "suspend", D1);
+    project(h.db, "web", A, [repo("https://github.com/acme/web")]);
+    expect(await h.disconnect(101)).toEqual(refusal(409, "GITHUB_IN_USE", githubInUseMessage(["web"])));
+  });
   it("repository matching: pins decide; other code hosts never count; unreadable entries do", () => {
     const install = { installationId: 101, accountLogin: "acme" };
     expect(repositoryUsesInstallation(repo("https://github.com/acme/a", 101), install)).toBe(true);
@@ -194,14 +212,14 @@ describe("GitHub's installation webhook", () => {
     const send = webhook(h.db, h.bindings);
     const aRows = () => JSON.stringify(h.db.find((item) => JSON.stringify(item).includes(A)));
     const before = aRows();
-    expect((await send({ action: "suspend", installation: { id: 202 } }, { delivery: D1 })).statusCode).toBe(200);
+    expect((await send({ action: "suspend", installation: { id: 202, account: { login: "beta" } }, sender: { login: "bea" } }, { delivery: D1 })).statusCode).toBe(200);
     expect(binding(h.db, 202)).toMatchObject({ state: "suspended" });
-    expect((await send({ action: "deleted", installation: { id: 202 } }, { delivery: D2 })).statusCode).toBe(200);
+    expect((await send({ action: "deleted", installation: { id: 202, account: { login: "beta" } }, sender: { login: "bea" } }, { delivery: D2 })).statusCode).toBe(200);
     expect(binding(h.db, 202)).toMatchObject({ state: "uninstalled", companyId: B });
     expect(aRows()).toBe(before);
     // An unsuspend never brings an uninstalled binding back; neither does "created".
-    expect((await send({ action: "unsuspend", installation: { id: 202 } }, { delivery: "550e8400-e29b-41d4-a716-446655440013" })).statusCode).toBe(200);
-    expect((await send({ action: "created", installation: { id: 202 } }, { delivery: "550e8400-e29b-41d4-a716-446655440014" })).statusCode).toBe(200);
+    expect((await send({ action: "unsuspend", installation: { id: 202, account: { login: "beta" } }, sender: { login: "bea" } }, { delivery: "550e8400-e29b-41d4-a716-446655440013" })).statusCode).toBe(200);
+    expect((await send({ action: "created", installation: { id: 202, account: { login: "beta" } }, sender: { login: "bea" } }, { delivery: "550e8400-e29b-41d4-a716-446655440014" })).statusCode).toBe(200);
     expect(binding(h.db, 202)).toMatchObject({ state: "uninstalled" });
   });
   it("an unsigned, forged or wrongly signed event changes nothing", async () => {
@@ -209,16 +227,26 @@ describe("GitHub's installation webhook", () => {
     const send = webhook(h.db, h.bindings);
     const before = JSON.stringify([...h.db.items]);
     for (const options of [{ signature: null }, { signature: "sha256=" + "0".repeat(64) }, { secret: "another-secret" }, { signature: "sha1=abc" }]) {
-      const answer = await send({ action: "deleted", installation: { id: 101 } }, options);
+      const answer = await send({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } }, options);
       expect(answer.statusCode).toBe(403);
     }
     // A body changed after signing.
     const { handler } = createBroker({ extra: { documentClient: h.db, githubBindings: h.bindings, githubWebhookSecret: async () => SECRET } });
-    const signed = JSON.stringify({ action: "suspend", installation: { id: 101 } });
-    const forged = JSON.stringify({ action: "deleted", installation: { id: 101 } });
+    const signed = JSON.stringify({ action: "suspend", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } });
+    const forged = JSON.stringify({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } });
     const answer = await handler({ rawPath: "/v1/github/webhooks", body: forged, headers: { "x-github-delivery": D1, "x-github-event": "installation", "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(signed).digest("hex")}` },
       requestContext: { requestId: "r", http: { method: "POST" } } });
     expect(answer.statusCode).toBe(403);
+    expect(JSON.stringify([...h.db.items])).toBe(before);
+  });
+  it("a body GitHub signed for another event, resent under the installation header, changes nothing; so does one naming another account", async () => {
+    const h = await world();
+    const send = webhook(h.db, h.bindings);
+    const before = JSON.stringify([...h.db.items]);
+    const comment = { action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" }, comment: { id: 1 }, issue: { number: 1 }, repository: { id: 42 } };
+    expect((await send(comment)).statusCode).toBe(403);
+    expect((await send({ action: "deleted", installation: { id: 101 }, sender: { login: "olive" } })).statusCode).toBe(403);
+    expect((await send({ action: "deleted", installation: { id: 101, account: { login: "mallory" } }, sender: { login: "olive" } })).statusCode).toBe(200);
     expect(JSON.stringify([...h.db.items])).toBe(before);
   });
   it("a malformed payload or delivery id is refused; a storage fault is retryable (503) and marks nothing", async () => {
@@ -226,9 +254,9 @@ describe("GitHub's installation webhook", () => {
     const send = webhook(h.db, h.bindings);
     expect((await send({ action: "deleted" })).statusCode).toBe(403);
     expect((await send({ action: "deleted", installation: { id: "101" } })).statusCode).toBe(403);
-    expect((await send({ action: "deleted", installation: { id: 101 } }, { delivery: "nope" })).statusCode).toBe(403);
+    expect((await send({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } }, { delivery: "nope" })).statusCode).toBe(403);
     h.db.injectFault({ command: "TransactWriteCommand", error: { name: "InternalServerError", message: "private-canary" } });
-    const answer = await send({ action: "deleted", installation: { id: 101 } });
+    const answer = await send({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } });
     expect(answer.statusCode).toBe(503);
     expect(answer.body).not.toContain("private-canary");
     expect(binding(h.db, 101)).not.toHaveProperty("state");
@@ -236,11 +264,11 @@ describe("GitHub's installation webhook", () => {
   it("without the company bindings (a single-company install), an installation event is refused exactly as before", async () => {
     const h = await world();
     const { handler } = createBroker({ extra: { documentClient: h.db, githubWebhookSecret: async () => SECRET } });
-    const raw = JSON.stringify({ action: "deleted", installation: { id: 101 } });
+    const raw = JSON.stringify({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } });
     const answer = await handler({ rawPath: "/v1/github/webhooks", body: raw, headers: { "x-github-delivery": D1, "x-github-event": "installation", "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}` },
       requestContext: { requestId: "r", http: { method: "POST" } } });
     expect(answer.statusCode).toBe(403);
-    expect(JSON.parse(answer.body).error).toEqual({ code: "FORBIDDEN", message: "GitHub webhook event type is unsupported" });
+    expect((JSON.parse(answer.body) as { error: unknown }).error).toEqual({ code: "FORBIDDEN", message: "GitHub webhook event type is unsupported" });
   });
 });
 
@@ -258,7 +286,7 @@ describe("tasks stop cleanly", () => {
       requireInstallationBound: bindings.requireBound, ...(withDisconnected ? { disconnectedFor: (orgId: string, owner: string) => bindings.disconnectedFor(orgId, owner) } : {}), fetchImplementation: fetch, now: () => NOW });
     return { app, fetch };
   }
-  const mint = (app: GitHubAppCredentialProvider, orgId: string) => app.createAgentInstallationToken("https://github.com/acme/web", { contents: "read" }, { orgId: orgId as never })
+  const mint = (app: GitHubAppCredentialProvider, orgId: typeof A) => app.createAgentInstallationToken("https://github.com/acme/web", { contents: "read" }, { orgId })
     .then(() => "minted", (error: { code: string; message: string }) => ({ code: error.code, message: error.message }));
   const DISCONNECTED = { code: "GITHUB_NOT_CONNECTED", message: `GITHUB_NOT_CONNECTED: ${GITHUB_DISCONNECTED_MESSAGE}` };
   it("a suspended installation: the fixed sentence before any token is asked for", async () => {
@@ -266,7 +294,7 @@ describe("tasks stop cleanly", () => {
     await h.bindings.markLifecycle(101, "suspend", D1);
     const { app, fetch } = client(h.bindings, { uninstalled: false });
     expect(await mint(app, A)).toEqual(DISCONNECTED);
-    expect(fetch.mock.calls.some(([url]) => String(url).includes("/access_tokens"))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => (typeof url === "string" ? url : url instanceof URL ? url.href : url.url).includes("/access_tokens"))).toBe(false);
     // Company B asking for A's repository learns nothing of A's state.
     const other = await mint(app, B);
     expect(other).not.toEqual(DISCONNECTED);
@@ -304,9 +332,9 @@ describe("tasks stop cleanly", () => {
       const invoke = () => handler({ rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/repository-credentials`, body: JSON.stringify(repository),
         headers: { "x-agentx-repository-grant": grant }, requestContext: { requestId: "mint", http: { method: "POST" } } });
       seed(A);
-      expect(JSON.parse((await invoke()).body).error).toEqual({ code: "GITHUB_NOT_CONNECTED", message: GITHUB_DISCONNECTED_MESSAGE });
+      expect((JSON.parse((await invoke()).body) as { error: unknown }).error).toEqual({ code: "GITHUB_NOT_CONNECTED", message: GITHUB_DISCONNECTED_MESSAGE });
       seed(B);
-      expect(JSON.parse((await invoke()).body).error).toEqual({ code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" });
+      expect((JSON.parse((await invoke()).body) as { error: unknown }).error).toEqual({ code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" });
       expect(minted).toBe(0);
     }
   });

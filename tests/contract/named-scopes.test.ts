@@ -199,7 +199,7 @@ async function setUp(mode: "linking" | "developer") {
     // Lane W part 4: the company admin routes need the member helper to exist; this one finds nobody, so only the route table's answer is tested here.
     companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
     // Guided onboarding PR 1: the GitHub connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
-    githubConnect: { bindings: { claimPerson: async () => "taken", companyInstallations: async () => [], ownersOf: async () => [] }, github: { appSlug: async () => "app", oauthClient: async () => undefined, userControlledInstallations: async () => { throw new Error("none"); } }, log: () => undefined },
+    githubConnect: { bindings: { claimPerson: async () => "taken", companyInstallations: async () => [], ownersOf: async () => [], disconnect: async () => ({ outcome: "not_found" }) }, github: { appSlug: async () => "app", oauthClient: async () => undefined, userControlledInstallations: async () => { throw new Error("none"); } }, log: () => undefined },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };

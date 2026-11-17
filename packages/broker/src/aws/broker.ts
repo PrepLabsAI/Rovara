@@ -2088,7 +2088,8 @@ async function checkCompanyRepository(dependencies: AwsBrokerDependencies, compa
     if (companyId === undefined || dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
     const installationId = await budget.read(() => dependencies.githubPullRequests.installationIdFor!(url));
     await dependencies.githubBindings.withBudget(budget).requireBound(companyId, installationId);
-  } catch {
+  } catch (error) {
+    if (isGithubDisconnected(error)) throw githubDisconnectedRefusal();
     throw agentXError("CONFIG_INVALID", `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`);
   }
 }

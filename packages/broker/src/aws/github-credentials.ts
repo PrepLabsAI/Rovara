@@ -245,15 +245,18 @@ export class GithubInstallationBindings {
    * installation id alone) moves state with one conditional transaction, on exactly what was read, with an audit row (actor "github", keyed by the delivery so a redelivery of
    * a processed event changes nothing). Nothing is deleted. An unbound installation is left alone; an uninstalled one moves again only by a claim.
    */
-  async markLifecycle(installationId: number, action: LifecycleAction, deliveryId: string): Promise<LifecycleOutcome> {
+  async markLifecycle(installationId: number, action: LifecycleAction, deliveryId: string, accountLogin?: string): Promise<LifecycleOutcome> {
     return this.run(async (send) => {
       installationIdSchema.parse(installationId);
+      if (accountLogin !== undefined) bindingText.parse(accountLogin);
       if (!DELIVERY.test(deliveryId) || !Object.hasOwn(LIFECYCLE_TRANSITIONS, action)) throw githubBindingRefusal();
       const transition = LIFECYCLE_TRANSITIONS[action];
       const auditKey = { pk: `GITHUB_INSTALLATION#${installationId}`, sk: `AUDIT#LIFECYCLE#${deliveryId.toLowerCase()}` };
       for (let attempt = 0; attempt < 2; attempt++) {
         const row = await this.binding(send, installationId);
         if (row === undefined) return { outcome: "unbound" };
+        // The event must name the account the binding was made for (a body signed for another event, replayed under this header, names none or another).
+        if (accountLogin !== undefined && accountLogin.toLowerCase() !== row.accountLogin.toLowerCase()) return { outcome: "unchanged", companyId: row.companyId };
         const done = await send(new GetCommand({ TableName: this.tableName, Key: auditKey, ConsistentRead: true }));
         const from = stateOf(row);
         if (done.Item !== undefined || !(transition.from as readonly InstallationState[]).includes(from)) return { outcome: "unchanged", companyId: row.companyId };
@@ -287,16 +290,20 @@ export class GithubInstallationBindings {
       if (row === undefined || row.companyId !== companyId) return { outcome: "not_found" };
       const at = new Date(this.clock()).toISOString();
       const fence = sameBinding(row);
+      const auditKey = { pk: `GITHUB_INSTALLATION#${installationId}`, sk: `AUDIT#DISCONNECT#${at}#${personId}` };
       try {
         await send(new TransactWriteCommand({ TransactItems: [
           { ConditionCheck: { TableName: this.tableName, Key: backfillKey, ConditionExpression: "attribute_exists(pk)" } },
           { Delete: { TableName: this.tableName, Key: bindingKey(installationId), ...fence } },
           { Delete: { TableName: this.tableName, Key: companyInstallationKey(companyId, installationId) } },
-          { Put: { TableName: this.tableName, Item: { pk: `GITHUB_INSTALLATION#${installationId}`, sk: `AUDIT#DISCONNECT#${at}#${personId}`, entityType: "GITHUB_INSTALLATION_DISCONNECT_AUDIT",
+          { Put: { TableName: this.tableName, Item: { ...auditKey, entityType: "GITHUB_INSTALLATION_DISCONNECT_AUDIT",
             installationId, accountLogin: row.accountLogin, companyId, state: stateOf(row), boundAt: row.boundAt, boundBy: row.boundBy, at, actor: personId }, ConditionExpression: "attribute_not_exists(pk)" } },
         ] }));
       } catch (error) {
         // Lost a race: whatever is stored now decides. Gone or someone else's: not found; still ours (changed meanwhile): refused, try again.
+        // A transaction error can mean it committed: our own audit row says so.
+        const committed = await send(new GetCommand({ TableName: this.tableName, Key: auditKey, ConsistentRead: true }));
+        if (committed.Item !== undefined) return { outcome: "disconnected", accountLogin: row.accountLogin, ...(row.accountType === undefined ? {} : { accountType: row.accountType }) };
         const now = await this.binding(send, installationId);
         if (now === undefined || now.companyId !== companyId) return { outcome: "not_found" };
         throw error;
@@ -343,7 +350,8 @@ export class GithubInstallationBindings {
       OrgIdSchema.parse(companyId); installationSchema.parse(installation); PersonIdSchema.parse(personId);
       const fields = { installationId: installation.installationId, accountLogin: installation.accountLogin, ...(seen.accountType === undefined ? {} : { accountType: z.enum(["User", "Organization"]).parse(seen.accountType) }) };
       const target: InstallationState = seen.suspended === true ? "suspended" : "active";
-      const decide = async (): Promise<PersonClaimOutcome | undefined> => {
+      // `retry`: after a lost race. A reconnect is then never re-attempted on the strength of a GitHub check made before the race (the person claims again).
+      const decide = async (retry = false): Promise<PersonClaimOutcome | undefined> => {
         const row = await this.binding(send, installation.installationId);
         if (row !== undefined) {
           if (row.companyId !== companyId) return "taken";
@@ -358,6 +366,7 @@ export class GithubInstallationBindings {
             } catch { return undefined; }
             return "already_bound";
           }
+          if (retry) return undefined;
           try {
             await send(new TransactWriteCommand({ TransactItems: [
               { Update: { TableName: this.tableName, Key: bindingKey(installation.installationId), UpdateExpression: "SET #state = :to, stateAt = :at", ...fence,
@@ -387,7 +396,7 @@ export class GithubInstallationBindings {
         return "bound";
       } catch (error) {
         // Lost a race (or the marker vanished): the stored binding decides; nothing is overwritten.
-        const after = await decide();
+        const after = await decide(true);
         if (after === undefined) throw error;
         return after;
       }

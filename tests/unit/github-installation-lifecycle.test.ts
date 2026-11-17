@@ -171,3 +171,60 @@ describe("disconnect", () => {
     else { expect(other).toBe("taken"); expect(binding(db, 101)).toBeUndefined(); }
   });
 });
+
+describe("fences on what was read (races between the read and the write)", () => {
+  /** Runs `between` once, just before the store's next transaction. */
+  const before = (db: FakeDynamoDb, between: () => Promise<void> | void) => {
+    const send = db.send.bind(db); let done = false;
+    db.send = async (command) => {
+      if (!done && command.constructor.name === "TransactWriteCommand") { done = true; await between(); }
+      return send(command);
+    };
+  };
+  it("a mark never recreates a binding a disconnect removed in between", async () => {
+    const { db, store } = await setup();
+    before(db, () => db.delete("GITHUB_INSTALLATION#101", "BINDING"));
+    expect(await store.markLifecycle(101, "deleted", D1)).toEqual({ outcome: "unbound" });
+    expect(binding(db, 101)).toBeUndefined();
+  });
+  it("a disconnect never deletes a binding made again in between (same company, later bind; or another company, same bind time)", async () => {
+    for (const change of [{ boundAt: "2026-11-17T12:00:05.000Z" }, { companyId: B }]) {
+      const { db, store } = await setup();
+      before(db, () => { db.set({ ...binding(db, 101)!, ...change }); });
+      await settle(store.disconnect(A, 101, ADA));
+      expect(binding(db, 101)).toMatchObject(change);
+    }
+  });
+  it("a reconnect claim that read 'suspended' never re-activates a binding GitHub uninstalled in between", async () => {
+    const { db, store } = await setup();
+    await store.markLifecycle(101, "suspend", D1);
+    before(db, async () => { await store.markLifecycle(101, "deleted", D2); });
+    await expect(store.claimPerson(A, { installationId: 101, accountLogin: "acme" }, ADA)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
+    expect(binding(db, 101)).toMatchObject({ state: "uninstalled" });
+  });
+  it("an already-bound claim that loses to a disconnect does not bring back the list row without its binding", async () => {
+    const { db, store, tick } = await setup();
+    tick();
+    before(db, async () => { expect((await store.disconnect(A, 101, ADA)).outcome).toBe("disconnected"); tick(); });
+    expect(await store.claimPerson(A, { installationId: 101, accountLogin: "acme" }, ADA)).toBe("bound");
+    expect(binding(db, 101)).toMatchObject({ companyId: A });
+    expect(await store.companyInstallations(A)).toHaveLength(1);
+  });
+  it("a disconnect whose transaction committed but answered an error still says disconnected", async () => {
+    const { db, store } = await setup();
+    const send = db.send.bind(db); let done = false;
+    db.send = async (command) => {
+      const result = await send(command);
+      if (!done && command.constructor.name === "TransactWriteCommand") { done = true; throw Object.assign(new Error("lost answer"), { name: "InternalServerError" }); }
+      return result;
+    };
+    expect((await store.disconnect(A, 101, ADA)).outcome).toBe("disconnected");
+    expect(binding(db, 101)).toBeUndefined();
+  });
+  it("a mark names the binding's account: an event for another account changes nothing", async () => {
+    const { db, store } = await setup();
+    expect(await store.markLifecycle(101, "deleted", D1, "someone-else")).toEqual({ outcome: "unchanged", companyId: A });
+    expect(binding(db, 101)).not.toHaveProperty("state");
+    expect((await store.markLifecycle(101, "deleted", D2, "ACME")).outcome).toBe("marked");
+  });
+});

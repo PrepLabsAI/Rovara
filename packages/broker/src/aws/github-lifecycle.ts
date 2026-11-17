@@ -18,7 +18,16 @@ import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRe
 
 const DELIVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MARKED_ACTIONS: ReadonlySet<string> = new Set<LifecycleAction>(["deleted", "suspend", "unsuspend"]);
-const InstallationEvent = z.object({ action: z.string().min(1).max(64), installation: z.object({ id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }) });
+/**
+ * GitHub signs the body, not the X-GitHub-Event header: a body signed for another event must not pass as an installation event. So the body must have an installation event's
+ * shape (the installation's account and the sender), none of another event's objects, and the account must be the binding's (checked in markLifecycle).
+ */
+const OTHER_EVENT_KEYS = ["comment", "issue", "pull_request", "review", "repository", "repositories_added", "repositories_removed", "check_run", "check_suite"];
+const InstallationEvent = z.object({
+  action: z.string().min(1).max(64),
+  installation: z.object({ id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), account: z.object({ login: z.string().min(1).max(256) }) }),
+  sender: z.object({ login: z.string().min(1).max(256) }),
+});
 
 /** Whether a GitHub delivery is an `installation` event (the header picks the path; the signature over the body is checked before anything is read or written). */
 export function isGithubInstallationEvent(headers: Record<string, string | undefined>): boolean {
@@ -27,7 +36,8 @@ export function isGithubInstallationEvent(headers: Record<string, string | undef
 
 /**
  * One `installation` delivery. Order: size, signature (GITHUB_WEBHOOK_SIGNATURE_INVALID, so the route's secret re-read applies), delivery id, payload; then the mark. A storage
- * fault is retryable (503, GitHub redelivers; the delivery id keeps the mark single). Answers ACCEPTED with the delivery id whatever the outcome, and logs ids only.
+ * fault answers 503 (GitHub does not redeliver App webhooks on its own; an operator may redeliver it, and the delivery id keeps the mark single).
+ * Known limit: deliveries are applied in arrival order, so a suspend and unsuspend that arrive reversed leave the binding suspended until a claim (fails safe: tasks refused). Answers ACCEPTED with the delivery id whatever the outcome, and logs ids only.
  */
 export async function handleGithubInstallationWebhook(input: {
   rawBody: string;
@@ -43,11 +53,11 @@ export async function handleGithubInstallationWebhook(input: {
   if (deliveryId === undefined || !DELIVERY_ID.test(deliveryId)) throw new GithubWebhookRefusal("GitHub webhook delivery ID is invalid");
   let raw: unknown;
   try { raw = JSON.parse(input.rawBody) as unknown; } catch { throw new GithubWebhookRefusal("GitHub webhook JSON body is invalid"); }
-  const event = InstallationEvent.safeParse(raw);
+  const event = InstallationEvent.safeParse(raw !== null && typeof raw === "object" && !Array.isArray(raw) && OTHER_EVENT_KEYS.some((key) => Object.hasOwn(raw, key)) ? undefined : raw);
   if (!event.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
   if (!MARKED_ACTIONS.has(event.data.action)) return { status: "ACCEPTED", deliveryId };
   let outcome: Awaited<ReturnType<GithubInstallationBindings["markLifecycle"]>>;
-  try { outcome = await input.bindings.markLifecycle(event.data.installation.id, event.data.action as LifecycleAction, deliveryId); }
+  try { outcome = await input.bindings.markLifecycle(event.data.installation.id, event.data.action as LifecycleAction, deliveryId, event.data.installation.account.login); }
   catch { throw new GithubWebhookRetryableError("GitHub installation state could not be saved"); }
   if (outcome.outcome === "marked") {
     companyLog(outcome.companyId, input.log)({ event: "github.installation_marked", installationId: event.data.installation.id, from: outcome.from, to: outcome.to, actor: "github", deliveryId });
