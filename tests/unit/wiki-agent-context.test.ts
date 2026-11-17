@@ -6,7 +6,7 @@ import { WIKI_AGENT_LIMITS, WikiContextSchema, wikiAgentSwitchKey, wikiUsePartit
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { buildWikiContext, createWikiForStep, createWikiOnEvents, deleteWikiUse, readWikiTaskUse, recordWikiReports, setWikiAgentSwitch, wikiAgentSwitchIsOn, wikiReportsOfEvents } from "../../packages/broker/src/core/wiki/agent-context.js";
+import { agentPageOf, buildWikiContext, createWikiForStep, createWikiOnEvents, deleteWikiUse, readWikiTaskUse, recordWikiReports, setWikiAgentSwitch, wikiAgentSwitchIsOn, wikiReportsOfEvents } from "../../packages/broker/src/core/wiki/agent-context.js";
 import { COMPANY_PURGE_COOLING_OFF_MS } from "../../packages/broker/src/core/company/purge.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -62,12 +62,12 @@ describe("wiki for agents: the switch", () => {
     await setWikiAgentSwitch(w.opts(B), "alpha", true);
     expect(await wikiAgentSwitchIsOn(w.opts(A), "alpha")).toBe(false);
     // A row copied under another company's / project's key is never believed.
-    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "alpha"), entityType: "WIKI_AGENT_SWITCH", companyId: B, project: "alpha", on: true, changedAt: "2026-11-17T10:00:00.000Z" } as never });
+    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "alpha"), entityType: "WIKI_AGENT_SWITCH", companyId: B, project: "alpha", on: true, changedAt: "2026-11-17T10:00:00.000Z" } });
     expect(await wikiAgentSwitchIsOn(w.opts(A), "alpha")).toBe(false);
-    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "alpha"), entityType: "WIKI_AGENT_SWITCH", companyId: A, project: "beta", on: true, changedAt: "2026-11-17T10:00:00.000Z" } as never });
+    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "alpha"), entityType: "WIKI_AGENT_SWITCH", companyId: A, project: "beta", on: true, changedAt: "2026-11-17T10:00:00.000Z" } });
     expect(await wikiAgentSwitchIsOn(w.opts(A), "alpha")).toBe(false);
     // A malformed row, or one that says anything but a plain true, is off.
-    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "alpha"), entityType: "WIKI_AGENT_SWITCH", companyId: A, project: "alpha", on: "yes", changedAt: "2026-11-17T10:00:00.000Z" } as never });
+    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "alpha"), entityType: "WIKI_AGENT_SWITCH", companyId: A, project: "alpha", on: "yes", changedAt: "2026-11-17T10:00:00.000Z" } });
     expect(await wikiAgentSwitchIsOn(w.opts(A), "alpha")).toBe(false);
   });
 
@@ -186,10 +186,28 @@ describe("wiki for agents: page -> agent (golden)", () => {
     const w = world();
     await setWikiAgentSwitch(w.opts(A), "alpha", true);
     await w.wiki(A).writePage("alpha", page("X"));
-    const rows = await w.store.query({ pk: "ORG#" + A + "#WIKI#alpha" } as never);
+    const rows = await w.store.query({ pk: "ORG#" + A + "#WIKI#alpha" });
     void rows;
     const broken = { ...w.opts(A), store: { ...w.store, get: async (key: { pk: string; sk: string }) => { if (key.sk.startsWith("SWITCH")) return w.store.get(key); throw new Error("boom"); }, getMany: async () => { throw new Error("boom"); }, query: w.store.query.bind(w.store), put: w.store.put.bind(w.store), update: w.store.update.bind(w.store), delete: w.store.delete.bind(w.store), transact: w.store.transact.bind(w.store) } as never };
     expect(await buildWikiContext(broken, { project: "alpha", repositories: REPOS })).toBeUndefined();
+  });
+});
+
+describe("wiki for agents: the agent copy is a second wall behind the store's agent view", () => {
+  it("leaves out a pending note and a not-found claim even if a read handed them over", () => {
+    const written = page("X");
+    const read = {
+      page: { ...written, writtenAt: "2026-11-17T10:00:00.000Z", claims: [written.claims[0]!, { ...written.claims[1]!, source: "not_found" as const }] },
+      notes: [
+        { noteId: "note-pending", pageId: "overview", text: "PENDING", authorId: "p1", createdAt: "2026-11-17T10:00:00.000Z", approval: { state: "pending" as const } },
+        { noteId: "note-approved", pageId: "overview", text: "APPROVED", authorId: "p1", createdAt: "2026-11-17T10:00:00.000Z", approval: { state: "approved" as const, by: "m1", at: "2026-11-17T10:00:00.000Z" } },
+      ],
+      flags: [], staleBlockIds: [],
+    };
+    const copy = agentPageOf(read);
+    expect(copy?.notes).toEqual([{ noteId: "note-approved", text: "APPROVED" }]);
+    expect(copy?.claims.map((c) => c.claimId)).toEqual(["c0001"]);
+    expect(JSON.stringify(copy)).not.toContain("p1");
   });
 });
 
@@ -260,7 +278,7 @@ describe("wiki for agents: the delivery seam and the report", () => {
     expect(await wikiAgentSwitchIsOn(w.opts(A), "alpha")).toBe(false);
     expect(await readWikiTaskUse(w.opts(A), { project: "alpha", taskId: TASK })).toBeUndefined();
     expect(await wikiAgentSwitchIsOn(w.opts(A), "beta")).toBe(true);
-    expect((await w.store.query({ pk: wikiUsePartition(A, "alpha") } as never)).items).toHaveLength(0);
+    expect((await w.store.query({ pk: wikiUsePartition(A, "alpha") })).items).toHaveLength(0);
   });
 });
 
@@ -272,7 +290,7 @@ describe("wiki for agents: the callback hook files a step's report on its own ta
     await w.wiki(A).writePage("alpha", page("A-alpha"));
     await setWikiAgentSwitch(w.opts(A), "alpha", true);
     await createWikiForStep(w.opts(A))({ companyId: A, project: "alpha", taskId: TASK, operationId: OP, workflowMode: "PLAN", repositories: REPOS });
-    await w.store.put({ item: { ...workspaceKey(A, WORKSPACE), entityType: "WORKSPACE", id: WORKSPACE, companyId: A, projectName: "alpha" } as never });
+    await w.store.put({ item: { ...workspaceKey(A, WORKSPACE), entityType: "WORKSPACE", id: WORKSPACE, companyId: A, projectName: "alpha" } });
     return w;
   }
 

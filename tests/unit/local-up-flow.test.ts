@@ -329,7 +329,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
         expect(JSON.stringify(understand.payload)).toContain("PAYMENTS-WIKI");
         expect(JSON.stringify(understand.payload)).not.toContain("OTHER-WIKI");
         // The delivery is noted under this operation, company and project, for the worker's report.
-        expect((await store.query({ pk: wikiUsePartition(IMPLICIT_COMPANY_ID, "payments") } as never)).items.some((item) => String(item.sk).startsWith("OP#"))).toBe(true);
+        expect((await store.query({ pk: wikiUsePartition(IMPLICIT_COMPANY_ID, "payments") })).items.some((item) => String(item.sk).startsWith("OP#"))).toBe(true);
       }
       // The switch off: the next step carries none.
       await setWikiAgentSwitch(options, "payments", false);

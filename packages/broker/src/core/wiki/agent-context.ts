@@ -10,8 +10,8 @@
 //    delivery was for. Information only: a lost report loses only a "pages this task read" line.
 import {
   INDEX_EXPIRY_ATTRIBUTE, WIKI_AGENT_LIMITS, WikiAgentPageSchema, WikiContextSchema, WikiUseRefRowSchema, WikiUseRowSchema, WikiAgentSwitchRowSchema, OrgIdSchema, queryAll, wikiAgentSwitchKey, wikiUseKey,
-  wikiUsePartition, wikiUseRefKey, wikiReadReportOfProgress, wikiModeAllows,
-  type DocumentStore, type OrgId, type StoredDocument, type WikiAgentPage, type WikiContext, type WikiIndexEntry, type WikiPageKind, type WikiPageRead, type WikiReadReport,
+  wikiUsePartition, wikiUseRefKey, wikiUseRowKey, wikiReadReportOfProgress, wikiModeAllows,
+  type DocumentStore, type OrgId, type WikiAgentPage, type WikiContext, type WikiIndexEntry, type WikiPageKind, type WikiPageRead, type WikiReadReport,
 } from "@agentx/contracts";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { createWikiStore } from "./store.js";
@@ -43,7 +43,7 @@ export async function wikiAgentSwitchIsOn(options: WikiAgentOptions, project: st
 export async function setWikiAgentSwitch(options: WikiAgentOptions, project: string, on: boolean): Promise<void> {
   const companyId = OrgIdSchema.parse(options.companyId);
   const key = wikiAgentSwitchKey(companyId, project);
-  await options.store.put({ item: { ...key, entityType: "WIKI_AGENT_SWITCH", companyId, project, on, changedAt: new Date(options.now()).toISOString() } as unknown as StoredDocument });
+  await options.store.put({ item: { ...key, entityType: "WIKI_AGENT_SWITCH", companyId, project, on, changedAt: new Date(options.now()).toISOString() } });
 }
 
 // ---- The context -------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -57,7 +57,8 @@ function mostlyStale(entry: WikiIndexEntry): boolean {
   return total > 0 && entry.claims.changed / total > WIKI_AGENT_LIMITS.mostlyStaleShare;
 }
 
-function agentPageOf(read: WikiPageRead): WikiAgentPage | undefined {
+/** The agent copy of a page read (exported for its test). A second wall behind the store's agent view: a pending note or a not-found claim is left out here too. */
+export function agentPageOf(read: WikiPageRead): WikiAgentPage | undefined {
   const { page } = read;
   const candidate = {
     pageId: page.pageId, kind: page.kind, title: page.title, summary: page.summary, ...(page.parentId === undefined ? {} : { parentId: page.parentId }), order: page.order, repos: page.repos,
@@ -121,7 +122,7 @@ export function createWikiForStep(options: WikiAgentOptions): WikiForStep {
       const wikiContext = await buildWikiContext(options, { project: input.project, repositories: input.repositories });
       if (wikiContext === undefined) return {};
       const ttl = Math.floor(options.now() / 1000) + REF_KEEP_SECONDS;
-      await options.store.put({ item: { ...wikiUseRefKey(options.companyId, input.project, input.operationId), entityType: "WIKI_AGENT_USE_REF", companyId: options.companyId, project: input.project, taskId: input.taskId, operationId: input.operationId, [INDEX_EXPIRY_ATTRIBUTE]: ttl } as unknown as StoredDocument }).catch(() => undefined);
+      await options.store.put({ item: { ...wikiUseRefKey(options.companyId, input.project, input.operationId), entityType: "WIKI_AGENT_USE_REF", companyId: options.companyId, project: input.project, taskId: input.taskId, operationId: input.operationId, [INDEX_EXPIRY_ATTRIBUTE]: ttl } }).catch(() => undefined);
       return { wikiContext };
     } catch {
       return {};
@@ -149,7 +150,7 @@ export async function recordWikiReports(options: WikiAgentOptions, input: { proj
     const read = union(was?.read ?? [], mine.filter((report) => report.phase === "read").flatMap((report) => report.pages.map((page) => page.pageId)));
     const cap = WIKI_AGENT_LIMITS.pages * 2;
     const expires = Math.floor(options.now() / 1000) + USE_KEEP_SECONDS;
-    await options.store.put({ item: { ...key, entityType: "WIKI_AGENT_USE", companyId, project: input.project, taskId: ref.data.taskId, given: given.slice(0, cap), read: read.slice(0, cap), updatedAt: new Date(options.now()).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: expires } as unknown as StoredDocument });
+    await options.store.put({ item: { ...key, entityType: "WIKI_AGENT_USE", companyId, project: input.project, taskId: ref.data.taskId, given: given.slice(0, cap), read: read.slice(0, cap), updatedAt: new Date(options.now()).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: expires } });
   } catch { /* information only */ }
 }
 
@@ -167,7 +168,7 @@ export function createWikiOnEvents(options: WikiAgentOptions): (operation: { wor
     try {
       const reports = wikiReportsOfEvents(events);
       if (reports.length === 0) return;
-      const workspace = await options.store.get((await workspaceKeys({ store: options.store as never, companyId: options.companyId }, operation.workspaceId)).workspaceKey);
+      const workspace = await options.store.get((await workspaceKeys({ store: options.store, companyId: options.companyId }, operation.workspaceId)).workspaceKey);
       if (workspace === undefined || workspace["companyId"] !== options.companyId || typeof workspace["projectName"] !== "string") return;
       await recordWikiReports(options, { project: workspace["projectName"], operationId: operation.id, reports });
     } catch { /* information only */ }
@@ -191,6 +192,6 @@ export async function readWikiTaskUse(options: WikiAgentOptions, input: { projec
 export async function deleteWikiUse(options: WikiAgentOptions, project: string): Promise<number> {
   const companyId = OrgIdSchema.parse(options.companyId);
   const items = await queryAll(options.store, { pk: wikiUsePartition(companyId, project) });
-  for (const item of items) await options.store.delete({ key: { pk: item.pk, sk: item.sk } });
+  for (const item of items) await options.store.delete({ key: wikiUseRowKey(companyId, project, item.sk) });
   return items.length;
 }

@@ -18,7 +18,7 @@ import {
 } from "@agentx/contracts";
 import { createBaseFileReader, type LearnedRepository } from "./learned-run.js";
 import type { BaseFile, BaseFileReader } from "./learned-context.js";
-import { openBaseCommitSource } from "./knowledge/source.js";
+import type { openBaseCommitSource } from "./knowledge/source.js";
 import { makeReadOnly } from "./meta-checkout.js";
 
 export { WIKI_READ_REPORT_FIELD };
@@ -27,7 +27,7 @@ export { WIKI_READ_REPORT_FIELD };
 
 /** Wiki text made safe to show a model: hidden characters out, every known frame tag defused, and no `<` left that could open a tag or the `<<`/`>>` delimiters of any block; cut to `max` characters. */
 export function cleanWikiText(text: string, max: number): string {
-  const plain = defuseFrameTags(stripHiddenCharacters(text).text).replace(/<(?=[<\/A-Za-z!?])/gu, "&lt;").replace(/>>+/gu, (run) => "> ".repeat(run.length).trimEnd());
+  const plain = defuseFrameTags(stripHiddenCharacters(text).text).replace(/<(?=[</A-Za-z!?])/gu, "&lt;").replace(/>>+/gu, (run) => "> ".repeat(run.length).trimEnd());
   const points = [...plain.trim()];
   return points.length <= max ? points.join("") : points.slice(0, max).join("").trimEnd();
 }

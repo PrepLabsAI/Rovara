@@ -124,6 +124,13 @@ export const WIKI_USE_TASK_PREFIX = "TASK#";
 /** The delivery ref: which task and stage an operation's wiki was built for (so the report is filed under the right task). `ORG#<company>#WIKIUSE#<project>` / `OP#<operation>`. */
 export const wikiUseRefKey = (orgId: OrgId, project: string, operationId: string): WikiUseKey => ({ pk: wikiUsePartition(orgId, project), sk: `OP#${z.string().regex(/^[0-9a-f-]{8,64}$/u).parse(operationId)}` });
 
+/** A row of the project's use partition by its sort key (for a delete of what a query of the partition gave back): the sort key must be one of this slice's families. */
+const USE_SK = /^(?:SWITCH|TASK#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|OP#[0-9a-f-]{8,64})$/u;
+export function wikiUseRowKey(orgId: OrgId, project: string, sk: string): WikiUseKey {
+  if (!USE_SK.test(sk)) throw new Error("not a wiki use row's sort key");
+  return { pk: wikiUsePartition(orgId, project), sk: `${sk}` };
+}
+
 export const WikiAgentSwitchRowSchema = z.object({ companyId: OrgIdSchema, project: WikiProjectSchema, entityType: z.literal("WIKI_AGENT_SWITCH"), on: z.boolean(), changedAt: z.string().datetime({ offset: false }) }).passthrough();
 export const WikiUseRowSchema = z.object({
   companyId: OrgIdSchema, project: WikiProjectSchema, entityType: z.literal("WIKI_AGENT_USE"), taskId: WikiTaskIdSchema,
