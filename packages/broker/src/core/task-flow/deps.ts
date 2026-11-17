@@ -42,7 +42,7 @@ import type { ModelSelectionService } from "../model-selection/service.js";
 import type { UsableModels } from "../model-selection/usable-models.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
-import type { LearnedContext } from "@agentx/contracts";
+import type { LearnedContext, WikiContext } from "@agentx/contracts";
 import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
@@ -380,6 +380,12 @@ export interface TaskFlowDeps {
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
    */
   learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
+  /**
+   * The project wiki a step is given (lead 4 A1): asked when the step's invocation is built, only for a task step whose worker lists "task.wikiContext.v1". The caller passes the task's OWN project (from the
+   * workspace record), its task id and the repositories of the revision it runs on; the answer is the worker's `wikiContext` or none, built from the company's wiki as it is at that moment. It never throws into the
+   * dispatch, and a slow answer is none (the step then runs as it would without the wiki). Absent: no step is given the wiki.
+   */
+  wiki?: (input: { companyId: string; project: string; taskId: string; operationId: string; workflowMode: string | undefined; repositories: readonly string[] }) => Promise<{ wikiContext?: WikiContext }>;
   /**
    * Learn on send-back: told after a PERSON's send-back of the task to coding is committed (the owner's send-back action calls it, best effort, after its own write). The lessons host queues one reflection of ids so the
    * correction can help the next task while this one is open; it reads the task itself (company, the send-back's words, the switch and the project's mode), so the caller passes only the task's id. It never throws into the

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  WIKI_LIMITS, WikiCitationSchema, WikiFlagAddSchema, WikiFlagSchema, WikiPageWriteSchema, WikiPathSchema, wikiAnswerKey, wikiBodyKey, wikiBuildKey, wikiFlagKey, wikiNoteKey, wikiPageKey, wikiPartition,
+  WIKI_LIMITS, WikiCitationSchema, WikiFlagAddSchema, WikiFlagSchema, WikiPageWriteSchema, WikiPathSchema, wikiAnswerKey, wikiBodyKey, wikiBuildKey, wikiFlagKey, wikiNoteKey, wikiPageKey, wikiPartition, wikiRowKey,
   type WikiPageWrite,
 } from "../../packages/contracts/src/wiki-store.js";
 import { COMPANY_A_ID, COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
@@ -54,4 +54,8 @@ describe("wiki store contract", () => {
     expect(WikiFlagSchema.safeParse({ flagId: "flag-1", pageId: "overview", by: { kind: "answer", answerId: "ans-1" }, reason: "x", createdAt: "2026-11-17T10:00:00.000Z", state: "open" }).success).toBe(false);
   });
   it("keeps the published limits", () => expect(WIKI_LIMITS.pagesPerProject).toBe(300));
+  it("builds a stored row's key only for the wiki's own sort-key families", () => {
+    expect(wikiRowKey(COMPANY_A, "alpha", "NOTE#overview#note-1")).toEqual({ pk: `ORG#${COMPANY_A}#WIKI#alpha`, sk: "NOTE#overview#note-1" });
+    for (const sk of ["OTHER#x", "META", "NOTE#overview", "PAGE#a#b", "LESSON#1", ""]) expect(() => wikiRowKey(COMPANY_A, "alpha", sk), sk).toThrow();
+  });
 });

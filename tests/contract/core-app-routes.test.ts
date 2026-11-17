@@ -15,7 +15,7 @@ import type { CoreEntryCaller } from "../../packages/broker/src/aws/engine-bound
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes } from "../../packages/broker/src/core-host/dev-routes.js";
 import { ERASE_ON_A_PAGE, createPersonEraseRoute } from "../../packages/broker/src/core-host/person-erase-route.js";
-import { noLearningToErase } from "../../packages/broker/src/core/people/erase.js";
+import { noLearningToErase, noWikiToErase } from "../../packages/broker/src/core/people/erase.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { BrokerRequest, BrokerResponse } from "../../packages/broker/src/handler.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -67,6 +67,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
     // Wiki W0: a project's free file map.
     ["GET", "/v1/app/projects/payments/wiki-map", "full"], ["POST", "/v1/app/projects/payments/wiki-map", "full"],
+    // Lead 4 W2: the project wiki's reads.
+    ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -83,6 +85,8 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-agent/discard"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
       ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
+      // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.
+      ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
@@ -297,7 +301,7 @@ async function coreOver(world: FakeWorld): Promise<{ entry: CoreAppEntry; log: A
   const registry = await app.registry();
   const personErase = createPersonEraseRoute({
     app, standing: personStandingFromDynamo(db, "signin"), companyOf: async (who) => await membershipOf(who.principal.personId),
-    eraseDeps: () => ({ store: registry.require("storage"), audit: registry.require("audit-sink"), objects: { deleteEveryVersion: async () => true }, eraseLearning: noLearningToErase, now: () => world.clock.now }),
+    eraseDeps: () => ({ store: registry.require("storage"), audit: registry.require("audit-sink"), objects: { deleteEveryVersion: async () => true }, eraseLearning: noLearningToErase, eraseWiki: noWikiToErase, now: () => world.clock.now }),
   });
   return { entry: coreAppEntryFrom({ routes, personErase, deployedCallerOf: deployedCallerFromMembership(membershipOf), log: (entry) => log.push(entry) }), log };
 }

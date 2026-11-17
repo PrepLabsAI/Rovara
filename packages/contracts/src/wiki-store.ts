@@ -11,10 +11,10 @@
 //  - Notes: people see a note at once; agents see it only after a project maintainer (or a company owner or admin) approves it.
 //  - Flags ("Mark wrong"): a person's optional reason is their words (erased with them); an open flag hides its claim, or its whole page, from agents.
 //  - A removed repository (or one Rovara lost access to) has its pages and every cross-repo page that names it deleted at once (`deleteRepository`).
-//  - Answer records (J1) expire 30 days after they are written, like Ask's.
+//  - Answer records (J1) expire 30 days after they are written, like Ask's. Expiry is app-driven, not a table TTL: a read treats a record past its `expiresAt` as gone, and a bounded
+//    sweep (`expireAnswers`, run on every answer write and schedulable) deletes expired rows.
 import { z } from "zod";
-import { OrgIdSchema, type OrgId } from "./browser-ids.js";
-import { orgScoped } from "./company-scope.js";
+import { type OrgId } from "./browser-ids.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 // ---- Limits -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -48,6 +48,8 @@ export const WIKI_LIMITS = {
 export const WIKI_QUOTE_MAX = 200;
 /** How long an answer record is kept (days), like Ask's answers. */
 export const WIKI_ANSWER_RETENTION_DAYS = 30;
+/** The most expired answer records one sweep deletes. */
+export const WIKI_ANSWER_SWEEP_MAX = 200;
 
 // ---- Small shapes -----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -275,25 +277,8 @@ export const WikiAnswerRecordWriteSchema = z.object({
 export type WikiAnswerRecordWrite = z.infer<typeof WikiAnswerRecordWriteSchema>;
 export type WikiAnswerRecord = WikiAnswerRecordWrite & { createdAt: string; expiresAt: number };
 
-// ---- Keys -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-export interface WikiKey { pk: string; sk: string }
-
-/** The one partition of a project's wiki in a company: `ORG#<company>#WIKI#<project>`. The company purge removes it by its `ORG#<company>#` prefix. */
-export function wikiPartition(orgId: OrgId, project: string): string {
-  return orgScoped(OrgIdSchema.parse(orgId), `WIKI#${WikiProjectSchema.parse(project)}`);
-}
-/** Sort-key families inside a project's wiki partition. */
-export const WIKI_SK = { page: "PAGE#", body: "BODY#", note: "NOTE#", flag: "FLAG#", build: "BUILD#", answer: "ANSWER#" } as const;
-const pageId = (value: string): string => WikiPageIdSchema.parse(value);
-const id = (value: string): string => WikiIdSchema.parse(value);
-/** A page's index row (small: title, summary, repos, counts) and its body row (blocks and claims), written together. */
-export const wikiPageKey = (orgId: OrgId, project: string, page: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.page}${pageId(page)}` });
-export const wikiBodyKey = (orgId: OrgId, project: string, page: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.body}${pageId(page)}` });
-export const wikiNoteKey = (orgId: OrgId, project: string, page: string, noteId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.note}${pageId(page)}#${id(noteId)}` });
-export const wikiFlagKey = (orgId: OrgId, project: string, page: string, flagId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.flag}${pageId(page)}#${id(flagId)}` });
-export const wikiBuildKey = (orgId: OrgId, project: string, buildId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.build}${id(buildId)}` });
-export const wikiAnswerKey = (orgId: OrgId, project: string, answerId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.answer}${id(answerId)}` });
+// ---- Keys: in wiki-keys.ts (the key builders the company inventory reads), re-exported here --------------------------------------------------------------------------------------
+export * from "./wiki-keys.js";
 
 // ---- Read routes (W2; Cloud's Wiki tab calls them as the signed-in person) ------------------------------------------------------------------------------------------------------------
 //
@@ -384,12 +369,15 @@ export type WikiSourcesResponse = z.infer<typeof WikiSourcesResponseSchema>;
 /** Who reads a page: a person (every note, pending marked; every claim) or an agent (approved notes only; flagged and `not_found` claims and the blocks resting on them left out). */
 export type WikiAudience = "person" | "agent";
 
+/** What an agent learns of an open flag: which page or claim is marked, never who marked it or why. */
+export type WikiAgentFlag = Pick<WikiFlag, "flagId" | "pageId" | "state" | "claimId">;
+
 /** A page as read for an audience. For an agent, a page with an open page-level flag is not returned at all. */
 export interface WikiPageRead {
   page: WikiPage;
   notes: WikiNote[];
-  /** Open flags on the page and its claims (a person's reasons are included only for audience "person"). */
-  flags: WikiFlag[];
+  /** Open flags on the page and its claims. For audience "person" each is the whole flag (who, why, when); an agent gets only which claim (or the page) is marked. */
+  flags: Array<WikiAgentFlag & Partial<Pick<WikiFlag, "by" | "reason" | "createdAt">>>;
   /** Block ids whose claims include a `changed` one ("may be out of date"). */
   staleBlockIds: string[];
 }
@@ -429,6 +417,11 @@ export interface WikiStore {
   deletePage(project: string, pageId: string): Promise<boolean>;
   /** Deletes every page naming the repository (single-repo and cross-repo pages), with their notes and flags. */
   deleteRepository(project: string, repo: string): Promise<WikiRepositoryDeletion>;
+  /**
+   * Deletes every page naming a repository that is not in `current` (the project's repositories now). Every reader that knows the project's current repositories calls it before reading
+   * (the read routes do), so a repository removed from the project leaves nothing behind on the next read, whichever path removed it.
+   */
+  pruneRepositories(project: string, current: readonly string[]): Promise<WikiRepositoryDeletion>;
   /** Deletes the whole project wiki: pages, notes, flags, build records and answer records. */
   deleteWiki(project: string): Promise<number>;
   addNote(project: string, note: WikiNoteAdd): Promise<WikiNote>;
@@ -442,10 +435,12 @@ export interface WikiStore {
   readBuild(project: string, buildId: string): Promise<WikiBuildRecord | undefined>;
   /** The most recent build (by start time), if any. */
   lastBuild(project: string): Promise<WikiBuildRecord | undefined>;
-  /** Writes an answer record that expires `WIKI_ANSWER_RETENTION_DAYS` after now. */
+  /** Writes an answer record that expires `WIKI_ANSWER_RETENTION_DAYS` after now (and first sweeps expired ones, `expireAnswers`). */
   writeAnswer(project: string, record: WikiAnswerRecordWrite): Promise<WikiAnswerRecord>;
   /** An answer record, or undefined when there is none or it has expired. */
   readAnswer(project: string, answerId: string): Promise<WikiAnswerRecord | undefined>;
+  /** Deletes up to `limit` (default and most `WIKI_ANSWER_SWEEP_MAX`) answer records of the project whose time is past. Answers how many went. */
+  expireAnswers(project: string, limit?: number): Promise<number>;
   /** The person-erase step: the person's notes and answer records are deleted and their "Mark wrong" reasons removed, in every given project. */
   erasePerson(projects: readonly string[], personId: string): Promise<WikiPersonErasure>;
 }

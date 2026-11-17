@@ -75,9 +75,22 @@ export interface CitedFileReadLimits {
   now: () => number;
   /** A file larger than this (UTF-8 bytes) is unread. No limit when absent. */
   maxFileBytes?: number | undefined;
-  /** Once the files read add up to more than this, that file and every later one are unread. No limit when absent. */
+  /** Once the files read (oversized ones included) add up to more than this, that file and every later one are unread. No limit when absent. */
   maxTotalBytes?: number | undefined;
+  /** Race every read against its own timeout, so a reader that ignores `timeoutMs` cannot hang the check (a lost race is `deadline`). Off for the setup re-read, which is unchanged. */
+  enforceTimeout?: boolean | undefined;
 }
+
+/** A read that gives up after `timeoutMs`, whatever the reader does; the timer never keeps the process alive. */
+async function raced<T>(read: Promise<T>, timeoutMs: number): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([read, new Promise<typeof TIMED_OUT>((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs); timer.unref?.(); })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+const TIMED_OUT = Symbol("timed out");
 
 /**
  * Reads the needed files, a few at a time, within the deadline. Never throws: a read that throws is `unread`, a file that is not there is `missing`. `queued` names the files that were
@@ -103,16 +116,20 @@ export async function readCitedFiles(read: CitationFileReader | undefined, needs
         if (overTotal) { texts.set(entry[0], { kind: "unread", reason: "total_bytes" }); continue; }
         const [key, need] = entry;
         try {
-          const text = await read(need.repository, need.path, need.commit, {
-            ...(need.whole ? {} : { untilLine: need.untilLine! }), timeoutMs: Math.max(1, Math.min(limits.readTimeoutMs, remaining)),
-          });
+          const timeoutMs = Math.max(1, Math.min(limits.readTimeoutMs, remaining));
+          const reading = read(need.repository, need.path, need.commit, { ...(need.whole ? {} : { untilLine: need.untilLine! }), timeoutMs });
+          const text = limits.enforceTimeout === true ? await raced(reading, timeoutMs) : await reading;
+          if (text === TIMED_OUT) { texts.set(key, { kind: "unread", reason: "deadline" }); continue; }
           if (text === undefined) { texts.set(key, { kind: "missing" }); continue; }
           if (countBytes) {
             // Throws for an answer that is not text (a broken reader): that read did not finish.
             const bytes = Buffer.byteLength(text, "utf8");
-            if (limits.maxFileBytes !== undefined && bytes > limits.maxFileBytes) { texts.set(key, { kind: "unread", reason: "file_too_large" }); continue; }
+            // An oversized file was still fetched: it counts toward the total too.
             total += bytes;
-            if (limits.maxTotalBytes !== undefined && total > limits.maxTotalBytes) { overTotal = true; texts.set(key, { kind: "unread", reason: "total_bytes" }); continue; }
+            const overFile = limits.maxFileBytes !== undefined && bytes > limits.maxFileBytes;
+            if (limits.maxTotalBytes !== undefined && total > limits.maxTotalBytes) overTotal = true;
+            if (overFile) { texts.set(key, { kind: "unread", reason: "file_too_large" }); continue; }
+            if (overTotal) { texts.set(key, { kind: "unread", reason: "total_bytes" }); continue; }
           }
           texts.set(key, { kind: "text", text });
         } catch {
@@ -254,6 +271,7 @@ export async function checkCitations(read: CitationFileReader | undefined, citat
     if (!isSafeCitedPath(citation.path)) return { outcome: "source_not_found", reason: "path_not_safe", shown };
     if (citation.line !== undefined && !isLine(citation.line)) return { outcome: "source_not_found", reason: "bad_line", shown };
     if (prose && citation.line === undefined) return { outcome: "source_not_found", reason: "line_required", shown };
+    if (citation.quote !== undefined && typeof citation.quote !== "string") return { outcome: "source_not_found", reason: "no_usable_quote", shown };
     const quote = usableQuoteOf(citation);
     if (quote === undefined) return { outcome: "source_not_found", reason: "no_usable_quote", shown };
     if (prose && [...quote].length < PROSE_QUOTE_MIN_CHARS) return { outcome: "source_not_found", reason: "quote_too_short", shown };
@@ -272,6 +290,7 @@ export async function checkCitations(read: CitationFileReader | undefined, citat
 
   const { texts, queued } = await readCitedFiles(read, needs, {
     maxFiles: limits.maxFiles, concurrency: limits.concurrency, readTimeoutMs: limits.readTimeoutMs, deadline, now, maxFileBytes: limits.maxFileBytes, maxTotalBytes: limits.maxTotalBytes,
+    enforceTimeout: true,
   });
 
   const results = citations.map((citation, index): CitationResult => {
@@ -284,6 +303,8 @@ export async function checkCitations(read: CitationFileReader | undefined, citat
     if (found === undefined) return { outcome: "unreadable", reason: read === undefined ? "no_reader" : "read_failed", shown };
     if (found.kind === "unread") return { outcome: "unreadable", reason: found.reason, shown };
     if (found.kind === "missing") return { outcome: "source_not_found", reason: "file_missing", shown };
+    // A reader that answers with something that is not text (a Buffer, say) did not finish the read.
+    if (typeof found.text !== "string") return { outcome: "unreadable", reason: "read_failed", shown };
     return citationHolds(found.text, citation) ? { outcome: "source_found", shown } : { outcome: "source_not_found", reason: "quote_not_at_line", shown };
   });
   return { results, complete: results.every((result) => result.outcome !== "unreadable") };
@@ -293,18 +314,22 @@ export async function checkCitations(read: CitationFileReader | undefined, citat
 
 /** At most this many code names are taken from one sentence; a sentence with more is not kept (it cannot be checked within the bound). */
 export const PROSE_CODE_NAMES_MAX = 16;
+/** A sentence longer than this (characters) is not kept: one sentence of an answer or a wiki claim is never this long, and the code-name scan stays cheap. */
+export const PROSE_SENTENCE_MAX_CHARS = 2_000;
 const BACKTICKED = /`([^`\n]{1,200})`/gu;
+// Every quantifier is bounded (a code name is at most 200 characters), so no shape can take quadratic time on a long run of word characters.
 const CODE_SHAPES: readonly RegExp[] = [
-  /[A-Za-z0-9_.-]*[A-Za-z0-9_-]\/[A-Za-z0-9_./-]*[A-Za-z0-9_-]/gu, // a path: a/b, src/app.ts
-  /\b[A-Za-z0-9_-]{2,}\.[a-z][a-z0-9]{0,5}\b/gu, // a file or member name: app.ts, Refund.limit
-  /\b[A-Za-z_$][\w$]*(?=\(\))/gu, // a call: refund()
-  /\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b/gu, // camelCase
-  /\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\b/gu, // PascalCase with two humps
-  /\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b/gu, // snake_case, SCREAMING_CASE
+  /[A-Za-z0-9_.-]{0,200}[A-Za-z0-9_-]\/[A-Za-z0-9_./-]{0,200}[A-Za-z0-9_-]/gu, // a path: a/b, src/app.ts
+  /\b[A-Za-z0-9_-]{2,200}\.[a-z][a-z0-9]{0,5}\b/gu, // a file or member name: app.ts, Refund.limit
+  /\b[A-Za-z_$][\w$]{0,200}(?=\(\))/gu, // a call: refund()
+  /\b[a-z][a-z0-9]{0,200}[A-Z][A-Za-z0-9]{0,200}\b/gu, // camelCase
+  /\b[A-Z][a-z0-9]{1,200}[A-Z][A-Za-z0-9]{0,200}\b/gu, // PascalCase with two humps
+  /\b[A-Za-z][A-Za-z0-9]{0,200}_[A-Za-z0-9_]{1,200}\b/gu, // snake_case, SCREAMING_CASE
 ];
 
 /** The code names a sentence mentions, in order of first appearance, each once: backticked spans (whitespace collapsed) and code-shaped words outside backticks. */
-export function codeNamesOf(sentence: string): string[] {
+export function codeNamesOf(raw: string): string[] {
+  const sentence = visibleText(raw);
   const names: string[] = [];
   const add = (name: string) => { const clean = collapseWhitespace(name); if (clean !== "" && !names.includes(clean)) names.push(clean); };
   for (const match of sentence.matchAll(BACKTICKED)) add(match[1]!);
@@ -313,11 +338,14 @@ export function codeNamesOf(sentence: string): string[] {
   return names;
 }
 
+/** Text as a person reads it: compatibility forms folded (NFKC) and invisible format characters removed, so `refund\u200BLimit` is the code name it looks like. */
+const visibleText = (text: string): string => text.normalize("NFKC").replace(/\p{Cf}/gu, "");
+
 const IDENTIFIER_CHARACTER = /[A-Za-z0-9_$]/u;
 /** Whether `name` is in `quote` as a whole token: the characters either side (if any) are not identifier characters. Case-sensitive; whitespace collapsed on both. */
 export function hasCodeToken(quote: string, name: string): boolean {
-  const text = collapseWhitespace(quote);
-  const wanted = collapseWhitespace(name);
+  const text = collapseWhitespace(visibleText(quote));
+  const wanted = collapseWhitespace(visibleText(name));
   if (wanted === "") return false;
   for (let from = text.indexOf(wanted); from !== -1; from = text.indexOf(wanted, from + 1)) {
     const before = from === 0 ? "" : text[from - 1]!;
@@ -333,7 +361,7 @@ export function hasCodeToken(quote: string, name: string): boolean {
 export interface ClaimToCheck { sentence: string; citations: readonly CitationRef[] }
 
 /** Why a sentence was dropped; fixed words, never the sentence's or the file's text. */
-export type ClaimDropReason = "uncited" | "source_not_found" | "unreadable" | "code_name_not_in_quote" | "too_many_code_names";
+export type ClaimDropReason = "uncited" | "not_a_sentence" | "source_not_found" | "unreadable" | "code_name_not_in_quote" | "too_many_code_names" | "code_name_too_long" | "sentence_too_long";
 
 /** A sentence survives only when it has at least one citation, every source was found, and (prose) every code name it mentions is in one of its quotes. Sentences are returned as given: the caller makes them inert for the surface it shows them on. */
 export interface ClaimResult { sentence: string; kept: boolean; dropped?: ClaimDropReason; results: CitationResult[] }
@@ -347,10 +375,14 @@ export interface ClaimsCheck {
 
 /** Why a claim cannot stand, or undefined when it can. */
 function dropReasonOf(claim: ClaimToCheck, results: readonly CitationResult[], prose: boolean): ClaimDropReason | undefined {
+  if (typeof claim.sentence !== "string") return "not_a_sentence";
   if (results.length === 0) return "uncited";
   if (results.some((result) => result.outcome === "unreadable")) return "unreadable";
   if (results.some((result) => result.outcome !== "source_found")) return "source_not_found";
   if (!prose) return undefined;
+  if (claim.sentence.length > PROSE_SENTENCE_MAX_CHARS) return "sentence_too_long";
+  // The code-name shapes stop at 200 characters, so a longer run of name characters could hide a name from them: such a sentence is not kept. (Linear: one character class.)
+  if (/[A-Za-z0-9_$./-]{201}/u.test(visibleText(claim.sentence))) return "code_name_too_long";
   const names = codeNamesOf(claim.sentence);
   if (names.length > PROSE_CODE_NAMES_MAX) return "too_many_code_names";
   const quotes = claim.citations.map((citation) => asText(citation.quote));

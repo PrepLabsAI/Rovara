@@ -366,6 +366,18 @@ describe("the core on the dispatcher", () => {
     expect(declared.mock.calls.map((call) => call[1])).toEqual([COMPANY_A, COMPANY_B]);
   });
 
+  it("lead 4 A1: each company's runtime on the dispatcher carries its own wiki reader, which gives a step nothing for another company's workspace or when no switch is on", async () => {
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const built = createDispatcherCoreHost({ ...made.inputs, flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
+    const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
+    expect(typeof a.flow.deps.wiki).toBe("function");
+    expect(a.flow.deps.wiki).not.toBe(b.flow.deps.wiki);
+    const step = { project: "alpha", taskId: "11111111-1111-4111-8111-111111111111", operationId: "aaaaaaaa-1111-4111-8111-111111111111", workflowMode: "PLAN", repositories: ["web"] };
+    expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_B })).toEqual({});
+    expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_A })).toEqual({});
+  });
+
   it("builds no company's runtime until every flow input a worker job carries is declared, and places the worker on the install's own workers only", async () => {
     // The points Code's modules leave owed, from the fake world, so the registry builds and the flow declaration is what decides.
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);

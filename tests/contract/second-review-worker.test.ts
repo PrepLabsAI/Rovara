@@ -83,7 +83,7 @@ function model(id: string, script: string[], prompts: string[], options: { delay
 const PASS = '{"findings":[]}';
 const FINDING = '{"findings":[{"text":"off by one in the loop bound","origin":"INTRODUCED"}]}';
 
-async function run(options: { first: ReturnType<typeof model>; candidates?: Array<ReturnType<typeof model>>; reviewers?: Array<"CRITIC" | "SECURITY">; timeoutMs?: number; context?: "change_only" | "same_as_first"; sources?: unknown; learnedBlock?: string; tools?: string[]; skills?: unknown[] }) {
+async function run(options: { first: ReturnType<typeof model>; candidates?: Array<ReturnType<typeof model>>; reviewers?: Array<"CRITIC" | "SECURITY">; timeoutMs?: number; context?: "change_only" | "same_as_first"; sources?: unknown; learnedBlock?: string; onWikiEvent?: (event: unknown) => void; tools?: string[]; skills?: unknown[] }) {
   const { rootPath, repositories, candidate } = await repository();
   let second: SecondReviewResult | undefined;
   const started = Date.now();
@@ -91,7 +91,7 @@ async function run(options: { first: ReturnType<typeof model>; candidates?: Arra
     const reports = await runWorkflowReviews({
       ruleFileBaseCommits: [], operationId: OPERATION, rootPath, model: options.first.model, candidate, repositories, piAdapter: options.first.piAdapter, now: () => now,
       ...(options.reviewers === undefined ? {} : { reviewers: options.reviewers }), ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      ...(options.sources === undefined ? {} : { sources: options.sources as never }), ...(options.learnedBlock === undefined ? {} : { learnedBlock: options.learnedBlock }), ...(options.tools === undefined ? {} : { tools: options.tools }), ...(options.skills === undefined ? {} : { skills: options.skills as never }),
+      ...(options.sources === undefined ? {} : { sources: options.sources as never }), ...(options.learnedBlock === undefined ? {} : { learnedBlock: options.learnedBlock }), ...(options.onWikiEvent === undefined ? {} : { onWikiEvent: options.onWikiEvent }), ...(options.tools === undefined ? {} : { tools: options.tools }), ...(options.skills === undefined ? {} : { skills: options.skills as never }),
       ...(options.candidates === undefined ? {} : { secondReviewer: { candidates: options.candidates, ...(options.context === undefined ? {} : { context: options.context }) }, onSecondReview: (result: SecondReviewResult) => { second = result; } }),
     });
     return { reports, second, elapsed: Date.now() - started };
@@ -229,6 +229,33 @@ describe("the second reviewer takes no extra wall time (M1)", () => {
     await run({ first: track("first-v1"), candidates: [track("second-a")], sources, learnedBlock: "LESSON-BLOCK", context: "same_as_first" });
     expect(seen).toContain("second-a:tools=1");
     expect(seen).toContain("second-a:lessons=true");
+  });
+});
+
+describe("the project wiki and the second reviewer (lead 4 A1)", () => {
+  it("a reviewer shown only the change neither gets the wiki's index (it rides in the learned block) nor has its wiki reads noted; same_as_first does", async () => {
+    const calls: string[] = [];
+    const track = (id: string) => {
+      const m = model(id, [PASS], []);
+      const inner = m.piAdapter.create.bind(m.piAdapter);
+      m.piAdapter.create = async (input) => {
+        const session = await inner(input);
+        const subscribe = session.subscribe.bind(session);
+        session.subscribe = (listener) => { listener({ type: "tool_execution_start", toolName: "read", args: { path: `who:${id}` } }); return subscribe(listener); };
+        return session;
+      };
+      return m;
+    };
+    const onWikiEvent = (event: unknown): void => { calls.push(String((event as { args?: { path?: string } }).args?.path)); };
+    await run({ first: track("first-v1"), candidates: [track("second-a")], learnedBlock: "WIKI-BLOCK", onWikiEvent });
+    expect(calls).toContain("who:first-v1");
+    expect(calls).not.toContain("who:second-a");
+    calls.length = 0;
+    await run({ first: track("first-v1"), candidates: [track("second-a")], learnedBlock: "WIKI-BLOCK", onWikiEvent, context: "change_only" });
+    expect(calls).not.toContain("who:second-a");
+    calls.length = 0;
+    await run({ first: track("first-v1"), candidates: [track("second-a")], learnedBlock: "WIKI-BLOCK", onWikiEvent, context: "same_as_first" });
+    expect(calls).toContain("who:second-a");
   });
 });
 
