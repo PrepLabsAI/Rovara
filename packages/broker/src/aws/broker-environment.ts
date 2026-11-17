@@ -138,7 +138,8 @@ export function brokerSettingsFromEnvironment(env: MutableEnvironment): Array<{ 
 export function hydrateBrokerSettings(env: MutableEnvironment): void {
   // The settings first: they are plain values the rest does not need, and a bad list stops the broker before anything is built from it.
   for (const { spec, value } of brokerSettingsFromEnvironment(env)) {
-    if (!isSet(env[spec.variable])) env[spec.variable] = value;
+    // A host setting (the core's model gateway) becomes its https origin; empty stays empty, so an unset gateway reads as unset.
+    if (!isSet(env[spec.variable])) env[spec.variable] = spec.httpsOrigin === true && value !== "" ? `https://${value}` : value;
   }
 }
 

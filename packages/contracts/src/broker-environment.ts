@@ -15,9 +15,10 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { coreDispatchDeadLetterName, coreDispatchQueueName, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE } from "./core-engine-infra.js";
+import { coreDispatchDeadLetterName, coreDispatchQueueName, CORE_AGENT_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
 import {
   environmentAlarmPrefix,
+  environmentChannelAdapterSecretPrefix,
   environmentConnectorSecretPrefix,
   environmentE2eFeatureRuntimeCatalogId,
   environmentMetricsNamespace,
@@ -117,6 +118,8 @@ export interface BrokerSettingSpec {
   readonly code: string;
   /** The variable the broker's code reads the value as. */
   readonly variable: string;
+  /** The value is a host (with an optional port) and the variable gets its https origin, `https://<value>`; an empty value stays empty. A slash cannot be packed, so the scheme is added here. */
+  readonly httpsOrigin?: true;
 }
 
 /**
@@ -139,6 +142,11 @@ export const BROKER_SETTINGS = {
   coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },
   coreCompanyDayCap: { code: "cd", variable: "ROVARA_CORE_COMPANY_DAY_CAP_USD" },
   coreLessons: { code: "cl", variable: "ROVARA_CORE_LESSONS" },
+  // Core switch-on blocker (2026-11-17): the switch, and the model gateway's host and agent model (the stack parameters CoreEngine, CoreModelGatewayHost and CoreAgentModel), packed
+  // to make room for the gateway settings in the broker's 4 KB.
+  coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
+  coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
+  coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;
@@ -161,6 +169,8 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   { variable: "AGENTX_METRICS_NAMESPACE", kind: "text", value: environmentMetricsNamespace },
   { variable: "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", kind: "text", value: environmentProjectSetupRuntimeCatalogId },
   { variable: "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", kind: "text", value: environmentE2eFeatureRuntimeCatalogId },
+  // Core switch-on blocker (2026-11-17): the channel adapters' secret prefix is the environment's own, so it is derived, making room for the gateway settings.
+  { variable: "CHANNEL_ADAPTER_SECRET_PREFIX", kind: "text", value: environmentChannelAdapterSecretPrefix },
   // Core switch-on lane L1a: the core dispatch queue and its dead letters have fixed names (core-engine-infra.ts), so the broker builds their URLs; nothing is passed.
   { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName },
   { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName },
