@@ -29,7 +29,7 @@ let module: Module;
 beforeAll(async () => { module = await loadSlackBroker() as unknown as Module; });
 
 /** One store, two companies (each with its own bound installation); `as(company)` makes the caller a member of that company. */
-async function world() {
+async function world(options: { bindings?: false } = {}) {
   const h = companyRouteHarness();
   const bindings = new GithubInstallationBindings(h.db, "state");
   await bindings.backfill(async () => []);
@@ -44,7 +44,7 @@ async function world() {
     workerBinding: vi.fn(async () => ({ deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" })),
     repositoryInstallation: vi.fn(async (url: string) => ({ installationId: LIVE[ownerOf(url)] ?? 0, suspended: false })),
   };
-  const extra = { documentClient: h.db, linking: h.deps.developer, clientProjects, companies: { companyOf }, githubBindings: bindings,
+  const extra = { documentClient: h.db, linking: h.deps.developer, clientProjects, companies: { companyOf }, ...(options.bindings === false ? {} : { githubBindings: bindings }),
     githubPullRequests: { installationIdFor: vi.fn(async (url: string) => LIVE[ownerOf(url)] ?? 0) },
     githubBindingInstallations: { get: async () => undefined, page: async () => ({ installations: [], more: false }) },
   };
@@ -183,11 +183,14 @@ describe("the claim is taken in the registration's own transaction", () => {
   });
 
   it("the claim items: a conditional Put of the company's claim and a check of the company's own catalog, nothing else", () => {
-    expect(companyNameClaimWrites("state", { companyId: A, name: "web", projectId: "web-abc123", by: PERSON, at: "2026-11-17T00:00:00.000Z" })).toEqual([
+    expect(companyNameClaimWrites("state", { companyId: A, name: "web", projectId: "web-abc123", revision: 1, by: PERSON, at: "2026-11-17T00:00:00.000Z" })).toEqual([
       { Put: { TableName: "state", ConditionExpression: "attribute_not_exists(pk)", Item: { pk: `ORG#${A}#PROJECT_NAME`, sk: "NAME#web", entityType: "PROJECT_NAME_CLAIM", companyId: A, name: "web", projectId: "web-abc123", claimedBy: PERSON, claimedAt: "2026-11-17T00:00:00.000Z" } } },
       { ConditionCheck: { TableName: "state", Key: { pk: `ORG#${A}#PROJECT_CATALOG`, sk: "PROJECT#web" }, ConditionExpression: "attribute_not_exists(pk)" } },
     ]);
-    expect(() => companyNameClaimWrites("state", { companyId: "not-a-company", name: "web", projectId: "web-abc123", by: PERSON, at: "x" })).toThrow();
+    // Only a company's project, and only its first revision, claims a name (registration refuses before any write).
+    for (const bad of [{ companyId: "not-a-company" }, { companyId: undefined }, { revision: 2 }]) {
+      expect(() => companyNameClaimWrites("state", { companyId: A, name: "web", projectId: "web-abc123", revision: 1, by: PERSON, at: "x", ...bad })).toThrow(expect.objectContaining({ code: "FORBIDDEN" }) as Error);
+    }
   });
 });
 
@@ -200,6 +203,7 @@ describe("the Rovara administrator's create is unchanged", () => {
     h.as(B);
     // Today's shared namespace, for the administrator only: B's administrator is refused A's web.
     expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] }))).toBe("name_taken");
+    await expect(h.deps.createClientProject(PERSON, { repository: "acme-b/api" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: a project named api already exists; choose another name" });
     const bulk = await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-b/api"] });
     expect(bulk.results).toEqual([{ repository: "acme-b/api", outcome: "refused", reason: "name_taken" }]);
   });
@@ -262,5 +266,46 @@ describe("ids and lookups", () => {
     }
     h.db.set({ ...orgProjectCatalogKey(B, "legacy"), entityType: "PROJECT_CATALOG", companyId: A, name: "legacy", latestRevision: 1 });
     expect(await companyProjectIdByName(h.db, "state", B, "legacy")).toBeUndefined();
+  });
+});
+
+describe("review fixes (L2-1 Opus review)", () => {
+  /** Plants a B-owned revision at the fresh id the create just checked, so registration meets a project that is not the company's. */
+  const plantAtFreshId = (h: Awaited<ReturnType<typeof world>>) => async () => {
+    const asked = h.sent.map((command) => (command as { input?: { ExpressionAttributeValues?: Record<string, unknown> } }).input?.ExpressionAttributeValues?.[":pk"])
+      .filter((pk): pk is string => typeof pk === "string" && /^PROJECT#web-[a-z0-9]{6}$/.test(pk));
+    const pk = asked.at(-1)!;
+    h.db.set({ pk, sk: "REV#000000000001", entityType: "PROJECT", companyId: B, definition: { name: pk.slice("PROJECT#".length), revision: 1 } });
+    return { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" };
+  };
+
+  it("a fresh id taken by another company between the check and registration answers unavailable in fixed words, never 'not found', nothing of A written", async () => {
+    for (const single of [false, true]) {
+      const h = await world();
+      h.clientProjects.workerBinding.mockImplementationOnce(plantAtFreshId(h));
+      const work = single ? h.deps.createClientProject(PERSON, { repository: "acme-a/web" }, PER_COMPANY) : h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] }, PER_COMPANY);
+      const error = await work.then(() => undefined, (caught: unknown) => caught as { code?: string; message?: string; reason?: string });
+      expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE", reason: "unavailable" });
+      expect(error?.message).not.toMatch(/not found|org_/);
+      expect(h.db.get(orgProjectNameClaimKey(A, "web").pk, orgProjectNameClaimKey(A, "web").sk)).toBeUndefined();
+      expect(h.db.find((item) => item.companyId === A && typeof item.pk === "string" && item.pk.startsWith("PROJECT#"))).toEqual([]);
+    }
+  });
+
+  it("per-company bulk without a company (no company bindings on this install) is refused whole before any row runs", async () => {
+    const h = await world({ bindings: false });
+    await expect(h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-a/web", "acme-a/api"] }, PER_COMPANY)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(h.clientProjects.repositoryInstallation).not.toHaveBeenCalled();
+    expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
+  });
+
+  it("a lookup by name checks the claimed project is still the company's, and an older catalog row must name the same project", async () => {
+    const h = await world();
+    const a = await h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] }, PER_COMPANY);
+    expect(await companyProjectIdByName(h.db, "state", A, "web")).toBe(a.name);
+    h.db.set({ ...h.revision(a.name)!, companyId: B });
+    expect(await companyProjectIdByName(h.db, "state", A, "web")).toBeUndefined();
+    h.db.set({ ...orgProjectCatalogKey(A, "old"), entityType: "PROJECT_CATALOG", companyId: A, name: "other", latestRevision: 1 });
+    expect(await companyProjectIdByName(h.db, "state", A, "old")).toBeUndefined();
   });
 });

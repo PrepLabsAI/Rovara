@@ -7,7 +7,7 @@
 //   - The Rovara administrator's create and the admin `register` keep today's global names (id == name), byte-identical.
 import { randomBytes } from "node:crypto";
 import { AGENTX_NAME_PATTERN, AgentXError, errorStatus, OrgIdSchema, orgProjectCatalogKey, orgProjectNameClaimKey } from "@agentx/contracts";
-import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { unavailable } from "./client-project-create.js";
 
 /** The six random characters after a company project's name, and the most of the name kept in front of them (63-character ids). */
@@ -47,10 +47,13 @@ export async function companyNameTaken(store: Store, tableName: string, companyI
 
 /**
  * The transaction items that claim `name` for `companyId` as project `projectId`: the claim row (only if absent) and a check that the company's
- * own catalog has no project named `name`. Either failing cancels the whole registration, so nothing is written.
+ * own catalog has no project named `name`. Either failing cancels the whole registration, so nothing is written. Only a company's project, and only
+ * its first revision, claims a name: anything else is refused before any write.
  */
-export function companyNameClaimWrites(tableName: string, claim: { companyId: string; name: string; projectId: string; by: string; at: string }) {
-  const company = OrgIdSchema.parse(claim.companyId);
+export function companyNameClaimWrites(tableName: string, claim: { companyId: string | undefined; name: string; projectId: string; revision: number; by: string; at: string }) {
+  const parsed = OrgIdSchema.safeParse(claim.companyId);
+  if (!parsed.success || claim.revision !== 1) throw new AgentXError("FORBIDDEN", "a company's project name is claimed only by that company's first revision", errorStatus("FORBIDDEN"));
+  const company = parsed.data;
   return [
     { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
       ...orgProjectNameClaimKey(company, claim.name), entityType: PROJECT_NAME_CLAIM, companyId: company, name: claim.name, projectId: claim.projectId, claimedBy: claim.by, claimedAt: claim.at,
@@ -68,8 +71,11 @@ export async function companyProjectIdByName(store: Store, tableName: string, co
   const read = async (Key: { pk: string; sk: string }) => ((await store.send(new GetCommand({ TableName: tableName, Key, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item;
   const claim = await read(orgProjectNameClaimKey(company, name));
   if (claim !== undefined) {
-    return claim.entityType === PROJECT_NAME_CLAIM && claim.companyId === company && claim.name === name && typeof claim.projectId === "string" && AGENTX_NAME_PATTERN.test(claim.projectId)
-      ? claim.projectId : undefined;
+    if (claim.entityType !== PROJECT_NAME_CLAIM || claim.companyId !== company || claim.name !== name || typeof claim.projectId !== "string" || !AGENTX_NAME_PATTERN.test(claim.projectId)) return undefined;
+    // The project itself must still be the company's (its latest revision), whatever the claim says.
+    const latest = ((await store.send(new QueryCommand({ TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${claim.projectId}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true }))) as { Items?: Array<Record<string, unknown>> }).Items?.[0];
+    return latest !== undefined && latest.companyId === company ? claim.projectId : undefined;
   }
   const older = await read(orgProjectCatalogKey(company, name));
   return older !== undefined && older.entityType === "PROJECT_CATALOG" && older.companyId === company && older.name === name ? name : undefined;

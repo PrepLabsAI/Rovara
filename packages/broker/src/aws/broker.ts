@@ -2131,7 +2131,7 @@ async function registerProject(
   const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
   const companyBudget = checked?.githubCompany?.budget ?? boundedCompanyReads(dependencies.documentClient);
   const companyId = checked?.githubCompany === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : checked.githubCompany.companyId;
-  await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget); if (checked?.nameClaim !== undefined && (companyId === undefined || definition.revision !== 1)) throw agentXError("FORBIDDEN", "a company's project name is claimed only by that company's first revision"); // Guided onboarding L2-1
+  await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
   let ownershipTakenOver = false;
@@ -2217,7 +2217,7 @@ async function registerProject(
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
   await judgeAuthority((await readCatalogSnapshot()).newestRevision);
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight, { companyId, budget: companyBudget });
-  const now = new Date().toISOString(); const nameClaimWrites = checked?.nameClaim === undefined ? [] : companyNameClaimWrites(dependencies.tableName, { companyId: companyId!, name: checked.nameClaim.name, projectId: definition.name, by: identity.ownerKey, at: now }); // L2-1: in the same transaction
+  const now = new Date().toISOString(); const nameClaimWrites = checked?.nameClaim === undefined ? [] : companyNameClaimWrites(dependencies.tableName, { companyId, name: checked.nameClaim.name, projectId: definition.name, revision: definition.revision, by: identity.ownerKey, at: now }); // L2-1: in the same transaction
   const record: RegisteredProjectRecord = {
     ...key,
     entityType: "PROJECT",
