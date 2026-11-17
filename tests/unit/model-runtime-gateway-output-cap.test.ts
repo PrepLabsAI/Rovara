@@ -1,10 +1,11 @@
-// DEC 254f review: the model gateway's agent route holds every non-Anthropic model name to its default output limit (64,000 tokens) and refuses a request asking for more. Pi asks for the
+// DEC 254f review (kept by DEC 254g, which drops Code's pinned model list): the model gateway's agent route holds every non-Anthropic model name to its default output limit (64,000 tokens) and refuses a request asking for more. Pi asks for the
 // catalog's whole output limit (zai.glm-5: 131,072), so a core step on a Bedrock model the gateway offers would be refused at every call. A routed model on that list asks for at most the
-// gateway's limit; Claude and every other routed model keep their catalog limit, as before.
+// gateway's limit (its offered-models answer carries no output limit, so 64,000 stands for every model but Claude on that route); Claude and routes on another API keep their catalog limit.
+// DEC 254g: the gateway is the authority on which models it offers; its 400 for one it does not offer ends the call in model-runtime's own fixed words ("model not offered").
 import { describe, expect, it, vi } from "vitest";
 import type { Context } from "@earendil-works/pi-ai";
-import { CORE_GATEWAY_CONVERSE_AGENT_MODELS } from "@agentx/contracts";
-import { GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS, createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
+import { GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS, GATEWAY_MODEL_NOT_OFFERED_ANSWERS, MODEL_NOT_OFFERED_DETAIL, createConfiguredModelRuntime, gatewayModelNotOfferedBody } from "../../packages/model-runtime/src/index.js";
+import { GATEWAY_CONVERSE_MODELS } from "../support/offered-models-fake.js";
 import { catalogModelByName } from "../../packages/model-runtime/src/catalog.js";
 
 const plain: Context = { messages: [{ role: "user", content: "Say hi", timestamp: 1 }] };
@@ -17,10 +18,15 @@ const answer = (model: string) => new Response([
   { type: "message_stop" },
 ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
 
-async function maxTokensAsked(name: string, provider: "anthropic" | "amazon-bedrock"): Promise<{ registered: number; sent: unknown }> {
+async function routedRuntime(name: string, provider: "anthropic" | "amazon-bedrock", reply: () => Response) {
   const bodies: Array<Record<string, unknown>> = [];
-  const transport = vi.fn(async (_input: unknown, init?: RequestInit) => { bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>); return answer(name); }) as unknown as typeof fetch;
+  const transport = vi.fn(async (_input: unknown, init?: RequestInit) => { bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>); return reply(); }) as unknown as typeof fetch;
   const runtime = await createConfiguredModelRuntime({ provider, modelId: name }, { fetch: transport, onUsage: () => undefined, proxy: { baseUrl: "https://gateway.example", apiKey: "task-key", route: { alias: name, api: "anthropic-messages", catalog: name } } });
+  return { runtime, bodies };
+}
+
+async function maxTokensAsked(name: string, provider: "anthropic" | "amazon-bedrock"): Promise<{ registered: number; sent: unknown }> {
+  const { runtime, bodies } = await routedRuntime(name, provider, () => answer(name));
   const model = runtime.getModel("rovara-route", name)!;
   const message = await runtime.completeSimple(model, plain);
   expect(message.stopReason).toBe("stop");
@@ -38,7 +44,7 @@ describe("a routed call to a Bedrock model the gateway offers", () => {
   });
 
   it("never asks for more than the gateway's limit on any offered model, and keeps a lower catalog limit", async () => {
-    for (const name of CORE_GATEWAY_CONVERSE_AGENT_MODELS) {
+    for (const name of [...GATEWAY_CONVERSE_MODELS, "acme.brand-new-model-v9:0"]) {
       const catalog = catalogModelByName(name)?.model.maxTokens ?? 16_384;
       const { registered, sent } = await maxTokensAsked(name, "amazon-bedrock");
       expect(registered, name).toBe(Math.min(catalog, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS));
@@ -54,11 +60,38 @@ describe("every other routed model keeps its catalog limit (today's behaviour)",
     expect(await maxTokensAsked("claude-sonnet-4-6", "anthropic")).toEqual({ registered: catalog, sent: catalog });
   });
 
-  it("a Bedrock model the gateway does not offer (a company's own route) keeps its catalog limit", async () => {
-    const catalog = catalogModelByName("zai.glm-5")!.model.maxTokens;
-    // global.zai.glm-5.3 is not on the gateway's list: no cap (catalog name lookup may not know it, so compare with what the runtime registers without a cap).
-    const known = catalogModelByName("global.zai.glm-5.3")?.model.maxTokens;
-    if (known !== undefined) expect((await maxTokensAsked("global.zai.glm-5.3", "amazon-bedrock")).registered).toBe(known);
-    expect(catalog).toBe(131_072);
+  it("a route on another API keeps its catalog limit, whatever the model", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const transport = vi.fn(async (_input: unknown, init?: RequestInit) => { bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>); return new Response("", { status: 500 }); }) as unknown as typeof fetch;
+    const runtime = await createConfiguredModelRuntime({ provider: "amazon-bedrock", modelId: "zai.glm-5" }, { fetch: transport, onUsage: () => undefined, proxy: { baseUrl: "https://gateway.example", apiKey: "task-key", route: { alias: "company-glm", api: "openai-completions", catalog: "zai.glm-5" } } });
+    expect(runtime.getModel("rovara-route", "company-glm")!.maxTokens).toBe(catalogModelByName("zai.glm-5")!.model.maxTokens);
+  });
+});
+
+describe("a model the gateway does not offer (DEC 254g: the gateway is the authority)", () => {
+  const refusal = (message: string, status = 400) => () => Response.json({ error: { type: "invalid_request", message } }, { status });
+
+  it("ends the call in model-runtime's own fixed words for each of the gateway's not-offered answers", async () => {
+    for (const message of GATEWAY_MODEL_NOT_OFFERED_ANSWERS) {
+      const { runtime } = await routedRuntime("zai.glm-9", "amazon-bedrock", refusal(message));
+      const result = await runtime.completeSimple(runtime.getModel("rovara-route", "zai.glm-9")!, plain);
+      expect(result.stopReason, message).toBe("error");
+      expect(result.errorMessage, message).toBe(`Model source request failed; ${MODEL_NOT_OFFERED_DETAIL}`);
+    }
+  });
+
+  it("any other 400 keeps the ordinary refused-request words (the body is matched whole, never echoed)", async () => {
+    for (const reply of [refusal("This model is not offered on Rovara's AI. secret-prompt"), refusal("prompt too long"), () => new Response("This model is not offered on Rovara's AI.", { status: 400 })]) {
+      const { runtime } = await routedRuntime("zai.glm-9", "amazon-bedrock", reply);
+      const result = await runtime.completeSimple(runtime.getModel("rovara-route", "zai.glm-9")!, plain);
+      expect(result.errorMessage).toBe("Model source request failed; the request was refused; check the model's context and output limits");
+      expect(result.errorMessage).not.toContain("secret-prompt");
+    }
+  });
+
+  it("is told by the gateway's exact answer only", () => {
+    expect(gatewayModelNotOfferedBody(JSON.stringify({ error: { type: "invalid_request", message: "This model is not offered on Rovara's AI." } }))).toBe(true);
+    for (const body of ["", "not json", "null", "[]", JSON.stringify({ error: "This model is not offered on Rovara's AI." }), JSON.stringify({ message: "This model is not offered on Rovara's AI." }),
+      JSON.stringify({ error: { message: "this model is not offered on rovara's ai." } })]) expect(gatewayModelNotOfferedBody(body), body).toBe(false);
   });
 });

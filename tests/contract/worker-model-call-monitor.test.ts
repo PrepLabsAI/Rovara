@@ -355,3 +355,23 @@ describe("ModelCallMonitor", () => {
     for (const options of [{ deadlineMs: 0 }, { stallMs: -1 }, { deadlineMs: 1.5 }, { tickMs: 0 }, { heartbeatMs: Number.NaN }]) expect(() => new ModelCallMonitor(options)).toThrow("model call");
   });
 });
+
+describe("a model the gateway does not offer (DEC 254g)", () => {
+  const failed = (provider: string | undefined, errorMessage: string) => sanitizeModelCallEvent({ type: "message_end", message: { role: "assistant", stopReason: "error", ...(provider === undefined ? {} : { provider }), errorMessage } });
+
+  it("is model-not-found ModelNotOffered, whichever provider the routed message names, with the fixed next step", () => {
+    for (const provider of ["rovara-route", "anthropic", "amazon-bedrock", undefined]) {
+      const note = failed(provider, "Model source request failed; the model gateway does not offer this model")?.modelCall;
+      expect(note, String(provider)).toMatchObject({ outcome: "failed", class: "model-not-found", signal: "ModelNotOffered", status: 400 });
+      if (note?.outcome !== "failed") throw new Error("not failed");
+      expect(describeModelCallNote(note)).toBe("the model call failed: model-not-found ModelNotOffered HTTP 400 attempt 1");
+      expect(modelFailureNextAction(note)).toContain("the model is not offered: the model gateway does not offer this model to this company");
+    }
+  });
+
+  it("is matched whole: other text, or the words inside other text, is not it", () => {
+    for (const text of ["Model source request failed; the model gateway does not offer this model, secret", "the model gateway does not offer this model", "x Model source request failed; the model gateway does not offer this model"]) {
+      expect(failed("anthropic", text)?.modelCall, text).not.toMatchObject({ signal: "ModelNotOffered" });
+    }
+  });
+});

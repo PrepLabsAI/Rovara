@@ -15,9 +15,9 @@ export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
 export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
 export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
-export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL } from "./provider-failure.js";
+export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isGatewayConverseAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isClaudeAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -274,9 +274,10 @@ function proxyRequestKey(proxy: ModelProxyOptions, api?: InvocationModelRoute["a
 }
 
 /**
- * DEC 254f: the most output tokens a call to a Bedrock model the model gateway offers (contracts CORE_GATEWAY_CONVERSE_AGENT_MODELS) may ask for. The gateway's agent route holds every
- * non-Anthropic model name to its default output limit (64,000) and refuses a request asking for more; Pi asks for the catalog's whole limit (zai.glm-5: 131,072). So such a route asks
- * for at most this (a lower catalog limit stays). Claude and every other routed model keep their catalog limit.
+ * DEC 254f/254g: the most output tokens a routed call to a model other than Claude on the Anthropic Messages route (the model gateway's agent route, which translates it to Bedrock
+ * Converse) may ask for. The gateway holds every non-Anthropic model name to its default output limit (64,000) unless it knows the model's own, and Pi asks for the catalog's whole limit
+ * (zai.glm-5: 131,072). The gateway's offered-models answer carries no output limit (OfferedAgentModels is a list of names), so this default stands; a lower catalog limit stays. Claude
+ * and every route on another API keep their catalog limit.
  */
 export const GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS = 64_000;
 
@@ -306,7 +307,7 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
     models: [{
       id: route.alias, name: route.alias, api: route.api, baseUrl,
       reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow,
-      maxTokens: route.api === "anthropic-messages" && isGatewayConverseAgentModel(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
+      maxTokens: route.api === "anthropic-messages" && !isClaudeAgentModel(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
       compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),
@@ -365,6 +366,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   let refusal: ChatGptFallbackReason | undefined;
   // Set when the model proxy answered 403 because Amazon Bedrock refused the model for this account (not a key or permission problem): the error then says so in its own fixed words.
   let notEnabled = false;
+  // Set when the model gateway answered 400 because it does not offer the routed model (DEC 254g).
+  let notOffered = false;
   let returnedModel: string | undefined;
   let returnedProvider: string | undefined;
   const observedFetch: typeof fetch = async (input, init) => {
@@ -376,6 +379,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     if (!response.ok && plan?.fallback !== undefined) refusal = chatGptRefusal(response.status, (await response.clone().text().catch(() => "")).slice(0, 65_536));
     // DR-KEY-1 (B): the model proxy's 403 body is read (matched, never kept) to tell a model the account cannot use from a refused key.
     if (response.status === 403 && proxyKey !== undefined && plan === undefined) notEnabled = modelNotEnabledBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notEnabled;
+    // DEC 254g: the model gateway is the authority on which models it offers. Its 400 for a model it does not offer is read (matched against its fixed words, never kept) so the step fails as "model not offered".
+    if (response.status === 400 && route?.api === "anthropic-messages" && plan === undefined) notOffered = gatewayModelNotOfferedBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notOffered;
     if (!response.ok || !response.body) return response;
     // Observe only the serving model and router provider identifiers; never record request/response bodies.
     const decoder = new TextDecoder();
@@ -453,7 +458,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
           return await fallBack(plan.fallback, refusal);
         }
         started = true;
-        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled);
+        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered);
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -473,7 +478,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     } catch (error) {
       const aborted = options?.signal?.aborted === true;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider, model: model.id,
-        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled),
+        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });
@@ -507,8 +512,24 @@ export function modelNotEnabledBody(body: string): boolean {
 /** The fixed sentence for a model the account cannot use (the worker reads it as `key-rejected ModelNotEnabled`, which the broker learns from). */
 export const MODEL_NOT_ENABLED_DETAIL = "the model is not available for this account";
 
+/**
+ * DEC 254g: the model gateway's own fixed refusals of a model it does not offer the company (Cloud model-gateway ROVARA_AI_MODEL and BYO_BEDROCK_MODEL), as the `error.message` of its
+ * 400 JSON answer. Matched whole, never kept.
+ */
+export const GATEWAY_MODEL_NOT_OFFERED_ANSWERS: readonly string[] = Object.freeze(["This model is not offered on Rovara's AI.", "This model is not one your company picked for its Bedrock connection."]);
+/** Whether a gateway 400 body says it does not offer the model: exactly `{ error: { message: <one of its fixed sentences>, ... } }`. Only matched; nothing of the body is kept. */
+export function gatewayModelNotOfferedBody(body: string): boolean {
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return false; }
+  const error = parsed !== null && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+  const message = error !== null && typeof error === "object" ? (error as { message?: unknown }).message : undefined;
+  return typeof message === "string" && GATEWAY_MODEL_NOT_OFFERED_ANSWERS.includes(message);
+}
+/** The fixed sentence for a model the gateway does not offer (the worker reads it as `model-not-found ModelNotOffered`). */
+export const MODEL_NOT_OFFERED_DETAIL = "the model gateway does not offer this model";
+
 /** A diagnostic chosen from the HTTP status alone, so provider error bodies (which can echo prompts) never surface. */
-function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number, chatgpt = false, exhausted?: ModelBudgetScope, routed = false, notEnabled = false): string {
+function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number, chatgpt = false, exhausted?: ModelBudgetScope, routed = false, notEnabled = false, notOffered = false): string {
   // A routed model is a company's source, whichever API it speaks: it is not named after a provider it may not be.
   const label = routed ? "Model source" : KEYED_MODEL_PROVIDERS[provider].label;
   if (aborted) return `${label} request cancelled`;
@@ -521,6 +542,7 @@ function safeError(provider: KeyedModelProvider, aborted: boolean, status?: numb
   // 401 is a key the provider does not accept (invalid, expired, not yet live); 403 is a key that may not use this model or call. Told apart so a person can be sent to the right place (QA6-14).
   // A 403 that Bedrock words as unentitled is MODEL_NOT_ENABLED (DR-KEY-1).
   const detail = status === 403 && notEnabled ? MODEL_NOT_ENABLED_DETAIL
+    : status === 400 && notOffered ? MODEL_NOT_OFFERED_DETAIL
     : status === 401 ? "the API key was refused; check that it is valid and has not expired"
     : status === 403 ? "check the API key and its permissions"
     : status === 402 ? "check the key's credit balance and spending limit"

@@ -46,13 +46,14 @@ describe("the gateway settings", () => {
       expect(() => gatewayModelAccessFromEnvironment({ ...ENV, [CORE_MODEL_GATEWAY_URL_VARIABLE]: bad })).toThrow(GATEWAY_URL_INVALID);
     }
   });
-  it("takes a Bedrock model the gateway offers, such as GLM 5 (DEC 254f), on the same Anthropic Messages route, named by its Bedrock id", () => {
-    for (const offered of ["zai.glm-5", "zai.glm-4.7", "qwen.qwen3-coder-480b-a35b-v1:0", "us.moonshotai.kimi-k3.1"]) {
-      expect(readGatewayModelAccess({ ...ENV, [CORE_AGENT_MODEL_VARIABLE]: offered }), offered).toEqual({ gatewayUrl: URL_, route: { alias: offered, api: "anthropic-messages", catalog: offered } });
+  it("takes ANY well-formed model id (DEC 254g) on the same Anthropic Messages route, named exactly: the gateway decides what it offers and refuses the rest at run time", () => {
+    for (const id of ["zai.glm-5", "zai.glm-4.7", "qwen.qwen3-coder-480b-a35b-v1:0", "us.moonshotai.kimi-k3.1", "zai.glm-9", "acme.brand-new-model-v9:0", "gpt-6"]) {
+      expect(readGatewayModelAccess({ ...ENV, [CORE_AGENT_MODEL_VARIABLE]: id }), id).toEqual({ gatewayUrl: URL_, route: { alias: id, api: "anthropic-messages", catalog: id } });
     }
   });
-  it("refuses anything but an Anthropic model id or a Bedrock model the gateway offers", () => {
-    for (const bad of ["gpt-6", "Claude-sonnet", "claude-", "claude-sonnet 4", `claude-${"a".repeat(120)}`, "claude-x/../y", "zai.glm-9", "us.zai.glm-5", "deepseek.v3.2", "ZAI.GLM-5", "zai.glm-5:0", "global.zai.glm-5.3", "us.anthropic.claude-sonnet-4-6"]) {
+  it("refuses a malformed id, and a Claude or Anthropic name that is not a Claude engine name, in fixed words that never echo it", () => {
+    for (const bad of ["Claude-sonnet", "claude-", "claude-sonnet 4", `claude-${"a".repeat(120)}`, "claude-x/../y", "ZAI.GLM-5", "us.anthropic.claude-sonnet-4-6", "zai.glm-5,am=x", "https://evil.example/m", "u:p@m", `m${"x".repeat(64)}`, "zai\nam=x"]) {
+      expect(JSON.stringify(readGatewayModelAccess({ ...ENV, [CORE_AGENT_MODEL_VARIABLE]: bad }))).not.toContain("evil");
       expect(readGatewayModelAccess({ ...ENV, [CORE_AGENT_MODEL_VARIABLE]: bad }), bad).toEqual({ problem: AGENT_MODEL_INVALID });
     }
   });

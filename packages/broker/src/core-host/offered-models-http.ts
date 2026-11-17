@@ -9,9 +9,9 @@
 // failure says fixed words only (never the gateway's answer, a URL, a token or a cause).
 import { randomUUID } from "node:crypto";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
-import { OfferedAgentModelsSchema, OrgIdSchema, TASK_KEY_PURPOSE, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES } from "@agentx/contracts";
+import { OfferedAgentModelsSchema, OrgIdSchema, TASK_KEY_PURPOSE, type OfferedAgentModels, type OrgId, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES } from "@agentx/contracts";
 import type { TokenSigner } from "../developer/tokens.js";
-import { readGatewayModelAccess } from "./gateway-model-access.js";
+import { readGatewayModelAccess, readGatewayUrl } from "./gateway-model-access.js";
 import type { OfferedModelsReader } from "./gateway-model-selection.js";
 
 export const OFFERED_MODELS_AUDIENCE = "rovara-model-gateway-offered-models";
@@ -29,6 +29,8 @@ export const SERVICE_TOKEN_ISSUER_MAX_CHARS = 2_048;
  * the dispatcher reads the broker's short-lived validation on the company's existing policy row (ANSWER-3). It gets no signing rights.
  */
 export const CORE_AGENT_MODEL_CHOICE_VARIABLE = "ROVARA_CORE_AGENT_MODEL_CHOICE";
+/** What the admin read says where the gateway is not set up (no gateway origin, or no company for the caller). */
+export const CORE_OFFERED_MODELS_NOT_SET_UP = "the core engine's model gateway is not set up in this deployment";
 /** The only thing a failed read says. */
 export const OFFERED_MODELS_READ_FAILED = "the gateway's offered models could not be read";
 
@@ -119,4 +121,25 @@ export function offeredModelsReaderFromEnvironment(env: NodeJS.ProcessEnv, taskT
   const tokens = taskTokens?.();
   if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "") return undefined;
   return offeredModelsReader({ gatewayUrl: settings.gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
+}
+
+/**
+ * DEC 254g: the admin read behind `GET /v1/admin/core/offered-models` (contracts CORE_OFFERED_MODELS_ADMIN_PATH), which `agentx config set coreEngine.agentModel` checks a model against
+ * before any deploy. It needs only the gateway's origin (ROVARA_CORE_MODEL_GATEWAY_URL, checked) and the install's task-token signer and issuer, NOT the agent model or the choice switch:
+ * the agent model is what is being chosen. Absent (no gateway origin, or one that is not an https origin): undefined, and the route answers "not set up". The company is the caller's
+ * (the route resolves it from membership); every failure is the reader's fixed words.
+ */
+export function adminOfferedModelsFromEnvironment(env: NodeJS.ProcessEnv, taskTokens: () => { signer: TokenSigner; issuer: string } | undefined, fetchImpl?: typeof fetch):
+  ((companyId: string) => Promise<OfferedAgentModels>) | undefined {
+  const gatewayUrl = readGatewayUrl(env);
+  if (typeof gatewayUrl !== "string") return undefined;
+  return async (companyId) => {
+    let tokens: { signer: TokenSigner; issuer: string } | undefined;
+    try { tokens = taskTokens(); } catch { throw failed(); }
+    if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "") throw failed();
+    const answer = await offeredModelsReader({ gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) }).offered(companyId as OrgId);
+    const parsed = OfferedAgentModelsSchema.safeParse(answer);
+    if (!parsed.success) throw failed();
+    return parsed.data;
+  };
 }

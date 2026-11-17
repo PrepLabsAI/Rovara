@@ -63,25 +63,29 @@ export const CORE_AGENT_MODEL_PARAMETER = "CoreAgentModel";
 export const CORE_MODEL_GATEWAY_HOST_PATTERN = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+(:[1-9][0-9]{0,4})?)?$";
 export const CORE_MODEL_GATEWAY_HOST_MAX_LENGTH = 56;
 /**
- * DEC 254f: the agent models besides Claude that Cloud's model gateway offers (Rovara's AI, through Bedrock Converse), each named exactly by the Bedrock id it calls. Pinned from
- * the gateway's offered list as deployed to staging on 2026-11-17 (ROVARA_AI_US_CONVERSE_MODELS, in its order); each passed the gateway's agent-loop test and a real tool call.
- * The core engine's agent model may be one of these or an Anthropic id; any other Bedrock id is refused (the gateway would refuse it too, after the switch was set). When Cloud's list
- * changes, this list changes with it.
+ * DEC 254g: the core engine's agent model is ANY model the model gateway offers (an Anthropic engine name for Claude, or a Bedrock id for every other model), not a list Code holds.
+ * The gateway is the authority: `agentx config set coreEngine.agentModel` checks a non-Claude id against the gateway's LIVE offered-models answer before any deploy, and at run time the
+ * gateway refuses an id it does not offer (the step then fails as "model not offered"). This pattern is only the stack's own last check of a WELL-FORMED id: lowercase letters, digits
+ * and `. _ : -` (the packed settings' own characters, BROKER_SETTING_VALUE), starting with a letter or digit. No slash (so no URL, path or ARN), no `@`, space, quote, comma or `=` (so no
+ * credentials and no packing separator).
  */
-export const CORE_GATEWAY_CONVERSE_AGENT_MODELS: readonly string[] = Object.freeze([
-  "qwen.qwen3-coder-480b-a35b-v1:0", "qwen.qwen3-coder-30b-a3b-v1:0", "qwen.qwen3-235b-a22b-2507-v1:0", "mistral.devstral-2-123b", "mistral.mistral-large-3-675b-instruct",
-  "deepseek.v3-v1:0", "moonshotai.kimi-k2.5", "zai.glm-5", "zai.glm-4.7", "us.amazon.nova-2-lite-v1:0", "openai.gpt-oss-120b-1:0", "openai.gpt-oss-20b-1:0", "us.amazon.nova-pro-v1:0",
-  "moonshot.kimi-k2-thinking", "minimax.minimax-m2.5", "us.moonshotai.kimi-k3", "us.moonshotai.kimi-k3.1",
-]);
-/** Whether `value` is exactly one of the gateway's offered Bedrock agent models (no trimming, no case folding). */
-export const isGatewayConverseAgentModel = (value: string): boolean => CORE_GATEWAY_CONVERSE_AGENT_MODELS.includes(value);
-const escapeForPattern = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+export const CORE_AGENT_MODEL_PATTERN = "^([a-z0-9][a-z0-9._:-]{0,63})?$";
+export const CORE_AGENT_MODEL_MAX_LENGTH = 64;
+/** A Claude model keeps its own rule: exactly its Anthropic engine name (`claude-...`, as the gateway's agent route names it), never a Bedrock `us.anthropic....` id. */
+export const CORE_CLAUDE_AGENT_MODEL = /^claude-[a-z0-9][a-z0-9.-]{0,31}$/u;
 /**
- * Empty, an Anthropic model id (`claude-...`, as the gateway's agent route names it; not a Bedrock `us.anthropic....` id), or exactly one of CORE_GATEWAY_CONVERSE_AGENT_MODELS
- * (each escaped: no wildcard, so no packing separator can pass).
+ * Whether `value` is a well-formed core agent model id (DEC 254g): the stack pattern, not empty, and, when it names Claude or Anthropic at all, exactly a Claude engine name. No trimming
+ * or case folding. Whether the gateway OFFERS it is the gateway's to say (config set asks it live; the gateway refuses at run time).
  */
-export const CORE_AGENT_MODEL_PATTERN = `^(claude-[a-z0-9][a-z0-9.-]{0,31}|${CORE_GATEWAY_CONVERSE_AGENT_MODELS.map(escapeForPattern).join("|")})?$`;
-export const CORE_AGENT_MODEL_MAX_LENGTH = 40;
+export function isCoreAgentModelId(value: string): boolean {
+  if (typeof value !== "string" || value === "" || value.length > CORE_AGENT_MODEL_MAX_LENGTH || !new RegExp(CORE_AGENT_MODEL_PATTERN, "u").test(value)) return false;
+  return /claude|anthropic/u.test(value) ? CORE_CLAUDE_AGENT_MODEL.test(value) : true;
+}
+/**
+ * DEC 254g: the broker's admin read of the models the model gateway offers the caller's company (`OfferedAgentModels`), for `agentx config set coreEngine.agentModel`. Only the broker
+ * may sign the gateway's service token (the task key's policy permits only its role), so the CLI asks the broker with its admin sign-in.
+ */
+export const CORE_OFFERED_MODELS_ADMIN_PATH = "/v1/admin/core/offered-models";
 
 /** The core's most dispatch attempts for one message (DISPATCH_ATTEMPTS_MAX in core/task-flow/dispatch.ts). The queue's redrive limit must be above it, or SQS dead-letters a message the core still retries. */
 export const CORE_DISPATCH_ATTEMPTS_MAX = 20;
