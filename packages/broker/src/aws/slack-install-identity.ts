@@ -59,7 +59,7 @@ export async function exchangeSlackInstallCode(fetchFn: typeof fetch, client: { 
   if (token === undefined || !botUser.success || !installerId.success) return { kind: "refused" };
   // Team ids only, as today (slackWorkspaceTeam): an Enterprise Grid org (E...) is not a workspace.
   if (!slackWorkspaceTeam(team.id)) return { kind: "enterprise", botToken: token };
-  const name = typeof team.name === "string" ? TeamName.safeParse(team.name.replace(/[\u0000-\u001f\u007f]/g, "").trim()) : undefined;
+  const name = typeof team.name === "string" ? TeamName.safeParse([...team.name].filter((char) => char.charCodeAt(0) > 31 && char.charCodeAt(0) !== 127).join("").trim()) : undefined;
   return { kind: "granted", grant: { teamId: team.id, ...(name?.success === true ? { teamName: name.data } : {}), botToken: token, botUserId: botUser.data, installerSlackUserId: installerId.data } };
 }
 

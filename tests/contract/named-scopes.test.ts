@@ -199,7 +199,7 @@ async function setUp(mode: "linking" | "developer") {
     // Lane W part 4: the company admin routes need the member helper to exist; this one finds nobody, so only the route table's answer is tested here.
     companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
     // Guided onboarding PR 4: the Add to Slack routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
-    slackInstall: { appClient: async () => undefined, secrets: { putToken: async () => undefined, readToken: async () => undefined, dropToken: async () => undefined }, fetch: vi.fn(), log: () => undefined },
+    slackInstall: { slack: { clientId: async () => undefined, exchange: async () => "not_set_up" as const, revoke: async () => false, store: async () => undefined, revokeStored: async () => undefined, drop: async () => undefined }, log: () => undefined },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };

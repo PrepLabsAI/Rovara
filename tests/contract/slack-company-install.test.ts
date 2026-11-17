@@ -24,11 +24,12 @@ const CLIENT_ID = "1234.5678";
 const tokenOf = (name: string) => ["xoxb", "100", name.replace(/[^A-Za-z0-9]/g, "")].join("-");
 
 type Answer = Record<string, unknown> & { error: { code: string; message: string } };
-interface Grant { team?: { id: string; name?: string }; enterprise?: boolean; ok?: boolean; tokenType?: string; installer?: string }
+interface Grant { team?: { id: string; name?: string }; enterprise?: boolean; ok?: boolean; tokenType?: string; installer?: string; status?: number; okFalseWithToken?: boolean }
 
 function fakeSlack(grants: Record<string, Grant>) {
   const revoked: string[] = [];
   const exchanged: string[] = [];
+  const control = { revokeAnswer: { ok: true, revoked: true } as Record<string, unknown> };
   const used = new Set<string>();
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -41,19 +42,20 @@ function fakeSlack(grants: Record<string, Grant>) {
       const basic = `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")}`;
       if (headers.get("authorization") !== basic || form.get("redirect_uri") !== CALLBACK || used.has(code) || grants[code] === undefined) return json({ ok: false, error: "invalid_code" });
       used.add(code);
-      const grant = grants[code]!;
+      const grant = grants[code];
       if (grant.ok === false) return json({ ok: false, error: "access_denied" });
-      return json({ ok: true, access_token: tokenOf(code), token_type: grant.tokenType ?? "bot", scope: SLACK_INSTALL_BOT_SCOPES.join(","), bot_user_id: "UBOT0001", app_id: "A0APP",
+      const answer = (body: unknown) => grant.status === undefined ? json(body) : new Response(JSON.stringify(body), { status: grant.status });
+      return answer({ ok: grant.okFalseWithToken !== true, access_token: tokenOf(code), token_type: grant.tokenType ?? "bot", scope: SLACK_INSTALL_BOT_SCOPES.join(","), bot_user_id: "UBOT0001", app_id: "A0APP",
         team: grant.team ?? null, enterprise: grant.enterprise === true ? { id: "E0GRID", name: "Grid" } : null, is_enterprise_install: grant.enterprise === true,
         authed_user: { id: grant.installer ?? "U0INSTALL" } });
     }
     if (url.startsWith("https://slack.com/api/auth.revoke")) {
       revoked.push((headers.get("authorization") ?? "").replace(/^Bearer /, ""));
-      return json({ ok: true, revoked: true });
+      return json(control.revokeAnswer);
     }
     return json({ ok: false, error: "unknown_method" });
   });
-  return { fetch, revoked, exchanged };
+  return { fetch, revoked, exchanged, control };
 }
 
 /** Secrets Manager's four calls the writer and readers make, by name; a create of an existing name throws ResourceExistsException as AWS does. */
@@ -91,7 +93,7 @@ function world(grants: Record<string, Grant> = {
   // The sign-in Lambda's side, behind the same JSON invoke the broker uses.
   const identity: SlackInstallIdentityDependencies = {
     appClient: async () => options.appClient === false ? { clientId: CLIENT_ID } : JSON.parse(sm.store.get("agentx/test/slack")!) as { clientId: string; clientSecret: string },
-    secrets: slackInstallSecretsFromSecretsManager(sm.client, "test"), fetch: slack.fetch as unknown as typeof fetch,
+    secrets: slackInstallSecretsFromSecretsManager(sm.client, "test"), fetch: slack.fetch,
   };
   const invokes: string[] = [];
   const invoke = async (payload: Uint8Array) => {
@@ -129,7 +131,7 @@ function world(grants: Record<string, Grant> = {
   const complete = (body: Record<string, unknown>, who?: { sub: string; sid: string }) => call("POST", "/v1/dev/company/slack/install/complete", body, who);
   const disconnect = (who?: { sub: string; sid: string }) => call("POST", "/v1/dev/company/slack/disconnect", {}, who);
   const read = (who?: { sub: string; sid: string }) => call("GET", "/v1/dev/company/slack", undefined, who);
-  const connect = async (code: string, who?: { sub: string; sid: string }) => complete({ state: (await start(who)).body.state as string, code }, who);
+  const connect = async (code: string, who?: { sub: string; sid: string }) => complete({ state: (await start(who)).body.state, code }, who);
   const tokens = createSlackWorkspaceTokens({ bindings: createSlackWorkspaceBindings({ client: h.db, tableName: "State" }), environment: "test",
     readSecret: async (name) => sm.store.get(name), now: () => now });
   const a = { sub: PERSON, sid: "session" }; const b = { sub: PERSON_B, sid: "session-b" };
@@ -230,7 +232,7 @@ describe("complete", () => {
     for (const [name, run] of cases) {
       const answer = await run();
       expect(answer.status, name).toBe(403);
-      expect(JSON.parse(answer.raw).error, name).toEqual(uniform);
+      expect((JSON.parse(answer.raw) as { error: unknown }).error, name).toEqual(uniform);
     }
     w.as(PERSON, A, "member");
     expect((await w.complete({ state, code: "acme-code" })).body.error).toEqual(uniform);
@@ -334,7 +336,7 @@ describe("one workspace per company, one company per workspace (DEC 254l item 4)
     const [stateA, stateB] = [(await w.start(w.a)).body.state, (await w.start(w.b)).body.state];
     const answers = await Promise.all([w.complete({ state: stateA, code: "acme-code" }, w.a), w.complete({ state: stateB, code: "acme-b" }, w.b)]);
     expect(answers.map((answer) => answer.status).sort()).toEqual([200, 409]);
-    const winner = answers[0]!.status === 200 ? A : B;
+    const winner = answers[0].status === 200 ? A : B;
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toMatchObject({ companyId: winner });
     expect(workspaceSecrets(w)).toEqual([secretName(winner, "T0ACME")]);
     expect(w.slack.revoked).toEqual([]);
@@ -344,7 +346,7 @@ describe("one workspace per company, one company per workspace (DEC 254l item 4)
     const states = [(await w.start()).body.state, (await w.start()).body.state];
     const answers = await Promise.all([w.complete({ state: states[0], code: "acme-code" }), w.complete({ state: states[1], code: "beta-a" })]);
     expect(answers.map((answer) => answer.status).sort()).toEqual([200, 409]);
-    const lost = answers[0]!.status === 409 ? "acme-code" : "beta-a";
+    const lost = answers[0].status === 409 ? "acme-code" : "beta-a";
     expect(w.slack.revoked).toEqual([tokenOf(lost)]);
     expect(workspaceSecrets(w)).toHaveLength(1);
   });
@@ -373,8 +375,8 @@ describe("Slack's removal events", () => {
   it("the ingress hands a signed app_uninstalled or bot tokens_revoked to the broker, and nothing unsigned", async () => {
     const now = Date.parse(TIME);
     for (const make of [
-      (removed: SlackIngressDependencies["workspaceRemoved"]) => createSlackIngressHandler({ secrets: async () => ({ signingSecret, botToken: "x" }), workspaceRemoved: removed, now: () => now } as unknown as SlackIngressDependencies),
-      (removed: SlackIngressDependencies["workspaceRemoved"]) => createSlackAdapterFront({ secrets: async () => ({ signingSecret }), isRovaraThread: async () => false, handOff: async () => undefined, workspaceRemoved: removed, now: () => now }),
+      (removed: NonNullable<SlackIngressDependencies["workspaceRemoved"]>) => createSlackIngressHandler({ secrets: async () => ({ signingSecret, botToken: "x" }), workspaceRemoved: removed, now: () => now } as unknown as SlackIngressDependencies),
+      (removed: NonNullable<SlackIngressDependencies["workspaceRemoved"]>) => createSlackAdapterFront({ secrets: async () => ({ signingSecret }), isRovaraThread: async () => false, handOff: async () => undefined, workspaceRemoved: removed, now: () => now }),
     ]) {
       const handed: unknown[] = [];
       const handler = make(async (removal) => { handed.push(removal); });
@@ -382,7 +384,7 @@ describe("Slack's removal events", () => {
       expect((await handler(signed({ ...uninstall("T0ACME", 1_800_000_001), event: { type: "tokens_revoked", tokens: { bot: ["UBOT0001"] } } }, now) as never)).statusCode).toBe(200);
       expect((await handler(signed({ ...uninstall("T0ACME", 1), event: { type: "tokens_revoked", tokens: { oauth: ["U1"] } } }, now) as never)).statusCode).toBe(200);
       const forged = signed(uninstall("T0BETA", 1), now);
-      expect((await handler({ ...forged, headers: { ...forged.headers, "x-slack-signature": "v0=00" } } as never)).statusCode).toBe(401);
+      expect((await handler({ ...forged, headers: { ...forged.headers, "x-slack-signature": "v0=00" } })).statusCode).toBe(401);
       expect(handed).toEqual([
         { source: "agentx.slack-workspace-removed", teamId: "T0ACME", reason: "app_uninstalled", eventTime: 1_800_000_000 },
         { source: "agentx.slack-workspace-removed", teamId: "T0ACME", reason: "tokens_revoked", eventTime: 1_800_000_001 },
@@ -468,7 +470,7 @@ describe("disconnect", () => {
     await w.connect("acme-code");
     w.as(PERSON, A, "owner", "session", fresh());
     const real = w.identity.fetch;
-    w.identity.fetch = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
+    w.identity.fetch = async () => { throw new Error("offline"); };
     expect((await w.disconnect()).status).toBe(503);
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeDefined();
     expect(await w.tokens.tokenForCompany(A, "T0ACME")).toBe(tokenOf("acme-code"));
@@ -530,5 +532,79 @@ describe("the sign-in Lambda's slack-install invoke", () => {
     expect(await handleSlackInstallRequest(w.identity, { kind: "slack-install", op: "exchange", code: "acme-code", redirectUri: CALLBACK })).toEqual({ ok: false, error: "not_set_up" });
     expect((await w.start()).body.error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: SLACK_NOT_SET_UP });
     expect(w.slack.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("review round 1", () => {
+  const fresh = () => Math.floor(Date.parse(TIME) / 1000);
+  it("an admin re-adding a second workspace the company already holds (operator-bound) never revokes that workspace's bot", async () => {
+    const w = world();
+    const operator = createSlackWorkspaceBindings({ client: w.db, tableName: "State" });
+    await operator.bind(A, "T0ACME", "operator"); await operator.bind(A, "T0BETA", "operator");
+    expect((await w.connect("beta-a")).body.error.code).toBe("SLACK_COMPANY_HAS_WORKSPACE");
+    expect(w.slack.revoked).toEqual([]);
+    expect(workspaceSecrets(w)).toEqual([]);
+  });
+  it("a record whose workspace is no longer this company's: disconnect removes only the record, revokes nothing and leaves the other company's links", async () => {
+    const w = world();
+    await w.connect("acme-code");
+    w.db.set({ pk: "SLACK_TEAM#T0ACME", sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId: "T0ACME", companyId: B, boundAt: TIME, boundBy: "operator" });
+    w.db.set({ pk: "SLACK_BINDING#T0ACME", sk: "CHANNEL#C7", teamId: "T0ACME", channelId: "C7", projectName: "b-app", updatedAt: TIME });
+    expect((await w.read()).body.workspace).toBeNull();
+    w.as(PERSON, A, "owner", "session", fresh());
+    const answer = await w.disconnect();
+    expect(answer.body).toMatchObject({ status: "disconnected", projectsLosingChannel: [] });
+    expect(w.slack.revoked).toEqual([]);
+    expect(w.db.get("SLACK_BINDING#T0ACME", "CHANNEL#C7")).toBeDefined();
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toMatchObject({ companyId: B });
+    expect(w.db.get(companyInstallKey(A).pk, "WORKSPACE")).toBeUndefined();
+  });
+  it("a reconnect landing during a disconnect makes the disconnect fail closed; pressing again finishes", async () => {
+    const w = world();
+    await w.connect("acme-code");
+    w.as(PERSON, A, "owner", "session", fresh());
+    const secrets = w.identity.secrets;
+    const real = (company: string, team: string) => secrets.readToken(company, team);
+    w.identity.secrets = { ...secrets, readToken: async (company, team) => {
+      const row = w.db.get(companyInstallKey(A).pk, "WORKSPACE")!;
+      w.db.set({ ...row, connectedAt: "2026-11-14T12:00:01.000Z" });
+      w.identity.secrets = secrets;
+      return real(company, team);
+    } };
+    expect((await w.disconnect()).status).toBe(503);
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toMatchObject({ companyId: A });
+    expect((await w.disconnect()).status).toBe(200);
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeUndefined();
+  });
+  it("disconnect takes no body", async () => {
+    const w = world(); await w.connect("acme-code"); w.as(PERSON, A, "owner", "session", fresh());
+    expect((await w.call("POST", "/v1/dev/company/slack/disconnect", { companyId: B })).status).toBe(400);
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeDefined();
+  });
+  it("a removal for another team bound to the same company, or a repeat, changes nothing more", async () => {
+    const w = world();
+    await w.connect("acme-code");
+    await createSlackWorkspaceBindings({ client: w.db, tableName: "State" }).bind(A, "T0BETA", "operator");
+    const ctx = { documentClient: w.db, tableName: "State", now: w.nowMs, wiring: w.wiring };
+    const now = Math.floor(w.nowMs() / 1000);
+    expect(await handleSlackWorkspaceRemoved(ctx, { source: "agentx.slack-workspace-removed", teamId: "T0BETA", reason: "app_uninstalled", eventTime: now })).toEqual({ outcome: "ignored" });
+    expect(await w.tokens.tokenForCompany(A, "T0ACME")).toBe(tokenOf("acme-code"));
+    expect(await handleSlackWorkspaceRemoved(ctx, { source: "agentx.slack-workspace-removed", teamId: "T0ACME", reason: "app_uninstalled", eventTime: now })).toEqual({ outcome: "disconnected" });
+    expect(await handleSlackWorkspaceRemoved(ctx, { source: "agentx.slack-workspace-removed", teamId: "T0ACME", reason: "tokens_revoked", eventTime: now })).toEqual({ outcome: "ignored" });
+    expect([...w.db.items.values()].filter((row) => row.entityType === "SLACK_WORKSPACE_AUDIT" && row.actor === "slack")).toHaveLength(1);
+  });
+  it("Slack's side refuses an answer that is not ok, not 200, or not a bot grant; the broker refuses a malformed or failed invoke reply", async () => {
+    const w = world({ "not-ok": { team: ACME, okFalseWithToken: true }, "http-500": { team: ACME, status: 500 }, "acme-code": { team: ACME } });
+    for (const code of ["not-ok", "http-500"]) expect((await w.connect(code)).body.error).toEqual(uniform);
+    const failing = slackInstallThroughLambda(async () => ({ FunctionError: "Unhandled", Payload: Buffer.from(JSON.stringify({ ok: true, exchange: { kind: "refused" } })) }));
+    await expect(failing.exchange("acme-code", CALLBACK)).rejects.toThrow();
+    const extra = slackInstallThroughLambda(async () => ({ Payload: Buffer.from(JSON.stringify({ ok: true, exchange: { kind: "granted", grant: { teamId: "T0ACME", botToken: tokenOf("x"), botUserId: "UBOT0001", installerSlackUserId: "U0INSTALL", companyId: B } } })) }));
+    await expect(extra.exchange("acme-code", CALLBACK)).rejects.toThrow();
+    w.slack.control.revokeAnswer = { ok: true, revoked: false };
+    expect(await handleSlackInstallRequest(w.identity, { kind: "slack-install", op: "revoke", botToken: tokenOf("x") })).toEqual({ ok: true, revoked: false });
+    expect(await handleSlackInstallRequest(w.identity, { kind: "slack-install", op: "store", companyId: A, teamId: "T0ACME", botToken: tokenOf("x"), extra: 1 })).toEqual({ ok: false, error: "invalid_request" });
+    await expect(w.identity.secrets.putToken(A, "T0ACME", "xoxp-user")).rejects.toThrow();
+    await expect(slackInstallSecretsFromSecretsManager(w.sm.client, "test").putToken("org_bad", "T0ACME", tokenOf("x"))).rejects.toThrow();
+    expect(workspaceSecrets(w)).toEqual([]);
   });
 });

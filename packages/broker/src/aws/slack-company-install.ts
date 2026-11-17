@@ -301,8 +301,10 @@ async function complete(ctx: SlackInstallContext, member: z.infer<typeof Members
     throw agentXError("SLACK_WORKSPACE_TAKEN", SLACK_WORKSPACE_TAKEN);
   }
   if (outcome === "company_has_other") {
-    // No company holds this workspace: the just-issued token is revoked and nothing is stored.
-    await ctx.wiring.slack.revoke(grant.botToken).catch(() => false);
+    // Nothing is stored. The just-issued token is revoked only while a fresh read shows NO company holds this workspace: revoking deactivates the workspace's bot user,
+    // which may be this company's own (an operator-bound second workspace) or another's that bound it meanwhile; then it is dropped unstored, as for a taken workspace.
+    const unheld = await readBinding((command) => ctx.documentClient.send(command), ctx.tableName, grant.teamId).then((row) => row === undefined, () => false);
+    if (unheld) await ctx.wiring.slack.revoke(grant.botToken).catch(() => false);
     log({ event: "slack.install_refused", reason: "company_has_workspace", teamId: grant.teamId, actor: caller.developerId });
     throw agentXError("SLACK_COMPANY_HAS_WORKSPACE", SLACK_COMPANY_HAS_WORKSPACE);
   }
@@ -339,29 +341,37 @@ async function disconnect(ctx: SlackInstallContext, member: z.infer<typeof Membe
   if (!DisconnectBody.safeParse(body(request)).success) throw agentXError("CONFIG_INVALID", "disconnecting Slack takes no body");
   const companyId = member.companyId;
   const send: Send = (command) => ctx.documentClient.send(command);
-  let teamId: string; let record: CompanyWorkspaceRow | undefined; let links: Awaited<ReturnType<typeof channelLinks>>;
+  let teamId: string; let record: CompanyWorkspaceRow | undefined; let links: Awaited<ReturnType<typeof channelLinks>>; let bound: boolean;
   try {
     record = await readCompanyWorkspace(send, ctx.tableName, companyId);
     const teams = record === undefined ? await companyTeams(send, ctx.tableName, companyId) : [record.teamId];
     if (teams.length === 0) throw agentXError("NOT_FOUND", SLACK_NOT_CONNECTED);
     if (teams.length > 1) throw new Error("several");
     teamId = teams[0]!;
-    if ((await readBinding(send, ctx.tableName, teamId))?.companyId !== companyId && record === undefined) throw agentXError("NOT_FOUND", SLACK_NOT_CONNECTED);
-    links = await channelLinks(ctx, teamId);
+    bound = (await readBinding(send, ctx.tableName, teamId))?.companyId === companyId;
+    if (!bound && record === undefined) throw agentXError("NOT_FOUND", SLACK_NOT_CONNECTED);
+    // A record whose team's binding is not this company's holds nothing of this company's in Slack: no token is revoked and no channel link is touched (they are
+    // keyed by team, not company); only the stale record goes.
+    links = bound ? await channelLinks(ctx, teamId) : [];
   } catch (error) {
     if (error instanceof Error && error.name === "AgentXError") throw error;
     throw agentXError("RUNTIME_UNAVAILABLE", SLACK_DISCONNECT_UNAVAILABLE);
   }
   // Clean up first, unbind last: a failure leaves the binding, so pressing Disconnect again finishes the job.
   try {
-    await ctx.wiring.slack.revokeStored(companyId, teamId);
-    for (const link of links) await send(new DeleteCommand({ TableName: ctx.tableName, Key: link.key }));
+    if (bound) {
+      await ctx.wiring.slack.revokeStored(companyId, teamId);
+      for (const link of links) await send(new DeleteCommand({ TableName: ctx.tableName, Key: link.key }));
+    }
     const at = new Date(ctx.now()).toISOString();
-    const binding = await readBinding(send, ctx.tableName, teamId);
+    // The record must still be the one read above: a reconnect that landed meanwhile (new connectedAt) fails this, nothing is unbound, and pressing again revokes
+    // its token too. Unbinding only while the binding is still this company's.
     await send(new TransactWriteCommand({ TransactItems: [
-      ...(binding?.companyId === companyId ? [{ Delete: { TableName: ctx.tableName, Key: teamKey(teamId), ConditionExpression: "companyId = :company", ExpressionAttributeValues: { ":company": companyId } } }] : []),
+      ...(bound ? [{ Delete: { TableName: ctx.tableName, Key: teamKey(teamId), ConditionExpression: "companyId = :company", ExpressionAttributeValues: { ":company": companyId } } }] : []),
       { Delete: { TableName: ctx.tableName, Key: companyWorkspaceKey(companyId, teamId) } },
-      { Delete: { TableName: ctx.tableName, Key: companyInstallKey(companyId), ConditionExpression: "attribute_not_exists(pk) OR teamId = :team", ExpressionAttributeValues: { ":team": teamId } } },
+      record === undefined
+        ? { ConditionCheck: { TableName: ctx.tableName, Key: companyInstallKey(companyId), ConditionExpression: "attribute_not_exists(pk)" } }
+        : { Delete: { TableName: ctx.tableName, Key: companyInstallKey(companyId), ConditionExpression: "teamId = :team AND connectedAt = :connectedAt", ExpressionAttributeValues: { ":team": teamId, ":connectedAt": record.connectedAt } } },
       { Put: { TableName: ctx.tableName, Item: { ...auditKey(teamId, "DISCONNECT", at, caller.developerId), entityType: "SLACK_WORKSPACE_AUDIT", action: "disconnect", teamId, companyId, at, actor: caller.developerId },
         ConditionExpression: "attribute_not_exists(pk)" } },
     ] }));
@@ -441,6 +451,14 @@ export async function routeSlackInstall(ctx: SlackInstallContext, caller: Develo
  * The broker's half: the company bound to the team (the binding, never the event) gets its record marked disconnected (actor "slack") and its token dropped. The binding
  * stays, so the workspace is still this company's when someone presses Add to Slack again; channel links stay too. Unbound teams and stale events change nothing.
  */
+/** Drops the token unless a reconnect replaced the record since it was read (its token is new and must stay). True when it dropped. */
+async function dropUnlessReconnected(ctx: Omit<SlackInstallContext, "signInTableName">, companyId: string, teamId: string, connectedAt: string): Promise<boolean> {
+  const now = await readCompanyWorkspace((command) => ctx.documentClient.send(command), ctx.tableName, companyId);
+  if (now === undefined || now.teamId !== teamId || now.connectedAt !== connectedAt || now.status !== "disconnected") return false;
+  await ctx.wiring.slack.drop(companyId, teamId);
+  return true;
+}
+
 export async function handleSlackWorkspaceRemoved(ctx: Omit<SlackInstallContext, "signInTableName">, input: SlackWorkspaceRemovedEvent): Promise<{ outcome: "disconnected" | "ignored" }> {
   const send: Send = (command) => ctx.documentClient.send(command);
   const binding = await readBinding(send, ctx.tableName, input.teamId);
@@ -448,7 +466,12 @@ export async function handleSlackWorkspaceRemoved(ctx: Omit<SlackInstallContext,
   const companyId = binding.companyId;
   const record = await readCompanyWorkspace(send, ctx.tableName, companyId);
   const eventAt = new Date(input.eventTime * 1000).toISOString();
-  if (record !== undefined && (record.teamId !== input.teamId || record.status === "disconnected" || Date.parse(record.connectedAt) > input.eventTime * 1000)) return { outcome: "ignored" };
+  if (record !== undefined && (record.teamId !== input.teamId || Date.parse(record.connectedAt) > input.eventTime * 1000)) return { outcome: "ignored" };
+  // Already marked (Slack's retry after a failed drop, or tokens_revoked after app_uninstalled): drop again (idempotent), no second audit row.
+  if (record?.status === "disconnected") {
+    await dropUnlessReconnected(ctx, companyId, input.teamId, record.connectedAt);
+    return { outcome: "ignored" };
+  }
   const at = new Date(ctx.now()).toISOString();
   if (record !== undefined && record.status === "connected") {
     try {
@@ -464,7 +487,8 @@ export async function handleSlackWorkspaceRemoved(ctx: Omit<SlackInstallContext,
     }
   }
   // Marked first, dropped second: a failure here is retried by Slack (the ingress answers 500), and the drop is idempotent.
-  await ctx.wiring.slack.drop(companyId, input.teamId);
+  if (record === undefined) await ctx.wiring.slack.drop(companyId, input.teamId);
+  else if (!await dropUnlessReconnected(ctx, companyId, input.teamId, record.connectedAt)) return { outcome: "ignored" };
   try {
     await send(new PutCommand({ TableName: ctx.tableName, Item: { ...auditKey(input.teamId, "REMOVED", at, "slack"), entityType: "SLACK_WORKSPACE_AUDIT", action: input.reason, teamId: input.teamId, companyId, at, actor: "slack" },
       ConditionExpression: "attribute_not_exists(pk)" }));
