@@ -360,6 +360,19 @@ describe("registration", () => {
     expect(await registry.require("approvers").verify(request, proofFor(request, issued()))).toMatchObject({ approved: true, approver: { personId: "ada" } });
   });
 
+  it("hands the deployment's task-owner rule the company, the live person, the stored task and the company's own store (C6)", async () => {
+    const store = seededStore();
+    const asked: Array<{ companyId: string; personId: string; store: unknown; task: unknown }> = [];
+    const modules = hostedSecurityModules({ env, identity: people, callbackSigningKey: SIGNING_KEY, taskOwner: async (input) => { asked.push({ companyId: input.companyId, personId: input.principal.personId, store: input.store, task: input.task }); return input.principal.personId === "bea"; } });
+    const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), ...modules], context, areas: [] });
+    const request = requestFor();
+    expect(await registry.require("approvers").verify(request, proofFor(request, issued({ personId: "bea" })))).toMatchObject({ approved: true, approver: { personId: "bea" } });
+    expect(asked).toEqual([{ companyId: A, personId: "bea", store: registry.require("storage"), task: { taskId: TASK_A, developerId: "ada", project: "demo" } }]);
+    // The task's own person is not accepted on the record alone once the rule is given.
+    const again = requestFor({ requestId: "decision-request-0002" });
+    expect(await registry.require("approvers").verify(again, proofFor(again, issued({ personId: "ada", requestId: "decision-request-0002" })))).toEqual({ approved: false, reason: "not_the_task_owner" });
+  });
+
   it("on the dispatcher (no key) it is registered and refuses every proof", async () => {
     const modules = hostedSecurityModules({ env, identity: people });
     const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => seededStore() }), ...modules], context, areas: [] });
@@ -402,3 +415,58 @@ describe("the decision gate as this point's caller (lane L11: it settles claims 
   });
 });
 
+
+// Web task channel C6 (plan 4.1, decision D5): a co-owner the People rule names may decide a core task's document; nobody else may.
+describe("the deployed approvers point: co-owners (the task-owner seam)", () => {
+  type OwnerCheck = NonNullable<Parameters<typeof createHostedApprovers>[0]["taskOwner"]>;
+  const seamWorld = (taskOwner: OwnerCheck) => {
+    const store = seededStore();
+    return { store, approvers: createHostedApprovers({ store, identity: identity(), key: KEY, now: () => new Date(NOW), taskOwner }) };
+  };
+  const bea = () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ personId: "bea" })) }; };
+
+  it("asks the seam for any person, with the company, the live principal and the stored task, and accepts the co-owner it names", async () => {
+    const seen: unknown[] = [];
+    const { approvers } = seamWorld(async (asked) => { seen.push(asked); return asked.principal.personId === "bea"; });
+    const { request, proof } = bea();
+    expect(await approvers.verify(request, proof)).toMatchObject({ approved: true, approver: { companyId: A, personId: "bea" } });
+    expect(seen).toEqual([{ companyId: A, principal: expect.objectContaining({ companyId: A, personId: "bea" }), task: { taskId: TASK_A, developerId: "ada", project: "demo" } }]);
+  });
+
+  it("refuses when the seam says no, throws, or answers anything but true; the task's own person is not accepted by the stored record alone once the seam is given", async () => {
+    for (const taskOwner of [async () => false, async () => { throw new Error("people down"); }, async () => "yes" as never, async () => undefined as never] satisfies OwnerCheck[]) {
+      const { approvers, store } = seamWorld(taskOwner);
+      const r = requestFor();
+      const verdict = await approvers.verify(r, proofFor(r, issued({ personId: "ada" })));
+      expect(verdict).toMatchObject({ approved: false });
+      expect((await store.query({ pk: stepUpClaimKey(A, "x").pk })).items).toEqual([]);
+    }
+    const { approvers } = seamWorld(async () => { throw new Error("people down zzq"); });
+    const r = requestFor();
+    expect(await approvers.verify(r, proofFor(r, issued({ personId: "bea" })))).toEqual({ approved: false, reason: "people_unreadable" });
+  });
+
+  it("still refuses a non-member, another company's task and a project mismatch before the seam can say yes", async () => {
+    const yes: OwnerCheck = async () => true;
+    const { approvers } = seamWorld(yes);
+    const gone = createHostedApprovers({ store: seededStore(), identity: identity({ bea: undefined }), key: KEY, now: () => new Date(NOW), taskOwner: yes });
+    const r1 = requestFor();
+    expect(await gone.verify(r1, proofFor(r1, issued({ personId: "bea" })))).toEqual({ approved: false, reason: "not_a_member" });
+    // Cy is a member of B only: asking for company A's task through company A's request is another company's person.
+    const r2 = requestFor();
+    expect(await approvers.verify(r2, proofFor(r2, issued({ personId: "cy" })))).toEqual({ approved: false, reason: "not_a_member" });
+    const r3 = requestFor({ projectName: "other" });
+    expect(await approvers.verify(r3, proofFor(r3, issued({ personId: "bea" })))).toEqual({ approved: false, reason: "not_the_task_owner" });
+    // The company's own task, but the request names another company's task id.
+    const r4 = requestFor({ subject: { type: "task", id: TASK_B }, card: cardOf(TASK_B) });
+    expect(await approvers.verify(r4, proofFor(r4, issued({ personId: "bea", taskId: TASK_B, card: cardOf(TASK_B) })))).toEqual({ approved: false, reason: "not_the_task_owner" });
+  });
+
+  it("golden: without the seam, only the task's own person is accepted, exactly as before", async () => {
+    const { approvers } = world();
+    const { request, proof } = bea();
+    expect(await approvers.verify(request, proof)).toEqual({ approved: false, reason: "not_the_task_owner" });
+    const r = requestFor();
+    expect(await approvers.verify(r, proofFor(r, issued()))).toMatchObject({ approved: true, approver: { personId: "ada" } });
+  });
+});

@@ -3,11 +3,12 @@
 //   - Session levels (`deployedSessionMembers`): the person's company role is their LIVE membership (R4's `COMPANY_MEMBER#` row: owner, admin or member), and their role on a project is the broker's own
 //     project grant (administrator: maintainer, developer: contributor; nothing else is a grant). The person is the principal the broker's sign-in vouched for, and it must be the same person the session
 //     layer names (its developer id) in the same company; anything else, and a re-check that has no principal, finds no one (fail closed: a session then reads as missing).
-//   - Decision cards (`deployedDecisionCards`): the cards of the documents a task waits on (the requirements, the design or the coding plan) for the task's OWN person, while they are still a member with the
-//     project grant. Acting on a card needs the fresh step-up the route already checked (lane ID part 2c); the performer re-checks the person's live authority (member, the task's own person, the grant)
+//   - Decision cards (`deployedDecisionCards`): the cards of the documents a task waits on (the requirements, the design or the coding plan) for the task's OWNERS, while they are still a member with the
+//     project grant: the task's own person, and (web task channel C6, decision D5) the co-owners its People list names, each under the live People rule the core's owner moves use (`TaskAccess.ownerActing`:
+//     live membership, the live proof of the person, the project grant). Commenters and viewers never decide. A host without that rule (Code's laptop) keeps the task's own person. Acting on a card needs the fresh step-up the route already checked (lane ID part 2c); the performer re-checks the person's live authority (member, the task's own person, the grant)
 //     and only then asks the approval gate, with a proof the deployment's approvers point issues and verifies (lane L2a: `DecisionProofIssuer`). The gate's Approvers seam (the policy hook's stricter-only
-//     wrapper in front of it) and the workflow decision decide; nothing here approves anything. The gate records the approver only as the task's owner (the deployed rule: the task's own person
-//     decides its documents; no project approver path on the core yet).
+//     wrapper in front of it) and the workflow decision decide; nothing here approves anything. The gate records the approver as the task owner who decided (the task's own person, or the co-owner, with the People
+//     revision fenced into the decision's transaction); there is no project approver path on the core yet.
 //   - How we work (`deployedPlaybook`): the repository's `.rovara/playbook.yaml` through the company's code host, with the deployment's code settings. Without a code host or the settings it is not
 //     built (the route answers "not on the core yet"): never "no file" and never the laptop's fixed settings, which would be a wrong answer about the company.
 //
@@ -163,8 +164,17 @@ export interface DeployedDecisionCardsOptions {
   registry: AdapterRegistry;
   people: DeployedPeople;
   proofs: DecisionProofIssuer;
+  /**
+   * More tasks a person's listing reads besides their own index: the task ids of the tasks they were ADDED to (the involved rows of the involved list, C5). Only ids: every one is read as a task of this
+   * company and judged by the live owner rule like any other, so a stale or foreign id shows nothing. At most INVOLVED_TASKS_MAX are read; a throw lists only the person's own. Absent: the person's own index.
+   */
+  involvedTaskIds?: (caller: DeployedDecisionCaller) => Promise<readonly string[]>;
   log?: (entry: Record<string, unknown>) => void;
 }
+
+/** Most involved task ids one listing reads. */
+export const INVOLVED_TASKS_MAX = 100;
+const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 /** The card routes' dependencies for one company on the deployed core. */
 export function deployedDecisionCards(options: DeployedDecisionCardsOptions): DecisionRouteDependencies<DeployedDecisionCaller> {
@@ -175,22 +185,53 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
   const nowMs = (): number => (deps.now?.() ?? new Date()).getTime();
   const log = (entry: Record<string, unknown>): void => { try { options.log?.(entry); } catch { /* a log never changes an answer */ } };
 
+  /**
+   * Whether the principal is an owner of the task NOW, and as whom the engine records them: the company's live owner rule (`TaskAccess.ownerActing`: the task's own person, or a People co-owner under the
+   * live proof, with the project grant). A throw (People or the proof unreadable) is no owner: nothing is decided on a guess. `authority` and `items` (the People revision fence) go to the decision's
+   * transaction. Only meaningful where the host gave the rule; `isOwner` keeps the task's own person otherwise.
+   */
+  const ownerActingOf = async (principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<NonNullable<Awaited<ReturnType<NonNullable<typeof deps.access.ownerActing>>>> | undefined> => {
+    const rule = deps.access.ownerActing;
+    if (rule === undefined || typeof principal.personId !== "string") return undefined;
+    try {
+      const acting = await rule.call(deps.access, principal, task);
+      if (acting === undefined) return undefined;
+      // The engine records one actor under the owner id it knows: the person's own owner key. A rule that names another actor is not believed.
+      const own = taskOwnerKey(principal.personId, task.taskId);
+      return acting.authority === undefined ? (acting.actorId === task.ownerKey && own === task.ownerKey ? acting : undefined) : (acting.actorId === own ? acting : undefined);
+    } catch {
+      return undefined;
+    }
+  };
+  const isOwner = async (principal: Principal, task: TaskRecord): Promise<boolean> => (deps.access.ownerActing === undefined
+    ? task.developerId === principal.personId
+    : (await ownerActingOf(principal, { taskId: task.taskId, developerId: task.developerId, project: task.project, ownerKey: task.workflow?.ownerId ?? task.ownerKey })) !== undefined);
+
   // The approval gate over the company's approvers point (with the policy hook's wrapper the registry was sealed with). The task's own person is the only decider of its documents.
   const decisions = createDecisionService({
     flow: deps, blobs, store: deps.store, approvers: registry.require("approvers"), audit: deps.audit, companyId, identity: registry.require("identity"),
     now: () => new Date(nowMs()),
     workflowSubject: {
+      // Who decides as the task's owner: read live for each verified approver (`ownerOf`), never from the proof alone.
       actorFor: (approver, workflow) => (approver.companyId === companyId && typeof approver.personId === "string" && taskOwnerKey(approver.personId, workflow.taskId) === workflow.ownerId
         ? { actorId: workflow.ownerId, role: "TASK_OWNER" } : undefined),
+      ...(deps.access.ownerActing === undefined ? {} : {
+        ownerActing: async (approver, task, workflow) => {
+          if (approver.companyId !== companyId || typeof approver.personId !== "string" || typeof task["developerId"] !== "string" || typeof task["project"] !== "string") return undefined;
+          return await ownerActingOf(approver, { taskId: workflow.taskId, developerId: task["developerId"], project: task["project"], ownerKey: workflow.ownerId });
+        },
+      }),
     },
   });
   const handler = workflowDocumentHandler<ProvingCaller>(decisions.gate);
 
-  /** The task, if the person may decide its document now: still a member, the task's own person, in this company, with the project grant. */
-  const ownTask = async (personId: string, taskId: string | undefined): Promise<TaskRecord | undefined> => {
+
+  /** The task, if the person may decide its document now: still a member, an owner of the task (its own person or a co-owner, live), in this company, with the project grant. */
+  const ownTask = async (principal: Principal, taskId: string | undefined): Promise<TaskRecord | undefined> => {
+    const personId = principal.personId;
     if (taskId === undefined || (await liveMemberRole(people, companyId, personId)) === undefined) return undefined;
     const task = await readTask(deps, taskId);
-    if (task === undefined || task.companyId !== companyId || task.developerId !== personId) return undefined;
+    if (task === undefined || task.companyId !== companyId || !(await isOwner(principal, task))) return undefined;
     return (await liveGrant(people, personId, task.project)) === undefined ? undefined : task;
   };
 
@@ -234,6 +275,13 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
         return found;
       };
       const items: DecisionItem[] = [];
+      const seen = new Set<string>();
+      /** One task's card, if the task waits on the person's decision now: this company's, waiting, with the grant, and the person an owner of it (read live). */
+      const cardOf = async (taskId: string): Promise<DecisionItem | undefined> => {
+        const task = await readTask(deps, taskId);
+        if (task === undefined || task.companyId !== companyId || waitingDocument(task) === undefined || !(await granted(task.project)) || !(await isOwner(caller.principal, task))) return undefined;
+        return await itemOf(task);
+      };
       let cursor: string | undefined;
       let read = 0;
       let calls = 0;
@@ -243,15 +291,25 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
         read += page.tasks.length;
         for (let start = 0; start < page.tasks.length; start += DECISION_SOURCE_PARALLEL) {
           const drawn = await Promise.all(page.tasks.slice(start, start + DECISION_SOURCE_PARALLEL).map(async (row) => {
-            const task = await readTask(deps, row.taskId);
-            if (task === undefined || task.companyId !== companyId || task.developerId !== personId || waitingDocument(task) === undefined || !(await granted(task.project))) return undefined;
-            return await itemOf(task);
+            if (seen.has(row.taskId)) return undefined;
+            seen.add(row.taskId);
+            return await cardOf(row.taskId);
           }));
           for (const item of drawn) if (item !== undefined) items.push(item);
         }
         cursor = page.cursor;
       // Bounded by rows AND by index reads: pages of another company's rows (read and dropped by listTasks) never walk the whole index.
       } while (cursor !== undefined && read < DECISION_SOURCE_TASKS_MAX && calls < DECISION_SOURCE_TASKS_MAX / DECISION_SOURCE_PAGE);
+      // The tasks the person was added to (the involved rows): ids only, each judged like the rest.
+      if (options.involvedTaskIds !== undefined) {
+        let involved: readonly string[] = [];
+        try { involved = await options.involvedTaskIds(caller); } catch { involved = []; }
+        const ids = (Array.isArray(involved) ? involved : []).filter((id): id is string => typeof id === "string" && TASK_ID.test(id) && !seen.has(id)).slice(0, INVOLVED_TASKS_MAX);
+        for (let start = 0; start < ids.length; start += DECISION_SOURCE_PARALLEL) {
+          const drawn = await Promise.all(ids.slice(start, start + DECISION_SOURCE_PARALLEL).map(async (id) => { seen.add(id); return await cardOf(id); }));
+          for (const item of drawn) if (item !== undefined) items.push(item);
+        }
+      }
       // An older task past the bound is not shown here (it is still decided on its own page); the log says the listing was cut.
       if (cursor !== undefined) log({ event: "core_engine.decision_cards_cut", companyId, read });
       return items;
@@ -264,7 +322,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     const personId = personOfCaller(companyId, caller);
     const stepUp = caller.stepUp;
     if (personId === undefined || stepUp === undefined || typeof stepUp.at !== "string" || typeof stepUp.method !== "string") return { kind: "refused", reason: "forbidden" };
-    const task = await ownTask(personId, input.item.taskId);
+    const task = await ownTask(caller.principal, input.item.taskId);
     if (task === undefined) return { kind: "refused", reason: "forbidden" };
     const binding = input.item.binding;
     if (binding === undefined) return { kind: "refused", reason: "stale" };

@@ -104,6 +104,11 @@ export interface TaskAccess {
   checkStart(principal: Principal, project: string): Promise<StartVerdict>;
   /** Whether this principal may read and drive the task. A task of someone else is "not found" to a principal who may not (no leak). */
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
+  /**
+   * Whether this principal may only READ the task (web task channel C6): its owners, and the commenters and viewers its People list gives a role to, each under the same live proof. Used for reads and nothing else:
+   * every move, answer and decision still asks `canAct` or `ownerActing`. Absent: `canAct` (Code's own rule, where reading and driving are the same).
+   */
+  canRead?(principal: Principal, task: { taskId: string; developerId: string; project: string }): Promise<boolean>;
   /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
   checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
   /**

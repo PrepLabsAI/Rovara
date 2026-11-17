@@ -34,6 +34,18 @@ export async function loadOwnedTask(deps: TaskFlowDeps, caller: TaskCaller, task
   return task;
 }
 
+/**
+ * The task, if the caller may READ it: whoever may act on it, and (on a host that says so, `TaskAccess.canRead`) the commenters and viewers of its People list. Otherwise TASK_NOT_FOUND, the same as
+ * for a task that does not exist. For reads only: nothing that changes a task goes through here.
+ */
+export async function loadReadableTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskRecord> {
+  const task = await readTask(deps, taskId);
+  if (caller.principal.companyId !== deps.companyId || task === undefined || task.companyId !== deps.companyId) throw taskNotFound();
+  const allowed = deps.access.canRead === undefined ? await deps.access.canAct(caller.principal, task) : await deps.access.canRead(caller.principal, task);
+  if (!allowed) throw taskNotFound();
+  return task;
+}
+
 export async function workspaceOperations(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string): Promise<OperationRecord[]> {
   if (!OrgIdSchema.safeParse(deps.companyId).success) throw agentXError("CONFIG_INVALID", "workspace company is invalid");
   const location = await locateWorkspace(deps, workspaceId);

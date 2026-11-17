@@ -29,7 +29,7 @@
 //     deployment's).
 import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
-import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
+import { loadOwnedTask, loadReadableTask, taskViewOf } from "../core/task-flow/reads.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
 import { createTaskActions, type TaskActions } from "../core/task-flow/task-actions.js";
 import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies } from "../core/decisions/routes.js";
@@ -284,8 +284,11 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         const task = TASK_READ.exec(path);
         if (task !== null) {
           if (request.method !== "GET") return undefined;
-          // Another company's task, or none, answers the same "not found" (the flow's owned read checks the company).
-          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
+          // Another company's task, or none, answers the same "not found" (the flow's read checks the company). A person's own read also lets the People list's commenters and viewers read it (C6, the same
+          // live rule); a script token reads exactly as before (its own closed list), never through People.
+          const record = caller.scriptToken === undefined
+            ? await loadReadableTask(target.runtime.flow.deps, taskCaller, task[1]!)
+            : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
           return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
         }
         const action = TASK_ACTION.exec(path);
