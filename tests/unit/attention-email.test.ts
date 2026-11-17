@@ -269,6 +269,16 @@ describe("the reverse index (H1), scoped to one company", () => {
     expect(await attentionPersonOf(store, HOSTED_IDENTITY_PROVIDER, OTHER_ORG, PERSON_HASH)).toBeUndefined();
   });
 
+  it("keeps one row per company: another company's row for the same id never replaces or answers for this one", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: taskRecord() });
+    await remember(store);
+    await store.put({ item: { ...attentionPersonKey(OTHER_ORG, PERSON_HASH), entityType: "ATTENTION_PERSON", orgId: OTHER_ORG, developerId: PERSON_HASH, personId: PERSON } });
+    expect(await attentionPersonOf(store, HOSTED_IDENTITY_PROVIDER, ORG, PERSON_HASH)).toBe(PERSON);
+    expect(await attentionPersonOf(store, HOSTED_IDENTITY_PROVIDER, OTHER_ORG, PERSON_HASH)).toBe(PERSON);
+    expect(attentionPersonKey(ORG, PERSON_HASH).pk).not.toBe(attentionPersonKey(OTHER_ORG, PERSON_HASH).pk);
+  });
+
   it("writes nothing for a task record of another company, another provider, a person who is not the owner, another session, or a session that is not a task's", async () => {
     for (const fields of [{ companyId: OTHER_ORG }, { provider: "github" }, { developerId: "someone-else" }, { sessionId: "ses_other" }, { developerId: "has space" }]) {
       const store = new MemoryDocumentStore();
