@@ -210,3 +210,22 @@ describe("wiki file map: one repository", () => {
 // Counted files of SAMPLE: README.md, package.json, src/a x3, src/b x3, tests/a.test.ts, docs/guide.md, web x3 = 13.
 const SAMPLE_COUNTED = 13;
 void (null as unknown as CodeHost);
+
+describe("wiki file map contract", () => {
+  it("refuses a map that is partial without saying so, and a whole one that claims to be partial", async () => {
+    const w = world(SAMPLE);
+    const whole = await computeWikiFileMap({ project: "p", repositories: [w.repo()] }, deps);
+    const repo = whole.repositories[0]!;
+    const bad = (override: object) => WikiFileMapSchema.safeParse({ ...whole, repositories: [{ ...repo, ...override }] }).success;
+    expect(bad({})).toBe(true);
+    expect(bad({ status: "partial" })).toBe(false);
+    expect(bad({ status: "partial", partial: "the code host cut the list" })).toBe(false);
+    expect(bad({ status: "partial", partial: "partial: the code host cut the list" })).toBe(true);
+    expect(bad({ partial: "partial: because" })).toBe(false);
+    expect(bad({ status: "unavailable" })).toBe(false);
+    expect(bad({ unavailable: "x" })).toBe(false);
+    expect(bad({ extra: 1 })).toBe(false);
+    expect(WikiFileMapSchema.safeParse({ ...whole, forecast: { ...whole.forecast, price: "$4.00" } }).success).toBe(false);
+    expect(WikiFileMapSchema.safeParse({ ...whole, forecast: { ...whole.forecast, estimatedUsd: 4 } }).success).toBe(false);
+  });
+});

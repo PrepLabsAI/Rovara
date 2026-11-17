@@ -60,7 +60,14 @@ export const WikiMapRepoSchema = z.object({
   activity: z.object({ status: z.enum(["ok", "partial", "unavailable"]), reason: line(200).optional(), days: z.literal(WIKI_MAP_ACTIVITY_DAYS) }).strict(),
   /** Pages a wiki would write for this repository: the repository page plus module pages. */
   pages: z.object({ repository: z.literal(1), modules: count, modulesCapped: z.boolean() }).strict(),
-}).strict();
+}).strict().superRefine((repo, context) => {
+  // A map that is not whole must say so, in the same words every time, and a whole one must not.
+  const issue = (path: string, message: string): void => context.addIssue({ code: "custom", path: [path], message });
+  if (repo.status === "partial" && (repo.partial === undefined || !repo.partial.startsWith("partial: "))) issue("partial", "a partial map says \"partial: <reason>\"");
+  if (repo.status !== "partial" && repo.partial !== undefined) issue("partial", "only a partial map has a partial reason");
+  if (repo.status === "unavailable" && repo.unavailable === undefined) issue("unavailable", "an unavailable repository says why");
+  if (repo.status !== "unavailable" && repo.unavailable !== undefined) issue("unavailable", "only an unavailable repository has that sentence");
+});
 export type WikiMapRepo = z.infer<typeof WikiMapRepoSchema>;
 
 /** The chips under "Tell Rovara what matters". `defaultOn`: generated and vendored folders are skipped unless the person turns that off; the other two are suggestions that start off. */
