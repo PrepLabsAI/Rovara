@@ -284,9 +284,7 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
-import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
-import { linearCompanyWiring } from "./linear-wiring.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -324,6 +322,8 @@ import {
 import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
+import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
+import { installEngineModel } from "../core-host/company-engine-model.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -370,7 +370,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -384,8 +384,10 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { companyPreapprovalsThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
+import { companyInvitesThroughLambda, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
+import { companyImportThroughLambda } from "./company-import-forwarding.js";
+import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -610,8 +612,6 @@ interface AwsBrokerDependencies {
     page(page: number): Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }>;
   };
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
-  /** Guided onboarding PR 7: the Linear OAuth app's webhooks (linear-app-webhook.ts). Absent: the route answers 404. */
-  linearWebhook?: LinearWebhookWiring;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
   descriptionUpdateMaxMs?: number;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
@@ -632,6 +632,11 @@ interface AwsBrokerDependencies {
     /** The repositories the GitHub App can reach, for GET /v1/dev/client/repositories. */
     repositories(): Promise<ClientRepositoriesResponse["installations"]>;
     workerBinding(): Promise<Ec2RuntimeBinding>;
+    /**
+     * Guided onboarding PR 6: which installation serves a repository and whether it is suspended, read from GitHub now (no cache). Every create
+     * checks it against the company's bindings; absent while bindings are on, the multi-repository and bulk creates refuse every repository.
+     */
+    repositoryInstallation?(url: string): Promise<LiveRepositoryInstallation>;
   };
   /**
    * Lanes AU and EV: the company audit and event reads for a company administrator (`/v1/dev/client/company/*`): the company's document store, the host's company
@@ -645,6 +650,11 @@ interface AwsBrokerDependencies {
   linking?: DeveloperApiConfiguration;
   /** Sign in with ChatGPT (#338): each developer's ChatGPT connection; absent without its key. */
   chatgpt?: ChatGptConnections;
+  /**
+   * DEC 254g: what the model gateway offers one company's agents (core-host/offered-models-http.ts `adminOfferedModelsFromEnvironment`), for an administrator's
+   * `agentx config set coreEngine.agentModel`; absent without the gateway's origin.
+   */
+  coreOfferedModels?: (companyId: string) => Promise<OfferedAgentModels>;
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<ScopeDiscovery>;
   credentialRegistry?: CredentialRegistry;
@@ -808,6 +818,8 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
       ...(developer?.endDeveloperSessions === undefined ? {} : { endDeveloperSessions: developer.endDeveloperSessions }),
       ...(signIn?.signInClients === undefined ? {} : { signInClients: signIn.signInClients }),
       ...(signIn?.companies === undefined ? {} : { companies: signIn.companies }),
+      ...(developer?.companyInvites === undefined ? {} : { companyInvites: developer.companyInvites }),
+      ...(developer?.companyImport === undefined ? {} : { companyImport: developer.companyImport }),
       now: Date.now,
     },
     handlers: adminChangeHandlers(dependencies),
@@ -1213,11 +1225,6 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
       // Lane L12: the same for the core's /v1/app/* route: what it carries goes to the core's routes or nowhere.
       if (event.routeKey === CORE_APP_ROUTE_KEY && !url.pathname.startsWith("/v1/app/")) throw agentXError("NOT_FOUND", "route not found");
-      // Guided onboarding PR 7: the Linear app's webhooks verify their own signature (HMAC of the raw body under the app's signing secret); no sign-in.
-      if (url.pathname === LINEAR_WEBHOOK_PATH) {
-        if (request.method !== "POST" || dependencies.linearWebhook === undefined) return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
-        return linearWebhookResponse(await handleLinearAppWebhook(dependencies.linearWebhook, { rawBody: request.body, headers: request.headers }), request.requestId);
-      }
       if (url.pathname === "/v1/github/webhooks") {
         if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
         if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
@@ -1235,7 +1242,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         try {
           const secret = await readWebhookSecret(false);
           if (secret === undefined) return notConfigured();
-          const deliver = (webhookSecret: string) => handleGithubWebhook({
+          // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
+          const deliver = (webhookSecret: string) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
+            ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
+            : handleGithubWebhook({
             documentClient: dependencies.documentClient,
             tableName: dependencies.tableName,
             rawBody: request.body ?? "",
@@ -1621,11 +1631,39 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json({ clients: await registry.list(await resolveCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey)) }, request.requestId);
       }
+      // DEC 254a: the install's invite codes (ids, status and times only) and the self-serve switch, for an install administrator.
+      if (request.method === "GET" && url.pathname === "/v1/admin/company-invites") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const invites = dependencies.developer?.companyInvites;
+        if (invites === undefined) throw agentXError("NOT_FOUND", "company sign-up is not set up in this deployment");
+        return json(await invites.list(), request.requestId);
+      }
+      // DEC 254b (b): the preview of an import of the install's old company layout into Code's company records (or of its undo). Reads only; ids, never emails.
+      if (request.method === "GET" && url.pathname === "/v1/admin/company-import") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const developer = dependencies.developer;
+        if (developer?.companyImport === undefined) throw agentXError("NOT_FOUND", "company import is not set up in this deployment");
+        const companyId = OrgIdSchema.safeParse(url.searchParams.get("companyId"));
+        const mode = url.searchParams.get("mode") ?? "import";
+        if (!companyId.success || (mode !== "import" && mode !== "undo")) throw agentXError("CONFIG_INVALID", "give the install's company id (org_ and 20 letters or digits), and the mode import or undo");
+        const reads = { documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName: developer.signInTableName };
+        return json((mode === "undo" ? await planCompanyImportUndo(reads, companyId.data) : await planCompanyImport(reads, companyId.data)).preview, request.requestId);
+      }
       // #343: Sign in with ChatGPT, for rovara doctor.
       if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
         if (!dependencies.chatgpt) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
         return json(await dependencies.chatgpt.health(), request.requestId);
+      }
+      // DEC 254g: the models the model gateway offers the administrator's company now, which agentx config set checks coreEngine.agentModel against (fail closed). Read only; fixed words on failure.
+      if (request.method === "GET" && url.pathname === CORE_OFFERED_MODELS_ADMIN_PATH) {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (dependencies.coreOfferedModels === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
+        const company = await resolveCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey);
+        if (company === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
+        let offered: OfferedAgentModels;
+        try { offered = await dependencies.coreOfferedModels(company); } catch { throw agentXError("RUNTIME_UNAVAILABLE", OFFERED_MODELS_READ_FAILED); }
+        return json(offered, request.requestId);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/turns") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
@@ -2094,7 +2132,8 @@ async function checkCompanyRepository(dependencies: AwsBrokerDependencies, compa
     if (companyId === undefined || dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
     const installationId = await budget.read(() => dependencies.githubPullRequests.installationIdFor!(url));
     await dependencies.githubBindings.withBudget(budget).requireBound(companyId, installationId);
-  } catch {
+  } catch (error) {
+    if (isGithubDisconnected(error)) throw githubDisconnectedRefusal();
     throw agentXError("CONFIG_INVALID", `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`);
   }
 }
@@ -14460,10 +14499,56 @@ function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: 
 /** What a chat agent is told about a project a sign-in client created; the project's administrators refine it later. */
 const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
 
-/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. */
-function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "clientRepositories" | "companyReads"> {
+/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. Guided onboarding PR 6: or from several, or one per repository. */
+function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyReads"> {
   const clientProjects = dependencies.clientProjects;
   if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
+  const rules = { ...(dependencies.githubBindings === undefined ? {} : { bindings: dependencies.githubBindings }),
+    ...(clientProjects.repositoryInstallation === undefined ? {} : { live: (url: string) => clientProjects.repositoryInstallation!(url) }) };
+  const projectExists = async (name: string) => ((await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] }).Items ?? []).length > 0;
+  /**
+   * Guided onboarding PR 6: one project from `repositories`, for `companyId` (the caller's, from membership). Every repository is checked against the
+   * company's bindings with GitHub's live answer before any token is made for any of them; one that fails refuses the whole create, in one fixed answer.
+   */
+  const createFromRepositories = async (developerId: string, companyId: string | undefined, repositories: readonly string[], options: { name?: string; setupCommands?: string[]; testCommands?: string[] }, commitBy: number) => {
+    const urls = repositories.map((repository) => `https://github.com/${repository}.git`);
+    const budget = boundedCompanyReads(dependencies.documentClient);
+    if (!await onCompanyInstallations(rules, companyId, urls, budget)) throw notAvailable();
+    let found: Array<{ name: string; defaultBranch: string }>;
+    try {
+      found = await eachLimited(urls, LOOKUP_CONCURRENCY, (url) => companyId === undefined ? clientProjects.repositoryDefaults(url) : budget.read(() => clientProjects.repositoryDefaults(url)));
+    } catch (error) {
+      throw (error as { code?: unknown }).code === "NOT_FOUND" ? notAvailable() : unavailable();
+    }
+    const repositoryNames = uniqueRepositoryNames(found.map((entry) => entry.name));
+    const name = options.name ?? repositoryNames[0]!;
+    if (await projectExists(name)) throw nameTaken(name);
+    const cwd = `repo/${repositoryNames[0]!}`;
+    // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted. They run in the first repository.
+    const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
+    const definition = ProjectDefinitionSchema.parse({
+      name, revision: 1,
+      repositories: urls.map((url, index) => ({ name: repositoryNames[index]!, url, path: `repo/${repositoryNames[index]!}`, defaultBranch: found[index]!.defaultBranch, credentialRef: clientProjects.credentialRef })),
+      setup: (options.setupCommands ?? []).map(command), readiness: (options.testCommands ?? []).map(command),
+      orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
+    });
+    const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
+    const runtimeBinding = await clientProjects.workerBinding();
+    // One wall-clock limit for the whole request: too late to register safely before the gateway gives up, so nothing is written.
+    if (Date.now() > commitBy) throw unavailable();
+    try {
+      // Registration checks every repository's binding once more (its own budget), in the transaction's company.
+      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) } });
+    } catch (error) {
+      if (await projectExists(name).catch(() => false)) throw nameTaken(name);
+      if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
+      throw error;
+    }
+    return { name, latestRevision: 1 };
+  };
   return {
     ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }),
     async clientRepositories(developerId) {
@@ -14475,19 +14560,35 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
         return await filterInstallationsFor(companyId!, listed, dependencies.githubBindings, budget);
       } catch { throw githubBindingRefusal(); }
     },
+    async clientRepositoryChoices(developerId, query) {
+      const budget = boundedCompanyReads(dependencies.documentClient);
+      const companyId = await githubCallerCompany(dependencies, developerId, budget);
+      let installations: ClientRepositoriesResponse["installations"];
+      if (dependencies.githubBindings === undefined) installations = await clientProjects.repositories();
+      else {
+        try {
+          installations = await filterInstallationsFor(companyId!, await budget.read(() => clientProjects.repositories()), dependencies.githubBindings, budget);
+        } catch { throw githubBindingRefusal(); }
+      }
+      let marks: Map<string, string[]>;
+      try { marks = await projectsByRepository(dependencies.documentClient, dependencies.tableName, companyId, boundedCompanyReads(dependencies.documentClient)); }
+      catch { throw agentXError("RUNTIME_UNAVAILABLE", REPOSITORY_CHOICES_UNAVAILABLE); }
+      return repositoryChoices(installations, marks, query);
+    },
     async createClientProject(developerId, input) {
       const url = `https://github.com/${input.repository}.git`;
       const budget = boundedCompanyReads(dependencies.documentClient);
       const companyId = await githubCallerCompany(dependencies, developerId, budget);
       await checkCompanyRepository(dependencies, companyId, url, budget);
+      // Guided onboarding PR 6: where the live lookup is wired, a suspended installation is refused too, in the same words.
+      if (rules.live !== undefined && !await onCompanyInstallations(rules, companyId, [url], budget)) {
+        const repository = parseGitHubRepository(url);
+        throw agentXError("CONFIG_INVALID", `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`);
+      }
       const found = companyId === undefined ? await clientProjects.repositoryDefaults(url) : await budget.read(() => clientProjects.repositoryDefaults(url));
-      const repositoryName = found.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/^([^a-z])/, "r-$1").slice(0, 63) || "repository";
+      const repositoryName = projectRepositoryName(found.name);
       const name = input.name ?? repositoryName;
-      const existing = await dependencies.documentClient.send(new QueryCommand({
-        TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-        ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
-      })) as { Items?: unknown[] };
-      if ((existing.Items ?? []).length > 0) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
+      if (await projectExists(name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
       const cwd = `repo/${repositoryName}`;
       // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
       const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
@@ -14501,6 +14602,22 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
       await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget } });
       return { name, latestRevision: 1 };
+    },
+    async createClientProjects(developerId, input) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
+      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
+      return createFromRepositories(developerId, companyId, input.repositories, {
+        ...(input.name === undefined ? {} : { name: input.name }), ...(input.setupCommands === undefined ? {} : { setupCommands: input.setupCommands }),
+        ...(input.testCommands === undefined ? {} : { testCommands: input.testCommands }),
+      }, commitBy);
+    },
+    async createClientProjectsBulk(developerId, input) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
+      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
+      return bulkCreate(input.repositories, {
+        now: Date.now, nameOf: (repository) => projectRepositoryName(repository.split("/")[1]!),
+        create: async (repository) => (await createFromRepositories(developerId, companyId, [repository], {}, commitBy)).name,
+      });
     },
   };
 }
@@ -15038,7 +15155,18 @@ async function requireGithubProjectBinding(dependencies: AwsBrokerDependencies, 
     const companyId = OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw);
     if (dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
     await dependencies.githubBindings.requireBound(companyId, await dependencies.githubPullRequests.installationIdFor(repositoryUrl));
-  } catch { throw githubBindingRefusal(); }
+  } catch (error) {
+    // Guided onboarding PR 3: the company's own uninstalled or suspended GitHub says so, in one fixed sentence.
+    if (isGithubDisconnected(error) || await githubDisconnectedFor(dependencies, project, repositoryUrl)) throw githubDisconnectedRefusal();
+    throw githubBindingRefusal();
+  }
+}
+
+async function githubDisconnectedFor(dependencies: AwsBrokerDependencies, project: RegisteredProjectRecord, repositoryUrl: string): Promise<boolean> {
+  try {
+    const raw = (project as RegisteredProjectRecord & { companyId?: unknown }).companyId;
+    return await dependencies.githubBindings!.disconnectedFor(OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw), parseGitHubRepository(repositoryUrl).owner);
+  } catch { return false; }
 }
 
 async function exchangeRepositoryCredential(
@@ -15273,9 +15401,8 @@ const repositoryGrants = new RepositoryGrantService(
 );
 
 const lambdaClient = new LambdaClient(awsClientConfiguration);
-// Guided onboarding PR 7: Linear by OAuth as the app, only where infra gives the token key (CHATGPT_CONNECTION_KEY_ARN); the app's settings come from its connector secret.
-const linear = linearCompanyWiring({ env: process.env, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), kms: new KMSClient(awsClientConfiguration), secrets: secretsManager,
-  connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine });
+// Guided onboarding PR 14 (DEC 254n item 1): the company engine model route's read of the gateway's live list for one company; set only where the gateway's origin is.
+const companyEngineModelOffered = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
 function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
   return createDeveloperApiConfiguration(process.env, (issuer, functionName) => ({
@@ -15291,11 +15418,18 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     endDeveloperSessions: endDeveloperSessionsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     setDisplayName: setDisplayNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     ...(process.env.COMPANY_SIGNIN === "enabled" ? { companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      // DEC 253z, 254a: self-serve company create and the install's invite codes, through the same sign-in Lambda, which owns those writes.
+      companySelfCreate: companySelfCreateThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      companyInvites: companyInvitesThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
       companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
-      // Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts), where the token key is given.
-      ...(linear === undefined ? {} : { linearConnect: linear.connect }) } : {}),
+      // Guided onboarding PR 1: GitHub connect (github-connect-routes.ts), through the same App secret's client (slug, OAuth client) and the State table's bindings.
+      githubConnect: { bindings: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")), github: new GitHubAppClient(github.clientOptions), log: brokerLogLine },
+      // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
+      ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine } }) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // DEC 254b (b): the operator's company import runs BEFORE COMPANY_SIGNIN is switched on, so it is wired with the company layer on or off.
+    companyImport: companyImportThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
     channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -15346,7 +15480,7 @@ const coreRoot = createBrokerCoreRoot({
     workerMachines: () => brokerCoreWorkerMachines({ sessions: ec2Sessions, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
     codeHost: () => brokerCoreCodeHost({
       credentials: github.clientOptions,
-      requireInstallationBound: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")).requireBound,
+      ...((bindings) => ({ requireInstallationBound: bindings.requireBound, disconnectedFor: (orgId: string, owner: string) => bindings.disconnectedFor(orgId, owner) }))(new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME"))),
       storage: core.storage,
       log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
     }),
@@ -15358,6 +15492,10 @@ const coreRoot = createBrokerCoreRoot({
 });
 // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
 const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
+
+// DEC 254g: the gateway's offered models for an administrator's config set; set only where the gateway's origin is.
+const offeredModelsKms = new KMSClient(awsClientConfiguration);
+const coreOfferedModels = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, offeredModelsKms));
 
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;
@@ -15374,6 +15512,7 @@ const sqs = new SQSClient(awsClientConfiguration);
 
 export const handler = createAwsBrokerHandler({
   core: coreRoot,
+  ...(coreOfferedModels === undefined ? {} : { coreOfferedModels }),
   ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
   documentClient,
   s3,
@@ -15391,6 +15530,7 @@ export const handler = createAwsBrokerHandler({
     credentialRef: githubCredentials.credentialRef,
     repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
     repositories: () => githubCredentials.installedRepositories(),
+    repositoryInstallation: (url: string) => githubCredentials.repositoryInstallation(url),
     workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
   } } : {}),
   projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
@@ -15401,7 +15541,6 @@ export const handler = createAwsBrokerHandler({
     ? { e2eFeatureRuntimeCatalogId: process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID }
     : {}),
   githubWebhookSecret: github.webhookSecret,
-  ...(linear === undefined ? {} : { linearWebhook: linear.webhook }),
   checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
   connectorCredentials: {

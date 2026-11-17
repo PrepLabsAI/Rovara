@@ -41,11 +41,13 @@ const THIRTY_DAYS = Math.floor(Date.parse(PROPOSED) / 1000) + 30 * 86_400;
 const omit = (value: Record<string, unknown>, ...keys: string[]) => Object.fromEntries(Object.entries(value).filter(([key]) => !keys.includes(key)));
 
 describe("change requests (E1)", () => {
-  it("names FR-030's nine change kinds, issue #205's recorded config change, #343's ChatGPT settings, and spec 063's sign-in clients", () => {
+  it("names FR-030's nine change kinds, issue #205's recorded config change, #343's ChatGPT settings, spec 063's sign-in clients, DEC 254a's invite codes and DEC 254b's company import", () => {
     expect(AdminChangeKindSchema.options).toEqual([
       "register_project_revision", "bind_channel", "unbind_channel", "register_credential", "stop_workspace",
       "grant_project_access", "revoke_project_access", "revoke_signin", "set_workspace_limits", "set_config", "set_chatgpt",
       "register_sign_in_client", "remove_sign_in_client",
+      "create_company_invite", "revoke_company_invite", "set_company_self_serve",
+      "import_install_company", "undo_install_company_import",
     ]);
     // A recorded config change is never planned or confirmed: it is not a change request's input.
     expect(AdminChangeInputSchema.safeParse({ kind: "set_config" }).success).toBe(false);

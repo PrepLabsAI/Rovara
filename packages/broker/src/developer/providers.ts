@@ -6,7 +6,11 @@ import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayNa
 
 /** `administrator` (spec 063 FR-005): the company sign-in's ID token carried the administrator claim. Slack never sets it. */
 /** `authTime` (lane ID part 2, company sign-in only): the ID token's `auth_time`, epoch seconds, when it carried a whole number. Slack's is never read: a Slack round trip never counts as a step-up. */
-export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; administrator?: true; authTime?: number }
+/**
+ * `slackTeam` (DEC 254e, only with `anyWorkspace`): the Slack workspace the person signed in with. `slackUserId` is set only for the install's own
+ * workspace (the one its bot and directory serve); a person from another workspace has none, and their subject carries the team.
+ */
+export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; slackTeam?: { id: string; name?: string }; administrator?: true; authTime?: number }
 /** `wrongAccount`: the person signed in fine but is not one AgentX accepts (another Slack workspace,
  * or without the required claim), so signing in as someone else may help. */
 export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string; wrongAccount?: true };
@@ -72,8 +76,13 @@ async function verifyIdToken(idToken: string, jwks: JWTVerifyGetKey, options: { 
 const verifiedEmail = (payload: JWTPayload): string | undefined =>
   typeof payload.email === "string" && (payload.email_verified === true || payload.email_verified === "true") ? payload.email : undefined;
 
+/**
+ * `anyWorkspace` (DEC 254e, Code's company layer only): any Slack workspace may sign in, not just the install's. The authorize link names no team;
+ * a person from another workspace gets the subject `<team id>:<user id>` (Slack user ids are only unique inside a workspace, and an install-workspace
+ * subject has no colon, so the two never collide) and no `slackUserId`. Off: exactly as before (the install's workspace only).
+ */
 export function slackSignInProvider(input: {
-  teamId: string | undefined; credentials: () => Promise<{ clientId?: string; clientSecret?: string }>; fetch: typeof fetch; jwks: JWTVerifyGetKey; now: () => number;
+  anyWorkspace?: boolean; teamId: string | undefined; credentials: () => Promise<{ clientId?: string; clientSecret?: string }>; fetch: typeof fetch; jwks: JWTVerifyGetKey; now: () => number;
 }): SignInProvider {
   const configured = async () => {
     if (input.teamId === undefined) throw new ProviderNotConfiguredError("this AgentX environment has no Slack team ID yet; ask an admin to run agentx signin enable slack");
@@ -86,7 +95,7 @@ export function slackSignInProvider(input: {
     async authorizeUrl({ state, nonce, redirectUri }) {
       const { teamId, clientId } = await configured();
       const url = new URL("https://slack.com/openid/connect/authorize");
-      for (const [key, value] of Object.entries({ response_type: "code", scope: SCOPES, client_id: clientId, state, nonce, redirect_uri: redirectUri, team: teamId })) url.searchParams.set(key, value);
+      for (const [key, value] of Object.entries({ response_type: "code", scope: SCOPES, client_id: clientId, state, nonce, redirect_uri: redirectUri, ...(input.anyWorkspace === true ? {} : { team: teamId }) })) url.searchParams.set(key, value);
       return url.toString();
     },
     async complete({ code, nonce, redirectUri }) {
@@ -103,6 +112,7 @@ export function slackSignInProvider(input: {
       const verified = await verifyIdToken(body.id_token, input.jwks, { issuer: SLACK_OIDC_ISSUER, audience: clientId, nonce, now: input.now() });
       if (!verified.ok) return verified;
       const team = verified.payload["https://slack.com/team_id"];
+      if (input.anyWorkspace === true) return slackAnyWorkspaceIdentity(verified.payload, teamId);
       if (team !== teamId) return { ok: false, wrongAccount: true, reason: `you signed in to Slack workspace ${SlackTeamIdSchema.safeParse(team).data ?? "unknown"}, but this AgentX serves ${teamId}` };
       const userId = SlackUserIdSchema.safeParse(verified.payload["https://slack.com/user_id"]);
       if (!userId.success) return { ok: false, reason: "Slack's identity token names no Slack user; run agentx login again" };
@@ -116,6 +126,29 @@ export function slackSignInProvider(input: {
           slackUserId: userId.data,
         },
       };
+    },
+  };
+}
+
+/** DEC 254e: a verified Slack identity from any workspace. Anything unreadable refuses; nothing is guessed. */
+function slackAnyWorkspaceIdentity(payload: JWTPayload, installTeam: string): ProviderResult {
+  const team = SlackTeamIdSchema.safeParse(payload["https://slack.com/team_id"]);
+  const userId = SlackUserIdSchema.safeParse(payload["https://slack.com/user_id"]);
+  if (!team.success || !userId.success) return { ok: false, reason: "Slack's identity token names no Slack workspace or user; run agentx login again" };
+  const own = team.data === installTeam;
+  const email = verifiedEmail(payload);
+  const rawName = payload["https://slack.com/team_name"];
+  const teamName = typeof rawName === "string" ? cleanDisplayName(rawName)?.slice(0, 80) : undefined;
+  return {
+    ok: true,
+    identity: {
+      method: "slack", issuer: SLACK_OIDC_ISSUER, subject: own ? userId.data : `${team.data}:${userId.data}`,
+      displayName: (typeof payload.name === "string" ? cleanDisplayName(payload.name) : undefined) ?? userId.data,
+      // Another workspace's admins control its members' emails (they can edit them, or assert any address through their own SSO), so an email
+      // from there proves nothing to Rovara: it spends no invite, enters no email index and never becomes a factor email.
+      ...(own && email !== undefined ? { email } : {}),
+      ...(own ? { slackUserId: userId.data } : {}),
+      slackTeam: { id: team.data, ...(teamName === undefined || teamName === "" ? {} : { name: teamName }) },
     },
   };
 }

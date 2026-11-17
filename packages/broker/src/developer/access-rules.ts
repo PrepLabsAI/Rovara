@@ -38,6 +38,12 @@ export async function applyAccessRules(rules: readonly AccessCheckRule[] | undef
     developerId: original.developerId, displayName: original.displayName, nameChosen: original.nameChosen, administrator,
     projects: original.projects.filter((project) => kept.has(project.name)).map((project) => ({ name: project.name, access: project.access })),
     notices: [...original.notices],
+    // DEC 253z: the company is Code's, read live; a rule can refuse the whole answer but never change or drop the company.
+    ...(original.companyId === undefined ? {} : { companyId: original.companyId }),
+    ...(original.companyRole === undefined ? {} : { companyRole: original.companyRole }),
+    ...(original.companyName === undefined ? {} : { companyName: original.companyName }),
+    // DEC 254b (f): Code's own record of this sign-in; a rule can neither set nor clear it.
+    ...(original.joinedByInvite === undefined ? {} : { joinedByInvite: original.joinedByInvite }),
   });
   for (const rule of rules ?? []) {
     try {
