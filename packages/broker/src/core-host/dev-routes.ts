@@ -32,6 +32,7 @@ import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
 import { createTaskActions, type TaskActions } from "../core/task-flow/task-actions.js";
+import { stopTaskOnRequest } from "../core/task-flow/stop-request.js";
 import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies } from "../core/decisions/routes.js";
 import type { SessionMembers } from "../core/sessions/access.js";
 import { developerIdOf } from "../core/sessions/create.js";
@@ -51,6 +52,8 @@ const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
 const TASK_READ = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})$/u;
 /** The owner's moves on a task already running (DECISIONS 198), on the old workflow routes' paths. */
 const TASK_ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/(workflow\/send-back|workflow\/review-findings|continue)$/u;
+/** A person's Stop on a core task, on the old cancel route's path (`{ requestId }` in, `{ task }` out), so Cloud's Stop and the AI tools' cancel stop a task of either engine. */
+const TASK_CANCEL = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/cancel$/u;
 const TASK_START = "/v1/dev/tasks";
 const DECISIONS = /^\/v1\/app\/decisions(?:\/|$)/u;
 const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:how-we-work|playbook)$/u;
@@ -148,7 +151,7 @@ function tokenIdOf(raw: string): string {
 function owns(path: string, method: string): boolean {
   if (path === TASK_START) return method === "POST";
   if (TASK_READ.test(path) || PLAYBOOK.test(path)) return method === "GET";
-  if (TASK_ACTION.test(path)) return method === "POST";
+  if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
@@ -258,7 +261,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       if (starting && options.app.engineForNewTask(companyId) !== "core") return undefined;
       // A script token reaches only a task's read here (its closed list: its own projects' tasks); never sessions, decisions, playbooks or tokens.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && TASK_ACTION.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+      if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path))) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       if (caller.scriptToken !== undefined && !TASK_READ.test(path)) return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       let target: Mounted;
       try {
@@ -287,6 +290,15 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           // Another company's task, or none, answers the same "not found" (the flow's owned read checks the company).
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
           return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+        }
+        const cancel = TASK_CANCEL.exec(path);
+        if (cancel !== null) {
+          // Served only with the company's owner rule (never Code's laptop rule on a hosted company); without it the engine boundary says "not on the core yet" to a reader, and a missing task to anyone else.
+          if (target.runtime.flow.deps.access.ownerActing === undefined) return undefined;
+          // The task's owner, or a live owner or admin of the task's company (the role is membership's, read for this request; the task's company is checked against it). Anyone who may not
+          // read the task gets the missing task's answer whatever they sent; a reader who may not stop gets fixed words. One request id is one stop.
+          const stopped = await stopTaskOnRequest(target.runtime.flow.deps, { ...taskCaller, companyRole: membership.role }, cancel[1]!, () => jsonBodyOf(request));
+          return json(200, { task: await developerTaskView(stopped.task, await taskViewOf(target.runtime.flow.deps, stopped.task), target.blobs) });
         }
         const action = TASK_ACTION.exec(path);
         if (action !== null) {
