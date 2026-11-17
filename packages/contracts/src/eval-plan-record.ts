@@ -83,8 +83,6 @@ export const EvalPlanBodyShape = z.object({
   /** DEC 253n(2): the confirmed eval command and report path, covered by `key.commandFingerprint`. Absent (a plan from before 253n): the eval has no command and reads Not run. */
   command: EvalCommandSchema.optional(),
   report: EvalReportPathSchema.optional(),
-  /** DEC 253q: the judge's scoring file, hashed by the broker at the setup commit (its hash is inside `judgePin`). The worker checks it at the task's base like a question file. Absent: no scoring file was pinned. */
-  judgeScoring: z.object({ path: EvalPlanQuestionSchema.shape.path, hash }).strict().optional(),
 }).strict();
 
 /** Whether a plan's command and report path are both present and hash to its stored command hash, or both absent. */

@@ -8,15 +8,15 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  EVAL_PLAN_DELIVERY_ACTION, EVAL_QUESTION_REMOVED_HASH, EvalPlanBodySchema, SetupEvalDiscoveryReportSchema, attestRovaraOnlyBaseCheckout, createDocumentBaseScoreCache, evalCodeHash, evalCommandFingerprintOf, evalPlanCommandHolds,
-  evalJudgePinOf, evalPlanDigest, evalQuestionHash, evalResultFromArtifact, evalSetHashOf, evalSettingsFingerprintOf, evalSpendInputsDigest,
+  EVAL_PLAN_DELIVERY_ACTION, EvalPlanBodySchema, SetupEvalDiscoveryReportSchema, attestRovaraOnlyBaseCheckout, createDocumentBaseScoreCache, evalCodeHash, evalCommandFingerprintOf, evalPlanCommandHolds,
+  evalPlanDigest, evalQuestionHash, evalResultFromArtifact, evalSetHashOf, evalSettingsFingerprintOf, evalSpendInputsDigest,
   type Approvers, type EvalBaseRecord, type EvalReservationAdapter, type OrgRole, type Principal, type SetupEvalDiscoveryReport,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createNoopAuditSink } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { EVAL_SPEND_KIND, createEvalSpendSubject, evalPlanKey, evalSpendKey, proposeEvalSpendApproval, readApprovedEvalPlan, readEvalSpendItem } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
-import { EVAL_NO_CAP_MESSAGE, confirmEvalDiscovery, evalDiscoveryKey, readEvalDiscovery, type EvalDiscoveryConfirmDeps } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
+import { confirmEvalDiscovery, evalDiscoveryKey, readEvalDiscovery, type EvalDiscoveryConfirmDeps } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
 import { handleSetupAgentCallback } from "../../packages/broker/src/core/setup-agent/callback.js";
 import { createEvalPlanSources } from "../../packages/broker/src/core/setup-agent/eval-plan-source.js";
 import { setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
@@ -27,9 +27,8 @@ import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { taskKey } from "../../packages/broker/src/developer/task-records.js";
 import { evalHostSourcesFor, evalPlanSourcesFor, plannedFreshEvalSandbox, type EvalFreshHost } from "../../packages/worker/src/verification/eval-wiring.js";
-import { pinnedEvalFreshCheck, pinnedEvalPlan, withEvalPinnedCandidate } from "../../packages/worker/src/verification/eval-plan-source.js";
-import { produceEvalDiscoveryReport } from "../../packages/worker/src/verification/eval-discovery-producer.js";
-import { EVAL_PLAN_QUESTIONS_CHANGED, runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
+import { pinnedEvalFreshCheck, withEvalPinnedCandidate } from "../../packages/worker/src/verification/eval-plan-source.js";
+import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
 import type { FreshEvalSandboxConfig } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -38,11 +37,7 @@ const B = COMPANY_B.orgId;
 const project = "demo";
 const NOW = Date.parse("2026-11-16T05:00:00.000Z");
 const Q1 = "question one\n"; const Q2 = "question two\n";
-const SCORE = "score: exact match\n";
-const JUDGE = { kind: "rule", scoringPath: "evals/demo/score.txt" } as const;
-const MODEL = "gemini-2.5-flash"; const VERSION = "gemini-2.5-flash-001";
-/** DEC 253q: the broker's own judge pin over the scoring file it read. */
-const judgePin = evalJudgePinOf({ catalogRowId: "gemini", judge: JUDGE, scoringHash: evalQuestionHash(Buffer.from(SCORE)) });
+const judgePin = "b".repeat(64);
 const IMAGE = `registry.example/worker@sha256:${"e".repeat(64)}`;
 const command = { executable: "node", args: ["evals/run.js", "--out", "rovara-measures.json"], cwd: "." };
 const report = { cwd: ".", argument: "rovara-measures.json" };
@@ -50,8 +45,8 @@ const report = { cwd: ".", argument: "rovara-measures.json" };
 const suite = (over: Record<string, unknown> = {}) => ({
   selection: "evals/demo", repository: "web",
   questions: [{ id: "q1", category: "ordinary", path: "evals/demo/q1.txt" }, { id: "q2", category: "safety", path: "evals/demo/q2.txt" }],
-  command, report, commandFingerprint: evalCommandFingerprintOf(command, report), judge: JUDGE, subsetSupported: true,
-  catalogRowId: "gemini", model: MODEL, modelVersion: VERSION, image: IMAGE, route: "gateway", maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 10, ...over,
+  command, report, commandFingerprint: evalCommandFingerprintOf(command, report), judgePin, baselineJudgePin: judgePin, subsetSupported: true,
+  catalogRowId: "model", model: "model", modelVersion: "version-1", image: IMAGE, route: "gateway", maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 10, ...over,
 });
 const reportOf = (over: Record<string, unknown> = {}): SetupEvalDiscoveryReport => ({ schemaVersion: 1, suites: [suite(over)] }) as SetupEvalDiscoveryReport;
 
@@ -90,7 +85,7 @@ const ROLES: Record<string, Role> = {
 
 async function world(companyId: string, options: { store?: MemoryDocumentStore; base?: Record<string, string>; head?: Record<string, string>; cap?: number | null; adapter?: boolean } = {}) {
   const store = options.store ?? new MemoryDocumentStore();
-  const repo = await repository(options.base ?? { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2, "evals/demo/score.txt": SCORE }, options.head);
+  const repo = await repository(options.base ?? { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, options.head);
   const members = deployedSessionMembers(companyId, people(companyId, ROLES));
   const logs: Array<{ event: string; reason?: string }> = [];
   const workspaceId = randomUUID(); const taskId = randomUUID();
@@ -101,7 +96,7 @@ async function world(companyId: string, options: { store?: MemoryDocumentStore; 
   const operation = { kind: "task", workflowMode: "SETUP_AGENT", status: "RUNNING", workspaceId, companyId };
   const callback = (body: unknown, op: object = operation, as = companyId) => handleSetupAgentCallback({ store, companyId: as, now: () => NOW, log: (e) => logs.push(e) }, op as never, body);
   const reads: string[] = [];
-  const deps: EvalDiscoveryConfirmDeps = { store, companyId, now: () => NOW, members, ...(options.cap === null ? {} : { monthlyCap: async () => options.cap ?? 50_000_000 }),
+  const deps: EvalDiscoveryConfirmDeps = { store, companyId, now: () => NOW, members, ...(options.cap === null ? {} : { monthlyCapMicros: options.cap ?? 50_000_000 }),
     latest: async (p) => (p === project ? { definition: { repositories: [{ name: "web", url: "https://github.com/acme/web" }] } } : undefined), readFile: gitReader(repo.dir, reads), log: (e) => logs.push(e) };
   const digestOf = async () => (await readEvalDiscovery({ store, companyId }, project))!.reportDigest;
   const confirm = async (as: Principal = person(companyId, "admin"), over: Record<string, unknown> = {}) =>
@@ -225,7 +220,7 @@ describe("the confirm route: who may confirm what", () => {
     expect(await store.get(evalSpendKey(A, project))).toBeUndefined();
   });
   it("refuses a selection naming a file or a suite that is not in the report (mutants: the path subset check, the suite check)", async () => {
-    const w = await world(A, { base: { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2, "evals/demo/score.txt": SCORE, "evals/secret.txt": "x\n" } });
+    const w = await world(A, { base: { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2, "evals/secret.txt": "x\n" } });
     await w.callback({ kind: "eval_discovery", report: reportOf() });
     await expect(w.confirm(undefined, { paths: ["evals/demo/q1.txt", "evals/secret.txt"] })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     await expect(w.confirm(undefined, { selection: "evals/other" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
@@ -278,10 +273,10 @@ describe("the confirm route: who may confirm what", () => {
     expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
   });
   it("a file missing at the setup commit, or not plain text, is refused; a cap the item does not fit puts the report back (nothing proposed)", async () => {
-    const missing = await world(A, { base: { "evals/demo/q1.txt": Q1, "evals/demo/score.txt": SCORE } });
+    const missing = await world(A, { base: { "evals/demo/q1.txt": Q1 } });
     await missing.callback({ kind: "eval_discovery", report: reportOf() });
     await expect(missing.confirm()).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    const binary = await world(A, { base: { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": "�bad", "evals/demo/score.txt": SCORE } });
+    const binary = await world(A, { base: { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": "�bad" } });
     await binary.callback({ kind: "eval_discovery", report: reportOf() });
     await expect(binary.confirm()).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     const noCap = await world(A, { cap: null });
@@ -298,15 +293,14 @@ describe("the broker builds the plan from its own reads", () => {
     const w = await world(A, { head: { "evals/demo/q1.txt": "edited on the run's branch\n" } });
     await w.callback({ kind: "eval_discovery", report: reportOf() });
     await w.confirm(undefined, { paths: ["evals/demo/q1.txt"] });
-    expect(w.reads.sort()).toEqual([`${w.repo.baseSha}:evals/demo/q1.txt`, `${w.repo.baseSha}:evals/demo/score.txt`]);
+    expect(w.reads).toEqual([`${w.repo.baseSha}:evals/demo/q1.txt`]);
     const plan = (await w.store.get(evalPlanKey(A, project)))!["plan"] as Record<string, unknown>;
     const settings = { imageDigest: IMAGE, route: "gateway" };
     const evalSetHash = evalSetHashOf([{ path: "evals/demo/q1.txt", bytes: Buffer.from(Q1) }]);
     expect(plan).toMatchObject({
       selection: "evals/demo", repository: "web", evalSetHash, evalConfigured: true, command, report,
       questions: [{ id: "q1", category: "ordinary", path: "evals/demo/q1.txt", hash: evalQuestionHash(Buffer.from(Q1)) }],
-      key: { commandFingerprint: evalCommandFingerprintOf(command, report), catalogRowId: "gemini", model: MODEL, modelVersion: VERSION },
-      judgePin, baselineJudgePin: judgePin, judgeScoring: { path: "evals/demo/score.txt", hash: evalQuestionHash(Buffer.from(SCORE)) },
+      key: { commandFingerprint: evalCommandFingerprintOf(command, report), catalogRowId: "model", model: "model", modelVersion: "version-1" },
       inputs: { evalSetHash, judgePin, commandFingerprint: evalCommandFingerprintOf(command, report), settingsFingerprint: evalSettingsFingerprintOf(settings, judgePin) },
     });
     expect(EvalPlanBodySchema.safeParse(plan).success).toBe(true);
@@ -358,9 +352,9 @@ async function approve(gate: ReturnType<typeof createDecisionGate>, store: Memor
 const KEY = Buffer.alloc(32, 9);
 const EVAL_REQUEST = { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 } as const;
 
-async function confirmedToCheck(options: { head?: Record<string, string>; report?: (w: Awaited<ReturnType<typeof world>>) => Promise<SetupEvalDiscoveryReport> } = {}) {
+async function confirmedToCheck(options: { head?: Record<string, string> } = {}) {
   const w = await world(A, options.head === undefined ? {} : { head: options.head });
-  await w.callback({ kind: "eval_discovery", report: options.report === undefined ? reportOf() : await options.report(w) });
+  await w.callback({ kind: "eval_discovery", report: reportOf() });
   await w.confirm(person(A, "maintainer"));
   const admin = person(A, "admin");
   const gate = createDecisionGate({ store: w.store, approvers: approversOf(admin), audit: createNoopAuditSink(), subjects: [createEvalSpendSubject({ store: w.store, companyId: A, members: w.members })], now: () => new Date(NOW) });
@@ -373,7 +367,7 @@ async function confirmedToCheck(options: { head?: Record<string, string>; report
   await store.put({ item: { ...(await workspaceKeys({ store, companyId: A }, workspaceId)).taskPointerKey(), taskId } });
   await store.put({ item: { ...taskKey(taskId), taskId, workspaceId, project, companyId: A } });
   const plan = (await store.get(evalPlanKey(A, project)))!["plan"] as { inputs: Record<string, string> };
-  const parts = { company: A, project, baseCommit: w.repo.baseSha, codeHash: evalCodeHash(w.repo.baseSha), judgePin, commandFingerprint: plan.inputs["commandFingerprint"]!, catalogRowId: "gemini", model: MODEL, modelVersion: VERSION, evalSetHash: plan.inputs["evalSetHash"]!, hiddenSetHash: "none", settingsFingerprint: plan.inputs["settingsFingerprint"]! };
+  const parts = { company: A, project, baseCommit: w.repo.baseSha, codeHash: evalCodeHash(w.repo.baseSha), judgePin, commandFingerprint: plan.inputs["commandFingerprint"]!, catalogRowId: "model", model: "model", modelVersion: "version-1", evalSetHash: plan.inputs["evalSetHash"]!, hiddenSetHash: "none", settingsFingerprint: plan.inputs["settingsFingerprint"]! };
   const RECORD: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.04, count: 2 }], questions: [{ id: "q1", samples: [{ pass: true, answer: "a" }, { pass: true, answer: "a" }, { pass: true, answer: "a" }] }, { id: "q2", samples: [{ pass: true, answer: "b" }, { pass: true, answer: "b" }, { pass: true, answer: "b" }] }], caseCount: 2, recordedOn: "2026-11-16", roundKind: "check_unsealed", runnerSchemaVersion: 1 };
   await createDocumentBaseScoreCache(store, { companyId: A }).write(parts, RECORD, { writer: "rovara_base_round", baseCommit: w.repo.baseSha });
   const adapter: EvalReservationAdapter = { async authority(request) { return request.company === A ? { company: A, project: request.project, principal: admin, provider: "customer", connected: true } : undefined; }, async reserve() { return undefined; } };
@@ -431,7 +425,7 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
       } };
     const facts = { status: "verified", candidateDigest: "9".repeat(64), signal: new AbortController().signal };
     const artifact = await withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports as never, facts));
-    expect(artifact, JSON.stringify(artifact)).toMatchObject({ outcome: "done", evalConfigured: true, basis: { judgePin, model: MODEL, modelVersion: VERSION, oldRuns: 3 } });
+    expect(artifact, JSON.stringify(artifact)).toMatchObject({ outcome: "done", evalConfigured: true, basis: { judgePin, model: "model", modelVersion: "version-1", oldRuns: 3 } });
     expect(evalResultFromArtifact(artifact).label).toBe("No regression measured (eval)");
     expect(stages).toContain("new");
   });
@@ -447,13 +441,13 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
     const pinned = <T>(fn: () => Promise<T>) => withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, fn, round);
     const planned = plannedFreshEvalSandbox(host(), { operationId }, sources.deliveredPlan);
     // The model pin answers nothing until a run has read its plan.
-    expect(planned.modelAllowed({ row: "gemini", method: "POST", path: `/v1beta/models/${MODEL}:generateContent`, query: "", headers: [], body: new Uint8Array() })).toBe(false);
+    expect(planned.modelAllowed({ row: "model", method: "POST", path: "/v1beta/models/model:generateContent", query: "", headers: [], body: new Uint8Array() })).toBe(false);
     await pinned(() => planned.sandbox.run(input));
     expect(configs).toHaveLength(1);
-    expect(configs[0]).toMatchObject({ image: IMAGE, workspace: "0123456789abcdef", taskId: operationId, command, report, rowId: "gemini", scratchDir: scratch, workingSandbox: "rovara-task-1",
+    expect(configs[0]).toMatchObject({ image: IMAGE, workspace: "0123456789abcdef", taskId: operationId, command, report, rowId: "model", scratchDir: scratch, workingSandbox: "rovara-task-1",
       repository: { directory: w.repo.dir, baseCommit: w.repo.baseSha, candidateCommit: w.repo.candidates[0]!.commitSha } });
-    expect(planned.modelAllowed({ row: "gemini", method: "POST", path: `/v1beta/models/${MODEL}:generateContent`, query: "", headers: [], body: new Uint8Array() })).toBe(true);
-    for (const frame of [{ row: "other", path: `/v1beta/models/${MODEL}:generateContent` }, { row: "gemini", path: "/v1beta/models/dearer-model:generateContent" }, { row: "gemini", path: `/v1beta/models/${MODEL}:generateContentX` }]) {
+    expect(planned.modelAllowed({ row: "model", method: "POST", path: "/v1beta/models/model:generateContent", query: "", headers: [], body: new Uint8Array() })).toBe(true);
+    for (const frame of [{ row: "other", path: "/v1beta/models/model:generateContent" }, { row: "model", path: "/v1beta/models/dearer-model:generateContent" }, { row: "model", path: "/v1beta/models/model:generateContentX" }]) {
       expect(planned.modelAllowed({ ...frame, method: "POST", query: "", headers: [], body: new Uint8Array() })).toBe(false);
     }
     // The image the plan was measured with must be the worker's own.
@@ -472,127 +466,5 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
     const { command: _c, ...noCommand } = delivered; void _c;
     expect(await pinned(async () => pinnedEvalFreshCheck(noCommand))).toBeUndefined();
     expect(configs).toHaveLength(1);
-  });
-});
-
-// ---- DEC 253q: the cap from the trusted host's source, the broker's own judge pin, the pinned scoring file, and the producer end to end
-
-describe("DEC 253q(c): the eval monthly cap", () => {
-  it("no cap source (a laptop) is a fixed, clear refusal before any file is read or the report is marked (mutant: the cap check)", async () => {
-    const w = await world(A, { cap: null });
-    await w.callback({ kind: "eval_discovery", report: reportOf() });
-    const error = await w.confirm().catch((e: unknown) => e) as Error & { code: string };
-    expect(error.code).toBe("CONFIG_INVALID");
-    expect(error.message).toContain(EVAL_NO_CAP_MESSAGE);
-    expect(w.reads).toEqual([]);
-    expect(w.logs).toContainEqual({ event: "eval_discovery_confirm_refused", reason: "no_cap" });
-    expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))!.state).toBe("reported");
-    expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
-  });
-  it("the cap comes from the host's source for THIS company and project; a fault, no answer, a negative or fractional cap is no cap (mutants: the whole-number check, the fault catch)", async () => {
-    const seen: unknown[] = [];
-    const ok = await world(A, { cap: null });
-    await ok.callback({ kind: "eval_discovery", report: reportOf() });
-    await confirmEvalDiscovery({ ...ok.deps, monthlyCap: async (scope) => { seen.push(scope); return 50_000_000; } }, project, { taskId: ok.taskId, reportDigest: await ok.digestOf(), selection: "evals/demo", paths: ["evals/demo/q1.txt"] }, person(A, "admin"));
-    expect(seen).toEqual([{ company: A, project }]);
-    expect(await ok.store.get(evalSpendKey(A, project))).toBeDefined();
-    for (const source of [async () => { throw new Error("down"); }, async () => undefined, async () => -1, async () => 1.5, async () => Number.NaN]) {
-      const w = await world(A, { cap: null });
-      await w.callback({ kind: "eval_discovery", report: reportOf() });
-      const error = await confirmEvalDiscovery({ ...w.deps, monthlyCap: source }, project, { taskId: w.taskId, reportDigest: await w.digestOf(), selection: "evals/demo", paths: ["evals/demo/q1.txt"] }, person(A, "admin")).catch((e: unknown) => e) as Error & { code: string };
-      expect(error.code).toBe("CONFIG_INVALID");
-      expect(error.message).toContain(EVAL_NO_CAP_MESSAGE);
-      expect(w.reads).toEqual([]);
-      expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
-    }
-  });
-  it("a cap below the item's maximum is refused by the proposal and the report goes back to waiting", async () => {
-    const w = await world(A, { cap: 1 });
-    await w.callback({ kind: "eval_discovery", report: reportOf() });
-    await expect(w.confirm()).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))!.state).toBe("reported");
-  });
-});
-
-describe("DEC 253q: the broker pins the judge", () => {
-  it("the plan's judge pin is the broker's over the scoring file it read at the setup commit; a model judge is marked same-family (mutants: the judge pin source, sameJudgeFamily)", async () => {
-    const MODEL_JUDGE = { kind: "model", model: "gemini-2.5-pro", version: "gemini-2.5-pro-002", scoringPath: "evals/demo/score.txt" } as const;
-    const w = await world(A, { head: { "evals/demo/score.txt": "a different judge on the branch\n" } });
-    await w.callback({ kind: "eval_discovery", report: reportOf({ judge: MODEL_JUDGE }) });
-    await w.confirm();
-    const plan = (await w.store.get(evalPlanKey(A, project)))!["plan"] as Record<string, unknown>;
-    const pin = evalJudgePinOf({ catalogRowId: "gemini", judge: MODEL_JUDGE, scoringHash: evalQuestionHash(Buffer.from(SCORE)) });
-    expect(plan).toMatchObject({ judgePin: pin, baselineJudgePin: pin, sameJudgeFamily: true, judgeScoring: { path: "evals/demo/score.txt", hash: evalQuestionHash(Buffer.from(SCORE)) } });
-    expect(pin).not.toBe(judgePin);
-    // The rule judge: no same-family notice.
-    const r = await world(A);
-    await r.callback({ kind: "eval_discovery", report: reportOf() });
-    await r.confirm();
-    expect((await r.store.get(evalPlanKey(A, project)))!["plan"]).not.toHaveProperty("sameJudgeFamily");
-  });
-  it("a scoring file that is not plain text is refused like a question file (it is read in the same bounded read)", async () => {
-    const w = await world(A, { base: { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2, "evals/demo/score.txt": "\ufffdbad" } });
-    await w.callback({ kind: "eval_discovery", report: reportOf() });
-    await expect(w.confirm()).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
-  });
-  it("a scoring file missing at the setup commit is refused and nothing is proposed", async () => {
-    const w = await world(A, { base: { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 } });
-    await w.callback({ kind: "eval_discovery", report: reportOf() });
-    await expect(w.confirm()).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
-    expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))!.state).toBe("reported");
-  });
-});
-
-describe("DEC 253q: the worker checks the pinned scoring file", () => {
-  it("a candidate that edits the scoring file makes every question edited (no proof from a changed judge) (mutant: scoringEdited)", async () => {
-    const { w, sources } = await confirmedToCheck({ head: { "evals/demo/score.txt": "graded more kindly\n" } });
-    const plan = await withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, () => sources.plan());
-    expect(plan).toMatchObject({ selection: "evals/demo" });
-    expect((plan as unknown as { questions: Array<{ headHash: string }> }).questions.every((q) => q.headHash === EVAL_QUESTION_REMOVED_HASH)).toBe(true);
-    // Control: a candidate that leaves the scoring file alone keeps the real head hashes.
-    const control = await confirmedToCheck();
-    const kept = await withEvalPinnedCandidate(control.w.repo.repositories, control.w.repo.candidates, new AbortController().signal, () => control.sources.plan());
-    expect((kept as unknown as { questions: Array<{ headHash: string }> }).questions.some((q) => q.headHash !== EVAL_QUESTION_REMOVED_HASH)).toBe(true);
-  });
-  it("a base whose scoring file is not the pinned one reads questions changed: re-approve (mutant: the base scoring check)", async () => {
-    const { w, sources } = await confirmedToCheck();
-    const delivered = await sources.deliveredPlan() as Record<string, unknown>;
-    const pinned = <T>(fn: () => Promise<T>) => withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, fn);
-    expect(await pinned(() => pinnedEvalPlan(delivered))).toMatchObject({ selection: "evals/demo" });
-    expect(await pinned(() => pinnedEvalPlan({ ...delivered, judgeScoring: { path: "evals/demo/score.txt", hash: "0".repeat(64) } }))).toBe(EVAL_PLAN_QUESTIONS_CHANGED);
-  });
-});
-
-describe("one fake end to end: the setup run's producer discovers, an admin confirms, a task runs, the eval result appears", () => {
-  it("the agent's draft becomes the report, the confirmed plan reaches the CHECKS run and the final check compares", async () => {
-    const draft = { suites: [{ selection: "evals/demo", repository: "web", questions: [{ id: "q2", category: "safety", path: "evals/demo/q2.txt" }, { id: "q1", category: "ordinary", path: "evals/demo/q1.txt" }],
-      command, report, model: MODEL, modelVersion: VERSION, judge: JUDGE, subsetSupported: true, maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 10 }] };
-    let produced: SetupEvalDiscoveryReport | undefined;
-    const { w, sources } = await confirmedToCheck({ report: async (world) => {
-      const tracked = new Map([["web", new Set(execFileSync("git", ["ls-tree", "-r", "--name-only", world.repo.baseSha], { cwd: world.repo.dir, encoding: "utf8" }).trim().split("\n"))]]);
-      const out = await produceEvalDiscoveryReport({ draft, repositories: [{ name: "web", directory: world.repo.dir }], tracked, image: IMAGE });
-      if (!("report" in out)) throw new Error(`no report: ${JSON.stringify(out)}`);
-      produced = out.report;
-      return out.report;
-    } });
-    expect(produced).toEqual(reportOf());
-    expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))).toMatchObject({ state: "confirmed", confirmedSelection: "evals/demo" });
-    const reports = await realpath(await mkdtemp(join(tmpdir(), "edc-e2e-"))); roots.push(reports);
-    const ports = { roundKind: "check_unsealed" as const, ...sources,
-      meter: { reserve: async () => ({ call: async () => ({ class: "ok" as const, calls: 1, costMicros: 1 }), close: async () => undefined }) },
-      runner: async (r: { side: "old" | "new"; ids: readonly string[]; runs: 1 | 2 | 3; call: (frame: never) => Promise<unknown> }) => {
-        for (let i = 0; i < r.ids.length * r.runs; i++) await r.call({} as never);
-        const file = `report-${r.side}-${r.runs}.json`;
-        await writeFile(join(reports, file), JSON.stringify({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", direction: "up_good", value: 1 }],
-          questions: r.ids.map(id => ({ id, samples: Array.from({ length: r.runs }, () => ({ pass: true, answer: id === "q1" ? "a" : "b" })) })) }));
-        return { report: { root: reports, cwd: ".", argument: file, notBeforeMs: Date.now() - 1000 }, facts: { total: r.ids.length * r.runs, run: r.ids.length * r.runs, notRun: 0, byClass: {}, overrunStop: false },
-          calls: 0, costMicros: 0, changedPromptCalls: r.side === "new" ? r.ids.length : 0, seconds: 1, attestation: attestRovaraOnlyBaseCheckout({ baseCommit: w.repo.baseSha }) };
-      } };
-    const facts = { status: "verified", candidateDigest: "9".repeat(64), signal: new AbortController().signal };
-    const artifact = await withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports as never, facts));
-    expect(artifact, JSON.stringify(artifact)).toMatchObject({ outcome: "done", evalConfigured: true, basis: { judgePin, model: MODEL, modelVersion: VERSION, oldRuns: 3 } });
-    expect(evalResultFromArtifact(artifact).label).toBe("No regression measured (eval)");
   });
 });

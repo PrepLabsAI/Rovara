@@ -4,15 +4,10 @@
 //   - question HASHES are not in it at all: on confirm the broker reads each selected file at the commit IT recorded for the run (`preparedBase`) and hashes the bytes itself (`evalQuestionHash`);
 //   - the eval-set hash, the settings fingerprint and the plan digest are the broker's own, computed from those reads and the confirmed fields;
 //   - the command FINGERPRINT the run sends must equal the broker's own `evalCommandFingerprintOf(command, report)`, or the whole report is refused;
-//   - DEC 253q: the JUDGE is named (a rule, or a model with its exact version, and its scoring file), never pinned by the run: the broker reads the scoring file at the recorded commit and
-//     computes the judge pin itself (`evalJudgePinOf`);
-//   - the judge, the model catalog row, the image and the per-question caps are what a maintainer or admin reads and confirms; the spend item they make is approved separately (EVAL_SPEND).
+//   - the judge pins, the model catalog row, the image and the per-question caps are what a maintainer or admin reads and confirms; the spend item they make is approved separately (EVAL_SPEND).
 import { z } from "zod";
-import { canonicalJson } from "./canonical-json.js";
 import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalCommandSchema, EvalPlanQuestionSchema, EvalReportPathSchema, evalCommandFingerprintOf } from "./eval-plan-record.js";
-import { sha256HexOf } from "./service-catalog-verify.js";
-import { modelBelongsToFamily, type SideBySideVendorFamily } from "./side-by-side-judge-pin.js";
 
 /** The most suites one report offers, the most distinct question files one suite names (the broker reads each on confirm), and the per-question bounds a report may ask for. */
 export const EVAL_DISCOVERY_SUITES_MAX = 4;
@@ -34,34 +29,6 @@ export function evalImageDigestOf(image: unknown): string | undefined {
   return image.slice(image.lastIndexOf("sha256:"));
 }
 
-/** DEC 253q: the catalog rows the eval's product route serves (`eval-gateway-access.ts`: Gemini only today), with the vendor family each serves. The product model and a model judge both go through it. */
-export const EVAL_PRODUCT_ROW = "gemini";
-export const EVAL_PRODUCT_ROWS: Readonly<Record<string, SideBySideVendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google" });
-/** The route every eval model call takes: the gateway's product route, on the customer's own connected key (DEC 240b, 253k). */
-export const EVAL_PRODUCT_ROUTE = "gateway";
-const familyOfRow = (row: string): SideBySideVendorFamily | undefined => (Object.hasOwn(EVAL_PRODUCT_ROWS, row) ? EVAL_PRODUCT_ROWS[row] : undefined);
-
-/** DEC 253q: the eval's judge as the setup run names it: a rule (exact match and the like: no model) or a model and its exact version, each with the file that holds its scoring rule or prompt. */
-export const EvalJudgeSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("rule"), scoringPath: EvalPlanQuestionSchema.shape.path }).strict(),
-  z.object({ kind: z.literal("model"), model: name, version: name, scoringPath: EvalPlanQuestionSchema.shape.path }).strict(),
-]);
-export type EvalJudge = z.infer<typeof EvalJudgeSchema>;
-
-/**
- * DEC 253q (design note, section 1): the judge pin, computed by the BROKER at confirm. It covers the provider (always the customer's connected key), the catalog row and its vendor family, the
- * judge's kind, model and version, and the scoring file's path and content hash (`evalQuestionHash` of the bytes the broker read at the setup commit). Any change to one is a new pin, so the spend
- * inputs change and the old approval no longer matches. Throws for a judge, row or hash it would not accept.
- */
-export function evalJudgePinOf(input: { catalogRowId: string; judge: EvalJudge; scoringHash: string }): string {
-  const judge = EvalJudgeSchema.parse(input.judge);
-  const family = familyOfRow(input.catalogRowId);
-  if (family === undefined || !/^[a-f0-9]{64}$/u.test(input.scoringHash)) throw new RangeError("the judge pin needs an eval product row and a scoring file hash");
-  if (judge.kind === "model" && !modelBelongsToFamily(judge.model, family)) throw new RangeError("a model judge goes through the eval's product row");
-  const body = { provider: "customer", catalogRowId: input.catalogRowId, family, kind: judge.kind, ...(judge.kind === "model" ? { model: judge.model, version: judge.version } : {}), scoring: { path: judge.scoringPath, hash: input.scoringHash } };
-  return sha256HexOf(new TextEncoder().encode(`rovara-eval-judge/v1\n${canonicalJson(body)}`));
-}
-
 export const EvalDiscoveryQuestionSchema = z.object({ id: questionId, category: EvalPlanQuestionSchema.shape.category, path: EvalPlanQuestionSchema.shape.path }).strict();
 
 export const EvalDiscoverySuiteSchema = z.object({
@@ -74,9 +41,11 @@ export const EvalDiscoverySuiteSchema = z.object({
   report: EvalReportPathSchema,
   /** The run's own fingerprint of `command` and `report`: refused unless it is the broker's `evalCommandFingerprintOf`. */
   commandFingerprint: hash,
-  judge: EvalJudgeSchema,
+  judgePin: hash,
+  baselineJudgePin: hash,
+  sameJudgeFamily: z.boolean().optional(),
   subsetSupported: z.boolean(),
-  catalogRowId: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/u).refine(row => familyOfRow(row) !== undefined, "a row the eval's product route serves"),
+  catalogRowId: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/u),
   model: name,
   modelVersion: name,
   image: z.string().regex(EVAL_PINNED_IMAGE),
@@ -86,10 +55,7 @@ export const EvalDiscoverySuiteSchema = z.object({
 }).strict()
   .refine(suite => new Set(suite.questions.map(q => q.id)).size === suite.questions.length, "question ids are unique")
   .refine(suite => new Set(suite.questions.map(q => q.path)).size <= EVAL_DISCOVERY_FILES_MAX, "too many question files")
-  .refine(suite => { try { return evalCommandFingerprintOf(suite.command, suite.report) === suite.commandFingerprint; } catch { return false; } }, "the command fingerprint does not match the command")
-  // The product model and a model judge are both reached through the row, so both belong to its family; the scoring file is not a question.
-  .refine(suite => { const family = familyOfRow(suite.catalogRowId); return family !== undefined && modelBelongsToFamily(suite.model, family) && (suite.judge.kind !== "model" || modelBelongsToFamily(suite.judge.model, family)); }, "the models go through the eval's product row")
-  .refine(suite => !suite.questions.some(q => q.path === suite.judge.scoringPath), "the scoring file is not a question file");
+  .refine(suite => { try { return evalCommandFingerprintOf(suite.command, suite.report) === suite.commandFingerprint; } catch { return false; } }, "the command fingerprint does not match the command");
 export type EvalDiscoverySuite = z.infer<typeof EvalDiscoverySuiteSchema>;
 
 export const SetupEvalDiscoveryReportSchema = z.object({

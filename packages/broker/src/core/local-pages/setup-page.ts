@@ -3,8 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { esc, layout, untrusted } from "./html.js";
 import type { PageContext } from "./pages.js";
-import type { ApprovalOffer, SetupEvalDiscoveryView, SetupItemView, SetupPageView } from "./views.js";
-import { evalConfirmBinding } from "./setup-eval-binding.js";
+import type { ApprovalOffer, SetupItemView, SetupPageView } from "./views.js";
 
 const hidden = (name: string, value: string | number): string => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`;
 const CHECK_WORDS = { unchecked: "not checked yet", outdated: "checked for an older version", checking: "being checked now", failed: "failed", ready: "passed" } as const;
@@ -12,13 +11,6 @@ const CHECK_CLASS = { unchecked: "muted", outdated: "warn", checking: "warn", fa
 const VERDICT_WORDS = { verified: "confirmed in the repository", unverified: "not found where it says", unchecked: "could not be checked" } as const;
 const VERDICT_CLASS = { verified: "ok", unverified: "bad", unchecked: "warn" } as const;
 const KIND_WORDS: Record<string, string> = { setup: "Setup command", tests: "Test command", repository: "Repository", devcontainer: "Dev container", check: "Check", knowledge: "Knowledge", allowed_domain: "Website", test_environment: "Test environment", source: "Source", intake: "Intake", secret: "Secret", spec_target: "Spec target", browser_evidence: "Browser evidence pages" };
-const EVAL_STATE_WORDS = {
-  none: "Not discovered: the latest setup run reported no eval for this project. An eval confirmed earlier, with its approved spend, still applies.",
-  waiting: "Waiting for confirmation: an owner, admin or project maintainer confirms the eval before Rovara uses it.",
-  confirmed: "Confirmed: Rovara uses this eval in the final check once its spend is approved.",
-  reapprove: "Re-approve needed: the eval's spend approval was rejected or no longer holds. Run the setup again to report it afresh, then confirm and approve it.",
-} as const;
-const EVAL_STATE_CLASS = { waiting: "warn", confirmed: "ok", reapprove: "bad" } as const;
 const STATUS_WORDS = { none: "Rovara has not set this project up yet.", running: "Rovara is running the setup now.", ready: "Rovara finished and has a setup to use.", failed: "The setup run did not finish." } as const;
 
 export function renderSetupIndex(context: PageContext, projects: readonly string[]): string {
@@ -86,25 +78,6 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     return `<div class="panel"><h2>Eval health check</h2><p>${esc(item.label)}</p><p>${esc(item.budget)}</p><p>Later refreshes require current approval and a reservation against the monthly cap. A higher estimate or changed eval inputs needs another approval.</p><p>Spend approval: ${esc(item.state)}. Approving spend does not start a health check.</p><div class="row">${form("approve")}${form("reject")}</div></div>`;
   };
 
-  // DEC 253q: the eval the setup run drafted. Everything in a suite came from the repository or the model, so it is shown as such. Confirm approves one suite (all its question files); its
-  // spend estimate then waits for its own approval in the panel below. The broker re-checks who may confirm, the report's digest and the install's eval budget.
-  const evalDiscovery = (): string => {
-    const found = view.evalDiscovery;
-    if (found === undefined) return `<div class="panel"><h2>Eval</h2><p class="muted">${esc(EVAL_STATE_WORDS.none)}</p>${view.evalNoBudget === undefined ? "" : `<p class="notice">${esc(view.evalNoBudget)}</p>`}</div>`;
-    const suite = (entry: SetupEvalDiscoveryView["suites"][number]): string => {
-      // Only a report nobody confirmed yet: a confirmed one (also when its spend needs re-approving) is never confirmed again; a new setup run reports afresh.
-      const confirmable = found.state === "waiting" && found.cannotConfirm === undefined;
-      const form = !confirmable ? "" : `<form method="post" action="${action("eval-confirm")}" class="row">${hidden("taskId", found.taskId)}${hidden("reportDigest", found.reportDigest)}${hidden("selection", entry.selection)}${entry.files.map((file) => hidden("path", file)).join("")}${hidden("ft", context.formToken(evalConfirmBinding(view.project, found.taskId, found.reportDigest, entry.selection, entry.files)))}${button("Confirm this eval", "primary")}</form>`;
-      return `<tr><td><code>${untrusted(entry.selection)}</code>${entry.repository === undefined ? "" : `<br><span class="muted">in ${untrusted(entry.repository)}</span>`}${found.confirmedSelection === entry.selection ? " <span class=\"ok\">confirmed</span>" : ""}</td>`
-        + `<td>${esc(entry.questions)} questions (${untrusted(entry.categories)})<br><span class="muted">from the repository: ${entry.files.map((file) => untrusted(file)).join(", ")}</span></td>`
-        + `<td><pre class="eval-wrap">${untrusted(entry.command)}</pre><span class="muted">run in ${untrusted(entry.commandCwd)}; report: ${untrusted(entry.report)}</span></td><td>${untrusted(entry.model)}<br>judge: ${untrusted(entry.judge)}<br><span class="muted">${esc(entry.caps)}</span></td><td>${form}</td></tr>`;
-    };
-    // The eval panel's own two rules (the page style is shared by every page, so they stay here), under the page's style nonce.
-    return `<style nonce="${esc(context.nonce)}">.eval-scroll{overflow-x:auto;max-width:100%}.eval-wrap{white-space:pre-wrap;overflow-wrap:anywhere}</style><div class="panel"><h2>Eval</h2><p class="${EVAL_STATE_CLASS[found.state]}">${esc(EVAL_STATE_WORDS[found.state])}</p>${found.cannotConfirm === undefined ? "" : `<p class="notice">${esc(found.cannotConfirm)}</p>`}`
-      + `<div class="eval-scroll"><table><thead><tr><th>Eval</th><th>Questions</th><th>Command</th><th>Model and judge</th><th></th></tr></thead><tbody>${found.suites.map(suite).join("")}</tbody></table></div>`
-      + `<p class="muted">The setup run drafted this from the repository. Confirming it makes Rovara read each question file and the scoring file at the setup commit and pin them; nothing runs until its spend estimate is approved.</p></div>`;
-  };
-
   const hosts = (): string => {
     if (view.hostAsks.length === 0) return "";
     const rows = view.hostAsks.map((ask) => {
@@ -125,7 +98,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
   const summary = view.summary === undefined ? "" : `<p class="muted">${esc(view.summary.commandsRun)} commands, ${esc(view.summary.elapsedMin)} minutes, about $${esc((view.summary.spendCents / 100).toFixed(2))}${view.summary.partial ? ", stopped before it finished (what it learned is kept)" : ""}.</p>`;
   return layout({
     title: `Set up ${view.project}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
-    body: `<h1>Set up ${esc(view.project)}</h1><p>${esc(STATUS_WORDS[view.status])}${view.failure === undefined ? "" : ` ${esc(view.failure)}`}${view.stoppedBy === undefined ? "" : ` <span class="muted">Stopped by ${untrusted(view.stoppedBy)}.</span>`}</p>${summary}${control()}${apply()}${evalDiscovery()}${evalSpend()}${hosts()}${approved()}${proposal()}${journal()}${checkPanel}`
+    body: `<h1>Set up ${esc(view.project)}</h1><p>${esc(STATUS_WORDS[view.status])}${view.failure === undefined ? "" : ` ${esc(view.failure)}`}${view.stoppedBy === undefined ? "" : ` <span class="muted">Stopped by ${untrusted(view.stoppedBy)}.</span>`}</p>${summary}${control()}${apply()}${evalSpend()}${hosts()}${approved()}${proposal()}${journal()}${checkPanel}`
       + `<p><a href="${esc(context.base)}/setup">All projects</a></p>`,
   });
 }

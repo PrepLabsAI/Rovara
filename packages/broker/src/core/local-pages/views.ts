@@ -294,16 +294,6 @@ export interface SetupItemView {
   usable: boolean;
 }
 
-/** The eval definition as the setup page shows it. `waiting`: nobody confirmed it yet; `confirmed`: confirmed and its spend item stands; `reapprove`: confirmed, but its spend approval was rejected, needs renewing or is gone. */
-export interface SetupEvalDiscoveryView {
-  state: "waiting" | "confirmed" | "reapprove";
-  taskId: string;
-  reportDigest: string;
-  confirmedSelection?: string;
-  cannotConfirm?: string;
-  suites: Array<{ selection: string; repository?: string; files: string[]; questions: number; categories: string; command: string; commandCwd: string; report: string; model: string; judge: string; caps: string }>;
-}
-
 /** What the setup page shows for a project (the setup agent). */
 export interface SetupPageView {
   project: string;
@@ -324,13 +314,6 @@ export interface SetupPageView {
   check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string };
   /** A proposal waiting: the commands, and where the check on them stands. */
   apply?: { candidateRevision: number; setup: string[]; readiness: string[]; check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string }; approval?: ApprovalOffer };
-  /**
-   * DEC 253q: the eval the latest setup run drafted (its `eval_discovery` report) and where its approval stands. Absent: no eval was discovered. Every text in `suites` came from the repository or
-   * the model and is shown as such. `cannotConfirm`: the install cannot confirm one (a laptop has no eval budget), with the fixed reason; no Confirm button is shown then.
-   */
-  evalDiscovery?: SetupEvalDiscoveryView;
-  /** No eval was discovered and this install could not confirm one anyway (no eval budget): the fixed reason, shown in the empty eval panel. */
-  evalNoBudget?: string;
   /** The independent eval-spend item. No repository text reaches its labels. */
   evalSpend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; label: string; budget: string; approval?: ApprovalOffer };
   /** The websites the owner approved for this project, with when, each to be taken back on the page. */
@@ -617,8 +600,6 @@ export interface LocalPageActions {
   setupCheck?(input: { project: string; requestId: string }): Promise<LocalActionResult>;
   /** Approves or refuses a website a setup run asked for. `proof` is the page session's proof over exactly this ask. */
   setupDecideHost?(input: { project: string; host: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
-  /** DEC 253q: confirms one suite of the latest setup run's eval definition (all its question files); the broker then builds the eval plan and proposes its spend item. */
-  setupEvalConfirm?(input: { project: string; taskId: string; reportDigest: string; selection: string; paths: string[] }): Promise<LocalActionResult>;
   /** Approves or rejects the independent eval-spend item. */
   setupDecideEval?(input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** Approves or rejects the waiting setup proposal of a project. */

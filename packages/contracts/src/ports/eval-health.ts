@@ -59,9 +59,4 @@ export interface EvalReservationAdapter {
     readonly company: string; readonly project: string; readonly principal: Principal; readonly provider: string; readonly connected: boolean;
   } | undefined>;
   reserve(input: { readonly approval: EvalSpendApprovalRecord; readonly calls: number; readonly costMicros: number; readonly revalidate: () => Promise<boolean> }): Promise<EvalMeterReservation | undefined>;
-  /**
-   * DEC 253q(c): the monthly cap an eval spend item for this company and project must fit, in micro-dollars (Cloud: the company budget's min of the company and project monthly caps).
-   * Optional: an adapter without it, undefined, or a fault means no cap source, and an eval confirmation is refused.
-   */
-  monthlyCapMicros?(input: { readonly company: string; readonly project: string }): Promise<number | undefined>;
 }

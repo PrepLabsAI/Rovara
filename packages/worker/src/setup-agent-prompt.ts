@@ -74,23 +74,8 @@ export function setupAgentInstructions(input: SetupAgentInstructionsInput): stri
     "Your proposal is checked again in a fresh sandbox that you never touched, and then a person confirms it, so only propose what worked when you ran it. For a command that worked, add to its place `{ \"kind\": \"inferred\", \"repo\": <repository>, \"note\": \"worked when run\" }`.",
     "",
     ...setupProposalFormatLines(input.metaRepo),
-    "",
-    ...SETUP_AGENT_EVAL_LINES,
   ].filter((line, index, all) => line !== "" || all[index - 1] !== "").join("\n");
 }
-
-/**
- * DEC 253q(a): how the agent DRAFTS the project's AI eval, as one more member of its proposal JSON. The worker checks the draft in code (`eval-discovery-producer.ts`) and a person confirms it
- * on the setup page; these words are guidance only.
- */
-export const SETUP_AGENT_EVAL_LINES: readonly string[] = [
-  "If the project has an eval for its AI features (a folder named evals or evaluations, a promptfoo or deepeval config, or a report of per-question results), add an \"eval\" member to the same JSON object:",
-  "  \"eval\": { \"suites\": [ { \"selection\": <a short name for the suite>, \"repository\": <repository name>, \"questions\": [ { \"id\": <question id>, \"category\": \"ordinary\" | \"safety\" | \"refusal\", \"path\": <the tracked file that holds the question> } ],",
-  "    \"command\": { \"executable\": <program>, \"args\": [<arguments>], \"cwd\": <folder in the repository, or \".\"> }, \"report\": { \"cwd\": <folder>, \"argument\": <the measures file the command writes> },",
-  "    \"model\": <the product model it calls>, \"modelVersion\": <its exact version>, \"judge\": { \"kind\": \"rule\", \"scoringPath\": <file> } or { \"kind\": \"model\", \"model\": <judge model>, \"version\": <exact version>, \"scoringPath\": <the file with its scoring prompt> },",
-  "    \"subsetSupported\": <whether the command can run only some questions>, \"maxCallsPerQuestion\": <1 to 20>, \"maxCostMicrosPerQuestion\": <micro-dollars, at most 1000000> } ] }",
-  "Name only files that are in the repository and questions inside the eval's own folder. Do not run the eval: it calls a paid model. Leave \"eval\" out when there is no eval.",
-];
 
 /** What a retry says when the answer could not be read. The same fixed words as the draft's. */
 export { setupProposalRetryPrompt as setupAgentRetryPrompt } from "./setup-draft.js";
