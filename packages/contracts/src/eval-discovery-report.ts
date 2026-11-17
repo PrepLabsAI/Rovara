@@ -12,7 +12,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalCommandSchema, EvalPlanQuestionSchema, EvalReportPathSchema, evalCommandFingerprintOf } from "./eval-plan-record.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
-import { modelBelongsToFamily, type SideBySideVendorFamily } from "./side-by-side-judge-pin.js";
+import { modelBelongsToFamily, type VendorFamily } from "./vendor-family.js";
 
 /** The most suites one report offers, the most distinct question files one suite names (the broker reads each on confirm), and the per-question bounds a report may ask for. */
 export const EVAL_DISCOVERY_SUITES_MAX = 4;
@@ -36,10 +36,10 @@ export function evalImageDigestOf(image: unknown): string | undefined {
 
 /** DEC 253q: the catalog rows the eval's product route serves (`eval-gateway-access.ts`: Gemini only today), with the vendor family each serves. The product model and a model judge both go through it. */
 export const EVAL_PRODUCT_ROW = "gemini";
-export const EVAL_PRODUCT_ROWS: Readonly<Record<string, SideBySideVendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google" });
+export const EVAL_PRODUCT_ROWS: Readonly<Record<string, VendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google" });
 /** The route every eval model call takes: the gateway's product route, on the customer's own connected key (DEC 240b, 253k). */
 export const EVAL_PRODUCT_ROUTE = "gateway";
-const familyOfRow = (row: string): SideBySideVendorFamily | undefined => (Object.hasOwn(EVAL_PRODUCT_ROWS, row) ? EVAL_PRODUCT_ROWS[row] : undefined);
+const familyOfRow = (row: string): VendorFamily | undefined => (Object.hasOwn(EVAL_PRODUCT_ROWS, row) ? EVAL_PRODUCT_ROWS[row] : undefined);
 
 /** DEC 253q: the eval's judge as the setup run names it: a rule (exact match and the like: no model) or a model and its exact version, each with the file that holds its scoring rule or prompt. */
 export const EvalJudgeSchema = z.discriminatedUnion("kind", [
