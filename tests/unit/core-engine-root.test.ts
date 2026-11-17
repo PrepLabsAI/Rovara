@@ -7,11 +7,13 @@ import { FakeHostModel } from "@agentx/broker/fakes";
 import type { CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, setupRunStandingFrom, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { CORE_APP_UNAVAILABLE } from "../../packages/broker/src/aws/core-app-routes.js";
+import { SETUP_RUN_NOT_ALLOWED } from "../../packages/broker/src/core-host/setup-run-routes.js";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
@@ -254,6 +256,51 @@ describe("the deployed task access", () => {
     expect(await access.checkStep({ taskId: "t", developerId: "dev-a", project: "payments" })).toEqual({ allowed: true });
     expect(await access.checkStep({ taskId: "t", developerId: "dev-x", project: "payments" })).toEqual({ allowed: false, message: NOT_A_MEMBER_HERE });
     expect(await access.checkStep({ taskId: "t", developerId: "dev-o", project: "payments" })).toEqual({ allowed: false, message: NO_PROJECT_GRANT });
+  });
+});
+
+describe("the hosted setup run's rule (guided onboarding L2-3)", () => {
+  const memberships: Record<string, { companyId: OrgId; role: "owner" | "admin" | "member" }> = {
+    owner: { companyId: ORG, role: "owner" }, admin: { companyId: ORG, role: "admin" }, padmin: { companyId: ORG, role: "member" }, dev: { companyId: ORG, role: "member" }, plain: { companyId: ORG, role: "member" }, foreign: { companyId: OTHER, role: "owner" },
+  };
+  const grants: Record<string, "developer" | "administrator"> = { padmin: "administrator", dev: "developer", foreign: "administrator" };
+  const standing = setupRunStandingFrom({ membershipOf: async (id) => memberships[id], projectGrantRole: async (id, project) => (project === "payments" ? grants[id] : undefined) });
+
+  it("is PR 16's rule over live membership and the grant: owners, admins and the project's administrators manage, a project user reads, anyone else and another company's people get nothing", async () => {
+    expect(await standing("owner", ORG, "payments")).toEqual({ access: "manage", basis: "company-owner" });
+    expect(await standing("admin", ORG, "web")).toEqual({ access: "manage", basis: "company-admin" });
+    expect(await standing("padmin", ORG, "payments")).toEqual({ access: "manage", basis: "project-admin" });
+    expect(await standing("padmin", ORG, "web")).toEqual({ access: "none" });
+    expect(await standing("dev", ORG, "payments")).toEqual({ access: "view" });
+    expect(await standing("plain", ORG, "payments")).toEqual({ access: "none" });
+    // Another company's owner with a grant of the same project name, and a person with no membership, are nobody here.
+    expect(await standing("foreign", ORG, "payments")).toEqual({ access: "none" });
+    expect(await standing("gone", ORG, "payments")).toEqual({ access: "none" });
+  });
+
+  it("runs a setup run's steps only while its person still manages the project's setup; every other task keeps the grant rule exactly", async () => {
+    const store = new MemoryDocumentStore();
+    const task = async (taskId: string, developerId: string, extra: Record<string, unknown>) => store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", taskId, developerId, project: "payments", companyId: ORG, ...extra } });
+    await task("setup-admin", "admin", { purpose: "setup_agent" });
+    await task("setup-dev", "dev", { purpose: "setup_agent" });
+    await task("setup-foreign-row", "owner", { purpose: "setup_agent", companyId: OTHER });
+    await task("plain-admin", "admin", {});
+    await task("plain-dev", "dev", {});
+    const projectGrant = async (id: string, project: string) => project === "payments" && grants[id] !== undefined;
+    const access = hostedTaskAccess({ companyId: ORG, membershipOf: async (id) => memberships[id], projectGrant, storage: async () => store, setupRunStanding: standing });
+    // A company admin with no grant: their setup run steps; their ordinary task does not (the grant rule, unchanged).
+    expect(await access.checkStep({ taskId: "setup-admin", developerId: "admin", project: "payments" })).toEqual({ allowed: true });
+    expect(await access.checkStep({ taskId: "plain-admin", developerId: "admin", project: "payments" })).toEqual({ allowed: false, message: NO_PROJECT_GRANT });
+    // A project user: their ordinary task steps; a setup run run for them (they lost the admin standing) does not.
+    expect(await access.checkStep({ taskId: "plain-dev", developerId: "dev", project: "payments" })).toEqual({ allowed: true });
+    expect(await access.checkStep({ taskId: "setup-dev", developerId: "dev", project: "payments" })).toEqual({ allowed: false, message: SETUP_RUN_NOT_ALLOWED });
+    // A stored setup run of another company, and a person who is not a member here, never step.
+    expect(await access.checkStep({ taskId: "setup-foreign-row", developerId: "owner", project: "payments" })).toEqual({ allowed: false, message: NOT_A_MEMBER_HERE });
+    expect(await access.checkStep({ taskId: "setup-admin", developerId: "foreign", project: "payments" })).toEqual({ allowed: false, message: NOT_A_MEMBER_HERE });
+    // Without the rule wired, a setup run is held to the grant rule as before (never looser).
+    const before = hostedTaskAccess({ companyId: ORG, membershipOf: async (id) => memberships[id], projectGrant, storage: async () => store });
+    expect(await before.checkStep({ taskId: "setup-admin", developerId: "admin", project: "payments" })).toEqual({ allowed: false, message: NO_PROJECT_GRANT });
+    expect(await before.checkStep({ taskId: "setup-dev", developerId: "dev", project: "payments" })).toEqual({ allowed: true });
   });
 });
 

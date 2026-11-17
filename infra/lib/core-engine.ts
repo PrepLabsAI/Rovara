@@ -66,7 +66,7 @@ export class CoreEngine extends Construct {
   private readonly lessons: CfnParameter;
   private readonly modelGatewayHost: CfnParameter;
   private readonly agentModel: CfnParameter;
-  /** DEC 254z-amend3: the install's test services switch ("1" on, the default; "0" off), packed for the dispatcher (`td`) and given to the session steps whole. */
+  /** DEC 254z-amend3: the install's test services switch ("1" on, the default; "0" off), packed for the broker and the dispatcher (`td`) and given to the session steps whole. */
   readonly testServices: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
@@ -115,11 +115,10 @@ export class CoreEngine extends Construct {
       addPackedSetting(dispatcher, key, value);
     }
     // DEC 254z-amend3: test services, ON by default with the owner's opt-out "0". A stack parameter, so an upgrade keeps what the operator set (OPERATOR_PARAMETERS); packed (`td`, read as ROVARA_TEST_SERVICES)
-    // for the dispatcher, which plans and dispatches the core's runs, and given whole to the session steps (control-plane.ts).
-    // NOT the broker yet: its environment is 4 bytes past the 4 KB ceiling's margin with `td` (tests/contract/lambda-environment-size.test.ts). The broker reads no value, which is on, and Code's workers cannot run
-    // test services, so the broker marks them unavailable ("workers", aws/hosted-test-services.ts) either way: nothing is planned with dependencies on or off. The lane that gives Code's workers the test-services stage
-    // must make room and add `td` to the broker in the same change (its "off" then reads as off, not as "not available here").
+    // for the broker and the dispatcher, where the core reads it, and given whole to the session steps (control-plane.ts). Code's workers cannot run test services yet, so while it is on the broker and the
+    // dispatcher say "not available here" (aws/hosted-test-services.ts).
     this.testServices = new CfnParameter(stack, TEST_SERVICES_PARAMETER, { type: "String", default: TEST_SERVICES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICES_PARAMETER_VALUES], description: "Test services: 1 on (the default), 0 off" });
+    addBrokerSetting(broker, props.naming, "testServices", this.testServices.valueAsString);
     addPackedSetting(dispatcher, "testServices", this.testServices.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive

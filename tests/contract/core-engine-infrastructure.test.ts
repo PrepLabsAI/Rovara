@@ -481,14 +481,14 @@ describe("the test services setting (stack parameter TestServices)", () => {
     expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServices");
   });
 
-  it("is packed for the dispatcher (td) and given whole to the session steps; not to the broker (its 4 KB has no room; it marks test services unavailable either way)", () => {
+  it("is packed for the broker and the dispatcher (td), never as a variable of their own, and given whole to the session steps", () => {
     expect(packedSettings(dispatcherVariables).get("td")).toStrictEqual({ Ref: "TestServices" });
-    expect(packedSettings(brokerVariables).has("td")).toBe(false);
+    expect(packedSettings(brokerVariables).get("td")).toStrictEqual({ Ref: "TestServices" });
     expect(brokerVariables).not.toHaveProperty("ROVARA_TEST_SERVICES");
     const steps = resources(named, "AWS::Lambda::Function").find(([id]) => /^SessionsSteps[0-9A-F]{8}$/u.test(id))!;
     expect((steps[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.ROVARA_TEST_SERVICES).toStrictEqual({ Ref: "TestServices" });
     const users = Object.entries(json.Resources).filter(([, resource]) => /"Ref":"TestServices"/u.test(JSON.stringify(resource))).map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""));
-    expect(users.sort()).toEqual(["Dispatcher", "SessionsSteps"]);
+    expect(users.sort()).toEqual(["Broker", "Dispatcher", "SessionsSteps"]);
   });
 
   it("is an operator setting an upgrade keeps", () => {

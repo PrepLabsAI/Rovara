@@ -140,6 +140,9 @@ export const BROKER_SETTINGS = {
   signInSlack: { code: "ss", variable: "DEVELOPER_SIGNIN_SLACK" },
   signInSlackSince: { code: "sn", variable: "DEVELOPER_SIGNIN_SLACK_SINCE" },
   oidcSince: { code: "os", variable: "DEVELOPER_OIDC_SINCE" },
+  // DEC 254h: GitHub sign-in (Code's company layer only) and when it was last turned on.
+  signInGithub: { code: "gh", variable: "DEVELOPER_SIGNIN_GITHUB" },
+  githubSince: { code: "gs", variable: "DEVELOPER_GITHUB_SINCE" },
   mcpConfirmElicitation: { code: "mc", variable: "MCP_CONFIRM_ELICITATION" },
   coreAllowedCompanies: { code: "ac", variable: "ROVARA_CORE_ALLOWED_COMPANIES" },
   coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },
@@ -153,6 +156,8 @@ export const BROKER_SETTINGS = {
   // DEC 254z-amend3: test services, ON unless exactly "0" (the stack parameter TestServices, TEST_SERVICES_PARAMETER_VALUES). The broker's core reads it as ROVARA_TEST_SERVICES (the laptop's own switch).
   // Not `tx`: Cloud's own table gives that code to its own test services switch, which is off by default; a code means one thing in both.
   testServices: { code: "td", variable: TEST_SERVICES_SETTING_VARIABLE },
+  // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
+  channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 /** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */
@@ -181,6 +186,9 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   { variable: "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", kind: "text", value: environmentE2eFeatureRuntimeCatalogId },
   // Core switch-on blocker (2026-11-17): the channel adapters' secret prefix is the environment's own, so it is derived, making room for the gateway settings.
   { variable: "CHANNEL_ADAPTER_SECRET_PREFIX", kind: "text", value: environmentChannelAdapterSecretPrefix },
+  // DEC 254h (room for GitHub sign-in): every named broker has the company reads on (infra/lib/developer-signin.ts, hosted wiring (d)); a named environment always deploys the
+  // tasks, so the value is the same for every name, and the broker sets it itself. The legacy install, which is never packed, is given none, as before.
+  { variable: "COMPANY_READS", kind: "text", value: () => "enabled" },
   // Core switch-on lane L1a: the core dispatch queue and its dead letters have fixed names (core-engine-infra.ts), so the broker builds their URLs; nothing is passed.
   { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName },
   { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName },
