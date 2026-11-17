@@ -1657,7 +1657,16 @@ const githubSignInTuples: AccessTuple[] = [
  */
 const envRoom2Added: AccessTuple[] = [["role:BrokerServiceRole", "Allow", "ssm:GetParameters", "arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/broker-names", "{}"]];
 const envRoom2Removed = new Set(["dynamodb:GetRecords", "dynamodb:GetShardIterator"].flatMap((action) => ["table:State", "table:State/index/*"].map((resource) => JSON.stringify(["role:BrokerServiceRole", "Allow", action, resource, "{}"]))));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples,
+/**
+ * Web task channel C8, option b (DEC 254zm(3), owner-approved new IAM): the attention email's own sender function may send as the one CoreAttentionEmailSender identity, From pinned, and write X-Ray
+ * traces (every function's tracing default). Its role, this policy and the broker's invoke permission (on the function's own policy, not here) exist only while CoreAttentionEmail is on.
+ */
+const attentionEmailTuples: AccessTuple[] = [
+  ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "ses:SendEmail", "arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:CoreAttentionEmailSender", "{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:CoreAttentionEmailSender\"]}}"],
+  ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTelemetryRecords", "*", "{}"],
+  ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTraceSegments", "*", "{}"],
+];
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,

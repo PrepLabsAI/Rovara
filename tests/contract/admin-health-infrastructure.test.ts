@@ -226,6 +226,9 @@ describe("the health route's grants (A13)", () => {
       // Wiki for agents (#896; DEC 254zzd, owner-approved): the WIKI_AGENT_USE_REF row (an operation's pointer to its task, 30 days) and the WIKI_AGENT_USE row (which pages a step was
       // given and read, 180 days), then expired. The project's "Give the wiki to agents" switch row carries no expiry.
       "packages/broker/src/core/wiki/agent-context.ts",
+      // Web task channel C8 (option b): the attention email's reverse index, one ATTENTION_PERSON row per company and hashed person id, kept 90 days after it was last written, then expired. Not a
+      // durable record (each new attention row for the person writes it again).
+      "packages/broker/src/core/notify/person-index.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

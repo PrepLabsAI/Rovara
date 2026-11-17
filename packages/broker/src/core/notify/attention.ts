@@ -175,7 +175,7 @@ export interface AttentionDeliveryDependencies {
    */
   urgent?: (orgId: OrgId, row: { developerId: string; sessionId: string; kind: AttentionKind }) => Promise<boolean>;
   /** The links an email carries (change the setting, stop these emails, the list of everything waiting); each only when it is a plain https link. */
-  emailLinks?: AttentionEmailLinks;
+  emailLinks?: AttentionEmailLinks | ((orgId: OrgId, developerId: string) => AttentionEmailLinks);
   log?: Log;
 }
 
@@ -416,7 +416,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done");
       let ok = false, refused = false;
       if (tkey === EMAIL_TARGET) {
-        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : "attention", deps.emailLinks);
+        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : "attention", typeof deps.emailLinks === "function" ? deps.emailLinks(orgId, developerId) : deps.emailLinks);
         try {
           await email!.send({ companyId: orgId, purpose: "attention", to: address!, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
           ok = true;

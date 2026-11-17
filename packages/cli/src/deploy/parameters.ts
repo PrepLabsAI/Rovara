@@ -87,6 +87,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "TestServices",
     // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
     "TestServiceImages",
+    // Web task channel C8 (option b): the attention email switch, the web app's host and the attention email's own SES identity, as the operator set them.
+    "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
     "StepUpEmailSender",
     // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).

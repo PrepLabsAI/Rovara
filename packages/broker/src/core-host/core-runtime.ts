@@ -15,7 +15,7 @@ import { withStepFenceRetry } from "./step-fence.js";
 import { startFenceItems } from "../core/task-flow/start-fence.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
-import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
+import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js"; import type { AttentionDeliveryDependencies } from "../core/notify/attention.js"; import type { SessionChange } from "../core/sessions/summary.js";
 
 /** A core service a scheduled job runs, per company. */
 export interface CoreService {
@@ -43,7 +43,7 @@ export interface CoreRuntime {
 
 /** What the services builder is handed besides the flow: the validated CI mode reader, so merge tracking reads the same mode the task readers do. Undefined when not wired. */
 export interface CoreServiceWiring {
-  ciMode?: CheckedCiReporting["ciMode"] | undefined;
+  ciMode?: CheckedCiReporting["ciMode"] | undefined; /** The attention email's own seams (hosted core, switch on): the person's address and per-person links. Absent: as before. */ notification?: (Pick<AttentionDeliveryDependencies, "address" | "emailLinks"> & { remember?: (change: SessionChange) => Promise<void> }) | undefined;
 }
 
 export interface CoreRuntimeOptions {

@@ -68,7 +68,7 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent/stop", "full"],
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
     // Web task channel C7: the in-app inbox (core/notify/inbox.ts over core-host/inbox-routes.ts).
-    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"],
+    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"], ["POST", "/v1/app/notify/unsubscribe", "full"],
     // Wiki W0: a project's free file map.
     ["GET", "/v1/app/projects/payments/wiki-map", "full"], ["POST", "/v1/app/projects/payments/wiki-map", "full"],
     // Lead 4 W2: the project wiki's reads.

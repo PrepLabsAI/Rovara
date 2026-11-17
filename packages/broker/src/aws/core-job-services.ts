@@ -9,7 +9,7 @@ import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { createTaskFactsSource } from "../local/app/facts.js";
 import { createCostLedger, costUsdOf } from "../core/cost/ledger.js";
 import { createSessionService } from "../services/sessions.js";
-import { createNoticeService } from "../services/notices.js";
+import { createNoticeService, type NoticeServiceOptions } from "../services/notices.js";
 import { createMergeTrackingService, createMilestoneService } from "../services/merge-tracking.js";
 import { createIdentityMergePeople, type MergePeople } from "../core/merge/people.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
@@ -82,7 +82,7 @@ export interface BrokerCoreServicesOptions {
   people?: MergePeople;
   settings?: CodeSettingsReader;
   summary?: Pick<SummaryDependencies, "facts" | "cost">;
-  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread">;
+  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks"> & Pick<NoticeServiceOptions, "remember">;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }

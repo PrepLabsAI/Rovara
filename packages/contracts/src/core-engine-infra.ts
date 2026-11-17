@@ -97,6 +97,14 @@ export const coreDispatchQueueName = (env: string): string => `agentx-${env}-cor
 export const coreDispatchDeadLetterName = (env: string): string => `agentx-${env}-core-dispatch-dead`;
 
 /**
+ * Web task channel C8 (option b, DEC 254zm(3)): the attention email's own small sender function, by a fixed per-environment name, so the broker builds it from AGENTX_ENV and its 4 KB grows by nothing.
+ * The function exists only while the `CoreAttentionEmail` stack parameter is `on` (infra/lib/attention-email.ts); the broker invokes it by its function policy, never by a grant on the broker's role.
+ */
+export const coreAttentionEmailFunctionName = (env: string): string => `agentx-${env}-attention-email`;
+/** The variable the broker reads the sender function's name as (derived, DERIVED_BROKER_VARIABLES). */
+export const ATTENTION_EMAIL_FUNCTION_VARIABLE = "ATTENTION_EMAIL_FUNCTION_NAME";
+
+/**
  * Engine host step 4: the dispatcher is the core dispatch queue's consumer (its own event source mapping, apart from the spec 056 DispatchQueue's). The CDK app sets these on the dispatcher
  * (named environments only); the dispatcher's core router (packages/broker/src/aws/worker-machines/dispatcher-core.ts) reads them. Absent (the legacy template): the router is not installed.
  */

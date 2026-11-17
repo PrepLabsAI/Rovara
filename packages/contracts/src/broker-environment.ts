@@ -15,7 +15,7 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { coreDispatchDeadLetterName, coreDispatchQueueName, CORE_AGENT_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
+import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, CORE_AGENT_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
 import {
   environmentAlarmPrefix,
   environmentChannelAdapterSecretPrefix,
@@ -209,6 +209,9 @@ export const BROKER_SETTINGS = {
   channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
   // DEC 254zg (a): Code's company layer (the CompanySignIn parameter, through its condition: enabled or disabled), packed.
   companySignIn: { code: "si", variable: "COMPANY_SIGNIN", switchFlag: true },
+  // Web task channel C8 (option b): the attention email switch (CoreAttentionEmail, AllowedValues off/on), packed. The web app's host is NOT the broker's: only the sender function has it
+  // (the broker writes links on a reserved placeholder origin, which the sender replaces), so the broker's 4 KB grows by this one short setting.
+  coreAttentionEmail: { code: "ae", variable: "ROVARA_ATTENTION_EMAIL" },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 /** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */
@@ -246,4 +249,6 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   // Core switch-on lane L1a: the core dispatch queue and its dead letters have fixed names (core-engine-infra.ts), so the broker builds their URLs; nothing is passed.
   { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName },
   { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName },
+  // Web task channel C8 (option b): the attention email's sender function has a fixed name, so the broker builds it; nothing is passed (the function exists only while the email is on).
+  { variable: ATTENTION_EMAIL_FUNCTION_VARIABLE, kind: "text", value: coreAttentionEmailFunctionName },
 ];
