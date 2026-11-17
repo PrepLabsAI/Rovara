@@ -120,7 +120,7 @@ export async function projectInCompany(ctx: SlackChannelContext, companyId: stri
 /** DEC 254l item 8: a company owner or admin, or that project's administrator (its grant in this company). Live. */
 export async function mayLinkProject(ctx: SlackChannelContext, linker: ChannelLinker, project: string): Promise<boolean> {
   if (linker.role === "owner" || linker.role === "admin") return true;
-  const grant = await projectGrant({ documentClient: ctx.documentClient as never, tableName: ctx.tableName }, project, linker.personId, linker.companyId);
+  const grant = await projectGrant({ documentClient: ctx.documentClient, tableName: ctx.tableName }, project, linker.personId, linker.companyId);
   return grant?.role === "administrator";
 }
 
@@ -182,7 +182,7 @@ const teamStillOurs = (ctx: SlackChannelContext, teamId: string, companyId: stri
 const isAgentXError = (error: unknown) => error instanceof Error && error.name === "AgentXError";
 
 /** The checks every change starts with: the company's connected workspace, the project in this company, and the person's right to it. */
-async function prepare(ctx: SlackChannelContext, linker: ChannelLinker, project: string): Promise<string> {
+async function prepare(ctx: SlackChannelContext, linker: ChannelLinker, project: string, expectedTeam?: string): Promise<string> {
   let teamId: string | undefined; let inCompany: boolean;
   try {
     inCompany = await projectInCompany(ctx, linker.companyId, project);
@@ -192,7 +192,8 @@ async function prepare(ctx: SlackChannelContext, linker: ChannelLinker, project:
   let allowed: boolean;
   try { allowed = await mayLinkProject(ctx, linker, project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CHANNEL_UNAVAILABLE); }
   if (!allowed) throw agentXError("FORBIDDEN", CHANNEL_LINK_NOT_ALLOWED);
-  if (teamId === undefined) throw agentXError("SLACK_NOT_CONNECTED", CHANNEL_NOT_CONNECTED);
+  // From Slack (/rovara), the workspace the request came from must be the company's connected one (not, say, an older operator-bound one).
+  if (teamId === undefined || (expectedTeam !== undefined && teamId !== expectedTeam)) throw agentXError("SLACK_NOT_CONNECTED", CHANNEL_NOT_CONNECTED);
   return teamId;
 }
 
@@ -221,11 +222,11 @@ async function checkWithSlack(ctx: SlackChannelContext, companyId: string, teamI
  * Links `channelId` to `project` for a live member who may (DEC 254l item 8). First wins: a channel linked to another project is refused, never overwritten. The project's
  * other channels in this workspace are unlinked in the same transaction (the project has one channel; DEC 254k: changeable later).
  */
-export async function linkChannel(ctx: SlackChannelContext, linker: ChannelLinker, project: string, channelIdValue: unknown, via: "web" | "slack"): Promise<LinkOutcome> {
+export async function linkChannel(ctx: SlackChannelContext, linker: ChannelLinker, project: string, channelIdValue: unknown, via: "web" | "slack", expectedTeam?: string): Promise<LinkOutcome> {
   const parsedChannel = SlackChannelIdSchema.safeParse(channelIdValue);
   if (!parsedChannel.success) throw agentXError("CONFIG_INVALID", "a Slack channel id (C... or G...) is required");
   const channelId = parsedChannel.data;
-  const teamId = await prepare(ctx, linker, project);
+  const teamId = await prepare(ctx, linker, project, expectedTeam);
   let existing: string | undefined; let others: TeamLink[];
   try {
     existing = await channelLink(ctx, teamId, channelId);
@@ -289,8 +290,8 @@ export async function unlinkProject(ctx: SlackChannelContext, linker: ChannelLin
 }
 
 /** Unlinks one channel, which must still be linked to `project` (what the person was shown and pressed for); the person needs the right to that project. */
-export async function unlinkChannel(ctx: SlackChannelContext, linker: ChannelLinker, project: string, channelId: string, via: "web" | "slack"): Promise<"unlinked" | "changed"> {
-  const teamId = await prepare(ctx, linker, project);
+export async function unlinkChannel(ctx: SlackChannelContext, linker: ChannelLinker, project: string, channelId: string, via: "web" | "slack", expectedTeam?: string): Promise<"unlinked" | "changed"> {
+  const teamId = await prepare(ctx, linker, project, expectedTeam);
   let now: string | undefined;
   try { now = await channelLink(ctx, teamId, channelId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CHANNEL_UNAVAILABLE); }
   if (now !== project) return "changed";

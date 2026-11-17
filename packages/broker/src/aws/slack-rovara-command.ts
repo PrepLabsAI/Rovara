@@ -11,7 +11,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { AgentXNameSchema, OrgIdSchema, orgProjectCatalogPk, SLACK_OIDC_ISSUER, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { AgentXNameSchema, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, orgProjectCatalogPk, SLACK_OIDC_ISSUER, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { ownerKeyForSubject } from "./lambda.js";
 import {
@@ -127,7 +127,9 @@ async function mintActions(ctx: SlackRovaraContext, bound: Bound[]): Promise<str
   const tokens = bound.map(() => (ctx.wiring.random?.(32) ?? randomBytes(32)).toString("base64url"));
   if (tokens.some((token) => !Token.safeParse(token).success)) throw new Error("random");
   const items = bound.map((fields, index) => ({ Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-    ...rovaraActionKey(tokens[index]!), entityType: "SLACK_ROVARA_ACTION", status: "live", ...fields, createdAt: new Date(nowMs).toISOString(), expiresAt } } }));
+    ...rovaraActionKey(tokens[index]!), entityType: "SLACK_ROVARA_ACTION", status: "live", ...fields, createdAt: new Date(nowMs).toISOString(), expiresAt,
+    // The State table's TTL attribute (named environments): spent or not, the row goes a day after it expired.
+    [INDEX_EXPIRY_ATTRIBUTE]: expiresAt + 86_400 } } }));
   if (items.length === 1) await ctx.documentClient.send(new PutCommand(items[0]!.Put));
   else await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
   return tokens;
@@ -236,12 +238,12 @@ async function answerPress(ctx: SlackRovaraContext, press: Extract<SlackRovaraEv
   if (linker.companyId !== row.companyId || linker.personId !== row.personId) return plain(ROVARA_EXPIRED, true);
   if (row.action === "unlink") {
     try {
-      const outcome = await unlinkChannel(ctx, linker, row.projectName, row.channelId, "slack");
+      const outcome = await unlinkChannel(ctx, linker, row.projectName, row.channelId, "slack", row.teamId);
       return plain(outcome === "changed" ? ROVARA_CHANGED : `Unlinked ${channelRef(row.channelId)} from *${row.projectName}*. Threads already started keep working.`, true);
     } catch (error) { return plain(refusalText(error), true); }
   }
   try {
-    const outcome = await linkChannel(ctx, linker, row.projectName, row.channelId, "slack");
+    const outcome = await linkChannel(ctx, linker, row.projectName, row.channelId, "slack", row.teamId);
     if (outcome.status === "linked") {
       return plain(outcome.alreadyLinked && outcome.replaced.length === 0 ? `${channelRef(row.channelId)} is already linked to *${row.projectName}*.`
         : `Linked ${channelRef(row.channelId)} to *${row.projectName}*. Mention @Rovara here to start work.`, true);
