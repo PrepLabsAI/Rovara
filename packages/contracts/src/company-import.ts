@@ -22,6 +22,8 @@ export const CompanyImportSkipReasonSchema = z.enum([
   "sign_in_revoked",
   /** Already a member of this same company in Code's records. */
   "already_member",
+  /** Removed from this same company in Code's records: kept removed. */
+  "removed_in_code",
   /** Undo: their row changed after the import (a role change, a removal, or any other write), so the undo keeps it. */
   "changed_since_import",
 ]);
@@ -33,6 +35,8 @@ export const CompanyImportRefusalSchema = z.enum([
   "member_of_another_company",
   /** A record that does not read: a malformed member record, pointer, sign-in record or merge chain, or a stray Code record. */
   "unreadable_record",
+  /** No longer a member in the install's records (removed, banned, revoked or merged), yet a live member of this company in Code's records. */
+  "no_longer_member",
 ]);
 
 export const CompanyImportPreviewSchema = z.object({
@@ -40,7 +44,8 @@ export const CompanyImportPreviewSchema = z.object({
   companyId: OrgIdSchema,
   /** True: an apply would do exactly this. False: refused (see `refusal` and `refused`) and nothing would be written. */
   ready: z.boolean(),
-  /** A refusal of the whole run that names no person: no such open company in the install's records, too many members, no owner after the import, a
+  /** A refusal of the whole run that names no person: no such open company in the install's records, too many members, no owner after the import (or live members
+   * left with no owner after an undo), a
    * record that does not read (the company's, a member record's key, Code's company record), or the built-in company. */
   refusal: z.enum(["no_open_company", "too_many_members", "no_owner", "unreadable", "built_in_company"]).optional(),
   /** import: "write" makes the company record, "exists" keeps the one already there. undo: "delete" removes the record the import made, "keep" leaves it. */

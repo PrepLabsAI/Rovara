@@ -26,7 +26,8 @@ export function companyImportThroughLambda(invoke: (payload: Uint8Array) => Prom
     try { reply = CompanyImportReply.safeParse(JSON.parse(Buffer.from(answer.Payload).toString("utf8"))); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNREACHABLE); }
     if (!reply.success) throw agentXError("RUNTIME_UNAVAILABLE", UNREACHABLE);
     if (reply.data.ok) return { rows: reply.data.rows, company: reply.data.company };
-    if (reply.data.error === "conflict") throw agentXError("CHANGE_STALE", conflict(reply.data.rows));
+    // Nothing written: stale. Part written: not "stale" (which reads as nothing applied), but unavailable, naming how far it got.
+    if (reply.data.error === "conflict") throw agentXError(reply.data.rows === 0 ? "CHANGE_STALE" : "RUNTIME_UNAVAILABLE", conflict(reply.data.rows));
     throw agentXError("RUNTIME_UNAVAILABLE", UNREACHABLE);
   };
   return {

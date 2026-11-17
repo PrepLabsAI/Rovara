@@ -109,27 +109,43 @@ async function judge(deps: CompanyImportReads, companyId: OrgId, record: Item, m
   const personId = (record.sk as string).slice("MEMBER#".length);
   try {
     if (record.developerId !== undefined && record.developerId !== personId) return { kind: "refuse", personId, reason: "unreadable_record" };
-    // The install's own removal deletes the member record; a record that still says removed is read as removed, never as a member.
-    if (record.removedAt !== undefined || record.status === "removed") return { kind: "skip", personId, reason: "removed" };
-    const developer = await get(deps.documentClient, deps.signInTableName, { pk: `DEVELOPER#${personId}`, sk: "META" });
-    if (developer !== undefined && developer.revoked !== undefined && typeof developer.revoked !== "boolean") return { kind: "refuse", personId, reason: "unreadable_record" };
-    if (developer?.mergedInto !== undefined) return { kind: "skip", personId, reason: "merged", survivorId: await survivorOf(deps, personId, developer) };
-    if (developer?.revoked === true) return { kind: "skip", personId, reason: "sign_in_revoked" };
-    const [pointer, ban] = await Promise.all([
-      get(deps.documentClient, deps.tableName, developerOrgPointerKey(personId)),
-      get(deps.documentClient, deps.tableName, installCompanyBanKey(companyId, personId)),
-    ]);
-    if (pointer !== undefined && !OrgIdSchema.safeParse(pointer.orgId).success) return { kind: "refuse", personId, reason: "unreadable_record" };
-    if (pointer?.orgId !== companyId) return { kind: "skip", personId, reason: "removed" };
-    if (ban !== undefined) return { kind: "skip", personId, reason: "banned" };
+    // Any member record with a role Code does not know refuses the whole run, whatever else holds for that person (the brief: "refuse on an unknown role").
     const role = OrgRoleSchema.safeParse(record.role);
     if (!role.success) return { kind: "refuse", personId, reason: "unknown_role" };
+    // Code's own record is read for everyone, so a person the install no longer counts as a member, but who already holds a membership here (an earlier
+    // import, say), is never hidden behind a skip: switching the layer on would let them in.
     const existing = await get(deps.documentClient, deps.signInTableName, membershipKey(personId));
-    if (existing !== undefined) {
-      const member = Membership.safeParse(existing);
-      if (!member.success || member.data.personId !== personId) return { kind: "refuse", personId, reason: "unreadable_record" };
-      if (member.data.companyId !== companyId) return { kind: "refuse", personId, reason: "member_of_another_company" };
-      return { kind: "skip", personId, reason: "already_member", liveOwner: member.data.revokedAt === undefined && member.data.role === "owner" };
+    const member = existing === undefined ? undefined : Membership.safeParse(existing);
+    if (member !== undefined && (!member.success || member.data.personId !== personId)) return { kind: "refuse", personId, reason: "unreadable_record" };
+    const code = member?.data;
+    const skip = async (): Promise<Verdict | undefined> => {
+      // The install's own removal deletes the member record; a record that still says removed is read as removed, never as a member.
+      if (record.removedAt !== undefined || record.status === "removed") return { kind: "skip", personId, reason: "removed" };
+      // A person with no sign-in record (never signed in to Code) is imported on purpose: they are a member in the install's records, and their
+      // membership is there when they first sign in. A revoked or merged-away sign-in is not.
+      const developer = await get(deps.documentClient, deps.signInTableName, { pk: `DEVELOPER#${personId}`, sk: "META" });
+      if (developer !== undefined && developer.revoked !== undefined && typeof developer.revoked !== "boolean") return { kind: "refuse", personId, reason: "unreadable_record" };
+      if (developer?.mergedInto !== undefined) return { kind: "skip", personId, reason: "merged", survivorId: await survivorOf(deps, personId, developer) };
+      if (developer?.revoked === true) return { kind: "skip", personId, reason: "sign_in_revoked" };
+      const [pointer, ban] = await Promise.all([
+        get(deps.documentClient, deps.tableName, developerOrgPointerKey(personId)),
+        get(deps.documentClient, deps.tableName, installCompanyBanKey(companyId, personId)),
+      ]);
+      if (pointer !== undefined && !OrgIdSchema.safeParse(pointer.orgId).success) return { kind: "refuse", personId, reason: "unreadable_record" };
+      if (pointer?.orgId !== companyId) return { kind: "skip", personId, reason: "removed" };
+      if (ban !== undefined) return { kind: "skip", personId, reason: "banned" };
+      return undefined;
+    };
+    const skipped = await skip();
+    if (skipped !== undefined) {
+      // Skipped here, yet a live member of this company in Code's records: refuse, so the operator undoes or removes them before switch-on.
+      if (skipped.kind === "skip" && code !== undefined && code.companyId === companyId && code.revokedAt === undefined) return { kind: "refuse", personId, reason: "no_longer_member" };
+      return skipped;
+    }
+    if (code !== undefined) {
+      if (code.companyId !== companyId) return { kind: "refuse", personId, reason: "member_of_another_company" };
+      if (code.revokedAt !== undefined) return { kind: "skip", personId, reason: "removed_in_code" };
+      return { kind: "skip", personId, reason: "already_member", liveOwner: code.role === "owner" };
     }
     // A mirror row with no membership is not Code's own state: never written over, never guessed at.
     if (mirrored.has(personId)) return { kind: "refuse", personId, reason: "unreadable_record" };
@@ -208,6 +224,10 @@ export async function planCompanyImportUndo(deps: CompanyImportReads, companyId:
     });
     const remove = byPerson(verdicts.flatMap((v) => v.remove ? [{ personId: v.personId, role: v.role, joinedAt: v.joinedAt, importedAt: v.importedAt }] : []));
     const kept = byPerson(verdicts.flatMap((v) => v.remove ? [] : [{ personId: v.personId, reason: "changed_since_import" as const }]));
+    // Never leave live members with no owner: whoever stays after the undo (not imported, or changed since) must include a live owner, or nobody stays live.
+    const removing = new Set(remove.map((member) => member.personId));
+    const staying = mirror.filter((row) => !removing.has((row.sk as string).slice("MEMBER#".length)) && row.revokedAt === undefined);
+    if (staying.length > 0 && !staying.some((row) => row.role === "owner")) return none("no_owner");
     const stored = await get(deps.documentClient, deps.signInTableName, companyKey(company));
     let companyRemove: UndoPlan["remove"]["company"];
     if (stored !== undefined) {

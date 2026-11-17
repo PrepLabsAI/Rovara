@@ -13,6 +13,8 @@ import { companyMembershipFromDynamo, membershipKey } from "../../packages/broke
 import { companyImportThroughLambda } from "../../packages/broker/src/aws/company-import-forwarding.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { planCompanyImport, planCompanyImportUndo } from "../../packages/broker/src/aws/install-company-import.js";
+import { PLANNERS, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
+import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { CompanyImportStore, COMPANY_IMPORT_BATCH, companyImportOperator } from "../../packages/broker/src/developer/company-import.js";
 import { CompanySignInStore, companyKey, companyMemberKey } from "../../packages/broker/src/developer/company-membership.js";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";
@@ -149,7 +151,7 @@ describe("preview", () => {
     expect((await world().importPlan("org_00000000000000000000")).preview).toMatchObject({ ready: false, refusal: "built_in_company" });
     const loop = world();
     loop.db.set({ pk: `DEVELOPER#${OWNER}`, sk: "META", developerId: OWNER, provider: "slack", displayName: "Founder", revoked: false, mergedInto: DUP });
-    expect((await loop.importPlan()).preview).toMatchObject({ ready: false, refused: expect.arrayContaining([{ personId: DUP, reason: "unreadable_record" }]) });
+    expect((await loop.importPlan()).preview).toMatchObject({ ready: false, refused: expect.arrayContaining([{ personId: DUP, reason: "unreadable_record" }]) as unknown });
     const pointer = world();
     pointer.db.set({ pk: `DEVELOPER_ORG#${MEMBER}`, sk: "ORG", orgId: "not-an-org" });
     expect((await pointer.importPlan()).preview).toMatchObject({ ready: false, refused: [{ personId: MEMBER, reason: "unreadable_record" }] });
@@ -162,6 +164,37 @@ describe("preview", () => {
     const ownerless = world();
     ownerless.db.set({ pk: `ORG#${A}`, sk: `MEMBER#${OWNER}`, entityType: "ORG_MEMBER", developerId: OWNER, role: "admin", joinedAt: TIME });
     expect((await ownerless.importPlan()).preview).toMatchObject({ ready: false, refusal: "no_owner" });
+  });
+
+  it("refuses an unknown role even for a banned or removed person", async () => {
+    const w = world();
+    w.db.set({ pk: `ORG#${A}`, sk: `MEMBER#${BANNED}`, entityType: "ORG_MEMBER", developerId: BANNED, role: "auditor", joinedAt: TIME });
+    expect((await w.importPlan()).preview).toMatchObject({ ready: false, refused: [{ personId: BANNED, reason: "unknown_role" }] });
+  });
+
+  it("reads a member record marked removed, and a pointer naming another company, as removed", async () => {
+    const w = world();
+    w.db.set({ pk: `ORG#${A}`, sk: `MEMBER#${MEMBER}`, entityType: "ORG_MEMBER", developerId: MEMBER, role: "member", joinedAt: TIME, removedAt: TIME });
+    w.db.set({ pk: `DEVELOPER_ORG#${ADMIN}`, sk: "ORG", entityType: "DEVELOPER_ORG", developerId: ADMIN, orgId: B });
+    const { preview } = await w.importPlan();
+    expect(preview.skipped).toEqual(expect.arrayContaining([{ personId: MEMBER, reason: "removed" }, { personId: ADMIN, reason: "removed" }]) as unknown);
+    expect(preview.members.map((member) => member.personId)).toEqual([OWNER, NEVER]);
+  });
+
+  it("refuses when a person the install no longer counts is still a live member in Code's records, and keeps a Code removal", async () => {
+    const w = world();
+    await w.apply();
+    w.db.set({ pk: `ORG#${A}#BAN`, sk: MEMBER, bannedAt: TIME });
+    expect((await w.importPlan()).preview).toMatchObject({ ready: false, refused: [{ personId: MEMBER, reason: "no_longer_member" }] });
+    const company = new CompanySignInStore({ documentClient: w.db, tableName: "signin", now: () => NOW + 1_000 });
+    expect(await company.setRevoked(A, MEMBER, true)).toBe(true);
+    const { preview } = await w.importPlan();
+    expect(preview.ready).toBe(true);
+    expect(preview.skipped).toContainEqual({ personId: MEMBER, reason: "banned" });
+    const unbanned = world();
+    await unbanned.apply();
+    await new CompanySignInStore({ documentClient: unbanned.db, tableName: "signin", now: () => NOW + 1_000 }).setRevoked(A, MEMBER, true);
+    expect((await unbanned.importPlan()).preview.skipped).toContainEqual({ personId: MEMBER, reason: "removed_in_code" });
   });
 
   it("refuses more members than one import copies, rather than copying some", async () => {
@@ -268,9 +301,9 @@ describe("apply", () => {
 describe("undo", () => {
   it("previews, then deletes exactly the rows the import wrote and nothing else; a second undo is a no-op", async () => {
     const w = world();
-    // Someone already in the company before the import: the undo never touches them.
-    w.db.set({ ...membershipKey(ADMIN), entityType: "COMPANY_MEMBERSHIP", personId: ADMIN, companyId: A, role: "admin", joinedAt: TIME, joinedVia: "preapproval" });
-    w.db.set({ ...companyMemberKey(A, ADMIN), entityType: "COMPANY_MEMBER_VIEW", personId: ADMIN, companyId: A, role: "admin", joinedAt: TIME, joinedVia: "preapproval" });
+    // Someone already in the company (an owner) before the import: the undo never touches them.
+    w.db.set({ ...membershipKey(ADMIN), entityType: "COMPANY_MEMBERSHIP", personId: ADMIN, companyId: A, role: "owner", joinedAt: TIME, joinedVia: "preapproval" });
+    w.db.set({ ...companyMemberKey(A, ADMIN), entityType: "COMPANY_MEMBER_VIEW", personId: ADMIN, companyId: A, role: "owner", joinedAt: TIME, joinedVia: "preapproval" });
     const before = w.all();
     await w.apply();
     const { preview } = await w.undoPlan();
@@ -286,6 +319,18 @@ describe("undo", () => {
     expect(w.all()).toEqual(again);
   });
 
+  it("refuses an undo that would leave live members with no owner", async () => {
+    const w = world();
+    w.db.set({ ...membershipKey(ADMIN), entityType: "COMPANY_MEMBERSHIP", personId: ADMIN, companyId: A, role: "admin", joinedAt: TIME, joinedVia: "preapproval" });
+    w.db.set({ ...companyMemberKey(A, ADMIN), entityType: "COMPANY_MEMBER_VIEW", personId: ADMIN, companyId: A, role: "admin", joinedAt: TIME, joinedVia: "preapproval" });
+    await w.apply();
+    const plan = await w.undoPlan();
+    expect(plan.preview).toMatchObject({ ready: false, refusal: "no_owner", members: [] });
+    const before = w.all();
+    await w.registry.undoImport(plan.remove, OPERATOR);
+    expect(w.all()).toEqual(before);
+  });
+
   it("deletes the company record too when no member is left, and leaves the install exactly as before", async () => {
     const w = world();
     const before = w.all();
@@ -299,13 +344,13 @@ describe("undo", () => {
     const w = world();
     await w.apply();
     const company = new CompanySignInStore({ documentClient: w.db, tableName: "signin", now: () => NOW + 1_000 });
-    expect(await company.setRole(A, MEMBER, "admin")).toBe("changed");
+    expect(await company.setRole(A, MEMBER, "owner")).toBe("changed");
     const { preview } = await w.undoPlan();
     expect(preview.skipped).toEqual([{ personId: MEMBER, reason: "changed_since_import" }]);
     expect(preview.company).toBe("keep");
     await w.undo();
-    expect(w.db.get(`COMPANY_MEMBER#${MEMBER}`, "COMPANY")).toMatchObject({ companyId: A, role: "admin" });
-    expect(w.db.get(companyMemberKey(A, MEMBER).pk, companyMemberKey(A, MEMBER).sk)).toMatchObject({ role: "admin" });
+    expect(w.db.get(`COMPANY_MEMBER#${MEMBER}`, "COMPANY")).toMatchObject({ companyId: A, role: "owner" });
+    expect(w.db.get(companyMemberKey(A, MEMBER).pk, companyMemberKey(A, MEMBER).sk)).toMatchObject({ role: "owner" });
     for (const id of [OWNER, ADMIN, NEVER]) expect(w.db.get(`COMPANY_MEMBER#${id}`, "COMPANY")).toBeUndefined();
     expect(w.db.get(companyKey(A).pk, "META")).toBeDefined();
   });
@@ -322,6 +367,14 @@ describe("undo", () => {
     const { preview } = await w.undoPlan();
     expect(preview.members).toEqual([{ personId: MEMBER, role: "member" }]);
     expect(preview.skipped.map((entry) => entry.personId)).toEqual([OWNER, ADMIN, NEVER]);
+  });
+
+  it("keeps a membership row that gained any field after the import, even with its mirror unchanged", async () => {
+    const w = world();
+    await w.apply();
+    const row = w.db.get(`COMPANY_MEMBER#${OWNER}`, "COMPANY")!;
+    w.db.set({ ...row, note: "x" });
+    expect((await w.undoPlan()).preview).toMatchObject({ ready: true, skipped: [{ personId: OWNER, reason: "changed_since_import" }] });
   });
 
   it("a row changed between the undo's plan and its write stops that batch, and nothing is deleted from it", async () => {
@@ -376,10 +429,10 @@ describe("the sign-in Lambda", () => {
 
 describe("an install administrator's preview and changes", () => {
   async function setUp() {
-    let store: CompanyImportStore | undefined;
-    const registry = companyImportThroughLambda(async (payload) => ({ Payload: new TextEncoder().encode(JSON.stringify(await companyImportOperator({ store: store!, log: () => undefined }, JSON.parse(new TextDecoder().decode(payload))))) }));
+    const held: { store?: CompanyImportStore } = {};
+    const registry = companyImportThroughLambda(async (payload) => ({ Payload: new TextEncoder().encode(JSON.stringify(await companyImportOperator({ store: held.store!, log: () => undefined }, JSON.parse(new TextDecoder().decode(payload))))) }));
     const harness = await createAdminChangeBroker({ companyImport: registry });
-    store = new CompanyImportStore({ documentClient: harness.db, tableName: "signin", now: Date.now });
+    held.store = new CompanyImportStore({ documentClient: harness.db, tableName: "signin", now: Date.now });
     seedInstall(harness.db);
     const change = async (input: AdminChangeInput) => {
       const planned = await harness.propose(input, ["cli"]);
@@ -432,6 +485,14 @@ describe("an install administrator's preview and changes", () => {
     expect((await planned.apply()).body.error).toMatchObject({ code: "CHANGE_STALE" });
     expect(imported()).toEqual([]);
     expect((await harness.admin("POST", "/v1/admin/changes", { admin: false, body: { requestId: "77777777-7777-4777-8777-777777777777", change: { kind: "import_install_company", companyId: A }, client: { cliVersion: "0.0.7" }, methods: ["cli"] } })).status).toBe(403);
+  });
+
+  it("each planner refuses a caller without the administrator claim before reading anything", async () => {
+    const deps = { actions: {} } as unknown as PlanDependencies;
+    const caller = { isAdministrator: false, ownerKey: OPERATOR } as unknown as AuthenticatedIdentity;
+    for (const input of [{ kind: "import_install_company", companyId: A }, { kind: "undo_install_company_import", companyId: A }] as const) {
+      await expect(PLANNERS[input.kind]!(deps, caller, input, {})).rejects.toMatchObject({ code: "FORBIDDEN" });
+    }
   });
 
   it("answers not found where it is not set up", async () => {

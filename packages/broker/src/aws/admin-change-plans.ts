@@ -543,7 +543,7 @@ const importIds = (people: string[]) => people.length <= IMPORT_IDS_SHOWN ? peop
 const IMPORT_REFUSAL: Record<NonNullable<CompanyImportPreview["refusal"]>, string> = {
   no_open_company: "the install has no open company with that id",
   too_many_members: `it has more than ${COMPANY_IMPORT_MEMBERS_MAX} members, more than one import copies`,
-  no_owner: "nobody would be its owner after the import",
+  no_owner: "nobody would be its owner afterwards",
   unreadable: "a record it needs does not read",
   built_in_company: "the built-in company is never imported",
 };
@@ -551,6 +551,7 @@ const IMPORT_PERSON_REFUSAL: Record<CompanyImportPreview["refused"][number]["rea
   unknown_role: "a role Code does not know",
   member_of_another_company: "already in another company in Code's records",
   unreadable_record: "records that do not read",
+  no_longer_member: "no longer members in the install's records but still live members in Code's",
 };
 /** Fixed words and opaque ids only. */
 export function companyImportRefusalText(preview: CompanyImportPreview): string {
