@@ -267,4 +267,14 @@ describe("invite link secret (DEC 254h)", () => {
     // Without a hash, the operator's answer is as before.
     expect(await w.operator({ kind: "company-preapprove", companyId: X, email: "three@example.test", role: "member", expiresInHours: 24 })).toEqual({ ok: true });
   });
+
+  it("withdrawing an expired invitation whose link row has aged out (TTL) still works", async () => {
+    const { w, owner } = await ready();
+    const invite = await mint(w, owner, "old@example.test", 1);
+    const key = inviteLinkKey(X, companyInviteCodeHash(invite.secret));
+    w.db.delete(key.pk, key.sk);
+    w.tick(3_600_001);
+    expect((await w.call("DELETE", `${PATH}/${emailIndexKey("old@example.test").pk.slice(6)}`, owner)).status).toBe(200);
+    expect(w.db.get(key.pk, key.sk)).toBeUndefined();
+  });
 });

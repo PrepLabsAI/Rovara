@@ -216,7 +216,7 @@ export class CompanySignInStore {
     await this.operatorWrite(companyId, "company-preapproval-withdraw", [{ Update: {
       TableName: this.input.tableName, Key: key, UpdateExpression: "SET #status = :withdrawn", ConditionExpression: "attribute_exists(pk) AND createdAt = :at",
       ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":withdrawn": "withdrawn", ":at": row.data.createdAt },
-    } }, ...(row.data.status === "live" ? link : [])], createdBy);
+    } }, ...(row.data.status === "live" && row.data.expiresAt > this.seconds() ? link : [])], createdBy);
     return true;
   }
   async list(companyId: string): Promise<{ preapprovals: Array<z.infer<typeof CompanyPreapproval> & { emailHash: string }>; more: boolean }> {
