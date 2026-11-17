@@ -17,7 +17,7 @@ const CLIENT_SECRET = ["client", "secret", "canary"].join("-");
 const tokenFor = (name: string) => ["ghu", `${name.replace(/[^A-Za-z0-9]/g, "")}0123456789abcdefghij`].join("_");
 
 type Answer = Record<string, unknown> & { error: { code: string; message: string } };
-interface GitHubUser { id: number; login: string; installations: Array<{ id: number; app_id?: number; account: { login: string; id: number; type: string }; suspended_at?: string | null }>; admins?: string[] }
+interface GitHubUser { id: number; login: string; installations: Array<{ id: number; app_id?: number; account: { login: string; id: number; type: string }; suspended_at?: string | null }>; admins?: string[]; membership?: Record<string, unknown>; pad?: number }
 
 function fakeGithub(users: Record<string, GitHubUser>) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -38,9 +38,12 @@ function fakeGithub(users: Record<string, GitHubUser>) {
     const user = users[code]!;
     const path = url.replace("https://api.github.com", "");
     if (path === "/user") return json({ id: user.id, login: user.login });
-    if (path.startsWith("/user/installations?")) return json({ total_count: user.installations.length, installations: user.installations.map((row) => ({ app_id: Number(APP_ID), suspended_at: null, ...row })) });
+    if (path.startsWith("/user/installations?")) return json({ total_count: user.installations.length, installations: user.installations.map((row) => ({ app_id: Number(APP_ID), suspended_at: null, ...row })), ...(user.pad === undefined ? {} : { pad: "x".repeat(user.pad) }) });
     const org = /^\/user\/memberships\/orgs\/([^/]+)$/.exec(path)?.[1];
-    if (org !== undefined) return (user.admins ?? []).includes(org) ? json({ state: "active", role: "admin" }) : json({ state: "active", role: "member" });
+    if (org !== undefined) {
+      const organization = { login: org, id: user.installations.find((row) => row.account.login === org && row.account.type === "Organization")?.account.id };
+      return json({ state: "active", role: (user.admins ?? []).includes(org) ? "admin" : "member", organization, ...(user.membership ?? {}) });
+    }
     return json({ message: "Not Found" }, 404);
   });
   return { fetch, requests };
@@ -337,5 +340,66 @@ describe("read", () => {
   it("a person with no membership is refused", async () => {
     const w = world(); w.db.delete(membershipKey(PERSON).pk, membershipKey(PERSON).sk);
     expect((await w.read()).status).toBe(401);
+  });
+});
+
+describe("review round 1: every spend condition, GitHub control edges and limits", () => {
+  it("one state sent twice at once: exactly one claim proceeds", async () => {
+    const w = world({ "c1": { id: 7, login: "alice", installations: [ACME], admins: ["acme"] }, "c2": { id: 7, login: "alice", installations: [ACME], admins: ["acme"] } });
+    const state = await w.startState();
+    const answers = await Promise.all([w.claim({ state, code: "c1", installationId: 101 }), w.claim({ state, code: "c2", installationId: 101 })]);
+    expect(answers.map((answer) => answer.status).sort()).toEqual([200, 403]);
+  });
+  it.each([["status", "used"], ["provider", "github-install-ticket"], ["companyId", B], ["personId", PERSON_B], ["sessionId", "other-session"], ["expiresAt", 1]] as const)(
+    "a state whose %s changes between its read and its spend is refused", async (field, value) => {
+      const w = world(); const state = await w.startState();
+      const send = w.db.send.bind(w.db);
+      w.db.send = (async (command: { constructor: { name: string }; input: { Key?: { pk?: string } } }) => {
+        if (command.constructor.name === "UpdateCommand" && command.input.Key?.pk?.startsWith("GITHUB_CONNECT#") === true) {
+          const row = w.db.get(command.input.Key.pk, "META")!; w.db.set({ ...row, [field]: value });
+        }
+        return send(command as never);
+      }) as typeof w.db.send;
+      const answer = await w.claim({ state, code: "alice-code", installationId: 101 });
+      expect(answer.status).toBe(403); expect(answer.body.error).toEqual(uniform);
+      expect(w.github.requests).toHaveLength(0);
+    });
+  it("a pending admin invitation, or a membership of another organization with the same login, does not control it", async () => {
+    for (const membership of [{ state: "pending" }, { organization: { login: "acme", id: 1 } }]) {
+      const w = world({ "p": { id: 7, login: "alice", installations: [ACME], admins: ["acme"], membership } });
+      expect((await w.claim({ state: await w.startState(), code: "p", installationId: 101 })).body.error).toEqual(uniform);
+    }
+  });
+  it("an Enterprise account never binds, even named like an organization the person administers", async () => {
+    const w = world({ "e": { id: 7, login: "alice", installations: [ACME, { id: 505, account: { login: "acme", id: 9001, type: "Enterprise" } }], admins: ["acme"] } });
+    expect((await w.claim({ state: await w.startState(), code: "e", installationId: 505 })).body.error).toEqual(uniform);
+  });
+  it.each([
+    ["more than one page", 2000, { installations: Array.from({ length: 101 }, (_, i) => ({ id: 2000 + i, account: { login: i === 0 ? "alice" : `u${i}`, id: i === 0 ? 7 : 3000 + i, type: "User" } })) }],
+    ["an answer over the byte cap", 101, { installations: [ACME], admins: ["acme"], pad: 1_000_001 }],
+    ["more organizations than the cap", 101, { installations: Array.from({ length: 26 }, (_, i) => ({ id: 101 + i, account: { login: `org${i}`, id: 4000 + i, type: "Organization" } })), admins: Array.from({ length: 26 }, (_, i) => `org${i}`) }],
+    ["a repeated installation id", 101, { installations: [ACME, ACME], admins: ["acme"] }],
+  ] as const)("%s refuses the whole answer", async (_name, target, shape) => {
+    const w = world({ "x": { id: 7, login: "alice", ...shape } as unknown as GitHubUser });
+    expect((await w.claim({ state: await w.startState(), code: "x", installationId: target })).body.error).toEqual(uniform);
+    expect(await w.bindings.ownerOf(target)).toBeUndefined();
+  });
+  it("store: the backfill marker removed between the check and the write binds nothing", async () => {
+    const w = world();
+    const send = w.db.send.bind(w.db);
+    w.db.send = (async (command: { constructor: { name: string } }) => {
+      if (command.constructor.name === "TransactWriteCommand") w.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
+      return send(command as never);
+    }) as typeof w.db.send;
+    expect(await w.bindings.claimPerson(A, { installationId: 9, accountLogin: "x" }, PERSON)).toBe("taken");
+    expect(w.db.get("GITHUB_INSTALLATION#9", "BINDING")).toBeUndefined();
+  });
+  it("the read names the person who connected only while they are still in the company", async () => {
+    const w = world();
+    await w.claim({ state: await w.startState(), code: "alice-code", installationId: 101 });
+    w.as(PERSON_B, A, "member");
+    expect((await w.read()).body.installations).toEqual([expect.objectContaining({ connectedBy: { kind: "person", personId: PERSON, name: "Ada Admin" } })]);
+    w.db.set({ ...w.db.get(membershipKey(PERSON).pk, membershipKey(PERSON).sk)!, revokedAt: TIME });
+    expect((await w.read()).body.installations).toEqual([expect.objectContaining({ connectedBy: { kind: "person", personId: PERSON } })]);
   });
 });

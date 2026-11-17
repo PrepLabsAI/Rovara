@@ -5,7 +5,7 @@
 // "Controls" is stricter than GitHub's "can access" (GET /user/installations lists every installation in which the person can read any repository,
 // including through a plain organization membership):
 //   - a User account's installation: the person IS that account (same numeric id);
-//   - an Organization's installation: the person's own membership of that organization is active and its role is admin (GET /user/memberships/orgs/{org});
+//   - an Organization's installation: the person's own membership of that organization (same numeric id) is active and its role is admin (GET /user/memberships/orgs/{org});
 //   - an Enterprise (or any other) account: never.
 // Every read is bounded (bytes per answer, one page of at most 100 installations, at most MAX_ORGS organizations checked, one total deadline); past a bound
 // the whole answer is refused, never a partial list.
@@ -109,7 +109,15 @@ export async function userControlledInstallations(input: UserControlInput): Prom
         if (suspendedAt !== null && suspendedAt !== undefined && typeof suspendedAt !== "string") refuse();
         ours.push({ installationId, accountLogin: login, accountType: type, suspended: typeof suspendedAt === "string", accountId: positive(account.id) });
       }
-      const organizations = [...new Set(ours.filter((row) => row.accountType === "Organization").map((row) => row.accountLogin.toLowerCase()))];
+      // Each organization by login, with its numeric id: the membership GitHub answers must name the same organization id.
+      const orgIds = new Map<string, number>();
+      for (const row of ours) {
+        if (row.accountType !== "Organization") continue;
+        const known = orgIds.get(row.accountLogin.toLowerCase());
+        if (known !== undefined && known !== row.accountId) refuse();
+        orgIds.set(row.accountLogin.toLowerCase(), row.accountId);
+      }
+      const organizations = [...orgIds.keys()];
       if (organizations.length > USER_AUTHORIZATION_LIMITS.organizations) refuse();
       const admin = new Map<string, boolean>();
       for (let index = 0; index < organizations.length; index += USER_AUTHORIZATION_LIMITS.parallel) {
@@ -117,7 +125,8 @@ export async function userControlledInstallations(input: UserControlInput): Prom
           const membership = await read(`/user/memberships/orgs/${encodeURIComponent(org)}`);
           if (membership.status === 404) { admin.set(org, false); return; }
           const body = record(membership.body);
-          admin.set(org, body.state === "active" && body.role === "admin");
+          const organization = body.organization === undefined ? undefined : record(body.organization);
+          admin.set(org, body.state === "active" && body.role === "admin" && organization !== undefined && organization.id === orgIds.get(org));
         }));
       }
       const installations = ours

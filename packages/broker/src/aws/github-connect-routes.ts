@@ -236,6 +236,10 @@ async function readConnections(ctx: GithubConnectContext, companyId: string): Pr
     const people = [...new Set(rows.map((row) => row.boundBy).filter((by) => /^[a-f0-9]{64}$/.test(by)))];
     const names = new Map<string, string>();
     for (const personId of people) {
+      // A name only while that person is still in this company; someone who left shows as an id.
+      const membership = await ctx.documentClient.send(new GetCommand({ TableName: ctx.signInTableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
+      const row = Membership.safeParse(membership.Item);
+      if (!row.success || row.data.personId !== personId || row.data.companyId !== companyId || row.data.revokedAt !== undefined) continue;
       const response = await ctx.documentClient.send(new GetCommand({ TableName: ctx.signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: { displayName?: unknown } };
       const name = response.Item?.displayName;
       if (typeof name === "string" && name.length > 0 && name.length <= 200) names.set(personId, name);
