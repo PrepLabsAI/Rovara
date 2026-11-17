@@ -17,7 +17,7 @@ async function put(store: MemoryDocumentStore, taskId: string, company: OrgId, o
 }
 const people = (store: MemoryDocumentStore, taskId: string, entries: Array<{ developerId: string; role: string }>, over: Record<string, unknown> = {}) =>
   store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: entries, ...over } });
-const share = (store: MemoryDocumentStore, company: OrgId, taskId: string, n: number, principal: Record<string, unknown>) =>
+const share = (store: MemoryDocumentStore, company: OrgId, taskId: string, n: number, principal: JsonValue) =>
   store.put({ item: { ...agentSessionKey(company, taskSessionId(taskId), `SHARE#${String(n)}`), principal, level: "view", sharedBy: { developerId: DEV("a"), name: "Owner" }, sharedAt: "2026-11-17T10:00:00.000Z" } });
 
 describe("a task is shared beyond its owner only when the company's records say someone else has it", () => {

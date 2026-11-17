@@ -26,15 +26,15 @@ function fakeLinear() {
   const companyOfToken = (header: string): string => header.replace("Bearer tok-", "");
   const impl: typeof fetch = async (_input, init) => {
     const company = companyOfToken(String((init?.headers as Record<string, string>)["authorization"] ?? (init?.headers as Record<string, string>)["Authorization"] ?? ""));
-    const body = JSON.parse(init?.body as string) as { query: string; variables: Record<string, never> };
+    const body = JSON.parse(init?.body as string) as { query: string; variables: Record<string, unknown> };
     const reply = (data: unknown) => new Response(JSON.stringify({ data }), { status: 200 });
     const q = body.query;
     if (q.includes("issue(id:")) {
-      const key = String(body.variables["id"]);
+      const key = (body.variables["id"] as string);
       return reply({ issue: { id: `iss:${company}:${key}`, identifier: key, url: `https://linear.app/${URL_KEY[company]}/issue/${key}/x`, state: { name: "Todo" }, team: { states: { nodes: [] } } } });
     }
     if (q.includes("comment(id:")) {
-      const found = comments.get(String(body.variables["id"]));
+      const found = comments.get((body.variables["id"] as string));
       return reply({ comment: found === undefined || found.company !== company ? null : { id: found.id, issue: { identifier: found.issue }, ...(found.parent === undefined ? {} : { parent: { id: found.parent } }) } });
     }
     if (q.includes("commentCreate")) {
@@ -45,7 +45,7 @@ function fakeLinear() {
       return reply({ commentCreate: { success: true } });
     }
     if (q.includes("commentUpdate")) {
-      const id = String(body.variables["id"]);
+      const id = (body.variables["id"] as string);
       const found = comments.get(id)!;
       found.body = (body.variables["input"] as { body: string }).body;
       writes.push({ company, kind: "edit", id, body: found.body });
