@@ -34,7 +34,7 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
+import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, orgProjectCatalogKey, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
@@ -245,6 +245,15 @@ const nowOf = (target: Mounted): number => (target.runtime.flow.deps.now?.() ?? 
  * The state answer of a project's test environment on the deployed API: the laptop's view (the same core reader, over the company's own records: every row is under the company's project key) plus the catalog
  * the install would pin from, while test services are switched on. The company is the membership's (the runtime's), never the request's.
  */
+/** Whether the project has a catalog row in THIS company (the company is the membership's, never the request's). A read that fails is "no". */
+async function projectExistsIn(target: Mounted, companyId: string, project: string): Promise<boolean> {
+  try {
+    return (await target.runtime.flow.deps.store.get(orgProjectCatalogKey(companyId, project)))?.["entityType"] === "PROJECT_CATALOG";
+  } catch {
+    return false;
+  }
+}
+
 async function testEnvironmentAnswer(target: Mounted, wired: NonNullable<CoreDevWiring["testEnvironment"]>, project: string): Promise<Record<string, unknown>> {
   const deps: TestEnvDeps = {
     store: target.runtime.flow.deps.store, now: () => nowOf(target), env: wired.env, audit: target.runtime.flow.deps.audit,
@@ -435,8 +444,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           const wired = target.wiring.testEnvironment;
           if (wired === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           const project = testEnvironment[1]!;
-          // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it.
-          if (!(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it. A live company owner or admin (the role is membership's, read for this request)
+          // needs no grant on a project of THEIR company (the same reach as approving; the project must exist in that company); anyone else needs the grant.
+          const mayRead = ((membership.role === "owner" || membership.role === "admin") && await projectExistsIn(target, companyId, project)) || await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false);
+          if (!mayRead) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           return json(200, await testEnvironmentAnswer(target, wired, project));
         }
         const tokens = SCRIPT_TOKENS.exec(path);
