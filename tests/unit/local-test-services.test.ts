@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { DockerResult, DockerRunner } from "../../packages/broker/src/local/docker-runner.js";
 import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
+import { prepareLocalTestServices } from "../../packages/broker/src/local/test-services-install.js";
 import { NO_TRUSTED_CATALOG_SENTENCE, loadLocalServiceCatalog, localTestServicesDigestPart, localTestServicesFrom, prepareTestServiceImages, removePulledTestServiceImages, testServicesEnvironment } from "../../packages/broker/src/local/test-services.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
@@ -263,6 +264,23 @@ describe("the worker machine with test services", () => {
     const none = { images: [], notPulled: ["svc/postgres"], failed: [], pulledNow: [] };
     expect(localTestServicesFrom({ registry: "r.example", catalogEnv: "local", prepared: none })).toBeUndefined();
     expect(localTestServicesFrom({ registry: "r.example", catalogEnv: "local", prepared: { ...none, images: ["r.example/rovara-catalog/local/svc/redis@sha256:" + "c".repeat(64)] }, maxMemoryMiB: 1024 })).toMatchObject({ registry: "r.example", catalogEnv: "local", maxMemoryMiB: 1024, notPulled: ["svc/postgres"] });
+  });
+
+  it("DEC 254zm 2: the signed install (a build with a catalog key) puts the resolved limits on what the machines are given", async () => {
+    const state = await folder();
+    const install = await prepareLocalTestServices({
+      environment: { ROVARA_TEST_SERVICES_REGISTRY: "registry.example:5000", ROVARA_TEST_SERVICES_MAX_CONTAINERS: "30" }, stateDirectory: state, docker: pullingDocker(new Set()), interfaces: {},
+      signedKeysPresent: () => true, loadCatalog: () => Promise.resolve({ ok: true as const, catalog: verifiedCatalog(pinnedCatalog()) }),
+    });
+    expect(install.mode).toBe("signed");
+    expect(install.services?.limits).toEqual({ containers: 30, helperMemoryMiB: 1024, memoryPercent: 40 });
+  });
+
+  it("DEC 254zm 2: the signed path's options carry the limits it was given", () => {
+    const prepared = { images: ["r.example/rovara-catalog/local/svc/redis@sha256:" + "c".repeat(64)], notPulled: [], failed: [], pulledNow: [] };
+    const limits = { containers: 9, helperMemoryMiB: 512, memoryPercent: 30 };
+    expect(localTestServicesFrom({ registry: "r.example", catalogEnv: "local", prepared, limits })).toMatchObject({ limits });
+    expect("limits" in localTestServicesFrom({ registry: "r.example", catalogEnv: "local", prepared })!).toBe(false);
   });
 
   it("builds the worker's environment from exactly what it was given, limits included", () => {

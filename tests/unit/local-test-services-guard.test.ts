@@ -1233,6 +1233,11 @@ describe("test services: the resource ceilings", () => {
     await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(2048 * MIB + 1))).status).toBe(403); }, withLimits({ maxMemoryMiB: 2048 }));
   });
 
+  it("a policy number below the smallest allowed is raised to it (one helper never gets less than 64 MiB of ceiling)", async () => {
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(64 * MIB))).status).toBe(201); }, withLimits({ maxMemoryMiB: 10 }));
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(64 * MIB + 1))).status).toBe(403); }, withLimits({ maxMemoryMiB: 10 }));
+  });
+
   it("a program keeps its own 512 MiB ceiling and its old words", async () => {
     await using(true, async (w) => {
       const answer = await create(w, `${NET}-p0123456789`, mutated(programBody, (v) => { v.HostConfig.Memory = 513 * MIB; v.HostConfig.MemorySwap = 513 * MIB; }));
