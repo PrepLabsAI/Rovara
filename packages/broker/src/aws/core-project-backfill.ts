@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { canonicalJson, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, StoredProjectDefinitionSchema, orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
+import { canonicalJson, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, StoredProjectDefinitionSchema, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { GithubInstallationBindings } from "./github-credentials.js";
 import { projectKey } from "./project-records.js";
@@ -73,6 +73,14 @@ function matchingRevision(row: Row, source: Row, company: string) {
 export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string, backfillRunId?: string): Promise<{ status: "ready" | "existing"; writes: Write[] }> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw conflict();
   const source = value as Row;
+  // Forward registration keeps the pre-catalog behavior until the implicit
+  // company's catalog has been verified. Operator backfill supplies a mapping
+  // and continues to use D1 attribution without consulting this rollout flag.
+  if (mappedCompany === undefined && source["companyId"] === undefined) {
+    const flag = await get(deps, orgSettingsKey(IMPLICIT_COMPANY_ID, "PROJECT_CATALOG_INDEX"));
+    if (flag === undefined) return { status: "existing", writes: [] };
+    if (!z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) }).safeParse(flag).success) throw conflict();
+  }
   // D1: legacy projects without an explicit company belong to the implicit company.
   const companyValue = mappedCompany === undefined ? source["companyId"] ?? IMPLICIT_COMPANY_ID : mappedCompany;
   const parsedCompany = OrgIdSchema.safeParse(companyValue);
