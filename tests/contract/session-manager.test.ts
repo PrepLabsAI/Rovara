@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding } from "../../packages/contracts/src/session.js";
-import { SessionManager, sessionFromItem } from "../../packages/broker/src/aws/sessions.js";
+import { SessionManager, sessionFromItem, type SessionManagerDependencies } from "../../packages/broker/src/aws/sessions.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const PROVISIONER = "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner";
@@ -137,6 +137,53 @@ describe("session manager: launched machine size (DEC 254zb)", () => {
     await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
     await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10");
     expect(session()).toMatchObject({ instanceType: "m6g.large", machineFallback: "size-unavailable" });
+  });
+});
+
+describe("session manager: picking the machine size (DEC 254zb)", () => {
+  function picked(pick: SessionManagerDependencies["pickMachine"]) {
+    const db = new FakeDynamoDb();
+    const startExecution = vi.fn<StartExecution>(startedExecution);
+    const sessions = new SessionManager({
+      documentClient: db, tableName: "state", executions: { provisionerArn: PROVISIONER, deleterArn: DELETER, start: startExecution },
+      now: () => new Date("2026-09-27T12:00:00.000Z"), chooseSubnet: (subnets) => subnets[0]!, ...(pick === undefined ? {} : { pickMachine: pick }),
+    });
+    const workspaceId = randomUUID();
+    const input = () => JSON.parse(startExecution.mock.calls.at(-1)![0].input) as Record<string, unknown>;
+    return { db, sessions, workspaceId, input, session: () => db.get(`WORKSPACE#${workspaceId}`, "SESSION") };
+  }
+
+  it("starts the provisioner exactly as before without a picker", async () => {
+    const without = picked(undefined);
+    await without.sessions.ensureSession({ workspaceId: without.workspaceId, binding });
+    expect(Object.keys(without.input()).sort()).toEqual(["availabilityZone", "generation", "launchTemplateId", "subnetId", "volumeId", "volumeSizeGiB", "volumeType", "workspaceId"]);
+    expect(without.session()).not.toHaveProperty("machineFallback");
+  });
+
+  it("hands the provisioner the picked machine, and nothing else of the pick", async () => {
+    const pick = vi.fn(async () => ({ machine: { instanceType: "m6g.2xlarge", chip: "arm64" as const, extra: "x" } as never }));
+    const w = picked(pick);
+    await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding });
+    expect(pick).toHaveBeenCalledExactlyOnceWith(w.workspaceId);
+    expect(w.input().machine).toEqual({ instanceType: "m6g.2xlarge", chip: "arm64" });
+  });
+
+  it("records an x86 choice the install cannot run on the generation, launches the default, and READY reports the reason", async () => {
+    const w = picked(async () => ({ fallback: "x86-unavailable" as const }));
+    await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding });
+    expect(w.input()).not.toHaveProperty("machine");
+    expect(w.session()).toMatchObject({ state: "PROVISIONING", machineFallback: "x86-unavailable" });
+    await w.sessions.markVolume(w.workspaceId, 1, "vol-0123456789abcdef0");
+    await w.sessions.markInstance(w.workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large" });
+    await w.sessions.markReady(w.workspaceId, 1);
+    expect(await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding })).toEqual({ ready: true, generation: 1, privateIp: "10.42.128.10", machineFallback: "x86-unavailable" });
+  });
+
+  it("launches the default when the picker fails, never failing the provisioning", async () => {
+    const w = picked(async () => { throw new Error("boom"); });
+    await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding });
+    expect(w.input()).not.toHaveProperty("machine");
+    expect(w.session()).toMatchObject({ state: "PROVISIONING" });
   });
 });
 

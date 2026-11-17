@@ -20,6 +20,12 @@ import { optIn, testEnvironmentEnabled } from "./switch.js";
 /** ROVARA_MACHINE_SIZE: the measured machine size at setup (record, show, choose). OFF unless exactly "1". Does nothing without the test environment. */
 export const MACHINE_SIZE_VARIABLE = "ROVARA_MACHINE_SIZE";
 export const machineSizeEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => optIn(env, MACHINE_SIZE_VARIABLE) && testEnvironmentEnabled(env);
+/** DEC 254zb (part C): ROVARA_MACHINE_SIZE_RUN makes the chosen size change what launches (and what a machine start is estimated to cost). OFF unless exactly "1", and only with the choice on. */
+export const MACHINE_SIZE_RUN_VARIABLE = "ROVARA_MACHINE_SIZE_RUN";
+export const machineSizeRunEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => optIn(env, MACHINE_SIZE_RUN_VARIABLE) && machineSizeEnabled(env);
+/** ROVARA_MACHINE_SIZE_X86: this install's worker image runs on x86. OFF unless exactly "1": until a release carries an amd64 image, an x86 choice launches the default size. */
+export const MACHINE_SIZE_X86_VARIABLE = "ROVARA_MACHINE_SIZE_X86";
+export const machineSizeX86Enabled = (env: NodeJS.ProcessEnv = process.env): boolean => optIn(env, MACHINE_SIZE_X86_VARIABLE);
 
 /** A measurement is kept this long: a proposal lives 7 days, an approved environment's card is read soon after. */
 export const MACHINE_MEASURE_TTL_MS = 30 * 86_400_000;

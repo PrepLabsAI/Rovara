@@ -5,6 +5,7 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
 import { CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
@@ -590,6 +591,8 @@ const dispatcherSessions = new SessionManager({
       return (await sfn.send(new StartExecutionCommand(input))).executionArn!;
     },
   },
+  // DEC 254zb: absent while ROVARA_MACHINE_SIZE_RUN is off (every worker launches as the template says).
+  ...optionalPicker(machineSizePicker({ documentClient, tableName: tableName ?? "" })),
 });
 
 /** KMS Sign with the invoke signing key, which only this function's role may use. */
@@ -643,6 +646,14 @@ const deliverEc2 = createEc2Delivery({
       operationId: record.operationId,
       fence: record.invocation.fence,
       onceKey: `session-wait#${record.id}`,
+      event: { type: "progress", timestamp: new Date().toISOString(), payload: { message } },
+    });
+  },  async machineNote(record, message) {
+    await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
+      workspaceId: record.workspaceId,
+      operationId: record.operationId,
+      fence: record.invocation.fence,
+      onceKey: `machine-size#${record.id}`,
       event: { type: "progress", timestamp: new Date().toISOString(), payload: { message } },
     });
   },

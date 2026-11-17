@@ -25,6 +25,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -15389,6 +15390,7 @@ const ec2Sessions = new SessionManager({
       return (await stepFunctions.send(new StartExecutionCommand(input))).executionArn!;
     },
   },
+  ...optionalPicker(machineSizePicker({ documentClient, tableName: process.env.STATE_TABLE_NAME ?? "" })),
 });
 const github = createGitHubAppCredentials(secretsManager);
 const githubCredentials = github.provider;

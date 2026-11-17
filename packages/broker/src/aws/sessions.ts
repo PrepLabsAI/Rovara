@@ -22,10 +22,13 @@ import {
   type WorkspaceSession,
   type WorkspaceSessionState,
   type ProjectSetupSession,
+  type MachineFallback,
+  type MachineLaunch,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { failOutboxOperation } from "./outbox-failure.js";
+import type { MachinePick } from "./worker-machines/machine-size-pick.js";
 
 /** What the provisioner state machine starts from. Deterministic for one generation, so a retried start is idempotent. */
 export interface ProvisioningInput {
@@ -38,6 +41,8 @@ export interface ProvisioningInput {
   volumeId: string | null;
   volumeSizeGiB: number;
   volumeType: Ec2RuntimeBinding["volumeType"];
+  /** DEC 254zb: the project's chosen machine size. Absent: the launch template's own type, exactly as before. */
+  machine?: MachineLaunch;
 }
 
 export interface DeletionInput {
@@ -47,7 +52,8 @@ export interface DeletionInput {
 }
 
 export type EnsureSessionResult =
-  | { ready: true; generation: number; privateIp: string }
+  /** `machineFallback`: this generation runs on the default size instead of the project's choice, for that fixed reason (the task is told). */
+  | { ready: true; generation: number; privateIp: string; machineFallback?: MachineFallback }
   | { ready: false; generation: number; state: WorkspaceSessionState };
 
 export interface SessionExecutions {
@@ -68,6 +74,11 @@ export interface SessionManagerDependencies {
   now?: () => Date;
   /** Picks the first availability zone of a workspace; random by default. */
   chooseSubnet?: (subnets: Ec2RuntimeBinding["subnets"]) => Ec2RuntimeBinding["subnets"][number];
+  /**
+   * DEC 254zb: the size the workspace's next worker launches as (machine-size-pick.ts), asked once per provisioning. Absent (the switch is off): every worker
+   * launches as the launch template says, and the provisioning input is exactly today's. A picker that fails is "no choice".
+   */
+  pickMachine?: (workspaceId: string) => Promise<MachinePick>;
 }
 
 const MAX_ATTEMPTS = 5;
@@ -107,7 +118,7 @@ export class SessionManager {
             set: { lastActivityAt: this.now() },
             when: { state: "READY", generation: ready.generation },
           })))) continue;
-          return { ready: true, generation: ready.generation, privateIp: ready.privateIp! };
+          return { ready: true, generation: ready.generation, privateIp: ready.privateIp!, ...(ready.machineFallback === undefined ? {} : { machineFallback: ready.machineFallback }) };
         }
         case "NONE":
         case "STOPPED":
@@ -402,6 +413,11 @@ export class SessionManager {
   }
 
   private async startProvisioning(session: WorkspaceSession, binding: Ec2RuntimeBinding): Promise<void> {
+    const pick = this.dependencies.pickMachine === undefined ? undefined : await this.dependencies.pickMachine(session.workspaceId).catch((): MachinePick => ({}));
+    // A choice the install cannot run is recorded on the generation now, so the task is told; a launch-time fallback is recorded by the provisioner.
+    if (pick?.fallback !== undefined) {
+      await this.conditional(this.update(session.workspaceId, { set: { machineFallback: pick.fallback }, when: { state: "PROVISIONING", generation: session.generation } }));
+    }
     const input: ProvisioningInput = {
       workspaceId: session.workspaceId,
       generation: session.generation,
@@ -411,6 +427,7 @@ export class SessionManager {
       volumeId: session.volumeId ?? null,
       volumeSizeGiB: binding.volumeSizeGiB,
       volumeType: binding.volumeType,
+      ...(pick?.machine === undefined ? {} : { machine: { instanceType: pick.machine.instanceType, chip: pick.machine.chip } }),
     };
     const executionArn = await this.start("provisioner", sessionProvisioningName(session.workspaceId, session.generation), input);
     await this.conditional(this.update(session.workspaceId, {
