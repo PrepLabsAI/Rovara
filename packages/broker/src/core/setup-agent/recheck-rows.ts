@@ -20,6 +20,8 @@ const afterWords = (classes: readonly SetupDriftClass[]): string => (classes.len
 /** The one evidence line of a re-check that found the setup working. */
 export const setupStillWorksWords = (classes: readonly SetupDriftClass[]): string => `${afterWords(classes)}: still works.`;
 export const setupTestsFailingWords = (classes: readonly SetupDriftClass[]): string => `${afterWords(classes)}: the setup works; some tests were already failing.`;
+/** DEC 254zzl: the quiet note when the re-check could not run or could not finish (the cap is used, a machine failed, the check never answered): the task started and goes on all the same. */
+export const setupNotRecheckedWords = (classes: readonly SetupDriftClass[]): string => (classes.length === 0 ? "Couldn't re-check setup." : `Couldn't re-check setup after ${setupDriftWords(classes)} changed.`);
 /** What the requester is told when the task pauses before Build (design 3c), with the check's failing step. */
 export const setupBrokenTaskWords = (failedStep: string): string =>
   `I can't build this yet. This project's setup stopped working after recent code changes (${failedStep}). I've asked the project's admins to approve a fix. Retry this step once the setup is fixed.`;
@@ -55,7 +57,9 @@ export interface RecheckRow {
   /** The check's own failing step (redacted, one line, cut), kept when the result was broken. */
   failedStep?: string;
 }
-export interface DriftTaskRow { entityType: "SETUP_DRIFT_TASK"; orgId: OrgId; project: string; taskId: string; recheckKey: string; state: "pending" | "released"; at: string; releasedAt?: string }
+export interface DriftTaskRow { entityType: "SETUP_DRIFT_TASK"; orgId: OrgId; project: string; taskId: string; recheckKey: string; state: "pending" | "released"; at: string; releasedAt?: string;
+  /** The re-check could not be started at all (the cap is used): nothing to wait on, and the task page says so quietly. */
+  noRecheck?: { classes: SetupDriftClass[] } }
 export interface RepairNoticeRow { entityType: "SETUP_REPAIR_NOTICE"; orgId: OrgId; project: string; key: string; failedStep: string; classes: SetupDriftClass[]; at: string }
 
 export const isRow = (row: Record<string, unknown> | undefined, orgId: OrgId, project: string, type: string): boolean => row !== undefined && row["entityType"] === type && row["orgId"] === orgId && row["project"] === project;
@@ -71,6 +75,8 @@ export async function setupRecheckLineOf(deps: Pick<TaskFlowDeps, "store" | "com
     const orgId = deps.companyId;
     const link = await deps.store.get(driftTaskKey(orgId, project, taskId));
     if (!isRow(link, orgId, project, "SETUP_DRIFT_TASK") || link?.["taskId"] !== taskId || typeof link?.["recheckKey"] !== "string") return undefined;
+    const noRecheck = (link as { noRecheck?: { classes?: unknown } }).noRecheck;
+    if (noRecheck !== undefined) return setupNotRecheckedWords(Array.isArray(noRecheck.classes) ? (noRecheck.classes as SetupDriftClass[]) : []);
     const stored = await deps.store.get(recheckRowKey(orgId, project, link["recheckKey"]));
     if (!isRow(stored, orgId, project, "SETUP_RECHECK")) return undefined;
     const row = stored as unknown as RecheckRow;
@@ -79,7 +85,7 @@ export async function setupRecheckLineOf(deps: Pick<TaskFlowDeps, "store" | "com
       case "passed": return setupStillWorksWords(row.classes);
       case "tests_failing": return setupTestsFailingWords(row.classes);
       case "broken": return setupBrokenTaskWords(row.failedStep ?? "setup");
-      case "unclear": return undefined;
+      case "unclear": return setupNotRecheckedWords(row.classes);
     }
   } catch {
     return undefined;

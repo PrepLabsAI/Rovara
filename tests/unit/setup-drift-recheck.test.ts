@@ -34,7 +34,7 @@ import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const URL_ = "https://examplehost.test/acme/app";
-const COMPANY_B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
+const COMPANY_B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
 const FILES: Record<string, string> = {
   "README.md": "readme", "src/index.ts": "export {}", "package.json": "{}", "package-lock.json": "lock-1", "docker-compose.yml": "services: {}", "services/api/Dockerfile": "FROM node:22",
   ".devcontainer/devcontainer.json": "{}", ".env.example": "A=", ".nvmrc": "22", "vitest.config.ts": "export default {}", ".github/workflows/ci.yml": "on: push",
@@ -48,7 +48,7 @@ const CLASSES: Array<[string, string]> = [
 const projectOf = (name = "payments", extra: Partial<ProjectDefinition> = {}): ProjectDefinition => ({
   ...definition, name, setup: [{ cwd: "repo/demo", executable: "npm", args: ["ci"], timeoutSeconds: 60 }], readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }], ...extra,
   repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }],
-} as ProjectDefinition);
+});
 
 interface World { h: Harness; model: FakeHostModel; host: FakeCodeHost; project: ProjectDefinition; modelRoute: ReturnType<typeof vi.fn> }
 
@@ -168,7 +168,7 @@ describe("the drift check at task start", () => {
 
   it("a website the setup now allows that the snapshot did not is drift, with no file changed", async () => {
     const w = await world();
-    const allowed = projectOf("payments", { revision: 2, network: { allowedDomains: ["api.stripe.com"] } } as Partial<ProjectDefinition>);
+    const allowed = projectOf("payments", { revision: 2, network: { allowedDomains: ["api.stripe.com"] } });
     await w.h.registerProject(allowed);
     await startTask(w);
     expect((await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).map((row) => row.classes)).toEqual([["websites"]]);
@@ -217,7 +217,10 @@ describe("the drift check at task start", () => {
     const task = await startTask(w);
     expect(task.status).toBe("STARTING");
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
-    expect(await linkOf(w, task.taskId)).toBeUndefined();
+    // DEC 254zzl: the task started all the same, and says so quietly.
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "released", noRecheck: { classes: [] }, recheckKey: "" });
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup.");
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
   });
 
   it("an install with no code host starts exactly as before", async () => {
@@ -244,7 +247,9 @@ describe("the drift check at task start", () => {
     w.h.deps.log = (entry) => logs.push(entry);
     w.h.deps.codeHosts = { ...w.h.deps.codeHosts!, get: () => { throw new Error("registry fault"); } } as never;
     const items = await setupDriftAtStart(w.h.deps, { project: "payments", taskId: "t1", definition: w.project });
-    expect(items).toEqual([]);
+    // The start goes on with only a released link and the quiet note; nothing is started.
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "put", item: { entityType: "SETUP_DRIFT_TASK", state: "released", noRecheck: { classes: [] } } });
     expect(logs.some((entry) => entry["event"] === "setup_drift.failed" || entry["event"] === "setup_drift.not_checked")).toBe(true);
   });
 });
@@ -334,7 +339,11 @@ describe("once per commit, and the monthly cap", () => {
     const task = await startTask(w);
     expect(task.status).toBe("STARTING");
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
-    expect(await linkOf(w, task.taskId)).toBeUndefined();
+    // DEC 254zzl: the task started all the same, nothing waits, and its page says quietly that the re-check could not be made.
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "released", noRecheck: { classes: ["lockfile"] }, recheckKey: "" });
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
+    expect((await taskViewOf(w.h.deps, (await readTask(w.h.deps, task.taskId))!)).setupRecheck).toBe("Couldn't re-check setup after dependency files changed.");
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
     const use = await readAutomaticRunsUse(deps, w.h.deps.companyId, "payments");
     expect(use).toMatchObject({ used: 1, cap: 1, paused: true });
     expect(await w.h.store.get({ pk: `ORG#${w.h.deps.companyId}#PROJECT#payments`, sk: `AUTOMATIC_RUNS#PAUSED#${use.month}` }).catch(() => undefined) ?? true).toBeDefined();
@@ -359,6 +368,7 @@ describe("once per commit, and the monthly cap", () => {
     await finishCheck(w.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
     const settled = await advanceAfterFailure(w.h);
     expect(settled?.state).toBe("unclear");
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
   });
 });
@@ -609,7 +619,8 @@ describe("what the re-check says, and what blocks", () => {
     w.h.clock.advance(SETUP_CHECK_STUCK_MS / 1000 + 60);
     expect(await advanceCurrentRecheck(w.h.deps, "payments")).toMatchObject({ state: "unclear", attempt: 2 });
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
-    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBeUndefined();
+    // DEC 254zzl: it could not be settled, the task went on all the same, and its page says so quietly.
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
     expect((await setupStateOf(w.h.deps, "payments", w.project)).status).not.toBe("failed");
     await w.h.flow.start(w.h.owner, { requestId: newRequestId(), project: "payments", instructions: "Still allowed" });
   });
@@ -675,7 +686,7 @@ describe("what the re-check says, and what blocks", () => {
     const task = await startTask(w);
     const realUpdate = w.h.store.update.bind(w.h.store);
     let failures = 0;
-    w.h.store.update = (async (input: Parameters<DocumentStore["update"]>[0]) => { if (input.key.sk === "META" && input.ops.some((op) => (op as { path?: unknown }).path?.toString() === "setupCheck" || (op as { path?: unknown }).path === "setupCheck") && failures < 1) { failures += 1; throw new Error("store fault"); } return realUpdate(input); }) as DocumentStore["update"];
+    w.h.store.update = (async (input: Parameters<DocumentStore["update"]>[0]) => { if (input.key.sk === "META" && input.ops.some((op) => (op as { path?: unknown }).path?.toString() === "setupCheck" || (op as { path?: unknown }).path === "setupCheck") && failures < 1) { failures += 1; throw new Error("store fault"); } return realUpdate(input); });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const [row] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
       await finishCheck(w.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
@@ -745,6 +756,7 @@ describe("what the re-check says, and what blocks", () => {
       await advanceAfterFailure(w.h);
     }
     expect((await rechecksOf(w.h.store, w.h.deps.companyId, "payments"))[0]!.state).toBe("unclear");
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
     expect((await setupStateOf(w.h.deps, "payments", w.project)).status).not.toBe("failed");
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
   });
@@ -819,7 +831,7 @@ describe("isolation", () => {
       for (const [index, key] of sourceKeys.entries()) {
         const original = await shared.get(key);
         expect(original, key.sk).toBeDefined();
-        await shared.put({ item: { ...original!, ...targetKeys[index]! } as never });
+        await shared.put({ item: { ...original!, ...targetKeys[index]! } });
       }
     };
     await copyAll({ orgId: COMPANY_B, project: "payments" });
