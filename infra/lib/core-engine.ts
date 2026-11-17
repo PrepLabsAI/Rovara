@@ -105,7 +105,7 @@ export class CoreEngine extends Construct {
     // (OPERATOR_PARAMETERS); packed, because the broker's 4 KB has no room for two more variables (a host has no separator; the broker reads `https://<host>`). Both empty (the
     // default): the core refuses the switch by name, as before.
     this.modelGatewayHost = new CfnParameter(stack, "CoreModelGatewayHost", { type: "String", default: "", maxLength: CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, allowedPattern: CORE_MODEL_GATEWAY_HOST_PATTERN, description: "Core engine model gateway host, reached over https (no scheme, path or credentials); empty (the default) leaves the core refused" });
-    this.agentModel = new CfnParameter(stack, "CoreAgentModel", { type: "String", default: "", maxLength: CORE_AGENT_MODEL_MAX_LENGTH, allowedPattern: CORE_AGENT_MODEL_PATTERN, description: "Core engine agent model, an Anthropic id such as claude-sonnet-4-6; empty (the default) leaves the core refused" });
+    this.agentModel = new CfnParameter(stack, "CoreAgentModel", { type: "String", default: "", maxLength: CORE_AGENT_MODEL_MAX_LENGTH, allowedPattern: CORE_AGENT_MODEL_PATTERN, description: "Core engine agent model, any model the model gateway offers by its exact id, such as claude-sonnet-4-6 or zai.glm-5; empty (the default) leaves the core refused" });
     for (const [key, value] of [["coreModelGateway", this.modelGatewayHost.valueAsString], ["coreAgentModel", this.agentModel.valueAsString]] as const) {
       addBrokerSetting(broker, props.naming, key, value);
       addPackedSetting(dispatcher, key, value);
