@@ -41,7 +41,7 @@ function twoCompanies(): World {
   const clock = { now: Date.parse("2026-11-09T10:00:00.000Z") };
   const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(clock.now / 1_000) });
   const queues = new MemoryQueueService({ now: () => clock.now });
-  const make = (companyId: string) => createHarness({ companyId: companyId as never, limits: { member: 1_000, organization: 2_000 }, backend: () => ({ store, queues }), extra: () => ({ access: accessWith(allowed) }) });
+  const make = (companyId: string) => createHarness({ companyId, limits: { member: 1_000, organization: 2_000 }, backend: () => ({ store, queues }), extra: () => ({ access: accessWith(allowed) }) });
   return { a: make(COMPANY_A_ID), b: make(COMPANY_B_ID), allowed, store };
 }
 
@@ -125,7 +125,7 @@ describe("the involved row and its writers", () => {
     ["a creation time that is not a time", { createdAt: "yesterday" }],
   ])("refuses %s, in fixed words that echo nothing", async (_label, bad) => {
     const { w, taskA } = await world();
-    const input = { ...rowFor(taskA, ALICE), ...bad } as InvolvedRowInput;
+    const input: InvolvedRowInput = { ...rowFor(taskA, ALICE), ...bad };
     const secret = JSON.stringify(Object.values(bad)[0]);
     for (const act of [() => involvedRowKey(input), () => involvedRowPut(input, "2026-11-10T00:00:00.000Z"), () => involvedRowDelete(input), () => writeInvolvedRow({ store: w.store }, input), () => deleteInvolvedRow({ store: w.store }, input)]) {
       let thrown: unknown;
@@ -262,7 +262,7 @@ describe("listing the tasks I was added to", () => {
       const query = vi.spyOn(w.store, "query");
       expect(await listInvolvedTasks(w.a.deps, { principal: person(COMPANY_B_ID, ALICE) })).toEqual({ involved: true, tasks: [] });
       expect(await listInvolvedTasks(w.a.deps, { principal: person(COMPANY_A_ID, "a#b") })).toEqual({ involved: true, tasks: [] });
-      expect(await listInvolvedTasks({ ...w.a.deps, companyId: "acme" as never }, caller(COMPANY_A_ID, ALICE))).toEqual({ involved: true, tasks: [] });
+      expect(await listInvolvedTasks({ ...w.a.deps, companyId: "acme" }, caller(COMPANY_A_ID, ALICE))).toEqual({ involved: true, tasks: [] });
       expect(query).not.toHaveBeenCalled();
     });
   });
@@ -337,7 +337,7 @@ describe("listing the tasks I was added to", () => {
       ["a cursor that is too long", "A".repeat(500)],
     ])("refuses %s in fixed words", async (_label, cursor) => {
       const { w } = await many(1);
-      await expect(list(w, COMPANY_A_ID, ALICE, { cursor })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("cursor is not valid") });
+      await expect(list(w, COMPANY_A_ID, ALICE, { cursor })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("cursor is not valid") as string });
     });
 
     it("a cursor can only start inside the caller's own partition: another person's sort key finds the caller's rows, never theirs", async () => {
