@@ -40,6 +40,9 @@ import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
+import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
+import { lifecycleAccess } from "./project-lifecycle-routes.js";
+import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
@@ -277,7 +280,25 @@ export const NO_PROJECT_GRANT = "You do not have access to this project.";
  * and project grant, with a revision fence on acts. A company role grants no reach into another person's task. A step the system starts on its own needs its person to be a
  * member still, with the grant.
  */
-export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies }): TaskAccess {
+/**
+ * Guided onboarding L2-3: a person's standing on a project's setup run in this company, read live: PR 16's rule (`lifecycleAccess`) over the person's membership and project grant.
+ * A person who is not a live member of THIS company is `none`, whatever grant they hold.
+ */
+export function setupRunStandingFrom(people: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrantRole: (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> }): (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding> {
+  return async (personId, companyId, project) => {
+    const membership = await people.membershipOf(personId);
+    if (membership === undefined || membership.companyId !== companyId) return { access: "none" };
+    const access = lifecycleAccess(membership.role, await people.projectGrantRole(personId, project));
+    if (access !== "manage") return { access };
+    return { access, basis: membership.role === "owner" ? "company-owner" : membership.role === "admin" ? "company-admin" : "project-admin" };
+  };
+}
+
+export function hostedTaskAccess(inputs: {
+  membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
+  /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
+  setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
+}): TaskAccess {
   const liveMember = async (personId: string) => {
     const membership = await inputs.membershipOf(personId);
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
@@ -317,6 +338,14 @@ export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => P
     },
     async checkStep(task) {
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
+      // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
+      if (inputs.setupRunStanding !== undefined && inputs.storage !== undefined) {
+        const stored = await (await inputs.storage()).get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
+        if (stored?.["purpose"] === "setup_agent") {
+          if (stored["companyId"] !== inputs.companyId) return { allowed: false, message: NOT_A_MEMBER_HERE };
+          return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: SETUP_RUN_NOT_ALLOWED };
+        }
+      }
       return (await inputs.projectGrant(task.developerId, task.project)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };
     },
   };
@@ -387,6 +416,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     : membershipWithRoleFromDynamo(inputs.documentClient, inputs.signInTableName);
   const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
+  // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
+  const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
   const displayNameOf = async (personId: string): Promise<string | undefined> => {
     if (inputs.signInTableName === undefined || inputs.signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
     const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
@@ -431,7 +462,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), people: {
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
       } }),
@@ -523,6 +554,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             return { limitUsd: admissionSettings.taskCapMicros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(runtime.companyId, task.taskId)) };
           } },
           canReadProject: (personId, project) => projectGrant(personId, project),
+          // Guided onboarding L2-3: the hosted setup run. Its model use is the gateway's (configured: the run is metered); citations are re-read from the company's own code host.
+          setupRun: {
+            standing: setupRunStanding,
+            modelAccessConfigured: () => { try { return modelGateway() !== undefined; } catch { return false; } },
+            readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+              .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
+            displayName: displayNameOf,
+          },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
         };
@@ -591,6 +630,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           bookUsage: money.bookUsage,
           // DEC 253c/253j(1): the trusted eval plan, approval and baseline cache for this company's CHECKS runs, with the approver's live role from the hosted members reader.
           evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),
+          // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
+          // the laptop page's only), so nothing is ever handed over.
+          setupAgent: { mayStillRun: async () => false },
         });
       })();
       found.catch(() => callbackHandlers.delete(companyId));

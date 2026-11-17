@@ -13,6 +13,8 @@
 //     cap per round (`taskActions.roundCap`) AND the company's owner rule (`TaskAccess.ownerActing` on the runtime's access): without that seam the flow would use Code's laptop rule
 //     (the install's owner role), which a hosted company never uses for who owns a task;
 //   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project;
+//   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, journal, confirm and discard, for a live company owner or admin or the
+//     project's administrator (a project user reads it); the rules are setup-run-routes.ts's;
 //   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
 //     "a page signed in to a few minutes ago" rule, with Code's own factor as the proof). A token's own requests are not accepted here either (the broker's sign-in decides that).
 //   - The step-up's time comes only from the caller the broker's sign-in vouched for (`DeployedCaller.stepUp`, read from the verified access token), never from a header, a query or a
@@ -45,6 +47,7 @@ import type { CoreHostApp } from "./app.js";
 import type { CoreRuntime } from "./core-runtime.js";
 import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
 import type { AgentModelChoice } from "./gateway-model-selection.js";
+import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -125,6 +128,8 @@ export interface CoreDevWiring {
   origin: () => string;
   /** Hosted wiring (d): the audit sink for one request, naming the caller it came through (`auditSinkForDeployedCaller`). Absent: the registry's sink as it is. */
   auditFor?: (caller: DeployedCaller, sink: AuditSink) => AuditSink;
+  /** Guided onboarding L2-3: the hosted setup run (`/v1/app/projects/<p>/setup-agent...`, setup-run-routes.ts). Absent: those paths say "not on the core yet". */
+  setupRun?: HostedSetupRunWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -150,6 +155,7 @@ function owns(path: string, method: string): boolean {
   if (TASK_READ.test(path) || PLAYBOOK.test(path)) return method === "GET";
   if (TASK_ACTION.test(path)) return method === "POST";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
+  if (isSetupRunPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -328,6 +334,15 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
             method: request.method, body: request.body, principal: caller.principal, role: membership.role, choice: target.wiring.modelChoice,
             audit: target.wiring.auditFor === undefined ? undefined : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
             freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
+          });
+        }
+        if (isSetupRunPath(path, request.method)) {
+          // Guided onboarding L2-3: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+          if (target.wiring.setupRun === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedSetupRun({
+            request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
+            startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
           });
         }
         const playbook = PLAYBOOK.exec(path);
