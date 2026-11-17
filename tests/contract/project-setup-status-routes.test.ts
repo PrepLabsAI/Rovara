@@ -65,7 +65,7 @@ function harness(options: HarnessOptions = {}) {
   const project = (name: string, companyId?: string, repositories: unknown[] = [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main" }]) =>
     db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision: 1, repositories } });
   const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: `MEMBER#${id}`, sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
-  const ok = async (path = PATH()) => { const answer = await call("GET", path); expect(answer.status).toBe(200); return answer.body as Record<string, any>; };
+  const ok = async (path = PATH()) => { const answer = await call("GET", path); expect(answer.status).toBe(200); return ProjectSetupChecklistSchema.parse(answer.body); };
   return { db, claims, deps, call, as, join, project, grant, ok };
 }
 type Harness = ReturnType<typeof harness>;
@@ -85,13 +85,13 @@ const SUMMARY = (over: Record<string, unknown> = {}) => ({ stop: "proposed", com
 
 type RunResult = Record<string, unknown> | undefined;
 function setupRun(h: Harness, company: string, project: string, result: RunResult, taskId = "11111111-1111-4111-8111-111111111111") {
-  h.db.set({ ...setupAgentKey(company as never, project), entityType: "SETUP_AGENT", orgId: company, project, taskId, requestId: "22222222-2222-4222-8222-222222222222", requestedBy: ADA, basedOnRevision: 1, startedAt: new Date(NOW - 120_000).toISOString(), limits: {} });
+  h.db.set({ ...setupAgentKey(company, project), entityType: "SETUP_AGENT", orgId: company, project, taskId, requestId: "22222222-2222-4222-8222-222222222222", requestedBy: ADA, basedOnRevision: 1, startedAt: new Date(NOW - 120_000).toISOString(), limits: {} });
   h.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, orgId: company, taskId, project, purpose: "setup_agent", workspaceId: "33333333-3333-4333-8333-333333333333", startingRevision: 1, ...(result === undefined ? {} : { setupAgentResult: result }) });
   return taskId;
 }
 const READY = (over: Record<string, unknown> = {}) => ({ status: "ready", stop: "proposed", proposal: PROPOSAL(), summary: SUMMARY(), ...over });
 function journal(h: Harness, company: string, project: string, taskId: string, n: number, entry: Record<string, unknown>) {
-  h.db.set({ ...journalKey({ orgId: company as never, project, taskId }, n), entityType: "SETUP_JOURNAL", orgId: company, project, taskId, entry: { n, source: "agent", command: "npm test", exitCode: 0, durationMs: 1000, timedOut: false, flagged: false, blockedHosts: [], tail: "", startedAt: TIME, ...entry } });
+  h.db.set({ ...journalKey({ orgId: company, project, taskId }, n), entityType: "SETUP_JOURNAL", orgId: company, project, taskId, entry: { n, source: "agent", command: "npm test", exitCode: 0, durationMs: 1000, timedOut: false, flagged: false, blockedHosts: [], tail: "", startedAt: TIME, ...entry } });
 }
 const IMAGE = `registry.example/worker@sha256:${"e".repeat(64)}`;
 function evalReport(h: Harness, company: string, project: string, taskId: string, state: "reported" | "confirmed") {
@@ -112,7 +112,7 @@ function realTask(h: Harness, company: string, project: string, id: string, purp
   const taskId = `44444444-4444-4444-8444-${id.padStart(12, "0")}`;
   const workspaceId = `55555555-5555-4555-8555-${id.padStart(12, "0")}`;
   h.db.set({ pk: legacy ? `WORKSPACE#${workspaceId}` : workspacePartition(company, workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: company, orgId: company, projectName: project,
-    workspaceProject: legacy ? project : workspaceProjectIndexValue(company as never, project), workspaceCreatedAt: TIME });
+    workspaceProject: legacy ? project : workspaceProjectIndexValue(company, project), workspaceCreatedAt: TIME });
   h.db.set({ pk: legacy ? `WORKSPACE#${workspaceId}` : workspacePartition(company, workspaceId), sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId });
   h.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, taskId, project, ...(purpose === undefined ? {} : { purpose }) });
 }
@@ -201,10 +201,33 @@ describe("the checklist's rows, each from its own records", () => {
     const run = (await h.ok()).setupRun;
     expect(run).toMatchObject({ state: "failed", failure: SETUP_AGENT_FAILURES.attempts_used });
     expect(run.failedCommand).toMatchObject({ n: 2, exitCode: 2, timedOut: false });
-    expect(run.failedCommand.lastLines.length).toBeLessThanOrEqual(20);
-    expect(run.failedCommand.lastLines.every((line: string) => line.length <= 300)).toBe(true);
+    expect(run.failedCommand?.lastLines.length).toBeLessThanOrEqual(20);
+    expect(run.failedCommand?.lastLines.every((line: string) => line.length <= 300)).toBe(true);
     expect(JSON.stringify(run)).not.toContain(secret);
-    expect(run.failedCommand.lastLines.at(-1)).toContain("[REDACTED]");
+    expect(run.failedCommand?.lastLines.at(-1)).toContain("[REDACTED]");
+  });
+
+  it("setup run: the last lines of a long (4 KB) output are its END, not the start", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used });
+    const long = [...Array.from({ length: 70 }, (_, i) => `noise ${i} ${"y".repeat(40)}`), "THE-REAL-ERROR-AT-THE-END"].join("\n").slice(-4_000);
+    journal(h, A, "alpha", task, 1, { command: "npm test", exitCode: 1, tail: long });
+    const lines = (await h.ok()).setupRun.failedCommand?.lastLines ?? [];
+    expect(lines.at(-1)).toBe("THE-REAL-ERROR-AT-THE-END");
+  });
+
+  it("setup run: journal rows that name another company, project or run are ignored; a pointer naming another company is not applied", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used });
+    journal(h, A, "alpha", task, 1, { command: "npm ci", exitCode: 0 });
+    for (const [n, over] of [[2, { orgId: B }], [3, { project: "beta" }], [4, { taskId: "99999999-9999-4999-8999-999999999990" }]] as const) {
+      h.db.set({ ...(h.db.get(journalKey({ orgId: A, project: "alpha", taskId: task }, 1).pk, journalKey({ orgId: A, project: "alpha", taskId: task }, 1).sk) as object), ...journalKey({ orgId: A, project: "alpha", taskId: task }, n), ...over, entry: { n, source: "agent", command: `echo ${CANARY}`, exitCode: 1, durationMs: 1, timedOut: false, flagged: false, blockedHosts: [], tail: CANARY, startedAt: TIME } });
+    }
+    const run = (await h.ok()).setupRun;
+    expect(run.failedCommand).toBeUndefined();
+    expect(JSON.stringify(run)).not.toContain(CANARY);
+    h.db.set({ ...(h.db.get(setupAgentKey(A, "alpha").pk, "AGENT") as object), orgId: B });
+    expect((await h.ok()).setupRun).toEqual({ state: "needs_you", status: "none" });
   });
 
   it("setup run: a timed-out command is the failing one; a failed run with no journal has none", async () => {
@@ -229,7 +252,7 @@ describe("the checklist's rows, each from its own records", () => {
     const task = setupRun(h, A, "alpha", undefined);
     evalReport(h, A, "alpha", task, "reported");
     expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "reported", suites: [{ selection: "evals/demo", questions: 2 }], blockedBy: "setupRun" });
-    h.db.set({ ...setupAgentKey(A as never, "alpha"), entityType: "SETUP_AGENT", orgId: A, project: "alpha", taskId: task, requestId: "22222222-2222-4222-8222-222222222222", requestedBy: ADA, basedOnRevision: 1, startedAt: TIME, limits: {} });
+    h.db.set({ ...setupAgentKey(A, "alpha"), entityType: "SETUP_AGENT", orgId: A, project: "alpha", taskId: task, requestId: "22222222-2222-4222-8222-222222222222", requestedBy: ADA, basedOnRevision: 1, startedAt: TIME, limits: {} });
     h.db.set({ pk: `DEVTASK#${task}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: A, orgId: A, taskId: task, project: "alpha", purpose: "setup_agent", workspaceId: "33333333-3333-4333-8333-333333333333", startingRevision: 1, setupAgentResult: READY() });
     expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "reported", suites: [{ selection: "evals/demo", questions: 2 }] });
     evalReport(h, A, "alpha", task, "confirmed");
@@ -243,14 +266,14 @@ describe("the checklist's rows, each from its own records", () => {
     evalReport(h, A, "alpha", older, "confirmed");
     expect((await h.ok()).evalConfirm.report).toBe("none");
     evalReport(h, A, "alpha", latest, "confirmed");
-    h.db.set({ ...(h.db.get(evalDiscoveryKey(A, "alpha", latest).pk, evalDiscoveryKey(A, "alpha", latest).sk) as object), reportDigest: "0".repeat(64) } as never);
+    h.db.set({ ...(h.db.get(evalDiscoveryKey(A, "alpha", latest).pk, evalDiscoveryKey(A, "alpha", latest).sk) as object), reportDigest: "0".repeat(64) });
     expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
   });
 
   it("AI and spend: the project's own budget, then the company's saved model, else the install's defaults", async () => {
     const h = companyA();
     expect((await h.ok()).aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
-    h.db.set({ ...modelSelectionPolicyKey(A as never), entityType: "MODEL_SELECTION_POLICY", orgId: A, version: 1, revision: 2, rankingVersion: "g3-v1", stepOverrides: {} });
+    h.db.set({ ...modelSelectionPolicyKey(A), entityType: "MODEL_SELECTION_POLICY", orgId: A, version: 1, revision: 2, rankingVersion: "g3-v1", stepOverrides: {} });
     expect((await h.ok()).aiAndSpend).toEqual({ state: "done", source: "company", companyModelSaved: true, modelBudgetUsd: null });
     h.db.set({ ...projectSettingsKey(A, "alpha"), entityType: "PROJECT_SETTINGS", companyId: A, projectName: "alpha", overrides: { model_budget_usd: 12.5 }, revision: 1, updatedAt: TIME, updatedBy: ADA });
     expect((await h.ok()).aiAndSpend).toEqual({ state: "done", source: "project", companyModelSaved: true, modelBudgetUsd: 12.5 });
@@ -261,7 +284,7 @@ describe("the checklist's rows, each from its own records", () => {
     h.db.set({ ...projectSettingsKey(A, "alpha"), entityType: "PROJECT_SETTINGS", companyId: B, projectName: "alpha", overrides: { model_budget_usd: 1 }, revision: 1 });
     expect(await h.call("GET", PATH())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE) });
     h.db.delete(projectSettingsKey(A, "alpha").pk, "META");
-    h.db.set({ ...modelSelectionPolicyKey(A as never), entityType: "MODEL_SELECTION_POLICY", orgId: B, version: 1, revision: 2, rankingVersion: "g3-v1", stepOverrides: {} });
+    h.db.set({ ...modelSelectionPolicyKey(A), entityType: "MODEL_SELECTION_POLICY", orgId: B, version: 1, revision: 2, rankingVersion: "g3-v1", stepOverrides: {} });
     expect(await h.call("GET", PATH())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE) });
   });
 
@@ -300,7 +323,7 @@ describe("the checklist's rows, each from its own records", () => {
     const h = companyA();
     realTask(h, A, "alpha", "1", "setup_agent");
     expect((await h.ok()).firstTask).toEqual({ state: "needs_you", hasTask: false, canStart: false });
-    h.db.set({ pk: workspacePartition(A, "77777777-7777-4777-8777-777777777777"), sk: "META", entityType: "WORKSPACE", id: "77777777-7777-4777-8777-777777777777", companyId: A, orgId: A, projectName: "alpha", workspaceProject: workspaceProjectIndexValue(A as never, "alpha"), workspaceCreatedAt: TIME });
+    h.db.set({ pk: workspacePartition(A, "77777777-7777-4777-8777-777777777777"), sk: "META", entityType: "WORKSPACE", id: "77777777-7777-4777-8777-777777777777", companyId: A, orgId: A, projectName: "alpha", workspaceProject: workspaceProjectIndexValue(A, "alpha"), workspaceCreatedAt: TIME });
     expect((await h.ok()).firstTask.hasTask).toBe(false);
     realTask(h, A, "alpha", "2");
     expect((await h.ok()).firstTask).toEqual({ state: "done", hasTask: true, canStart: false });
@@ -312,6 +335,21 @@ describe("the checklist's rows, each from its own records", () => {
     // The same plain-named index row, seen from company A, is never read (company A reads its own partition only).
     const foreign = companyA();
     realTask(foreign, IMPLICIT_COMPANY_ID, "alpha", "4", undefined, true);
+    // A legacy row that names no company at all is the implicit company's: company A must not read it either.
+    const bare = "88888888-8888-4888-8888-888888888881";
+    foreign.db.set({ pk: `WORKSPACE#${bare}`, sk: "META", entityType: "WORKSPACE", id: bare, projectName: "alpha", workspaceProject: "alpha", workspaceCreatedAt: TIME });
+    foreign.db.set({ pk: `WORKSPACE#${bare}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: "44444444-4444-4444-8444-000000000009" });
+    foreign.db.set({ pk: "DEVTASK#44444444-4444-4444-8444-000000000009", sk: "META", entityType: "DEVELOPER_TASK", taskId: "44444444-4444-4444-8444-000000000009", project: "alpha" });
+    expect((await foreign.ok()).firstTask.hasTask).toBe(false);
+    // Defence in depth: a plain-named (legacy partition) row that even names company A is not read, because A never reads the legacy partition.
+    const named = "88888888-8888-4888-8888-888888888882";
+    foreign.db.set({ pk: `WORKSPACE#${named}`, sk: "META", entityType: "WORKSPACE", id: named, companyId: A, orgId: A, projectName: "alpha", workspaceProject: "alpha", workspaceCreatedAt: TIME });
+    foreign.db.set({ pk: `WORKSPACE#${named}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: "44444444-4444-4444-8444-00000000000a" });
+    foreign.db.set({ pk: "DEVTASK#44444444-4444-4444-8444-00000000000a", sk: "META", entityType: "DEVELOPER_TASK", companyId: A, taskId: "44444444-4444-4444-8444-00000000000a", project: "alpha" });
+    expect((await foreign.ok()).firstTask.hasTask).toBe(false);
+    // A task in A's own partition whose record names another org is not counted.
+    realTask(foreign, A, "alpha", "b");
+    foreign.db.set({ ...(foreign.db.get("DEVTASK#44444444-4444-4444-8444-00000000000b", "META") as object), orgId: B });
     expect((await foreign.ok()).firstTask.hasTask).toBe(false);
   });
 
@@ -383,7 +421,7 @@ describe("who may read, and which company's project it is", () => {
       h.db.set({ ...projectSettingsKey(company, name), entityType: "PROJECT_SETTINGS", companyId: company, projectName: name, overrides: { model_budget_usd: 99 }, revision: 1, updatedAt: TIME, updatedBy: CAT });
       realTask(h, company, name, company === B && name === "alpha" ? "6" : "7");
     }
-    h.db.set({ ...modelSelectionPolicyKey(B as never), entityType: "MODEL_SELECTION_POLICY", orgId: B, version: 1, revision: 5, rankingVersion: "g3-v1", stepOverrides: {} });
+    h.db.set({ ...modelSelectionPolicyKey(B), entityType: "MODEL_SELECTION_POLICY", orgId: B, version: 1, revision: 5, rankingVersion: "g3-v1", stepOverrides: {} });
     const seenByA = await h.ok();
     expect(JSON.stringify(seenByA)).not.toContain(CANARY);
     expect(seenByA.setupRun).toEqual({ state: "needs_you", status: "none" });
@@ -501,6 +539,36 @@ describe("setting a skipped optional row", () => {
     };
     expect(await h.call("PUT", SKIPS(), { row: "slackChannel", skipped: true })).toEqual({ status: 409, body: error("CHANGE_STALE", SETUP_SKIPS_STALE) });
     expect(h.db.get(setupSkipsKey(A, "alpha").pk, "META")).toMatchObject({ skipped: ["linear", "invites"], revision: 2 });
+  });
+
+  it("a first write that loses a race to another first write is refused, not overwritten", async () => {
+    const h = companyA();
+    const real = h.db.send;
+    let moved = false;
+    (h.db as { send: typeof real }).send = async (command) => {
+      if (!moved && (command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") {
+        moved = true;
+        h.db.set({ ...setupSkipsKey(A, "alpha"), entityType: "PROJECT_SETUP_SKIPS", companyId: A, project: "alpha", skipped: ["invites"], revision: 1 });
+      }
+      return real(command);
+    };
+    expect(await h.call("PUT", SKIPS(), { row: "linear", skipped: true })).toEqual({ status: 409, body: error("CHANGE_STALE", SETUP_SKIPS_STALE) });
+    expect(h.db.get(setupSkipsKey(A, "alpha").pk, "META")).toMatchObject({ skipped: ["invites"], revision: 1 });
+  });
+
+  it("a member gets the fixed 403 whatever the body is, even one that is not JSON; and for a foreign project the same 404", async () => {
+    const h = companyA();
+    h.project("foreign", B);
+    h.as(BEN, "s-ben");
+    const send = async (path: string, body: string) => {
+      const request = { method: "PUT", path, headers: { authorization: `Bearer ${["{\"alg\":\"none\"}", JSON.stringify(h.claims)].map((p) => Buffer.from(p).toString("base64url")).join(".")}.sig` }, requestId: "r", body };
+      try { return await routeDeveloperRequest(h.deps, request, new URL(path, "https://broker.example.test")); } catch (e) { return e as AgentXError; }
+    };
+    const memberRefused = await send(SKIPS(), "{not json");
+    expect(memberRefused).toBeInstanceOf(AgentXError);
+    expect((memberRefused as AgentXError).statusCode).toBe(403);
+    const foreign = await send(SKIPS("foreign"), "{not json");
+    expect((foreign as AgentXError).statusCode).toBe(404);
   });
 
   it("refuses unknown rows, extra fields and a missing flag in fixed words that echo nothing", async () => {

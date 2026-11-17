@@ -1401,7 +1401,7 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   const effectiveCompany = companyId ?? IMPLICIT_COMPANY_ID;
   if (skips) {
     if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
-    const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: jsonBody(request) });
+    const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: () => jsonBody(request) });
     scope.check();
     logDeveloperEvent({ event: "client.project_setup_skip_changed", clientId: person.client.clientId, by: person.developerId, project, row: changed.row, skipped: changed.skipped ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
     return changed;

@@ -4,7 +4,7 @@
 //   GET /v1/dev/client/projects/{project}/setup-status          any member of the project's company
 //   PUT /v1/dev/client/projects/{project}/setup-status/skips    a company owner or admin, or the project's administrator
 //
-// "Progress is read from the real state, not a saved wizard position": every row is derived on each request, strongly consistent, from records Code already keeps:
+// "Progress is read from the real state, not a saved wizard position": every row is derived on each request, from records Code already keeps:
 //   repos        the project's latest revision (the same row `GET /v1/dev/client/projects/{project}` reads)
 //   setupRun     the setup run's pointer and task (`readState`, the laptop Setup screen's own reader), the run's journal for a failed run's command and last lines
 //   evalConfirm  the latest run's eval report row (`readEvalDiscovery`): reported, or confirmed by a person (DEC 253n/253q)
@@ -49,9 +49,10 @@ const TASK_PROBE_WORKSPACES = 25;
 /** The failing command's output: at most this many lines of at most this many characters, and this many characters in all. */
 const TAIL_LINES = 20;
 const TAIL_LINE_CHARS = 300;
-const TAIL_TOTAL_CHARS = 3_000;
-/** The setup run's journal: the newest page is enough to find the last failed command. */
-const JOURNAL_PAGE = 400;
+const TAIL_REDACT_CHARS = 8_192;
+/** The setup run's journal: at most this many pages of this many rows are read (the schema holds a run to 400 entries). */
+const JOURNAL_PAGE = 100;
+const JOURNAL_PAGES = 8;
 
 const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE);
 
@@ -117,10 +118,10 @@ export async function readSkips(client: Client, tableName: string, companyId: st
  * route from LIVE records before any body is read. A repeat of what is stored writes nothing and answers the same. The change and its audit row are one transaction, conditional on the revision read.
  */
 export async function putSkip(input: {
-  documentClient: Client; tableName: string; now: () => number; companyId: string; project: string; personId: string; mayChange: boolean; body: unknown;
+  documentClient: Client; tableName: string; now: () => number; companyId: string; project: string; personId: string; mayChange: boolean; body: () => unknown;
 }): Promise<{ project: string; row: SetupSkippableRow; skipped: boolean; skippedRows: SetupSkippableRow[] }> {
   if (!input.mayChange) throw agentXError("FORBIDDEN", NOT_A_SETUP_ADMIN);
-  const body = ProjectSetupSkipBodySchema.safeParse(input.body);
+  const body = ProjectSetupSkipBodySchema.safeParse(input.body());
   if (!body.success) throw agentXError("CONFIG_INVALID", SETUP_SKIPS_BODY);
   const { row, skipped } = body.data;
   const current = await readSkips(input.documentClient, input.tableName, input.companyId, input.project);
@@ -165,15 +166,21 @@ const commandCount = (items: SetupProposal["setup"] | undefined): number => (ite
 async function journalOf(client: Client, tableName: string, companyId: OrgId, project: string, taskId: string): Promise<SetupJournalEntry[]> {
   const pk = setupPartition(companyId, project);
   const probe = journalKey({ orgId: companyId, project, taskId }, 1).sk.replace(/#\d+$/u, "#");
-  const response = await client.send(new QueryCommand({
-    TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)", ExpressionAttributeValues: { ":pk": pk, ":prefix": probe }, ConsistentRead: true, Limit: JOURNAL_PAGE,
-  })) as { Items?: unknown[] };
   const entries: SetupJournalEntry[] = [];
-  for (const raw of response.Items ?? []) {
-    const row = asRecord(raw);
-    if (row === undefined || row["orgId"] !== companyId || row["project"] !== project || row["taskId"] !== taskId) continue;
-    const entry = SetupJournalEntrySchema.safeParse(row["entry"]);
-    if (entry.success) entries.push(entry.data);
+  let start: Record<string, unknown> | undefined;
+  for (let page = 0; page < JOURNAL_PAGES; page += 1) {
+    const response = await client.send(new QueryCommand({
+      TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)", ExpressionAttributeValues: { ":pk": pk, ":prefix": probe }, ConsistentRead: true, Limit: JOURNAL_PAGE,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: unknown[]; LastEvaluatedKey?: Record<string, unknown> };
+    for (const raw of response.Items ?? []) {
+      const row = asRecord(raw);
+      if (row === undefined || row["orgId"] !== companyId || row["project"] !== project || row["taskId"] !== taskId) continue;
+      const entry = SetupJournalEntrySchema.safeParse(row["entry"]);
+      if (entry.success) entries.push(entry.data);
+    }
+    start = response.LastEvaluatedKey;
+    if (start === undefined) break;
   }
   return entries.sort((left, right) => left.n - right.n);
 }
@@ -181,7 +188,7 @@ async function journalOf(client: Client, tableName: string, companyId: OrgId, pr
 function failedCommandOf(entries: readonly SetupJournalEntry[]): NonNullable<ProjectSetupChecklist["setupRun"]["failedCommand"]> | undefined {
   const failed = [...entries].reverse().find((entry) => entry.timedOut || (entry.exitCode !== null && entry.exitCode !== 0));
   if (failed === undefined) return undefined;
-  const tail = redactAndCap(failed.tail, TAIL_TOTAL_CHARS).text.split("\n").filter((line) => line.trim() !== "").slice(-TAIL_LINES).map((line) => line.slice(0, TAIL_LINE_CHARS));
+  const tail = redactAndCap(failed.tail, TAIL_REDACT_CHARS).text.split("\n").filter((line) => line.trim() !== "").slice(-TAIL_LINES).map((line) => line.slice(0, TAIL_LINE_CHARS));
   return { n: failed.n, command: redactAndCap(failed.command, 2_000).text, exitCode: failed.exitCode, timedOut: failed.timedOut, lastLines: tail };
 }
 
@@ -258,7 +265,7 @@ async function hasRealTask(input: SetupStatusInput, client: Client, companyId: O
       const taskId = pointer?.["taskId"];
       if (typeof taskId !== "string") continue;
       const task = asRecord((await client.send(new GetCommand({ TableName: input.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: unknown }).Item);
-      if (task !== undefined && recordInCompany(task, companyId) && task["project"] === input.project && task["purpose"] !== "setup_agent") return true;
+      if (task !== undefined && recordInCompany(task, companyId) && (typeof task["orgId"] !== "string" || task["orgId"] === companyId) && task["project"] === input.project && task["purpose"] !== "setup_agent") return true;
     }
   }
   return false;
