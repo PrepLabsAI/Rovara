@@ -11,6 +11,8 @@ export const FAILURE_CAUSES_ARTIFACT = "failure-causes.json";
 export const FAILURE_CAUSES_FILE_MAX_BYTES = 256 * 1024;
 /** The most checks one file carries causes for (a pack has at most 64 checks). */
 export const FAILURE_CAUSES_CHECKS_MAX = 64;
+/** The most failing tests a pull request block or a task page lists in all; the rest are counted. */
+export const FAILURE_CAUSES_LISTED_MAX = 10;
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 const line = (max: number) => z.string().min(1).max(max).regex(NO_HIDDEN, "one plain line");

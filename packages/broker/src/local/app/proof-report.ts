@@ -1,8 +1,8 @@
 // Lane L12, slice 3: the local proof page's report for a task, from what the broker itself recorded about the checked code: the verification results of the approved checks, the reviews, the risk it judged, and the
 // evidence pack kept for this very code (if one was). Every line is the broker's own words; a name from the repository or a worker is made inert (`inertPlanLine`) and redacted, and nothing here repeats a
 // claim the broker could not check (a missing pack says "no evidence was kept", it never fills the gap).
-import { GENERAL_FAKE_MADE_NOTE, redactText, workflowSelectedChecks, type EvidencePack, type WorkflowSnapshot } from "@agentx/contracts";
-import type { ProofReportView, ProofRowView } from "../../core/local-pages/views.js";
+import { FAILURE_CAUSES_LISTED_MAX, FailureCausesSchema, GENERAL_FAKE_MADE_NOTE, failureCauseWords, redactText, workflowSelectedChecks, type EvidencePack, type WorkflowSnapshot } from "@agentx/contracts";
+import type { ProofFailuresView, ProofReportView, ProofRowView } from "../../core/local-pages/views.js";
 import { inertPlanLine } from "../../core/proof/inert-text.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 
@@ -16,6 +16,27 @@ function testsDetail(check: EvidencePack["checks"][number]): string | undefined 
   if (tests === undefined) return undefined;
   return [`${String(tests.passed)} passed`, ...(tests.failed > 0 ? [`${String(tests.failed)} failed`] : []), ...(tests.errored > 0 ? [`${String(tests.errored)} errored`] : []), ...(tests.skipped > 0 ? [`${String(tests.skipped)} skipped`] : []),
     ...(tests.newTests.length > 0 ? [`${String(tests.newTests.length)} new`] : [])].join(", ");
+}
+
+/**
+ * TE-A6 (DEC 254zzf): the failing tests of the failed checks with the change that most likely broke each, or "unknown". Same rules as the pull request: only a failed check, only causes that read as the contract says (anything
+ * else adds nothing), ten tests in all and the rest counted, every test id and path plain text (`words`). Undefined when there is nothing to show, so the report keeps today's shape.
+ */
+export function failuresOf(pack: EvidencePack | undefined): ProofFailuresView | undefined {
+  if (pack === undefined) return undefined;
+  let left = FAILURE_CAUSES_LISTED_MAX;
+  let more = 0;
+  const checks: ProofFailuresView["checks"] = [];
+  for (const check of pack.checks) {
+    if (check.after !== "failed") continue;
+    const parsed = FailureCausesSchema.safeParse(check.tests?.failureCauses);
+    if (!parsed.success || parsed.data.length === 0) continue;
+    const shown = parsed.data.slice(0, Math.max(0, left));
+    left -= shown.length;
+    more += parsed.data.length - shown.length;
+    if (shown.length > 0) checks.push({ check: words(check.label, 200), tests: shown.map((row) => ({ test: words(row.testId, 100), cause: failureCauseWords(row.cause, (text, max) => words(text, max)) })) });
+  }
+  return checks.length === 0 && more === 0 ? undefined : { checks, more };
 }
 
 /** A short list of file names, redacted, with the count of the rest. */
@@ -67,8 +88,9 @@ export function proofReportOf(task: TaskRecord, workflow: WorkflowSnapshot, pack
     ...(changed.reported === undefined ? [] : [`The worker reported ${String(changed.reported.files.length)} changed file${changed.reported.files.length === 1 ? "" : "s"} (${fileList(changed.reported.files)}); Rovara has not checked that list and does not use it.`]),
     ...(rows.length === 0 ? ["Nothing has been checked yet."] : []),
   ].join(" ");
+  const failures = failuresOf(pack);
   return {
-    taskId: task.taskId, title: task.title, revision: workflow.revision, summary, rows,
+    taskId: task.taskId, title: task.title, revision: workflow.revision, summary, rows, ...(failures === undefined ? {} : { failures }),
     pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase() })),
   };
 }

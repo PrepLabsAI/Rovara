@@ -4,7 +4,7 @@
 // list and line is bounded, with the rest counted ("and 52 more checks"), so the block stays inside a pull request description however large the pack is. Browser-safe: nothing here imports a Node module.
 import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPTED_AI_PROOF_WORDS, checkKindWords, trustLabelWords, type ProofBasis, type EvidenceTrustClass } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
-import { FailureCausesSchema, failureCauseWords } from "./failure-causes.js";
+import { FAILURE_CAUSES_LISTED_MAX, FailureCausesSchema, failureCauseWords } from "./failure-causes.js";
 import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { EVIDENCE_DEPENDENCY_LABEL_WORDS, hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
 import { renderAiEvidence } from "./evidence-ai-render.js";
@@ -15,7 +15,7 @@ import { rovaraProblem, type RovaraProblemFacts } from "./rovara-problem.js";
 /** The last line of the compact form: where the checks, the dependencies and the not-tested list are. */
 export const EVIDENCE_COMPACT_POINTER = "Checks, dependencies and what was not tested: open in Rovara";
 
-export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3, failureCausesListed: 10 } as const;
+export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3, failureCausesListed: FAILURE_CAUSES_LISTED_MAX } as const;
 
 /** The result axis, in words (the v1 axis kept). */
 export const EVIDENCE_RESULT_WORDS: Record<(typeof EVIDENCE_RESULTS)[number], string> = {
