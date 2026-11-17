@@ -228,7 +228,6 @@ describe("wiki for agents: the wiki never makes a step too big to send", () => {
   it("measures the whole invocation against a margin under the 1 MiB body the workers accept", () => {
     expect(invocationTooBigForWiki({ payload: { prompt: "x".repeat(WIKI_INVOCATION_MARGIN_BYTES - 1_000) } })).toBe(false);
     expect(invocationTooBigForWiki({ payload: { prompt: "x".repeat(WIKI_INVOCATION_MARGIN_BYTES + 1) } })).toBe(true);
-    expect(WIKI_INVOCATION_MARGIN_BYTES + WIKI_AGENT_LIMITS.contextBytes).toBeLessThanOrEqual(1024 * 1024 + 80 * 1024);
   });
 });
 

@@ -543,7 +543,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         learnedRefs: LearnedRefsSchema.optional(),
         /**
          * Lead 4 A1: the project wiki's pages for this step (the agent view: no pending note, no flagged or not-found claim, no page marked wrong), built at delivery from the task's OWN project and never stored or queued.
-         * The worker places them as read-only files outside the repositories and puts the `AGENTX-WIKI.md` index in the step's context. Sent only to a worker that lists "task.wikiContext.v1"; an older worker is sent
+         * The worker places them as read-only files outside the repositories and puts the `AGENTX-WIKI.md` index in the step's prompt as a labelled untrusted-data block. Sent only to a worker that lists "task.wikiContext.v1"; an older worker is sent
          * none, which is safe (the task runs as without the wiki). Never carries a tool, a check, an approval or a limit.
          */
         wikiContext: WikiContextSchema.optional(),

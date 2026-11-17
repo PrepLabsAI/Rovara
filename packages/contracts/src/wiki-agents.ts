@@ -20,7 +20,7 @@ export const WIKI_AGENT_FEATURE = "task.wikiContext.v1" as const;
 export const WIKI_AGENT_FOLDER = "agentx-wiki";
 export const WIKI_AGENT_PAGES_FOLDER = "pages";
 export const WIKI_AGENT_INDEX_FILE = "AGENTX-WIKI.md";
-/** The index in every step's context stays within this many bytes. */
+/** The index in every step's prompt stays within this many bytes. */
 export const WIKI_AGENT_INDEX_MAX_BYTES = 4 * 1024;
 /** The fixed instruction every step gets with the index. */
 export const WIKI_AGENT_INSTRUCTION = "The wiki is a map written by a machine. Use it to choose where to look. Confirm in the code. If they disagree, the code wins.";
