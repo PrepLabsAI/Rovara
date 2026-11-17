@@ -1,4 +1,4 @@
-// Guided onboarding L2-3 (DEC 254o c, DEC 254n 3): the hosted setup run on the deployed API. Who may start, re-run, stop, confirm and discard (a live company owner or admin, or the
+// Guided onboarding L2-3 (DEC 254o c, DEC 254n 3): the hosted setup run on the deployed API. Who may start, re-run and stop (a live company owner or admin, or the
 // project's administrator), who may only read (a project user), and who sees nothing (anyone else, another company, a missing or malformed project: one uniform 404); one run per
 // project; a re-run only proposes; an audit record naming the person for every act; a start refused before anything is written when the company or the install cannot run it.
 import { randomUUID } from "node:crypto";
@@ -106,7 +106,7 @@ describe("hosted setup run: who may do what", () => {
     expect(read.status).toBe(200);
     expect(read.body).toMatchObject({ status: "none", canManage: false });
     expect((await call(get(`${RUN}/journal`), reader)).body).toEqual({ status: "none", entries: [], hostAsks: [] });
-    for (const [path, body] of [[RUN, { requestId: randomUUID() }], [`${RUN}/stop`, { requestId: randomUUID() }], [`${RUN}/confirm`, { requestId: randomUUID(), expectedRevision: 1 }], [`${RUN}/discard`, {}]] as const) {
+    for (const [path, body] of [[RUN, { requestId: randomUUID() }], [`${RUN}/stop`, { requestId: randomUUID() }]] as const) {
       const refused = await call(post(path, body), reader);
       expect(refused.status, path).toBe(403);
       expect(refused.body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
@@ -139,6 +139,18 @@ describe("hosted setup run: who may do what", () => {
     expect(own.body).toMatchObject({ status: "none" });
     expect(own.raw).not.toContain(FAKE_COMPANY);
     expect(await pointerOf(world, OTHER, "ledger")).toBeUndefined();
+  });
+
+  it("reads nothing for a malformed project name: no standing is asked and no project key is built from it", async () => {
+    const { world, person, call, standing } = await setupWorld();
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    const reads = vi.spyOn(world.store, "get");
+    for (const raw of ["-bad", "a%23b", "a%20b", ".hidden", "x".repeat(101), "%E0%A4%A"]) {
+      const answer = await call(get(`/v1/app/projects/${raw}/setup-agent`), admin);
+      expect({ status: answer.status, body: answer.body }, raw).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } } });
+    }
+    expect(standing).not.toHaveBeenCalled();
+    expect(reads).not.toHaveBeenCalled();
   });
 
   it("refuses in fixed words when the person's standing cannot be read, and reads an answer it does not know as no standing", async () => {
@@ -218,7 +230,7 @@ describe("hosted setup run: starting, re-running and stopping", () => {
   it("refuses a start before writing anything when the company's new tasks are not on the core, or the install has no model gateway", async () => {
     for (const mode of ["no-gateway", "not-on-core"] as const) {
       const { world, person, call, app } = await setupWorld(mode === "no-gateway" ? { gateway: false } : {});
-      if (mode === "not-on-core") vi.spyOn(app, "engineForNewTask").mockReturnValue("workflow" as never);
+      if (mode === "not-on-core") vi.spyOn(app, "engineForNewTask").mockReturnValue("workflow");
       const caller = person("p-owner", FAKE_COMPANY, "owner");
       const answer = await call(post(RUN, { requestId: randomUUID() }), caller);
       expect(answer.status, mode).toBe(503);
@@ -266,16 +278,25 @@ describe("hosted setup run: starting, re-running and stopping", () => {
     expect(setupEvents(world)[1]?.details).toMatchObject({ basis: "company-owner", requestId: stopId });
   });
 
-  it("confirm with no finished run proposes nothing (fixed words) and discard with nothing waiting changes nothing; both are audited with the person", async () => {
-    const { world, person, call } = await setupWorld();
-    const admin = person("p-padmin", FAKE_COMPANY, "member", "administrator");
-    const confirmed = await call(post(`${RUN}/confirm`, { requestId: randomUUID(), expectedRevision: 1 }), admin);
-    expect(confirmed.status).toBe(400);
-    expect(confirmed.body["error"]).toMatchObject({ code: "CONFIG_INVALID" });
+  it("does not serve confirm or discard on hosted Code yet (nothing could approve the candidate): they stay the old broker's 'route not found', writing nothing", async () => {
+    const { world, person, routes } = await setupWorld();
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    for (const path of [`${RUN}/confirm`, `${RUN}/discard`, `${RUN}/command`, `${RUN}/eval-confirm`]) {
+      expect(await routes.route(post(path, { requestId: randomUUID(), expectedRevision: 1 }), admin), path).toBeUndefined();
+    }
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
-    const discarded = await call(post(`${RUN}/discard`, {}), admin);
-    expect(discarded).toMatchObject({ status: 200, body: { discarded: false } });
-    expect((await call(post(`${RUN}/discard`, { extra: 1 }), admin)).status).toBe(400);
-    expect(setupEvents(world).map((event) => [event.action, event.actor.id, event.details?.["basis"]])).toEqual([["setup_run.confirm_requested", "p-padmin", "project-admin"], ["setup_run.discard_requested", "p-padmin", "project-admin"]]);
+    expect(setupEvents(world)).toEqual([]);
+  });
+
+  it("refuses the start in fixed words, writing nothing, when the standing cannot be read again inside the start", async () => {
+    let calls = 0;
+    const { world, person, call } = await setupWorld({ standing: async () => { if (calls++ === 0) return { access: "manage", basis: "company-owner" }; throw new Error("down detail"); } });
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    const answer = await call(post(RUN, { requestId: randomUUID() }), owner);
+    expect(answer.status).toBe(503);
+    expect(answer.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: SETUP_RUN_UNREADABLE } });
+    expect(answer.raw).not.toContain("down detail");
+    expect(await pointerOf(world, FAKE_COMPANY)).toBeUndefined();
+    expect(setupEvents(world)).toEqual([]);
   });
 });

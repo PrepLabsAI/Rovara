@@ -168,8 +168,6 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/stop", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
-  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },
-  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/discard", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

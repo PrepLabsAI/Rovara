@@ -5,29 +5,29 @@
 //   POST /v1/app/projects/{project}/setup-agent            start a run, or RE-RUN one that ended ({ requestId }); 202 started, 200 a repeat of the same request id
 //   POST /v1/app/projects/{project}/setup-agent/stop       stop the running run ({ requestId })
 //   GET  /v1/app/projects/{project}/setup-agent/journal    the run's journal (`?after=<n>`) and the websites it asked for
-//   POST /v1/app/projects/{project}/setup-agent/confirm    "Use this setup": the run's verified commands become a CANDIDATE revision checked on a fresh workspace (apply.ts); nothing is applied
-//   POST /v1/app/projects/{project}/setup-agent/discard    drop a waiting candidate ({}); applies nothing
+//
+// NOT served here yet: confirm ("Use this setup") and discard. On hosted Code nothing can approve the candidate a confirm writes (no setup-proposal decision subject is wired), and the
+// hosted project registration would then fail on the occupied candidate revision. They stay the laptop's until the hosted approval exists (Question L2-3 in the build tracker).
 //
 // Rules:
 //   - The company is the caller's LIVE membership (the dev routes' `companyOf`), never a header, a query, a body or a token claim; every key is the company's own (the runtime's).
-//   - Who (DEC 254n 3, the rule of PR 16's `lifecycleAccess`): a live owner or admin of the company, or an administrator of the project, MANAGES (starts, re-runs, stops, confirms,
-//     discards); a person who uses the project (a developer grant) READS the run and its journal; anyone else, another company's project, a missing one and a malformed name all answer
+//   - Who (DEC 254n 3, the rule of PR 16's `lifecycleAccess`): a live owner or admin of the company, or an administrator of the project, MANAGES (starts, re-runs, stops); a person who uses the project (a developer grant) READS the run and its journal; anyone else, another company's project, a missing one and a malformed name all answer
 //     the same 404 "project not found". The standing is read live on every request, again inside the start (the start's own access check), and before every step the run takes
 //     (`hostedTaskAccess.checkStep` for a setup run). A change by a reader is 403 in fixed words.
 //   - One run per project: the core's conditional pointer write (`setupAgentPointerItem`) in the start's own transaction. A re-run of a working project only PROPOSES: the project's
 //     commands change only after confirm, a passing check on a fresh workspace and an approval (apply.ts); a failed or stopped re-run never replaces a working setup.
-//   - Every start, re-run, stop, confirm and discard leaves an audit record naming the person and why they were allowed (the runtime's audit sink): a start's in the start's own
+//   - Every start, re-run and stop leaves an audit record naming the person and why they were allowed (the runtime's audit sink): a start's in the start's own
 //     transaction; the others' before the act, so nothing is done when the record cannot be written.
 //   - A start needs the company on the core for NEW tasks and the install's model gateway (which meters the run); otherwise a fixed 503 and nothing is written.
 //   - Bodies are the core's strict schemas (a request id and nothing else for start and stop: limits, payer and goal never come from the client).
 import { AgentXError, agentXError, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
-import { z } from "zod";
+import type { z } from "zod";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { startTask } from "../core/task-flow/start.js";
 import { cancelTask } from "../core/task-flow/cancel.js";
 import { SetupAgentStartBodySchema, SetupAgentStopBodySchema, getSetupAgent, readState, startSetupAgent, stopSetupAgent, type SetupAgentDeps } from "../core/setup-agent/agent.js";
-import { SetupConfirmBodySchema, confirmSetupAgent, discardSetupApply, type SetupApplyDeps } from "../core/setup-agent/apply.js";
+import type { SetupApplyDeps } from "../core/setup-agent/apply.js";
 import { readSetupJournal } from "../core/setup-agent/journal.js";
 import { listHostAsks } from "../core/setup-agent/host-ask.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
@@ -75,9 +75,8 @@ export interface HostedSetupRunInput {
   now: () => number;
 }
 
-const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard))?$/u;
+const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal))?$/u;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
-const DiscardBodySchema = z.object({}).strict();
 
 /** Whether this method and path is the hosted setup run's. */
 export function isSetupRunPath(path: string, method: string): boolean {
@@ -85,7 +84,7 @@ export function isSetupRunPath(path: string, method: string): boolean {
   if (match === null) return false;
   const tail = match[2];
   if (method === "GET") return tail === undefined || tail === "journal";
-  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard";
+  if (method === "POST") return tail === undefined || tail === "stop";
   return false;
 }
 
@@ -210,18 +209,11 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
     }
     if (tail === "stop") {
       const body = parsed(SetupAgentStopBodySchema, raw);
-      await recorded(input, auditEvent(input, "setup_run.stop_requested", `setup_run.stop:${companyId}:${project}:${body.requestId}`, project, basis, { requestId: body.requestId }));
+      await recorded(input, auditEvent(input, "setup_run.stop_requested", `setup_run.stop:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
       const answer = await stopSetupAgent(deps, project, body, personId);
       return json(answer.status, { ...answer.view, canManage: true });
     }
-    if (tail === "confirm") {
-      const body = parsed(SetupConfirmBodySchema, raw);
-      await recorded(input, auditEvent(input, "setup_run.confirm_requested", `setup_run.confirm:${companyId}:${project}:${body.requestId}`, project, basis, { requestId: body.requestId }));
-      return json(200, await confirmSetupAgent(deps, project, body, personId));
-    }
-    parsed(DiscardBodySchema, raw);
-    await recorded(input, auditEvent(input, "setup_run.discard_requested", `setup_run.discard:${companyId}:${project}:${String(input.now())}`, project, basis, {}));
-    return json(200, { discarded: await discardSetupApply(deps, project, personId) });
+    throw agentXError("NOT_FOUND", "route not found");
   } catch (error) {
     if (error instanceof AgentXError) {
       // The core names a missing project with its name; here every missing or unseen project reads the same.
