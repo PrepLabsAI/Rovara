@@ -113,7 +113,7 @@ import { installCompanyBindings } from "./slack-install-company.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
-import type { DeveloperTaskActions } from "./developer-task-actions.js";
+import type { DeveloperTaskActions } from "./developer-task-actions.js"; import type { ClientProjectNaming } from "./company-project-names.js";
 import {
   createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
   confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
@@ -225,13 +225,13 @@ export interface DeveloperRouteDependencies {
   /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
   lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
-  createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
+  createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
   clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
   /** Guided onboarding PR 6: one project from several repositories (all on the caller's company's installations, or nothing is created). */
-  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest) => Promise<{ name: string; latestRevision: number }>;
+  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
   /** Guided onboarding PR 6: one project per repository, with one result row each. */
-  createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest) => Promise<BulkCreateClientProjectsResponse>;
+  createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<BulkCreateClientProjectsResponse>;
   /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
   clientRepositoryChoices?: (developerId: string, query: { q?: string | undefined; limit?: number | undefined; after?: string | undefined }) => Promise<ClientRepositoryChoicesResponse>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
@@ -1472,6 +1472,26 @@ async function routeClientLifecycle(deps: DeveloperRouteDependencies, request: A
     linkedSlackChannels: async (companyId, project) => (await bindingsOf(deps, undefined, companyId)).filter((binding) => binding.projectName === project).length,
   }, { personId: person.developerId, project: rawProject, action, body: request.body });
 }
+// Guided onboarding PR 19 (declared here, merged into the interface above, so the line-keyed company inventory rows above stay where they are).
+export interface DeveloperRouteDependencies {
+  /**
+   * Design section 4, DEC 254l: the company this person is a live owner or admin of, read now by the same membership reader the create's repository
+   * isolation uses; undefined for anyone else. Absent where repositories are not checked against the company's GitHub bindings, so there only a Rovara
+   * administrator creates projects.
+   */
+  companyProjectCreator?: (developerId: string) => Promise<string | undefined>;
+}
+
+/**
+ * Guided onboarding PR 19: a signed-in person who is not a Rovara administrator may create projects (and read the repository pickers) only as a live owner or
+ * admin of the company their sign-in resolved, by the isolation's own reader, and only while their sign-in record is not revoked. Never from the request.
+ */
+async function companyMayCreateProjects(deps: DeveloperRouteDependencies, creator: { developerId: string; companyId?: string }): Promise<boolean> {
+  if (deps.companyProjectCreator === undefined || creator.companyId === undefined) return false;
+  if (await deps.companyProjectCreator(creator.developerId) !== creator.companyId) return false;
+  const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${creator.developerId}`);
+  return person !== undefined && person.revoked !== true;
+}
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
 /**
@@ -1506,7 +1526,8 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   if (creating || bulk || choosing || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
     const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
     requireRouteScope(route, creator);
-    if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+    // Guided onboarding PR 19: or a live owner or admin of the caller's own company; the Rovara administrator's path is unchanged and reads nothing more.
+    if (!creator.administrator && !await companyMayCreateProjects(deps, creator)) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project"); const naming: [] | [ClientProjectNaming] = creator.administrator ? [] : [{ perCompany: true }]; // L2-1: a company's creates use its own names; the administrator's calls are unchanged
     if (choosing) {
       if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
@@ -1517,7 +1538,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
       if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-      const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data);
+      const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data, ...naming);
       logDeveloperEvent({ event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
         ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
         created: answer.results.filter((row) => row.outcome === "created").length });
@@ -1533,7 +1554,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       const many = CreateClientProjectsRequestSchema.safeParse(body);
       if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
-      const created = await deps.createClientProjects(creator.developerId, many.data);
+      const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
       logDeveloperEvent({ event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
         ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }) });
       return readClientProject(deps, creator.developerId, created.name, creator.companyId);
@@ -1541,7 +1562,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
     const parsed = CreateClientProjectRequestSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-    const created = await deps.createClientProject(creator.developerId, parsed.data);
+    const created = await deps.createClientProject(creator.developerId, parsed.data, ...naming);
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
     return readClientProject(deps, creator.developerId, created.name, creator.companyId);
   }
