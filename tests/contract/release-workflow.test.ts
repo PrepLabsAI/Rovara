@@ -85,7 +85,7 @@ describe("release workflow", () => {
     expect(wf.jobs.npm?.permissions).toEqual({ contents: "read", "id-token": "write" });
   });
 
-  it("builds arm64 images with buildx, pushes a single-manifest image, and cross-checks the registry digest before publishing", async () => {
+  it("builds the images with buildx (the worker for arm64 and amd64, see worker-image-platforms.test.ts), pushes one digest per image, and cross-checks the registry digest before publishing", async () => {
     const wf = await workflow();
     const steps = wf.jobs.images!.steps;
     const buildxIndex = steps.findIndex((s) => s.uses?.startsWith("docker/setup-buildx-action"));
@@ -98,8 +98,8 @@ describe("release workflow", () => {
     expect(buildxIndex).toBeLessThan(pushStepIndex);
 
     expect(push).toContain("--platform linux/arm64");
-    // Without these, buildx pushes an OCI index (image + attestations), not a single arm64
-    // manifest, and the digest read back would be the index's, not the image's.
+    // Without these, buildx adds attestation entries to the pushed index, and the digest read back would
+    // be the index's, not the image's. With them, the worker's index lists exactly its platforms.
     expect(push).toContain("--provenance=false");
     expect(push).toContain("--sbom=false");
     expect(push).toContain("containerimage.digest");
