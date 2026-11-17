@@ -1,6 +1,7 @@
 import { slackRecordScope } from "./slack-workspace-tokens.js";
 import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
+import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, type CompanyInviteList, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
@@ -161,6 +162,10 @@ export interface DeveloperApiConfiguration {
   signInClients?: SignInClientRegistry;
   companies?: CompanyMembershipReader;
   companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<boolean>;
+  /** DEC 253z: `POST /v1/dev/company`'s forward to the sign-in Lambda (companySelfCreateThroughLambda). Absent: that route is unknown. */
+  companySelfCreate?: (request: CompanySelfCreateRequest) => Promise<CompanySelfCreateAnswer>;
+  /** DEC 254a: the install's invite codes and self-serve switch, through the sign-in Lambda (companyInvitesThroughLambda), for an install administrator's changes and list. */
+  companyInvites?: CompanyInviteRegistry;
   /** Lane W part 4: T3b's member helper (companyMemberActionsThroughLambda), the only way the admin routes list, remove or change a member. Absent: those routes are unknown. */
   companyMembers?: CompanyMemberActions;
   /**
@@ -252,7 +257,7 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
   request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest | CompanyPreapprovalRequest,
+    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest | CompanyPreapprovalRequest | CompanySelfCreateRequest | CompanyInviteRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -462,6 +467,65 @@ export function companyPreapprovalsThroughLambda(invoke: (payload: Uint8Array) =
     if (!parsed.success) return false;
     const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok === true ? true : reply.ok === false ? false : undefined, "developer.company_preapproval");
     return answer === true;
+  };
+}
+
+/** DEC 253z: the only self-serve event broker code builds. The person is the verified caller; the code travels only as its hash. */
+type CompanySelfCreateRequest = { kind: "company-self-create"; personId: string; name: string; codeHash: string };
+export type CompanySelfCreateAnswer = { ok: true; companyId: string; companyName: string } | { ok: false; error: "refused" | "already_member" | "rate_limited" | "unavailable" };
+const CompanySelfCreateInvoke = z.object({ kind: z.literal("company-self-create"), personId: z.string().regex(/^[a-f0-9]{64}$/), name: CompanySelfServeNameSchema, codeHash: CompanyInviteCodeHashSchema }).strict();
+const CompanySelfCreateReply = z.union([
+  z.object({ ok: z.literal(true), companyId: OrgIdSchema, companyName: z.string().min(1).max(80) }).strict(),
+  z.object({ ok: z.literal(false), error: z.enum(["refused", "already_member", "rate_limited", "unavailable"]) }).strict(),
+]);
+export function companySelfCreateThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: CompanySelfCreateRequest) => Promise<CompanySelfCreateAnswer> {
+  return async (request) => {
+    const parsed = CompanySelfCreateInvoke.safeParse(request);
+    if (!parsed.success) return { ok: false, error: "unavailable" };
+    const answer = await identityInvoke(invoke, parsed.data, (reply) => { const read = CompanySelfCreateReply.safeParse(reply); return read.success ? read.data : undefined; }, "developer.company_self_create");
+    const read = CompanySelfCreateReply.safeParse(answer);
+    return read.success ? read.data : { ok: false, error: "unavailable" };
+  };
+}
+
+/** DEC 254a: what an install administrator's changes and list ask of the sign-in Lambda, which owns the codes. */
+type CompanyInviteRequest =
+  | { kind: "company-invite-create"; codeHash: string; expiresInHours: number; createdBy: string }
+  | { kind: "company-invite-list" }
+  | { kind: "company-invite-revoke"; codeId: string; createdBy: string }
+  | { kind: "company-self-serve-set"; open: boolean; createdBy: string };
+export interface CompanyInviteRegistry {
+  create(codeHash: string, expiresInHours: number, createdBy: string): Promise<string>;
+  list(): Promise<CompanyInviteList>;
+  /** False: no live code has that id. */
+  revoke(codeId: string, createdBy: string): Promise<boolean>;
+  setSelfServe(open: boolean, createdBy: string): Promise<void>;
+}
+const Person = z.string().regex(/^[a-f0-9]{64}$/);
+const CompanyInviteInvoke = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("company-invite-create"), codeHash: CompanyInviteCodeHashSchema, expiresInHours: z.number().int().min(1).max(720), createdBy: Person }).strict(),
+  z.object({ kind: z.literal("company-invite-list") }).strict(),
+  z.object({ kind: z.literal("company-invite-revoke"), codeId: CompanyInviteCodeIdSchema, createdBy: Person }).strict(),
+  z.object({ kind: z.literal("company-self-serve-set"), open: z.boolean(), createdBy: Person }).strict(),
+]);
+export function companyInvitesThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): CompanyInviteRegistry {
+  const unreachable = () => agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach its sign-in service; try again");
+  const ask = async <T>(request: CompanyInviteRequest, read: (reply: Record<string, unknown>) => T | undefined, notFound?: T): Promise<T> => {
+    const parsed = CompanyInviteInvoke.safeParse(request);
+    if (!parsed.success) throw agentXError("CONFIG_INVALID", "that invite code change is not one AgentX can make");
+    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok === true ? read(reply) : reply.ok === false && reply.error === "not_found" && notFound !== undefined ? notFound : undefined, "developer.company_invites");
+    if (typeof answer === "object" && answer !== null && "ok" in answer && (answer as { ok: unknown }).ok === false) throw unreachable();
+    return answer as T;
+  };
+  return {
+    create: (codeHash, expiresInHours, createdBy) => ask({ kind: "company-invite-create", codeHash, expiresInHours, createdBy }, (reply) => CompanyInviteCodeIdSchema.safeParse(reply.codeId).success ? reply.codeId as string : undefined),
+    list: () => ask({ kind: "company-invite-list" }, (reply) => {
+      const { ok: _ok, ...rest } = reply; void _ok;
+      const parsed = CompanyInviteListSchema.safeParse(rest);
+      return parsed.success ? parsed.data : undefined;
+    }),
+    revoke: (codeId, createdBy) => ask<boolean>({ kind: "company-invite-revoke", codeId, createdBy }, () => true, false),
+    setSelfServe: async (open, createdBy) => { await ask({ kind: "company-self-serve-set", open, createdBy }, () => true); },
   };
 }
 
@@ -910,6 +974,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   let clientId: string;
   let companyId: string | undefined;
   let sessionFacts: AccessCheckContext["session"];
+  let companyless = false;
   if (basic !== undefined) {
     const client = await signInClientOf(deps, basic.clientId);
     if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || parsed.data.developerId === undefined) throw refused();
@@ -918,10 +983,12 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     companyId = await clientCompany(deps, client, developerId);
   } else {
     if (parsed.data.developerId !== undefined) throw refused();
-    const authenticated = await authenticateClientToken(deps, authorization, nowSeconds);
+    // DEC 253z: the person's own token is the one form that may answer for a person with no company yet (the web app's "create your company").
+    const authenticated = await authenticateClientToken(deps, authorization, nowSeconds, { companyless: true });
     ({ developerId, administrator } = authenticated);
     clientId = authenticated.client.clientId;
     companyId = authenticated.companyId;
+    companyless = authenticated.companyless === true;
     sessionFacts = { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator };
   }
   const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
@@ -933,6 +1000,11 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     if (install === "refused") throw refused();
     access = install === undefined ? await projectsAPersonUses(deps, developerId) : install.access;
     if (install?.company !== undefined) company = install.company;
+  } else if (companyless) {
+    // DEC 253z: no company yet: who they are, no company fields, no projects. Nothing company-scoped is read.
+    const person = await getSignIn<Pick<DeveloperRecord, "displayName" | "displayNameChosen" | "revoked">>({ ...deps, documentClient: scope!.client }, `DEVELOPER#${developerId}`);
+    access = person === undefined || person.revoked !== false || typeof person.displayName !== "string" ? undefined
+      : { displayName: person.displayName, nameChosen: person.displayNameChosen === true, projects: [], notices: [] };
   } else {
     access = await projectsAPersonUses({ ...deps, documentClient: scope!.client }, developerId, companyId);
     // DEC 253z: the company, its role and its name, from live membership read on this call.
@@ -1080,10 +1152,25 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
 }
 
 /**
+ * DEC 253z: is this live session one with no company? Only the install-level web app with full access, the install's own OIDC sign-in, a session
+ * that names no company, NO membership row for the person at all (a removed member's row stays, so they stay refused), and a sign-in record the
+ * no-company sign-in wrote (never a legacy person's). Read live, on the sign-in table; any doubt is no.
+ */
+async function companylessSession(deps: DeveloperRouteDependencies, client: SignInClientRecord, session: SessionRecord): Promise<boolean> {
+  if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || session.amr !== "oidc" || session.companyId !== undefined) return false;
+  try {
+    const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
+    if (membership.Item !== undefined) return false;
+    const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
+    return developer?.revoked === false && developer.companyless === true;
+  } catch { return false; }
+}
+
+/**
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; stepUp?: CallerStepUp }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; stepUp?: CallerStepUp }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -1107,8 +1194,15 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
     if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
       || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)) throw refused();
-    const companyId = await clientCompany(deps, client, session.developerId);
-    const companyDeveloper = await companyOidcSession(deps, session, companyId);
+    let companyId: string | undefined;
+    let companyless = false;
+    try { companyId = await clientCompany(deps, client, session.developerId); }
+    catch (error) {
+      // DEC 253z: only a caller that asked for it (the access check, company create) takes a session with no company, and only as `companylessSession` reads it now.
+      if (options.companyless !== true || !await companylessSession(deps, client, session)) throw error;
+      companyless = true;
+    }
+    const companyDeveloper = companyless ? undefined : await companyOidcSession(deps, session, companyId);
     if (companyDeveloper === undefined && (!deps.developer.methods[amr] || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
     const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
     if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
@@ -1119,7 +1213,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     // step-up on Code's own page, `acr_values=step-up`), never anything else the request sends. The route checks its age.
     const stepUp = stepUpOf(claims);
     return {
-      client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt,
+      client, ...(companyId === undefined ? {} : { companyId }), ...(companyless ? { companyless: true as const } : {}), developerId: session.developerId, sessionId: claims.sid, amr,
+      administrator: amr === "oidc" && session.administrator === true && !companyless, scopes, startedAt: session.startedAt,
       ...(stepUp === undefined ? {} : { stepUp }),
     };
   } catch (error) {
@@ -1155,7 +1250,7 @@ export async function authenticateCaller(deps: DeveloperRouteDependencies, autho
 }
 
 /** As `authenticateCaller`, with the step-up the VERIFIED token carries (lane W; its age is checked by the route that needs it). */
-async function authenticateCallerWithStepUp(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<{ caller: DeveloperCaller; stepUp?: CallerStepUp }> {
+async function authenticateCallerWithStepUp(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute, options: { companyless?: true } = {}): Promise<{ caller: DeveloperCaller; stepUp?: CallerStepUp }> {
   let azp: unknown;
   try {
     azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
@@ -1168,7 +1263,7 @@ async function authenticateCallerWithStepUp(deps: DeveloperRouteDependencies, au
     // The Rovara CLI's token (or a tool holding it) never carries a step-up here: a merge or a loosened rule is a web client's press (plan 7.2 change 5).
     return { caller: await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization)) };
   }
-  const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));
+  const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000), options);
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   requireRouteScope(route, person);
@@ -1673,6 +1768,33 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   return { ok: true };
 }
 
+/**
+ * DEC 253z, 254a: `POST /v1/dev/company`. A signed-in person with no company makes their own, with an operator's invite code, from the web app only.
+ * The code is hashed here and only the hash travels; the sign-in Lambda counts the try, then checks the code, the switch and membership in one
+ * transaction. Every code problem and a closed switch get one answer. The session still names no company afterwards: the web app signs the person
+ * in again (a switch of company is a new sign-in).
+ */
+async function companySelfCreateRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<CompanySelfCreateResponse> {
+  if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // The route table's `full` row is applied while authenticating, before anything else is read.
+  const { caller } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route, { companyless: true });
+  if (caller.webApp !== true) throw agentXError("FORBIDDEN", "creating a company is done in the Rovara web app");
+  const create = deps.developer.companySelfCreate;
+  if (create === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const body = CompanySelfCreateBodySchema.safeParse(jsonBody(request));
+  if (!body.success) throw agentXError("CONFIG_INVALID", COMPANY_SELF_CREATE_TEXT.badName);
+  // A missing, non-text or overlong code is hashed as the empty code: the same reads and the same answer as any unknown code.
+  const code = typeof body.data.inviteCode === "string" && body.data.inviteCode.length <= COMPANY_INVITE_CODE_MAX ? body.data.inviteCode : "";
+  const answer = await create({ kind: "company-self-create", personId: caller.developerId, name: body.data.name, codeHash: companyInviteCodeHash(code) });
+  if (answer.ok) return { companyId: answer.companyId, companyName: answer.companyName, companyRole: "owner" };
+  if (answer.error === "refused") throw agentXError("FORBIDDEN", COMPANY_SELF_CREATE_TEXT.refused);
+  if (answer.error === "already_member") throw agentXError("ALREADY_IN_ORG", COMPANY_SELF_CREATE_TEXT.alreadyMember);
+  if (answer.error === "rate_limited") throw agentXError("TOO_MANY_REQUESTS", COMPANY_SELF_CREATE_TEXT.rateLimited);
+  throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach its sign-in service; try again");
+}
+
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
 export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
@@ -1701,6 +1823,7 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
+  if (url.pathname === "/v1/dev/company") return companySelfCreateRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
   if (url.pathname.startsWith("/review/link/")) {
     const links = deps.channelLinks;

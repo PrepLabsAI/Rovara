@@ -1,5 +1,5 @@
 // Sign-in-table membership, preapprovals and operator writes. No token claim is authority.
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, companyScoped } from "@agentx/contracts";
@@ -12,7 +12,12 @@ import { CompanyIssuerRecord, CompanyIssuerSettings, companyIssuerKey } from "./
 export const CompanyPersonId = z.string().regex(/^[a-f0-9]{64}$/);
 export const CompanyEmail = z.string().trim().min(3).max(320).email();
 export const CompanyExpiryHours = z.number().int().min(1).max(720);
-export const CompanyRecord = z.object({ entityType: z.literal("COMPANY"), companyId: OrgIdSchema, name: z.string().min(1).max(80), status: z.literal("active"), createdAt: z.iso.datetime(), createdBy: z.literal("operator") });
+// DEC 253z: a company is made by an operator, or by its first owner with an operator's invite code ("self-serve", naming that person). Old rows ("operator") still read.
+export const CompanyRecord = z.object({ entityType: z.literal("COMPANY"), companyId: OrgIdSchema, name: z.string().min(1).max(80), status: z.literal("active"), createdAt: z.iso.datetime(),
+  createdBy: z.enum(["operator", "self-serve"]), selfServedBy: z.string().regex(/^[a-f0-9]{64}$/).optional() })
+  .refine((record) => (record.createdBy === "self-serve") === (record.selfServedBy !== undefined), "a self-serve company names its first owner");
+/** A new company id: 128 random bits in base 36, as the operator's create has always made them. */
+export const generateCompanyId = () => `org_${BigInt(`0x${randomBytes(16).toString("hex")}`).toString(36).padStart(20, "0").slice(-20)}`;
 export const CompanyPreapproval = z.object({
   entityType: z.literal("COMPANY_PREAPPROVAL"), role: z.enum(["admin", "member"]), status: z.enum(["live", "used", "withdrawn"]),
   expiresAt: z.number().int().positive(), createdAt: z.iso.datetime(), createdBy: z.union([z.literal("operator"), CompanyPersonId]),
@@ -67,8 +72,9 @@ export class CompanySignInStore {
       if (!await this.companyExists(input.companyId)) return refused();
       let legacy = false;
       if (input.companyId === IMPLICIT_COMPANY_ID) {
-        const developer = z.object({ entityType: z.literal("DEVELOPER"), provider: z.enum(["slack", "oidc"]), issuer: z.string().min(1), subject: z.string().min(1), revoked: z.literal(false), firstSignInAt: z.iso.datetime() }).safeParse(await this.read({ pk: `DEVELOPER#${input.personId}`, sk: "META" }));
-        legacy = developer.success && ownerKeyForSubject(developer.data.issuer, developer.data.subject) === input.personId;
+        const developer = z.object({ entityType: z.literal("DEVELOPER"), provider: z.enum(["slack", "oidc"]), issuer: z.string().min(1), subject: z.string().min(1), revoked: z.literal(false), firstSignInAt: z.iso.datetime(), companyless: z.unknown().optional() }).safeParse(await this.read({ pk: `DEVELOPER#${input.personId}`, sk: "META" }));
+        // DEC 253z: a record first written by a sign-in with no company is never "legacy": that person joins only by invitation or their own company.
+        legacy = developer.success && developer.data.companyless === undefined && ownerKeyForSubject(developer.data.issuer, developer.data.subject) === input.personId;
       }
       const key = input.email === undefined || !CompanyEmail.safeParse(input.email).success ? undefined : preapprovalKey(input.companyId, input.email);
       const approval = !legacy && key !== undefined ? CompanyPreapproval.safeParse(await this.read(key)) : undefined;
@@ -144,7 +150,7 @@ export class CompanySignInStore {
     });
     return { preapprovals, more: answer.LastEvaluatedKey !== undefined };
   }
-  private memberMirror(member: Member): Write {
+  memberMirror(member: Member): Write {
     return { Put: { TableName: this.input.tableName, Item: { ...member, ...companyMemberKey(member.companyId, member.personId), entityType: "COMPANY_MEMBER_VIEW" } } };
   }
   /** Stable snapshot CAS protects role, revocation and mirror contents against concurrent writers. */

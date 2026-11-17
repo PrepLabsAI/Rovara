@@ -5,6 +5,7 @@
 // answers: a newer control plane may add fields, kinds, statuses, methods, outcomes and refusal
 // reasons, and an older CLI must still read the answer (R23), so those are plain strings there.
 import { SignInClientIdSchema, SignInClientRegistrationSchema } from "./sign-in-clients.js";
+import { CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteExpiryHoursSchema } from "./company-invites.js";
 import { ChatGptModelIdSchema } from "./chatgpt.js";
 import { z } from "zod";
 import { INDEX_EXPIRY_ATTRIBUTE } from "./admin.js";
@@ -44,6 +45,8 @@ export const AdminChangeKindSchema = z.enum([
   "set_chatgpt",
   // Spec 063: services that sign Rovara users in.
   "register_sign_in_client", "remove_sign_in_client",
+  // DEC 254a: operator invite codes for self-serve company creation, and the self-serve switch.
+  "create_company_invite", "revoke_company_invite", "set_company_self_serve",
 ]);
 export type AdminChangeKind = z.infer<typeof AdminChangeKindSchema>;
 export const ConfirmationMethodSchema = z.enum(["elicitation", "slack", "cli"]);
@@ -65,6 +68,10 @@ export const AdminChangeInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("set_chatgpt"), enabled: z.boolean().optional(), preferredModel: ChatGptModelIdSchema.optional() }).strict(),
   z.object({ kind: z.literal("register_sign_in_client"), clientId: SignInClientIdSchema, registration: SignInClientRegistrationSchema }).strict(),
   z.object({ kind: z.literal("remove_sign_in_client"), clientId: SignInClientIdSchema }).strict(),
+  // DEC 254a: the CLI makes the code and sends only its hash; the code never reaches a change, a record or a log.
+  z.object({ kind: z.literal("create_company_invite"), codeHash: CompanyInviteCodeHashSchema, expiresInHours: CompanyInviteExpiryHoursSchema }).strict(),
+  z.object({ kind: z.literal("revoke_company_invite"), codeId: CompanyInviteCodeIdSchema }).strict(),
+  z.object({ kind: z.literal("set_company_self_serve"), open: z.boolean() }).strict(),
 ]);
 export type AdminChangeInput = z.infer<typeof AdminChangeInputSchema>;
 

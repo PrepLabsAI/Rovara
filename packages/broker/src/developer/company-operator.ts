@@ -1,11 +1,11 @@
 // Imported only by the sign-in Lambda's server. No broker route builds operator-only events.
-import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { IMPLICIT_COMPANY_ID, SignInClientRecordSchema, OrgIdSchema } from "@agentx/contracts";
-import { CompanyEmail, CompanyExpiryHours, CompanyPersonId, type CompanySignInStore } from "./company-membership.js";
+import { CompanySelfServeNameSchema, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteExpiryHoursSchema, IMPLICIT_COMPANY_ID, SignInClientRecordSchema, OrgIdSchema, type CompanyInviteList } from "@agentx/contracts";
+import { CompanyEmail, CompanyExpiryHours, CompanyPersonId, generateCompanyId, type CompanySignInStore } from "./company-membership.js";
 import { emailIndexKey, type DeveloperSignInStore } from "./store.js";
 import { CompanyMemberRefusal, MemberListInput, type CompanyMemberReply } from "./company-member-contract.js";
 import { CompanyIssuerSettings } from "./company-issuer.js";
+import type { CompanyInviteStore, SelfCreateResult } from "./company-invites.js";
 
 const request = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("company-create"), name: z.string().trim().min(1).max(80), firstAdminEmail: CompanyEmail, expiresInHours: CompanyExpiryHours }).strict(),
@@ -18,15 +18,46 @@ const request = z.discriminatedUnion("kind", [
   MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
   z.object({ kind: z.literal("company-signin-client-set"), client: SignInClientRecordSchema }).strict(),
   CompanyIssuerSettings.extend({ kind: z.literal("company-issuer-set"), companyId: OrgIdSchema.refine((id) => id !== IMPLICIT_COMPANY_ID) }).strict(),
+  // DEC 254a: the install's invite codes and self-serve switch (an install administrator's applied change, or a direct operator invoke). Hashes only.
+  z.object({ kind: z.literal("company-invite-create"), codeHash: CompanyInviteCodeHashSchema, expiresInHours: CompanyInviteExpiryHoursSchema, createdBy: CompanyPersonId.optional() }).strict(),
+  z.object({ kind: z.literal("company-invite-list") }).strict(),
+  z.object({ kind: z.literal("company-invite-revoke"), codeId: CompanyInviteCodeIdSchema, createdBy: CompanyPersonId.optional() }).strict(),
+  z.object({ kind: z.literal("company-self-serve-set"), open: z.boolean(), createdBy: CompanyPersonId.optional() }).strict(),
+  // DEC 253z: a signed-in person with no company makes their own, with a code. The broker pins the person; the name is checked again here.
+  z.object({ kind: z.literal("company-self-create"), personId: CompanyPersonId, name: CompanySelfServeNameSchema, codeHash: CompanyInviteCodeHashSchema }).strict(),
 ]);
 export type CompanyOperatorRequest = z.infer<typeof request>;
 export type CompanyOperatorResponse = { ok: true; companyId?: string; preapprovals?: Awaited<ReturnType<CompanySignInStore["list"]>>["preapprovals"]; more?: boolean }
-  | CompanyMemberReply;
-export async function companyOperator(deps: { store: CompanySignInStore; clients?: DeveloperSignInStore; now: () => number; log: (entry: Record<string, unknown>) => void; newCompanyId?: () => string }, event: unknown): Promise<CompanyOperatorResponse> {
+  | CompanyMemberReply | { ok: true; codeId: string } | ({ ok: true } & CompanyInviteList) | SelfCreateResult;
+export async function companyOperator(deps: { store: CompanySignInStore; invites?: CompanyInviteStore; clients?: DeveloperSignInStore; now: () => number; log: (entry: Record<string, unknown>) => void; newCompanyId?: () => string }, event: unknown): Promise<CompanyOperatorResponse> {
   const parsed = request.safeParse(event);
   if (!parsed.success) return { ok: false, error: "invalid_request" };
   try {
     const input = parsed.data;
+    if (input.kind === "company-invite-create" || input.kind === "company-invite-list" || input.kind === "company-invite-revoke" || input.kind === "company-self-serve-set" || input.kind === "company-self-create") {
+      const invites = deps.invites;
+      if (invites === undefined) return { ok: false, error: "unavailable" };
+      switch (input.kind) {
+        case "company-invite-create": {
+          const codeId = await invites.create(input.codeHash, input.expiresInHours, input.createdBy);
+          deps.log({ event: input.kind, codeId });
+          return { ok: true, codeId };
+        }
+        case "company-invite-list": return { ok: true, ...await invites.list() };
+        case "company-invite-revoke": {
+          if (!await invites.revoke(input.codeId, input.createdBy)) return { ok: false, error: "not_found" };
+          deps.log({ event: input.kind, codeId: input.codeId });
+          return { ok: true };
+        }
+        case "company-self-serve-set": await invites.setSelfServe(input.open, input.createdBy); deps.log({ event: input.kind, open: input.open }); return { ok: true };
+        case "company-self-create": {
+          const result = await invites.selfCreate({ personId: input.personId, name: input.name, codeHash: input.codeHash });
+          // Only fixed outcomes and opaque ids: never the name or the code's hash.
+          deps.log(result.ok ? { event: input.kind, companyId: result.companyId, personId: input.personId } : { event: input.kind, refused: result.error, personId: input.personId });
+          return result;
+        }
+      }
+    }
     if (input.kind === "company-signin-client-set") {
       const companyId = input.client.companyId ?? IMPLICIT_COMPANY_ID;
       if (deps.clients === undefined || !await deps.store.companyExists(companyId)) return { ok: false, error: "invalid_request" };
@@ -34,7 +65,7 @@ export async function companyOperator(deps: { store: CompanySignInStore; clients
       deps.log({ event: input.kind, companyId });
       return { ok: true };
     }
-    const companyId = input.kind === "company-create" ? (deps.newCompanyId?.() ?? `org_${BigInt(`0x${randomBytes(16).toString("hex")}`).toString(36).padStart(20, "0").slice(-20)}`) : input.companyId;
+    const companyId = input.kind === "company-create" ? (deps.newCompanyId?.() ?? generateCompanyId()) : input.companyId;
     switch (input.kind) {
       case "company-create": await deps.store.create(companyId, input.name, input.firstAdminEmail, input.expiresInHours); break;
       case "company-preapprove": await deps.store.preapprove(companyId, input.email, input.role, input.expiresInHours, input.createdBy); break;

@@ -3,7 +3,7 @@
 // linked Slack user for the admin, and the ingress's press event.
 import { randomUUID } from "node:crypto";
 import type { AdminChangeInput, EndDeveloperSessionsRequest, ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
-import type { SignInClientRegistry } from "../../packages/broker/src/aws/developer-routes.js";
+import type { CompanyInviteRegistry, SignInClientRegistry } from "../../packages/broker/src/aws/developer-routes.js";
 import { createAdminReadBroker } from "./admin-read-broker.js";
 import { SLACK_TEAM, issuer } from "./slack-broker.js";
 
@@ -43,6 +43,8 @@ export async function createAdminChangeBroker(options: {
   signInClients?: SignInClientRegistry;
   /** Spec 064: the legacy deployment, whose sign-in is for account linking only. */
   linkingOnly?: boolean;
+  /** DEC 254a: the install's invite codes, through DeveloperIdentity. */
+  companyInvites?: CompanyInviteRegistry;
 } = {}): Promise<AdminChangeHarness> {
   let now = Date.now();
   const clock = { now: () => now, advance: (ms: number) => { now += ms; } };
@@ -65,6 +67,7 @@ export async function createAdminChangeBroker(options: {
       endDeveloperSessions: async (request: EndDeveloperSessionsRequest) => { endedSessions.push(request); return { ok: true }; },
       channelByName: async ({ name }) => (channelLookup.down ? { ok: false, error: "slack_unavailable" } : name === "ledger-dev" ? { ok: true, channel: { channelId: "C0LEDGER01", name } } : { ok: true }),
       ...(options.signInClients === undefined ? {} : { signInClients: options.signInClients }),
+      ...(options.companyInvites === undefined ? {} : { companyInvites: options.companyInvites }),
     },
     brokerExtra: {
       ...(options.connectorTypes === undefined ? {} : { connectorTypes: options.connectorTypes }),

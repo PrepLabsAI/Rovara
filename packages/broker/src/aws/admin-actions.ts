@@ -1,7 +1,7 @@
 // packages/broker/src/aws/admin-actions.ts
 // Spec 025 E8, E9, E19: the admin actions 25e's change tools apply that no admin command had. Each
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
-import type { SignInClientRegistry } from "./developer-routes.js";
+import type { CompanyInviteRegistry, SignInClientRegistry } from "./developer-routes.js";
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
@@ -23,6 +23,8 @@ export interface AdminActionDependencies {
   /** Spec 063: the sign-in clients' registry; absent where developer sign-in is not set up. */
   signInClients?: SignInClientRegistry;
   companies?: CompanyMembershipReader;
+  /** DEC 254a: the install's invite codes and self-serve switch, through the sign-in Lambda; absent without the company layer. */
+  companyInvites?: CompanyInviteRegistry;
   now(): number;
 }
 export interface ResolvedDeveloper {
