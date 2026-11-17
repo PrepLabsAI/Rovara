@@ -300,13 +300,28 @@ describe("one workspace per company, one company per workspace (DEC 254l item 4)
     expect(w.slack.revoked).toEqual([]);
     expect(refused.raw).not.toContain(tokenOf("acme-b"));
   });
-  it("DEC 254s: a workspace another company holds: the new token is discarded (no token-store write, in no log line or console output, not in the answer), exact text, no revoke", async () => {
+  it.each(["held before the connect", "bound by A during B's connect (the transaction loses the race)"] as const)("DEC 254s: a workspace another company holds (%s): the new token is discarded (no token-store write, in no log line, console or stdout/stderr output, not in the answer), exact text, no revoke", async (when) => {
     const w = world();
-    expect((await w.connect("acme-code")).status).toBe(200);
+    if (when === "held before the connect") expect((await w.connect("acme-code")).status).toBe(200);
+    else {
+      // A binds T0ACME just before B's conditional transaction runs, so the transaction fails and the fresh read decides.
+      const db = w.deps.documentClient; let raced = false;
+      w.deps.documentClient = { send: async (command: unknown) => {
+        if (!raced && (command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") {
+          raced = true;
+          await createSlackWorkspaceBindings({ client: w.db, tableName: "State" }).bind(A, "T0ACME", "operator");
+        }
+        return db.send(command as never);
+      } } as typeof db;
+    }
     const token = tokenOf("acme-b");
     const callsBefore = w.sm.calls.length; const logsBefore = w.logs.length;
     const printed: string[] = [];
-    const spies = (["log", "info", "warn", "error", "debug"] as const).map((level) => vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { printed.push(args.map((arg) => typeof arg === "string" ? arg : JSON.stringify(arg)).join(" ")); }));
+    const text = (args: unknown[]) => args.map((arg) => typeof arg === "string" ? arg : arg instanceof Uint8Array ? Buffer.from(arg).toString("utf8") : JSON.stringify(arg)).join(" ");
+    const spies = [
+      ...(["log", "info", "warn", "error", "debug"] as const).map((level) => vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { printed.push(text(args)); })),
+      ...([process.stdout, process.stderr] as const).map((stream) => vi.spyOn(stream, "write").mockImplementation(((...args: unknown[]) => { printed.push(text(args.slice(0, 1))); return true; }) as typeof stream.write)),
+    ];
     let refused: Awaited<ReturnType<typeof w.connect>>;
     try { refused = await w.connect("acme-b", w.b); } finally { for (const spy of spies) spy.mockRestore(); }
     expect(refused.status).toBe(409);
@@ -316,6 +331,7 @@ describe("one workspace per company, one company per workspace (DEC 254l item 4)
     expect(w.sm.calls.slice(callsBefore).filter((call) => /^(CreateSecret|PutSecretValue)Command /.test(call))).toEqual([]);
     expect([...w.sm.store.values()].join("\n")).not.toContain(token);
     expect(JSON.stringify([...w.db.items.values()])).not.toContain(token);
+    expect(w.db.get(companyInstallKey(B).pk, "WORKSPACE")).toBeUndefined();
     expect(w.logs.slice(logsBefore)).toEqual([{ companyId: B, event: "slack.install_refused", reason: "workspace_taken", teamId: "T0ACME", actor: PERSON_B }]);
     expect(JSON.stringify(w.logs)).not.toContain(token);
     expect(printed.join("\n")).not.toContain(token);
