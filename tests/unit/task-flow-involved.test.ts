@@ -501,6 +501,13 @@ describe("the involved task ids (the decision cards' second source)", () => {
     expect(await idsOf(w, COMPANY_A_ID, ALICE)).toEqual([taskA.taskId]);
   });
 
+  it("names a task once even when two rows (two creation times) point at it", async () => {
+    const { w, taskA } = await world();
+    await writeInvolvedRow({ store: w.store }, rowFor(taskA, ALICE));
+    await writeInvolvedRow({ store: w.store }, { ...rowFor(taskA, ALICE), createdAt: "2026-01-01T00:00:00.000Z" });
+    expect(await idsOf(w, COMPANY_A_ID, ALICE)).toEqual([taskA.taskId]);
+  });
+
   it("is bounded: at most INVOLVED_EXAMINE_MAX of the newest rows, whatever the person has", async () => {
     const { w, taskA } = await world();
     const ids: string[] = [];

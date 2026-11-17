@@ -218,6 +218,16 @@ describe("taking ownership of an ownerless task", () => {
   });
 });
 
+describe("the task's own person", () => {
+  it("never gets a row for their own task, even when they take the ownerless task back", async () => {
+    const h = harness({ people: { revision: 3, orphaned: true, people: [GALE("commenter")] } });
+    await proposeTaskOwnership(h.deps, GALE_CALLER, TASK_A, { requestId: uuid(7), expectedPeopleRevision: 3 });
+    await expect(confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, uuid(7))).resolves.toMatchObject({ status: "COMMITTED" });
+    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4, orphaned: false, people: [GALE("owner")] });
+    expect(h.involvedItems()).toEqual([]);
+  });
+});
+
 describe("the row People writes is the row the readers use", () => {
   /** The stored row, moved into a store the readers can query (the same keys and fields). */
   const readerStore = (h: ReturnType<typeof harness>) => {
