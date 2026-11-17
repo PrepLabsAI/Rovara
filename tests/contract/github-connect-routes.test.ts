@@ -158,7 +158,22 @@ describe("claim with an installation id", () => {
       if (JSON.stringify(request).includes(tokenFor("alice-code"))) expect(request.url.startsWith("https://api.github.com/")).toBe(true);
       if (JSON.stringify(request).includes(CLIENT_SECRET)) expect(request.url).toBe("https://github.com/login/oauth/access_token");
     }
-    expect((await w.read()).body).toEqual({ installations: [{ installationId: 101, accountLogin: "acme", connectedAt: TIME, connectedBy: { kind: "person", personId: PERSON, name: "Ada Admin" } }], requestId: "company-test" });
+    expect((await w.read()).body).toEqual({ installations: [{ installationId: 101, accountLogin: "acme", status: "active", accountType: "Organization", connectedAt: TIME, connectedBy: { kind: "person", personId: PERSON, name: "Ada Admin" } }], requestId: "company-test" });
+  });
+  it("guided onboarding PR 3: after GitHub's uninstall mark, a claim with a new installation id binds, and the same id comes back only through a claim", async () => {
+    const w = world({ "a1": { id: 7, login: "alice", installations: [ACME], admins: ["acme"] }, "a2": { id: 7, login: "alice", installations: [{ ...ACME, id: 104 }], admins: ["acme"] },
+      "a3": { id: 7, login: "alice", installations: [ACME], admins: ["acme"] } });
+    expect((await w.claim({ state: await w.startState(), code: "a1", installationId: 101 })).status).toBe(200);
+    expect((await w.bindings.markLifecycle(101, "deleted", "550e8400-e29b-41d4-a716-446655440021")).outcome).toBe("marked");
+    expect(((await w.read()).body.installations as Array<Record<string, unknown>>)[0]).toMatchObject({ installationId: 101, status: "uninstalled" });
+    // A webhook never brings it back.
+    expect((await w.bindings.markLifecycle(101, "unsuspend", "550e8400-e29b-41d4-a716-446655440022")).outcome).toBe("unchanged");
+    const fresh = await w.claim({ state: await w.startState(), code: "a2", installationId: 104 });
+    expect(fresh.status).toBe(200); expect(fresh.body.alreadyConnected).toBe(false);
+    const again = await w.claim({ state: await w.startState(), code: "a3", installationId: 101 });
+    expect(again.status).toBe(200); expect(again.body).toMatchObject({ status: "connected", alreadyConnected: false });
+    expect(((await w.read()).body.installations as Array<Record<string, unknown>>).map((row) => [row.installationId, row.status]).sort()).toEqual([[101, "active"], [104, "active"]]);
+    expect(w.logs).toContainEqual({ companyId: A, event: "github.binding_reconnected", installationId: 101, actor: PERSON });
   });
   it("the same installation again for the same company is an idempotent OK that writes nothing new", async () => {
     const w = world({ "a1": { id: 7, login: "alice", installations: [ACME], admins: ["acme"] }, "a2": { id: 7, login: "alice", installations: [ACME], admins: ["acme"] } });

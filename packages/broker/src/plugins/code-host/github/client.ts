@@ -2,7 +2,7 @@ import { createHash, createSign } from "node:crypto";
 import { userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
 import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
-import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -72,6 +72,12 @@ export interface GitHubAppCredentialProviderOptions {
    * an `orgId` scope. Absent on a single-company install.
    */
   requireInstallationBound?: (orgId: OrgId, installationId: number, repository?: { owner: string; name: string }) => Promise<void>;
+  /**
+   * Guided onboarding PR 3, cloud installs only: whether the org's GitHub connection for a repository owner is one GitHub uninstalled or suspended (and none of the org's for that
+   * owner is active). Asked only after GitHub said the App cannot reach the repository, so that refusal reads "GitHub disconnected. Reconnect it in Company settings, Connections."
+   * (GITHUB_NOT_CONNECTED) instead of the install hint. A failed answer keeps the original refusal.
+   */
+  disconnectedFor?: (orgId: OrgId, owner: string) => Promise<boolean>;
   /**
    * Told after each repository-scoped installation token is issued, with what was asked and what GitHub says it granted (permission names, repository names, selection,
    * expiry). Never the token. It lets an operator tell a token GitHub issued with less than was asked, or for another repository, from a refused clone.
@@ -2551,6 +2557,15 @@ export class GitHubAppCredentialProvider {
    * the App has since been reinstalled over (a new id): GitHub is asked once more before the refusal stands.
    */
   private async installed(repository: { owner: string; name: string }, scope: GitHubTokenScope): Promise<InstalledRepository> {
+    try { return await this.installedOnce(repository, scope); } catch (error) {
+      const disconnectedFor = this.options.disconnectedFor;
+      if ("orgId" in scope && disconnectedFor !== undefined && isAgentXError(error) && error.code === "CONFIG_INVALID"
+        && await disconnectedFor(scope.orgId, repository.owner).catch(() => false)) throw agentXError("GITHUB_NOT_CONNECTED", GITHUB_DISCONNECTED_MESSAGE);
+      throw error;
+    }
+  }
+
+  private async installedOnce(repository: { owner: string; name: string }, scope: GitHubTokenScope): Promise<InstalledRepository> {
     let { id, login } = await this.lookedUp(repository, false);
     const check = this.options.requireInstallationBound;
     if ("orgId" in scope && check !== undefined) {

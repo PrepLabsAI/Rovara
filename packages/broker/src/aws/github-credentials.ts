@@ -1,7 +1,7 @@
 // The GitHub App credentials as the broker and the plan evidence job build them: one definition, from the same environment
 // (GITHUB_APP_CREDENTIAL_REF, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN) and the same secret.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, type ClientRepositoriesResponse } from "@agentx/contracts";
+import { AgentXError, agentXError, GITHUB_DISCONNECTED_MESSAGE, IMPLICIT_COMPANY_ID, OrgIdSchema, type ClientRepositoriesResponse } from "@agentx/contracts";
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { boundedCompanyReads } from "./company-check.js";
@@ -105,9 +105,13 @@ const backfillKey = { pk: "GITHUB_INSTALLATION_BINDING", sk: "BACKFILL" };
 const installationIdSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const bindingText = z.string().min(1).max(256);
 const installationSchema = z.object({ installationId: installationIdSchema, accountLogin: bindingText });
+/** Guided onboarding PR 3: an installation's state as GitHub's webhook last said (absent on a row written before: active). */
+export const InstallationStateSchema = z.enum(["active", "suspended", "uninstalled"]);
+export type InstallationState = z.infer<typeof InstallationStateSchema>;
 const bindingSchema = installationSchema.extend({
   entityType: z.literal("GITHUB_INSTALLATION_BINDING"), companyId: OrgIdSchema,
   boundAt: z.iso.datetime(), boundBy: bindingText,
+  state: InstallationStateSchema.optional(), stateAt: z.iso.datetime().optional(), accountType: z.enum(["User", "Organization"]).optional(),
 });
 const markerSchema = z.object({ pk: z.literal("GITHUB_INSTALLATION_BINDING"), sk: z.literal("BACKFILL") }).strict();
 /** Guided onboarding PR 1: the company's own list of the installations bound to it (written in the binding's transaction), for its Connections read. */
@@ -121,8 +125,30 @@ const companyInstallationSchema = z.object({ entityType: z.literal("GITHUB_COMPA
 /** At most this many installations are listed for one company; more refuses the whole read. */
 export const COMPANY_INSTALLATIONS_MAX = 100;
 const PersonIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
-export type PersonClaimOutcome = "bound" | "already_bound" | "taken";
+export type PersonClaimOutcome = "bound" | "already_bound" | "reconnected" | "taken";
 export function githubBindingRefusal() { return agentXError("GITHUB_NOT_CONNECTED", "the GitHub installation is not connected"); }
+/** Guided onboarding PR 3: the refusal for the company's OWN installation that GitHub says is uninstalled or suspended. Never said about another company's. */
+export function githubDisconnectedRefusal() { return agentXError("GITHUB_NOT_CONNECTED", GITHUB_DISCONNECTED_MESSAGE); }
+export function isGithubDisconnected(error: unknown): boolean { return error instanceof AgentXError && error.code === "GITHUB_NOT_CONNECTED" && error.message.endsWith(GITHUB_DISCONNECTED_MESSAGE); }
+/** What GitHub's webhook said happened to an installation, and the state each moves a binding from and to. An uninstalled binding moves again only by a claim. */
+export const LIFECYCLE_TRANSITIONS = {
+  deleted: { from: ["active", "suspended"], to: "uninstalled" },
+  suspend: { from: ["active"], to: "suspended" },
+  unsuspend: { from: ["suspended"], to: "active" },
+} as const satisfies Record<string, { from: readonly InstallationState[]; to: InstallationState }>;
+export type LifecycleAction = keyof typeof LIFECYCLE_TRANSITIONS;
+export type LifecycleOutcome = { outcome: "unbound" } | { outcome: "unchanged"; companyId: string } | { outcome: "marked"; companyId: string; from: InstallationState; to: InstallationState };
+export type DisconnectOutcome = { outcome: "not_found" } | { outcome: "disconnected"; accountLogin: string; accountType?: "User" | "Organization" };
+const DELIVERY = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const stateOf = (row: { state?: InstallationState | undefined }): InstallationState => row.state ?? "active";
+/** The condition that the binding is still exactly what was read: same company, same bind, same state. */
+function sameBinding(row: { companyId: string; boundAt: string; state?: InstallationState | undefined }) {
+  return {
+    ConditionExpression: `companyId = :company AND boundAt = :boundAt AND ${row.state === undefined ? "attribute_not_exists(#state)" : "#state = :read"}`,
+    ExpressionAttributeNames: { "#state": "state" },
+    ExpressionAttributeValues: { ":company": row.companyId, ":boundAt": row.boundAt, ...(row.state === undefined ? {} : { ":read": row.state }) },
+  };
+}
 
 /** Operator writers, plus claimPerson (guided onboarding PR 1: the GitHub connect routes, after the person proved control on GitHub). No HTTP path calls claim. The host owns
  * I/O cancellation; one joined budget checks every await, without detached writes. */
@@ -182,10 +208,102 @@ export class GithubInstallationBindings {
     });
   }
 
+  /** The owner and state of an installation: its binding's, or (no binding) the implicit company's before backfill and nobody's after. */
+  private async ownerAndState(installationId: number): Promise<{ owner: string | undefined; state: InstallationState }> {
+    return this.run(async (send) => {
+      installationIdSchema.parse(installationId);
+      const row = await this.binding(send, installationId);
+      if (row !== undefined) return { owner: row.companyId, state: stateOf(row) };
+      return { owner: await this.marker(send) ? undefined : IMPLICIT_COMPANY_ID, state: "active" as const };
+    });
+  }
+
+  /**
+   * Before every mint for a company: the installation must be bound to it, and (guided onboarding PR 3) active. The company's own uninstalled or suspended
+   * installation gets the one clear sentence (GITHUB_DISCONNECTED_MESSAGE); everything else, another company's included, the one fixed refusal.
+   */
   readonly requireBound = async (companyId: string, installationId: number, _repository?: { owner: string; name: string }): Promise<void> => {
     void _repository;
-    if (!OrgIdSchema.safeParse(companyId).success || await this.ownerOf(installationId) !== companyId) throw githubBindingRefusal();
+    if (!OrgIdSchema.safeParse(companyId).success) throw githubBindingRefusal();
+    const { owner, state } = await this.ownerAndState(installationId);
+    if (owner !== companyId) throw githubBindingRefusal();
+    if (state !== "active") throw githubDisconnectedRefusal();
   };
+
+  /**
+   * Guided onboarding PR 3: whether a repository owner's only connection for `companyId` is one GitHub said is uninstalled or suspended (so a repository GitHub no longer
+   * shows the App is the company's disconnected GitHub, not an unknown one). False when any of the company's bindings for that owner is active, or none names it.
+   */
+  async disconnectedFor(companyId: string, owner: string): Promise<boolean> {
+    const rows = await this.companyInstallations(companyId);
+    const named = rows.filter((row) => row.accountLogin.toLowerCase() === owner.toLowerCase());
+    return named.length > 0 && named.every((row) => row.state !== "active");
+  }
+
+  /**
+   * Guided onboarding PR 3: GitHub's signed webhook says an installation was uninstalled, suspended or unsuspended. The binding (whichever company holds it, found by the
+   * installation id alone) moves state with one conditional transaction, on exactly what was read, with an audit row (actor "github", keyed by the delivery so a redelivery of
+   * a processed event changes nothing). Nothing is deleted. An unbound installation is left alone; an uninstalled one moves again only by a claim.
+   */
+  async markLifecycle(installationId: number, action: LifecycleAction, deliveryId: string): Promise<LifecycleOutcome> {
+    return this.run(async (send) => {
+      installationIdSchema.parse(installationId);
+      if (!DELIVERY.test(deliveryId) || !Object.hasOwn(LIFECYCLE_TRANSITIONS, action)) throw githubBindingRefusal();
+      const transition = LIFECYCLE_TRANSITIONS[action];
+      const auditKey = { pk: `GITHUB_INSTALLATION#${installationId}`, sk: `AUDIT#LIFECYCLE#${deliveryId.toLowerCase()}` };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const row = await this.binding(send, installationId);
+        if (row === undefined) return { outcome: "unbound" };
+        const done = await send(new GetCommand({ TableName: this.tableName, Key: auditKey, ConsistentRead: true }));
+        const from = stateOf(row);
+        if (done.Item !== undefined || !(transition.from as readonly InstallationState[]).includes(from)) return { outcome: "unchanged", companyId: row.companyId };
+        const at = new Date(this.clock()).toISOString();
+        const fence = sameBinding(row);
+        try {
+          await send(new TransactWriteCommand({ TransactItems: [
+            { Update: { TableName: this.tableName, Key: bindingKey(installationId), UpdateExpression: "SET #state = :to, stateAt = :at", ...fence,
+              ExpressionAttributeValues: { ...fence.ExpressionAttributeValues, ":to": transition.to, ":at": at } } },
+            { Put: { TableName: this.tableName, Item: { ...auditKey, entityType: "GITHUB_INSTALLATION_LIFECYCLE_AUDIT", installationId, companyId: row.companyId,
+              action, from, to: transition.to, at, actor: "github", deliveryId: deliveryId.toLowerCase() }, ConditionExpression: "attribute_not_exists(pk)" } },
+          ] }));
+          return { outcome: "marked", companyId: row.companyId, from, to: transition.to };
+        } catch (error) {
+          if (!isConditional(error)) throw error;
+        }
+      }
+      throw githubBindingRefusal();
+    });
+  }
+
+  /**
+   * Guided onboarding PR 3: a company owner unbinds the company's installation (the route checked the role, the step-up and that no project uses it). One conditional
+   * transaction on exactly the binding that was read: the binding and the company's list row go, an audit row naming the person stays (with the claim audits, history is kept),
+   * and the backfill marker must exist (before it, an unbound installation would read as the implicit company's). Another company's, or none: not_found, nothing written.
+   */
+  async disconnect(companyId: string, installationId: number, personId: string): Promise<DisconnectOutcome> {
+    return this.run(async (send) => {
+      OrgIdSchema.parse(companyId); installationIdSchema.parse(installationId); PersonIdSchema.parse(personId);
+      const row = await this.binding(send, installationId);
+      if (row === undefined || row.companyId !== companyId) return { outcome: "not_found" };
+      const at = new Date(this.clock()).toISOString();
+      const fence = sameBinding(row);
+      try {
+        await send(new TransactWriteCommand({ TransactItems: [
+          { ConditionCheck: { TableName: this.tableName, Key: backfillKey, ConditionExpression: "attribute_exists(pk)" } },
+          { Delete: { TableName: this.tableName, Key: bindingKey(installationId), ...fence } },
+          { Delete: { TableName: this.tableName, Key: companyInstallationKey(companyId, installationId) } },
+          { Put: { TableName: this.tableName, Item: { pk: `GITHUB_INSTALLATION#${installationId}`, sk: `AUDIT#DISCONNECT#${at}#${personId}`, entityType: "GITHUB_INSTALLATION_DISCONNECT_AUDIT",
+            installationId, accountLogin: row.accountLogin, companyId, state: stateOf(row), boundAt: row.boundAt, boundBy: row.boundBy, at, actor: personId }, ConditionExpression: "attribute_not_exists(pk)" } },
+        ] }));
+      } catch (error) {
+        // Lost a race: whatever is stored now decides. Gone or someone else's: not found; still ours (changed meanwhile): refused, try again.
+        const now = await this.binding(send, installationId);
+        if (now === undefined || now.companyId !== companyId) return { outcome: "not_found" };
+        throw error;
+      }
+      return { outcome: "disconnected", accountLogin: row.accountLogin, ...(row.accountType === undefined ? {} : { accountType: row.accountType }) };
+    });
+  }
 
   async claim(companyId: string, installationId: number, accountLogin: string, by: string): Promise<void> {
     return this.run(async (send) => {
@@ -215,17 +333,41 @@ export class GithubInstallationBindings {
    * Guided onboarding PR 1: a company owner or admin binds an installation they proved they control (the route checked that against GitHub first).
    * First binder wins with one conditional transaction: the binding (absent), its audit row naming the person, the company's list row, and the
    * backfill marker (present: before backfill every unbound installation is the implicit company's, so the person path never binds then).
-   * Already this company's: nothing is overwritten (the company's list row is put back if it is missing). Another company's: "taken", nothing written.
+   * Already this company's: nothing is overwritten (the company's list row is put back if it is missing, only while that binding still stands). Another company's: "taken", nothing written.
+   * Guided onboarding PR 3: this company's binding that GitHub said is uninstalled or suspended is reconnected by the claim alone (`reconnected`): its state moves to what the
+   * person's GitHub check saw (active, or suspended if GitHub still says so), conditionally on what was read, with an audit row naming the person. A webhook never re-activates
+   * an uninstalled binding. `seen.accountType` is kept on a new binding (for the uninstall page's address).
    */
-  async claimPerson(companyId: string, installation: { installationId: number; accountLogin: string }, personId: string): Promise<PersonClaimOutcome> {
+  async claimPerson(companyId: string, installation: { installationId: number; accountLogin: string }, personId: string, seen: { accountType?: "User" | "Organization"; suspended?: boolean } = {}): Promise<PersonClaimOutcome> {
     return this.run(async send => {
       OrgIdSchema.parse(companyId); installationSchema.parse(installation); PersonIdSchema.parse(personId);
+      const fields = { installationId: installation.installationId, accountLogin: installation.accountLogin, ...(seen.accountType === undefined ? {} : { accountType: z.enum(["User", "Organization"]).parse(seen.accountType) }) };
+      const target: InstallationState = seen.suspended === true ? "suspended" : "active";
       const decide = async (): Promise<PersonClaimOutcome | undefined> => {
         const row = await this.binding(send, installation.installationId);
         if (row !== undefined) {
           if (row.companyId !== companyId) return "taken";
-          await send(new PutCommand({ TableName: this.tableName, Item: companyInstallationRow(companyId, row) }));
-          return "already_bound";
+          const fence = sameBinding(row);
+          const at = new Date(this.clock()).toISOString();
+          if (stateOf(row) === "active" || stateOf(row) === target) {
+            try {
+              await send(new TransactWriteCommand({ TransactItems: [
+                { ConditionCheck: { TableName: this.tableName, Key: bindingKey(installation.installationId), ...fence } },
+                { Put: { TableName: this.tableName, Item: companyInstallationRow(companyId, row) } },
+              ] }));
+            } catch { return undefined; }
+            return "already_bound";
+          }
+          try {
+            await send(new TransactWriteCommand({ TransactItems: [
+              { Update: { TableName: this.tableName, Key: bindingKey(installation.installationId), UpdateExpression: "SET #state = :to, stateAt = :at", ...fence,
+                ExpressionAttributeValues: { ...fence.ExpressionAttributeValues, ":to": target, ":at": at } } },
+              { Put: { TableName: this.tableName, Item: { pk: `GITHUB_INSTALLATION#${installation.installationId}`, sk: `AUDIT#RECONNECT#${at}#${personId}`,
+                entityType: "GITHUB_INSTALLATION_CLAIM_AUDIT", ...fields, companyId, from: stateOf(row), to: target, at, actor: personId }, ConditionExpression: "attribute_not_exists(pk)" } },
+              { Put: { TableName: this.tableName, Item: companyInstallationRow(companyId, row) } },
+            ] }));
+          } catch { return undefined; }
+          return "reconnected";
         }
         if (!await this.marker(send)) return companyId === IMPLICIT_COMPANY_ID ? "already_bound" : "taken";
         return undefined;
@@ -236,8 +378,8 @@ export class GithubInstallationBindings {
       try {
         await send(new TransactWriteCommand({ TransactItems: [
           { ConditionCheck: { TableName: this.tableName, Key: backfillKey, ConditionExpression: "attribute_exists(pk)" } },
-          { Put: { TableName: this.tableName, Item: { ...bindingKey(installation.installationId), ...installation,
-            entityType: "GITHUB_INSTALLATION_BINDING", companyId, boundAt: at, boundBy: personId }, ConditionExpression: "attribute_not_exists(pk)" } },
+          { Put: { TableName: this.tableName, Item: { ...bindingKey(installation.installationId), ...fields,
+            entityType: "GITHUB_INSTALLATION_BINDING", companyId, boundAt: at, boundBy: personId, ...(target === "active" ? {} : { state: target, stateAt: at }) }, ConditionExpression: "attribute_not_exists(pk)" } },
           { Put: { TableName: this.tableName, Item: { pk: `GITHUB_INSTALLATION#${installation.installationId}`, sk: `AUDIT#CLAIM#${at}#${personId}`,
             entityType: "GITHUB_INSTALLATION_CLAIM_AUDIT", ...installation, companyId, at, actor: personId }, ConditionExpression: "attribute_not_exists(pk)" } },
           { Put: { TableName: this.tableName, Item: companyInstallationRow(companyId, { ...installation, boundAt: at, boundBy: personId }) } },
@@ -253,7 +395,7 @@ export class GithubInstallationBindings {
   }
 
   /** Guided onboarding PR 1: the installations bound to `companyId`, from its list, each re-checked against its binding row (a row the binding no longer backs is left out). */
-  async companyInstallations(companyId: string): Promise<Array<z.infer<typeof companyInstallationSchema>>> {
+  async companyInstallations(companyId: string): Promise<Array<z.infer<typeof companyInstallationSchema> & { state: InstallationState; accountType?: "User" | "Organization" }>> {
     return this.run(async send => {
       OrgIdSchema.parse(companyId);
       const pk = companyInstallationKey(companyId, 1).pk;
@@ -270,7 +412,8 @@ export class GithubInstallationBindings {
       const listed = [];
       for (const row of rows) {
         const binding = await this.binding(send, row.installationId);
-        if (binding?.companyId === companyId) listed.push({ ...row, accountLogin: binding.accountLogin, boundAt: binding.boundAt, boundBy: binding.boundBy });
+        if (binding?.companyId === companyId) listed.push({ ...row, accountLogin: binding.accountLogin, boundAt: binding.boundAt, boundBy: binding.boundBy, state: stateOf(binding),
+          ...(binding.accountType === undefined ? {} : { accountType: binding.accountType }) });
       }
       return listed;
     });

@@ -1622,10 +1622,11 @@ async function githubConnectRoute(deps: DeveloperRouteDependencies, request: Ada
   if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
   const route = devRouteOf(request.method, url.pathname);
   if (route === undefined) throw agentXError("NOT_FOUND", "not found");
-  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  // Guided onboarding PR 3: the step-up the verified token carries travels beside the caller, for disconnect (its age is checked there).
+  const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  return routeGithubConnect({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url);
+  return routeGithubConnect({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url, stepUp);
 }
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
