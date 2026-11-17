@@ -13,14 +13,14 @@
 // Settings (the function's environment, both the broker and the dispatcher): ROVARA_CORE_MODEL_GATEWAY_URL (the gateway's https origin) and
 // ROVARA_CORE_AGENT_MODEL (an Anthropic model id). Both absent: nothing is built and the model-keys point stays empty, so the registry refuses the switch
 // by name, as before. One without the other, or either malformed, refuses in fixed words (no value is echoed).
-import { TASK_KEY_PURPOSE, type InvocationModelRoute, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
+import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, TASK_KEY_PURPOSE, type InvocationModelRoute, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
 import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
 import type { ModelGateway } from "../core/model-gateway/route.js";
 import type { TaskTokenDescriber } from "../core/model-gateway/token.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
-export const CORE_MODEL_GATEWAY_URL_VARIABLE = "ROVARA_CORE_MODEL_GATEWAY_URL";
-export const CORE_AGENT_MODEL_VARIABLE = "ROVARA_CORE_AGENT_MODEL";
+// The names are the deployment's (contracts/core-engine-infra.ts: the stack parameters CoreModelGatewayHost and CoreAgentModel set them).
+export { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE };
 /** The model-keys adapter's name: the keys are the gateway's. */
 export const GATEWAY_MODEL_KEYS = "model-gateway";
 

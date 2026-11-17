@@ -42,7 +42,10 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "channels.adapters")).toMatchObject({ where: "stack parameter ChannelAdapters on agentx-staging-control-plane" });
     // Migration plan v3.2 lane E2: the core engine switch, off until set.
     expect(rows.find((row) => row.key === "coreEngine.switch")).toMatchObject({ where: "stack parameter CoreEngine on agentx-staging-control-plane" });
-    expect(rows).toHaveLength(19);
+    // Core switch-on blocker (2026-11-17): the model gateway settings, empty until set.
+    expect(rows.find((row) => row.key === "coreEngine.modelGatewayUrl")).toMatchObject({ value: "", where: "stack parameter CoreModelGatewayHost on agentx-staging-control-plane" });
+    expect(rows.find((row) => row.key === "coreEngine.agentModel")).toMatchObject({ value: "", where: "stack parameter CoreAgentModel on agentx-staging-control-plane" });
+    expect(rows).toHaveLength(21);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

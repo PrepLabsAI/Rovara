@@ -60,6 +60,9 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   CoreCompanyDayCapUsd: "1000",
   CorePolicyHook: policyHookWorstCase(),
   CoreLessons: `on:org_${"a".repeat(20)}:org_${"b".repeat(20)}`,
+  // The gateway host and agent model at their parameters' longest (CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_AGENT_MODEL_MAX_LENGTH).
+  CoreModelGatewayHost: `${"g".repeat(36)}.${"h".repeat(9)}.dev:65535`,
+  CoreAgentModel: `claude-${"m".repeat(33)}`,
 };
 const RANDOM = "A1B2C3D4E5F6G";
 const UUID = "12345678-1234-1234-1234-123456789012";
