@@ -1,4 +1,5 @@
-// DEC 254zb (TE-C5 part C): what one machine of each size costs, for the spend estimate a machine start asks admission with.
+// DEC 254zb (TE-C5 part C): what one machine of each size costs, for the setup card's cost note and, once the owner decides how machine time meets the
+// spending caps (plan Q5), a machine start's admission estimate. Nothing charges or holds money from this table yet.
 //
 // A pinned table, not a live AWS Price List read: the EC2 offer file is several gigabytes, too big for a Lambda to read per start. The figures are the on-demand Linux,
 // shared-tenancy list prices per hour, the same in us-east-1 and us-west-2 (Code's SUPPORTED_REGIONS), as of PRICES_CHECKED; a release re-checks them with a read-only
@@ -25,8 +26,6 @@ export const MACHINE_HOURLY_USD: Readonly<Record<string, number>> = Object.freez
 
 const MICROS_PER_USD = 1_000_000;
 
-/** The row a worker launches as with no (runnable) choice: the launch template's own m6g.large. */
-export const MACHINE_DEFAULT_ROW_ID = "arm64-2-8";
 
 /** The cautious cost of `minutes` (a whole number, 1 to 10,080) on one machine of `rowId` in `region`. Undefined for anything not in the table. */
 export function machineCost(rowId: unknown, region: unknown, minutes: number): Cost | undefined {

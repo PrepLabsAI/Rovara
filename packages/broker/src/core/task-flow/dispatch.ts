@@ -32,7 +32,6 @@ import {
 import { serialWorkerCanResume } from "../work-breakdown/parallel-parts.js";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
 import { admit, releaseAdmission } from "./admission.js";
-import { machineStartEstimate } from "../test-env/machine-size-cost.js";
 import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
@@ -203,10 +202,8 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
 
   let reservationId: string | undefined;
   // A machine that does not exist yet is new spend: ask admission once for it (each machine of the workspace has its own key), before it starts.
-  // DEC 254zb: with sized launches on, a machine start carries the cautious cost of one hour of the size it launches as; off, the request is exactly today's.
-  const machineEstimate = () => machineStartEstimate({ store: deps.store, companyId: deps.companyId, projectName: workspace.projectName, now: () => (deps.now?.() ?? new Date()).getTime() });
   if (workspace.machine === undefined) {
-    const admitted = await admit(deps, { idempotencyKey: `machine.start:${workspace.id}:${(workspace.machineGeneration ?? 0) + 1}`, action: "machine.start", projectName: workspace.projectName, subject: { type: "workspace", id: workspace.id }, ...(await machineEstimate()) });
+    const admitted = await admit(deps, { idempotencyKey: `machine.start:${workspace.id}:${(workspace.machineGeneration ?? 0) + 1}`, action: "machine.start", projectName: workspace.projectName, subject: { type: "workspace", id: workspace.id } });
     if ("refusal" in admitted) return endAndAck("FAILED", admitted.refusal.message.replace(`${admitted.refusal.code}: `, ""));
     reservationId = admitted.reservationId;
   }
@@ -218,7 +215,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // The adapter gave a different machine than the one the workspace knew (the old one was reaped and the key started a new one): that is a new machine,
     // admitted on its own like any other. Refused, it is stopped again at once.
     if (workspace.machine !== undefined && handle.machineId !== workspace.machine.machineId) {
-      const replacement = await admit(deps, { idempotencyKey: `machine.start:${workspace.id}:${(workspace.machineGeneration ?? 0) + 1}`, action: "machine.start", projectName: workspace.projectName, subject: { type: "workspace", id: workspace.id }, ...(await machineEstimate()) });
+      const replacement = await admit(deps, { idempotencyKey: `machine.start:${workspace.id}:${(workspace.machineGeneration ?? 0) + 1}`, action: "machine.start", projectName: workspace.projectName, subject: { type: "workspace", id: workspace.id } });
       if ("refusal" in replacement) {
         await deps.machines.terminate(handle.machineId);
         return endAndAck("FAILED", replacement.refusal.message.replace(`${replacement.refusal.code}: `, ""));
