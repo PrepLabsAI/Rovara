@@ -9,7 +9,7 @@
 // failure says fixed words only (never the gateway's answer, a URL, a token or a cause).
 import { randomUUID } from "node:crypto";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
-import { OfferedAgentModelsSchema, OrgIdSchema, TASK_KEY_PURPOSE, type OfferedAgentModels, type OrgId, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES } from "@agentx/contracts";
+import { OfferedAgentModelsSchema, OrgIdSchema, TASK_KEY_PURPOSE, type OfferedAgentModels, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES } from "@agentx/contracts";
 import type { TokenSigner } from "../developer/tokens.js";
 import { readGatewayModelAccess, readGatewayUrl } from "./gateway-model-access.js";
 import type { OfferedModelsReader } from "./gateway-model-selection.js";
@@ -137,7 +137,7 @@ export function adminOfferedModelsFromEnvironment(env: NodeJS.ProcessEnv, taskTo
     let tokens: { signer: TokenSigner; issuer: string } | undefined;
     try { tokens = taskTokens(); } catch { throw failed(); }
     if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "") throw failed();
-    const answer = await offeredModelsReader({ gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) }).offered(companyId as OrgId);
+    const answer = await offeredModelsReader({ gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) }).offered(companyId);
     const parsed = OfferedAgentModelsSchema.safeParse(answer);
     if (!parsed.success) throw failed();
     return parsed.data;

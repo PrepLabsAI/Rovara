@@ -28,7 +28,7 @@ async function boundedJson(response: Response): Promise<unknown> {
   // Read with a running byte cap: a chunked answer with no length is never buffered past the limit.
   const chunks: Uint8Array[] = [];
   let total = 0;
-  const reader = response.body?.getReader();
+  const reader = response.body?.getReader() as ReadableStreamDefaultReader<Uint8Array> | undefined;
   for (;;) {
     if (reader === undefined) break;
     const { done, value } = await reader.read();

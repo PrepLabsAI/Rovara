@@ -78,7 +78,8 @@ describe(`GET ${CORE_OFFERED_MODELS_ADMIN_PATH}`, () => {
       const { handler } = await createAdminBroker({ linking: people.linking as never, coreOfferedModels: gatewayReads.read });
       const answer = await adminCall(handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH });
       expect(answer.status, company).toBe(200);
-      expect(answer.body, company).toEqual({ ...offeredAnswer(expected), requestId: expect.any(String) });
+      expect(answer.body, company).toMatchObject(offeredAnswer(expected));
+      expect(Object.keys(answer.body).sort(), company).toEqual(["models", "requestId", "version"]);
       expect(gatewayReads.asked, company).toEqual([company]);
       expect(people.asked.length, company).toBe(1);
     }
