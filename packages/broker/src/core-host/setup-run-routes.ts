@@ -53,7 +53,7 @@ export interface HostedSetupRunWiring {
   standing(personId: string, companyId: OrgId, project: string): Promise<SetupRunStanding>;
   /** Whether the install's model gateway is configured (it meters and prices a run). False: a start is refused. */
   modelAccessConfigured(): boolean;
-  /** The code host's file read at a commit, for re-reading a proposal's citations. Absent: every item is `unchecked` (and confirm refuses). */
+  /** The code host's file read at a commit, for re-reading a proposal's citations. Absent: every item is `unchecked`. */
   readFile?: SetupAgentDeps["readFile"];
   /** A person's display name, for "stopped by". Absent or unknown: "Unknown". */
   displayName?: ((personId: string) => Promise<string | undefined>) | undefined;
