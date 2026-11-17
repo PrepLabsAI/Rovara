@@ -10,7 +10,7 @@
 // NOT HERE (part C): who may call `recordMachineMeasurement`. It trusts that the caller already authenticated the worker's lease and the operation (as `handleNightlyResultCallback` does); the route, the job queue and
 // the advertising of `task.testEnvProveMeasure.v1` are not built yet, so no production caller exists.
 import {
-  MACHINE_SIZE_ROWS, MachineFactsSchema, SetupProveResultBodySchema, agentXError, machineAdviceOf, machineFactsOf, machineRowLabel, MACHINE_STORED_ONLY_LINE, projectPk, when,
+  MACHINE_SIZE_ROWS, MachineFactsSchema, SetupProveResultBodySchema, agentXError, machineAdviceOf, machineCostWords, machineFactsOf, machineRowLabel, MACHINE_STORED_ONLY_LINE, projectPk, when,
   type DocumentKey, type MachineFacts, type OrgId,
 } from "@agentx/contracts";
 import { documentOf, expired, expiryOf, type TestEnvDeps } from "./deps.js";
@@ -98,7 +98,8 @@ export interface MachineCard {
   chosenRowId?: string;
   measuredPeakMemoryMiB?: number;
   testTimeMs?: number;
-  choices: readonly { id: string; label: string }[];
+  /** Each size's label and, in fixed words, what it would cost compared with the standard size. */
+  choices: readonly { id: string; label: string; costNote?: string }[];
 }
 
 /** What the setup card shows for a proposal or approved digest. Undefined while the switch is off (the card is then exactly what it was). At most two stored rows are read. */
@@ -110,7 +111,7 @@ export async function machineCard(deps: TestEnvDeps, orgId: OrgId, project: stri
   const chosenLabel = chosen === undefined ? undefined : machineRowLabel(chosen);
   return {
     lines: [advice.headline, `Why: ${advice.reasons.join("; ")}`, `Your choice: ${chosenLabel ?? "none yet"}`, MACHINE_STORED_ONLY_LINE],
-    choices: MACHINE_SIZE_ROWS.map((row) => ({ id: row.id, label: machineRowLabel(row.id)! })),
+    choices: MACHINE_SIZE_ROWS.map((row) => ({ id: row.id, label: machineRowLabel(row.id)!, ...(machineCostWords(row.id) === undefined ? {} : { costNote: machineCostWords(row.id)! }) })),
     ...(facts?.peakMemoryMiB === undefined ? {} : { measuredPeakMemoryMiB: facts.peakMemoryMiB }),
     ...(facts?.suiteMs === undefined ? {} : { testTimeMs: facts.suiteMs }),
     ...(advice.row === undefined ? {} : { suggestedRowId: advice.row.id }), ...(chosen === undefined ? {} : { chosenRowId: chosen }),

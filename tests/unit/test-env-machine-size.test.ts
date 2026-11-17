@@ -135,6 +135,16 @@ describe("the person's choice", () => {
     expect(String((error as Error).message)).not.toContain(CANARY);
     expect(await w.store.get(testEnvMachineChoiceKey(BENCH_ORG, w.project))).toBeUndefined();
   });
+  it.each([["arm64-16-64"], ["arm64-32-128"], ["x86_64-16-64"], ["x86_64-32-128"]])("accepts the big size %s", async (rowId) => {
+    const w = await world();
+    await setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId });
+    expect(await readMachineChoice(w.deps, BENCH_ORG, w.project)).toBe(rowId);
+  });
+  it.each([["arm64-64-256"], ["x86_64-64-256"], ["arm64-12-48"], ["m6g.4xlarge"], ["arm64-16-64 "]])("refuses the unlisted size %j and stores nothing", async (rowId) => {
+    const w = await world();
+    await expect(setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(await w.store.get(testEnvMachineChoiceKey(BENCH_ORG, w.project))).toBeUndefined();
+  });
   it("every listed row is accepted", async () => {
     const w = await world();
     for (const row of MACHINE_SIZE_ROWS) { await setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId: row.id }); expect(await readMachineChoice(w.deps, BENCH_ORG, w.project)).toBe(row.id); }
@@ -179,6 +189,26 @@ describe("the card", () => {
     expect(card?.lines[1]).toBe("Why: peak memory 6246 MiB; memory headroom 1.5x; peak memory includes file cache; suite 35 min; current chip retained; an ARM run does not prove x86 compatibility");
     expect(card?.lines[2]).toBe("Your choice: x86, 4 vCPU, 16 GB");
     expect(card?.lines[3]).toBe("Stored only: Rovara does not launch this size yet.");
+  });
+  it("suggests a big size from a big measured peak and a long suite", async () => {
+    const w = await world();
+    await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest, { fullSuite: { peakMemoryMiB: 30_000, durationMs: 35 * 60_000, tests: 10 } })) });
+    expect((await machineCard(w.deps, BENCH_ORG, w.project, w.digest))?.suggestedRowId).toBe("arm64-16-64");
+    const long = await world();
+    await recordMachineMeasurement(long.deps, { orgId: BENCH_ORG, project: long.project, body: body(reportFor(long.digest, { steps: [{ step: "full_suite", status: "passed", durationMs: 90 * 60_000 }], fullSuite: { peakMemoryMiB: 30_000, durationMs: 90 * 60_000, tests: 10 } })) });
+    const card = await machineCard(long.deps, BENCH_ORG, long.project, long.digest);
+    expect(card?.suggestedRowId).toBe("arm64-32-128");
+    expect(card?.lines[0]).toBe("Suggested machine: ARM, 32 vCPU, 128 GB");
+    expect(card?.lines[1]).toContain("long suite; one size larger to shorten it");
+  });
+  it("lists all ten sizes, each with its cost impact in words", async () => {
+    const w = await world();
+    const card = await machineCard(w.deps, BENCH_ORG, w.project, w.digest);
+    expect(card?.choices.map((choice) => choice.id)).toEqual(MACHINE_SIZE_ROWS.map((row) => row.id));
+    expect(card?.choices).toHaveLength(10);
+    expect(card?.choices.find((choice) => choice.id === "arm64-16-64")).toEqual({ id: "arm64-16-64", label: "ARM, 16 vCPU, 64 GB", costNote: "About 8 times the cost of the standard size, about $0.68 an hour." });
+    expect(card?.choices.find((choice) => choice.id === "x86_64-32-128")?.costNote).toBe("About 20 times the cost of the standard size, about $1.69 an hour.");
+    for (const choice of card!.choices) expect(choice.costNote).toBeDefined();
   });
   it("the suggestion does not depend on the choice", async () => {
     const w = await world();

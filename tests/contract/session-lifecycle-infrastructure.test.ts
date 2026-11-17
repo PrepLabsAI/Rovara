@@ -94,7 +94,12 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     const statements = roleStatements(roleId);
     const launch = statements.find((s) => s.Sid === "LaunchFromTemplate")!;
     expect(Object.keys(launch.Condition!).sort()).toEqual(["ArnEquals", "StringEquals"]);
-    expect(launch.Condition!.StringEquals).toEqual({ "ec2:InstanceType": ["m6g.large", "m6g.xlarge", "m6g.2xlarge", "m6i.large", "m6i.xlarge", "m6i.2xlarge"] });
+    expect(launch.Condition!.StringEquals).toEqual({ "ec2:InstanceType": ["m6g.large", "m6g.xlarge", "m6g.2xlarge", "m6g.4xlarge", "m6g.8xlarge", "m6i.large", "m6i.xlarge", "m6i.2xlarge", "m6i.4xlarge", "m6i.8xlarge"] });
+    // DEC 254zr: exactly the ten types, no wildcard, no duplicate, nothing outside the m6g and m6i families up to 8xlarge.
+    const types = launch.Condition!.StringEquals["ec2:InstanceType"] as string[];
+    expect(types).toHaveLength(10);
+    expect(new Set(types).size).toBe(10);
+    for (const type of types) expect(type).toMatch(/^m6[gi]\.(large|xlarge|2xlarge|4xlarge|8xlarge)$/u);
     expect(launch.Resource).toEqual({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ec2:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":instance/*"]] });
     // Every grant that can create an instance carries the type condition: no other RunInstances statement names instance/*.
     const instanceGrants = statements.filter((s) => [s.Action].flat().includes("ec2:RunInstances") && JSON.stringify(s.Resource).includes("instance/*"));

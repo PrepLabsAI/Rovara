@@ -28,9 +28,9 @@ function world(env: NodeJS.ProcessEnv = ON) {
 
 describe("machine size pick: the switch", () => {
   it.each([
-    [{}, false], [{ ROVARA_MACHINE_SIZE_RUN: "1" }, false], [{ ROVARA_MACHINE_SIZE: "1" }, false], [{ ...ON, ROVARA_MACHINE_SIZE_RUN: "true" }, false],
+    [{}, false], [{ ROVARA_MACHINE_SIZE_RUN: "1" }, true], [{ ROVARA_MACHINE_SIZE: "1" }, false], [{ ...ON, ROVARA_MACHINE_SIZE: "0" }, false], [{ ...ON, ROVARA_MACHINE_SIZE_RUN: "true" }, false],
     [{ ...ON, ROVARA_MACHINE_SIZE_RUN: " 1" }, false], [{ ...ON, ROVARA_TEST_ENVIRONMENT: "0" }, false], [ON, true],
-  ])("is on only with exactly \"1\" and the choice switch on: %j -> %s", (env, on) => {
+  ])("is on only with exactly \"1\" and the choice switch not turned off (it is on by default, DEC 254zr stack): %j -> %s", (env, on) => {
     expect(machineSizeRunEnabled(env)).toBe(on);
   });
 

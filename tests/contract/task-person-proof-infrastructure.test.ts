@@ -221,24 +221,28 @@ describe("the named TEST proof-only installation gate", () => {
     // core-gateway-settings.test.ts and verified: with the variable passed as before, the old pins hold); legacy unchanged.
     // Guided onboarding PR 4 (#836, DEC 254r item 2): named and foreign re-pinned for the sign-in Lambda's one Slack workspace token statement (secretsmanager CreateSecret,
     // PutSecretValue, GetSecretValue on agentx/<env>/slack-workspaces/*; developer-signin-infrastructure.test.ts pins it exactly). Verified: with only that statement removed, the old pins hold; legacy unchanged.
+    // Machine size stack (#877 infra + #887 + DEC 254zr, 2026-11-17): named, foreign AND legacy re-pinned. The session provisioner's RunInstances grant carries the ec2:InstanceType allow-list
+    // (infra/lib/session-lifecycle.ts, session-lifecycle-infrastructure.test.ts pins it exactly): six types in #877/#887, ten with DEC 254zr. Verified: removing only the four types m6g.4xlarge,
+    // m6g.8xlarge, m6i.4xlarge and m6i.8xlarge from every ec2:InstanceType list gives the #887 head's digests (named 69aa57be..., foreign 3c33651d..., legacy f9e67a89...; the same without the route),
+    // so DEC 254zr moves these pins by exactly those four strings. The older pins below this note did not hold at the #887 head either (its six types moved them first).
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "56585ffd2c1581b2920df568a77dfbcf6504d7fa41714a9baf824753185cc947",
-        withoutRoute: "f52329983db36a52bc1e2e90c98908fee2dc152a6891647adcdd9045e1ed29ac",
+        withRoute: "1cab3910386278db8eaff63c71ce6f5d4b200ed7367ab7c2d478c82303d2f3e2",
+        withoutRoute: "b04e3e78fd6f5670361f11fcf29d834aa37dd8e4104b251e8d182465e24e8d54",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "feb9693bf3da472c9a060e4c87221a9ae2b0a661ec4b0a9935f1b25663e76f8b",
-        withoutRoute: "524270619e97c8bd495ff0f6e56e52108dbed3a656829a0d32fd9de2b947c311",
+        withRoute: "4632cca667dcd453ec25513284a6fc94a988e998d45071de88257a4726d775f0",
+        withoutRoute: "11a8f860a239a49e737fe6d4c01bc4d61b03536145df060c204f17ea927808de",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "c9cd4a7890c9d0502fa0df7e5e06a28f87c0dba8de4fa439db39c7099874c201",
-        withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
+        withRoute: "fb615f5080ef0e1f150fd31b126abdf58b4d4b98fce05ec7cdc4e8e0cef37713",
+        withoutRoute: "1dfb78fb22ba60f3e3f899c8452f62f8b0c34fe5442ce3860d2482c0753ac113",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();

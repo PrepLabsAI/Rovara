@@ -9,9 +9,13 @@ export const MACHINE_LAUNCH_TYPES: Readonly<Record<string, MachineLaunch>> = Obj
   "arm64-2-8": Object.freeze({ instanceType: "m6g.large", chip: "arm64" }),
   "arm64-4-16": Object.freeze({ instanceType: "m6g.xlarge", chip: "arm64" }),
   "arm64-8-32": Object.freeze({ instanceType: "m6g.2xlarge", chip: "arm64" }),
+  "arm64-16-64": Object.freeze({ instanceType: "m6g.4xlarge", chip: "arm64" }),
+  "arm64-32-128": Object.freeze({ instanceType: "m6g.8xlarge", chip: "arm64" }),
   "x86_64-2-8": Object.freeze({ instanceType: "m6i.large", chip: "x86_64" }),
   "x86_64-4-16": Object.freeze({ instanceType: "m6i.xlarge", chip: "x86_64" }),
   "x86_64-8-32": Object.freeze({ instanceType: "m6i.2xlarge", chip: "x86_64" }),
+  "x86_64-16-64": Object.freeze({ instanceType: "m6i.4xlarge", chip: "x86_64" }),
+  "x86_64-32-128": Object.freeze({ instanceType: "m6i.8xlarge", chip: "x86_64" }),
 });
 
 /** Every type a worker may launch as: the IAM allow-list of the provisioner's RunInstances. */

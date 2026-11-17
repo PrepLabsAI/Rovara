@@ -8,7 +8,7 @@
 import type { Cost } from "./ports/json.js";
 import { MACHINE_LAUNCH_TYPES } from "./machine-size-launch.js";
 
-export const MACHINE_PRICES_CHECKED = "2026-11-17 (AWS on-demand list prices; re-check on staging before switch-on)";
+export const MACHINE_PRICES_CHECKED = "2026-11-17 (AWS on-demand list prices; the 16 vCPU and 32 vCPU rows read from a public AWS price listing; re-check on staging before switch-on)";
 /** The regions whose list price for these types is the one below. */
 export const MACHINE_PRICE_REGIONS: readonly string[] = Object.freeze(["us-east-1", "us-west-2"]);
 /** Added on top of the list price, in percent, so an estimate is never below what AWS charges. */
@@ -19,9 +19,13 @@ export const MACHINE_HOURLY_USD: Readonly<Record<string, number>> = Object.freez
   "m6g.large": 0.077,
   "m6g.xlarge": 0.154,
   "m6g.2xlarge": 0.308,
+  "m6g.4xlarge": 0.616,
+  "m6g.8xlarge": 1.232,
   "m6i.large": 0.096,
   "m6i.xlarge": 0.192,
   "m6i.2xlarge": 0.384,
+  "m6i.4xlarge": 0.768,
+  "m6i.8xlarge": 1.536,
 });
 
 const MICROS_PER_USD = 1_000_000;
@@ -37,4 +41,25 @@ export function machineCost(rowId: unknown, region: unknown, minutes: number): C
   // Whole numbers only (list prices have at most 4 decimals): micros per hour, times (100 + margin) percent, times minutes, over 60 x 100, rounded up.
   const microsPerHour = Math.round(hourly * MICROS_PER_USD);
   return { micros: Math.ceil((microsPerHour * (100 + MACHINE_PRICE_MARGIN_PERCENT) * minutes) / 6000), currency: "USD" };
+}
+
+/** The row every size is compared with: today's default launch. */
+const COST_BASELINE_ROW = "arm64-2-8";
+
+/**
+ * The cost impact of a size in fixed words, for the setup screen: how many times the standard size's hourly price it is, and about what an hour costs (cautious estimate, rounded up to whole cents).
+ * Undefined for anything not in the table. It says what the size would cost to run; it is not a charge.
+ */
+export function machineCostWords(rowId: unknown): string | undefined {
+  if (typeof rowId !== "string" || !Object.hasOwn(MACHINE_LAUNCH_TYPES, rowId)) return undefined;
+  const hourly = MACHINE_HOURLY_USD[MACHINE_LAUNCH_TYPES[rowId]!.instanceType];
+  const base = MACHINE_HOURLY_USD[MACHINE_LAUNCH_TYPES[COST_BASELINE_ROW]!.instanceType];
+  const perHour = machineCost(rowId, MACHINE_PRICE_REGIONS[0], 60);
+  if (hourly === undefined || base === undefined || perHour === undefined) return undefined;
+  const cents = Math.ceil(perHour.micros / 10_000);
+  const dollars = `about $${String(Math.floor(cents / 100))}.${String(cents % 100).padStart(2, "0")} an hour`;
+  if (rowId === COST_BASELINE_ROW) return `The standard size, ${dollars}.`;
+  const ratio = hourly / base;
+  const times = ratio >= 10 ? Math.round(ratio) : Math.round(ratio * 10) / 10;
+  return `About ${Number.isInteger(times) ? String(times) : times.toFixed(1)} times the cost of the standard size, ${dollars}.`;
 }
