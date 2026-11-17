@@ -79,7 +79,7 @@ import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
 import { hostedAnswersModel } from "../core-host/gateway-answers.js";
-import { createModelStartRouter } from "../core/answers/model-start-router.js";
+import { hostedStartRoute } from "../core/answers/model-start-router.js";
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE, adminOfferedModelsFromEnvironment, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { companyEngineModelRoute, companyEngineModelStartCheck, type EngineModelOfferedReader } from "../core-host/company-engine-model.js";
 import { evalReservationModules } from "../core-host/eval-authority-http.js";
@@ -591,10 +591,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // the classifier is unavailable (small talk is still answered, free). The hourly counter is stored per company, project and person.
           startSuggest: {
             standing: setupRunStanding,
-            route: (companyId, scope) => {
-              const model = answersModel()?.(companyId);
-              return model === undefined ? undefined : createModelStartRouter({ model, companyId, project: scope.project, personId: scope.personId });
-            },
+            route: hostedStartRoute(answersModel),
           },
           // Lead 4 J1: the smart Just answer. Any live role on the project asks (the setup run's standing); the code is the project's own repositories on the company's code host. The model is the gateway's
           // "answers" purpose (Cloud lane L4-E; L4-AG): the company's own key, its own monthly limit, a fresh answers token per call. No gateway configured (or a Bedrock-only agent model, or no task-token key):

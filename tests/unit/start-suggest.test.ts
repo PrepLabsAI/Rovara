@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, REQUEST_ROUTER_SYSTEM_PROMPT, START_SUGGEST_WORDS, StartSuggestResponseSchema, pickOfKind, requestRouterPrompt, type OrgId, type RequestRouteKind, type RequestRouteOutcome,
 } from "@agentx/contracts";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createStartSuggest, type StartRouter } from "../../packages/broker/src/core/answers/start-suggest.js";
 import { isStartSuggestPath, routeHostedStartSuggest, type HostedStartSuggestWiring } from "../../packages/broker/src/core-host/start-suggest-routes.js";
 import { createLocalStartSuggest } from "../../packages/broker/src/local/app/project-start-suggest.js";
@@ -116,12 +117,14 @@ describe("the suggest service", () => {
 describe("the hosted route", () => {
   function world(standings: Record<string, SetupRunStanding["access"]>, route?: StartRouter) {
     const standingCalls: string[] = [];
+    // The hourly counter is stored in each company's own store.
+    const stores = new Map<OrgId, MemoryDocumentStore>([[A, new MemoryDocumentStore()], [B, new MemoryDocumentStore()]]);
     const wiring: HostedStartSuggestWiring = {
       standing: async (personId, companyId, project) => { standingCalls.push(`${companyId}/${project}/${personId}`); const access = standings[`${companyId}/${project}/${personId}`] ?? "none"; return access === "manage" ? { access, basis: "company-admin" } : { access }; },
       ...(route === undefined ? {} : { route: (companyId: OrgId) => (companyId === A ? route : undefined) }),
     };
     const post = async (companyId: OrgId, personId: string, input: unknown, path = PATH, overrides: Partial<HostedStartSuggestWiring> = {}) => {
-      const answered = await routeHostedStartSuggest({ request: { method: "POST", path, headers: {}, body: typeof input === "string" ? input : JSON.stringify(input) }, path, personId, companyId, wiring: { ...wiring, ...overrides }, now: () => T0 });
+      const answered = await routeHostedStartSuggest({ request: { method: "POST", path, headers: {}, body: typeof input === "string" ? input : JSON.stringify(input) }, path, personId, companyId, store: stores.get(companyId) ?? new MemoryDocumentStore(), wiring: { ...wiring, ...overrides }, now: () => T0 });
       return { status: answered.statusCode, body: JSON.parse(answered.body ?? "{}") as Record<string, unknown>, raw: answered.body ?? "" };
     };
     return { post, standingCalls };

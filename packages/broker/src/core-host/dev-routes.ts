@@ -376,7 +376,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         if (isStartSuggestPath(path, request.method)) {
           // Lead 4 J3: the member company's own role read live inside; nothing is stored or started.
           if (target.wiring.startSuggest === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedStartSuggest({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, wiring: target.wiring.startSuggest, now: () => nowOf(target), log: options.log });
+          return await routeHostedStartSuggest({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.startSuggest, now: () => nowOf(target), log: options.log });
         }
         if (isAnswersPath(path, request.method)) {
           // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
