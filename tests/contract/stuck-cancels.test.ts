@@ -26,7 +26,7 @@ type Retry = NonNullable<StuckCancelDependencies["retryCancel"]>;
 
 type PostNote = NonNullable<StuckCancelDependencies["postNote"]>;
 
-function setup(options: { retry?: Retry | false; postNote?: PostNote; workspaces?: StuckCancelDependencies["workspaces"] } = {}) {
+function setup(options: { retry?: Retry | false; postNote?: PostNote; workspaces?: StuckCancelDependencies["workspaces"]; slackLegacyTeamId?: string } = {}) {
   const db = new FakeDynamoDb();
   const logs: Array<Record<string, unknown>> = [];
   const retryCancel = vi.fn<Retry>(options.retry === false || options.retry === undefined ? async () => ({ outcome: "REQUEUED", cancelOperationId: randomUUID() }) : options.retry);
@@ -34,6 +34,7 @@ function setup(options: { retry?: Retry | false; postNote?: PostNote; workspaces
     client: db,
     tableName: "state",
     ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
+    ...(options.slackLegacyTeamId === undefined ? {} : { slackLegacyTeamId: options.slackLegacyTeamId }),
     ...(options.retry === false ? {} : { retryCancel }),
     ...(options.postNote === undefined ? {} : { postNote: options.postNote }),
     log: (entry) => { logs.push(entry); },
@@ -637,5 +638,31 @@ it("release notes retain authoritative company/workspace scope with identical ra
     db.set({ pk: "SLACK_THREAD#owner-1", sk: "META", workspaceId: task.workspaceId, thread: `${teamId}/C0SHARED/1695500000.000001` });
     await sweep([{ workspaceId: task.workspaceId, compute: "gone" }]);
     expect(postNote).toHaveBeenCalledExactlyOnceWith({ channelId: "C0SHARED", threadTs: "1695500000.000001", workspace: { companyId, teamId } }, FAILED_CANCEL_RELEASED_MESSAGE);
+  }
+});
+
+it("L2-2 18d: in company mode the install's own thread keeps today's unscoped note, another team's (or a company record's) is scoped", async () => {
+  const IMPLICIT = "org_00000000000000000000", B = "org_bbbbbbbbbbbbbbbbbbbb";
+  for (const [teamId, orgId, scoped] of [["T0INSTALL0", undefined, false], ["T0BBBBBBB", B, true], ["T0INSTALL0", B, true], ["T0BBBBBBB", undefined, true]] as const) {
+    const postNote = vi.fn<PostNote>(async () => undefined);
+    const lookup = vi.fn(async (team: string) => (team === "T0INSTALL0" ? IMPLICIT : B));
+    const { db, sweep } = setup({ postNote, workspaces: { requireCompany: lookup }, slackLegacyTeamId: "T0INSTALL0" });
+    const task = seedTask(db, "INTERRUPTED", 1, {}, { ownerKey: "owner-1" });
+    if (orgId !== undefined) db.get(`WORKSPACE#${task.workspaceId}`, "META")!.orgId = orgId;
+    db.set({ pk: "SLACK_THREAD#owner-1", sk: "META", workspaceId: task.workspaceId, thread: `${teamId}/C0SHARED/1695500000.000001` });
+    await sweep([{ workspaceId: task.workspaceId, compute: "gone" }]);
+    const place = postNote.mock.calls[0]?.[0];
+    if (scoped && (teamId === "T0INSTALL0" || orgId === undefined)) {
+      // A record whose company disagrees with the team's binding (another company on the install's team, the implicit company on B's): nothing is posted (fail closed).
+      expect(postNote, `${teamId} ${orgId}`).not.toHaveBeenCalled();
+      expect(lookup).toHaveBeenCalled();
+    } else if (scoped) {
+      expect(place, `${teamId} ${orgId}`).toMatchObject({ workspace: { teamId } });
+      expect(lookup).toHaveBeenCalled();
+    } else {
+      // The install's own thread: scoped to the implicit company and its team (the poster posts it as today), with no binding read.
+      expect(postNote).toHaveBeenCalledExactlyOnceWith({ channelId: "C0SHARED", threadTs: "1695500000.000001", workspace: { companyId: IMPLICIT, teamId } }, FAILED_CANCEL_RELEASED_MESSAGE);
+      expect(lookup).not.toHaveBeenCalled();
+    }
   }
 });

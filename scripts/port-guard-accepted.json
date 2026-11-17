@@ -5,7 +5,7 @@
     {
       "path": "packages/broker/src/aws/channel-api-lambda.ts",
       "rule": "cloud-aws",
-      "blob": "c7e705423aa7731a32261db8cd44a3ad3421c0db",
+      "blob": "811304eece37c3e7306b3c0a459c4bf14cba1832",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
@@ -35,13 +35,13 @@
     {
       "path": "packages/broker/src/aws/slack-channel-presses.ts",
       "rule": "cloud-aws",
-      "blob": "d2bbc888372a7ac886c9aa66cd7dbc77d601d0bb",
+      "blob": "ed147f056d653eb616216b30120900bc8f685e90",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
       "path": "packages/broker/src/aws/slack-channel-router.ts",
       "rule": "cloud-aws",
-      "blob": "74927e4f5ee17999b1d82046e3b1caaa1bee3d4c",
+      "blob": "f8c7fb40a21cd1801304ef538261435b107f543f",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
