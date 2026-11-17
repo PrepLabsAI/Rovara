@@ -24,7 +24,7 @@ import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch 
 import { Construct } from "constructs";
 import {
   CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
-  CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -32,6 +32,8 @@ import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
 
 /** The stack parameter that holds the switch. */
 export const CORE_ENGINE_PARAMETER = "CoreEngine";
+/** DEC 254z-amend3: the stack parameter that holds the test services switch. */
+export const TEST_SERVICES_PARAMETER = "TestServices";
 
 /** The broker's actions on the core dispatch queue and its dead letters. */
 export const CORE_BROKER_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
@@ -64,6 +66,8 @@ export class CoreEngine extends Construct {
   private readonly lessons: CfnParameter;
   private readonly modelGatewayHost: CfnParameter;
   private readonly agentModel: CfnParameter;
+  /** DEC 254z-amend3: the install's test services switch ("1" on, the default; "0" off), packed for the dispatcher (`td`) and given to the session steps whole. */
+  readonly testServices: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
@@ -110,6 +114,13 @@ export class CoreEngine extends Construct {
       addBrokerSetting(broker, props.naming, key, value);
       addPackedSetting(dispatcher, key, value);
     }
+    // DEC 254z-amend3: test services, ON by default with the owner's opt-out "0". A stack parameter, so an upgrade keeps what the operator set (OPERATOR_PARAMETERS); packed (`td`, read as ROVARA_TEST_SERVICES)
+    // for the dispatcher, which plans and dispatches the core's runs, and given whole to the session steps (control-plane.ts).
+    // NOT the broker yet: its environment is 4 bytes past the 4 KB ceiling's margin with `td` (tests/contract/lambda-environment-size.test.ts). The broker reads no value, which is on, and Code's workers cannot run
+    // test services, so the broker marks them unavailable ("workers", aws/hosted-test-services.ts) either way: nothing is planned with dependencies on or off. The lane that gives Code's workers the test-services stage
+    // must make room and add `td` to the broker in the same change (its "off" then reads as off, not as "not available here").
+    this.testServices = new CfnParameter(stack, TEST_SERVICES_PARAMETER, { type: "String", default: TEST_SERVICES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICES_PARAMETER_VALUES], description: "Test services: 1 on (the default), 0 off" });
+    addPackedSetting(dispatcher, "testServices", this.testServices.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).

@@ -150,15 +150,19 @@ describe("an owner-list catalog is never a signed one", () => {
 });
 
 describe("a starter image is served with no approval", () => {
-  it("pulls each starter by its digest, lists exactly those for the guard and the worker, and builds the catalog from them", async () => {
+  it("lists each starter by its digest for the guard and the worker, pulls NONE of them at start-up (DEC 254z-amend3: lazy), and builds the catalog from them", async () => {
     const h = setup();
     const result = await install(h);
     expect(result.mode).toBe("owner");
     expect(result.unavailable).toBeUndefined();
+    expect(result.unavailableReason).toBeUndefined();
     const starterRefs = OWNER_STARTER_IMAGES.map((image) => image.reference).sort();
     expect([...result.services!.images].sort()).toEqual(starterRefs);
-    expect(h.docker.pulls().sort()).toEqual(starterRefs);
-    expect(h.docker.pulls().every((name) => name.includes("@sha256:"))).toBe(true);
+    expect(result.services!.images.every((name) => name.includes("@sha256:"))).toBe(true);
+    expect(result.services!.lazyPulls).toBe(true);
+    // Lazy: start-up asks Docker nothing at all (no inspect, no pull) for the starter list.
+    expect(h.docker.pulls()).toEqual([]);
+    expect(h.docker.calls).toEqual([]);
     expect(result.catalog!.entries.map((entry) => entry.id).sort()).toEqual(["mongodb@7", "mysql@8", "postgres@16", "postgres@17", "redis@7"]);
     expect(await result.catalogSource!()).toBe(result.catalog);
     // The worker is told the same list, and no registry.
@@ -177,26 +181,46 @@ describe("a starter image is served with no approval", () => {
     expect(h.docker.pulls()).toEqual([]);
   });
 
-  it("leaves out a starter that cannot be pulled, and says how to approve images when none can", async () => {
+  it("pulling now (resolveOwnerImages' default): leaves out a starter that cannot be pulled, and keeps nothing when none can", async () => {
     const h = setup();
     h.docker.failing.add("library/mysql");
-    const some = await install(h);
-    expect(some.services!.images).toHaveLength(4);
-    expect(some.catalog!.entries.some((entry) => entry.family === "mysql")).toBe(false);
+    const some = await resolveOwnerImages({ service: h.service, environment: ON, docker: h.docker, now: () => 0 });
+    expect(some.entries).toHaveLength(4);
+    expect(some.entries.some((entry) => entry.family === "mysql")).toBe(false);
+    expect(some.failed).toHaveLength(1);
     const none = setup();
     none.docker.reachable = false;
-    const result = await install(none);
-    expect(result).toMatchObject({ services: undefined, catalog: undefined, unavailable: NO_IMAGES_SENTENCE, mode: "owner" });
+    expect((await resolveOwnerImages({ service: none.service, environment: ON, docker: none.docker, now: () => 0 })).entries).toEqual([]);
     expect(NO_IMAGES_SENTENCE).toContain("test environment page");
     expect(NO_IMAGES_SENTENCE).toContain("ROVARA_TEST_SERVICE_IMAGES");
-    // The owner's list is still handed back, so the page can approve an image.
-    expect(result.ownerImages).toBe(none.service);
   });
 
-  it("is off, and touches nothing, with test services off", async () => {
+  it("lazy at start-up: a Docker that cannot pull (or is not even running) does not take the starters away; they are pulled the first time a step needs them", async () => {
     const h = setup();
-    expect(await install(h, {})).toEqual({ services: undefined, catalog: undefined, unavailable: undefined });
+    h.docker.failing.add("library/mysql");
+    h.docker.reachable = false;
+    const result = await install(h);
+    expect(result.services!.images).toHaveLength(5);
+    expect(result.catalog!.entries.map((entry) => entry.family).sort()).toEqual(["mongodb", "mysql", "postgres", "postgres", "redis"]);
+    expect(result.unavailable).toBeUndefined();
     expect(h.docker.calls).toEqual([]);
+    // The owner's list is still handed back, so the page can approve an image.
+    expect(result.ownerImages).toBe(h.service);
+  });
+
+  it("is off, and touches nothing, with the owner's opt-out (exactly 0)", async () => {
+    const h = setup();
+    expect(await install(h, { ROVARA_TEST_SERVICES: "0" })).toEqual({ services: undefined, catalog: undefined, unavailable: undefined });
+    expect(h.docker.calls).toEqual([]);
+  });
+
+  it("is ON with nothing set (DEC 254z-amend3: the default), and with any value but exactly 0", async () => {
+    for (const environment of [{}, { ROVARA_TEST_SERVICES: "" }, { ROVARA_TEST_SERVICES: "false" }, { ROVARA_TEST_SERVICES: " 0" }]) {
+      const h = setup();
+      const result = await install(h, environment);
+      expect(result.mode, JSON.stringify(environment)).toBe("owner");
+      expect(result.services!.images, JSON.stringify(environment)).toHaveLength(5);
+    }
   });
 });
 
@@ -297,7 +321,11 @@ describe("ROVARA_TEST_SERVICE_IMAGES", () => {
     const started = await install(h, env);
     expect(started.services!.images).toContain(pg15("c"));
     expect(started.services!.images).toHaveLength(6);
-    expect(h.docker.pulls()).toContain(pg15("c"));
+    // Lazy: an entry pinned by digest as written is in effect at once, and pulled only when a step needs it.
+    expect(h.docker.pulls()).not.toContain(pg15("c"));
+    const eager = setup();
+    expect((await resolveOwnerImages({ service: eager.service, environment: env, docker: eager.docker, now: () => 0 })).entries.map((entry) => entry.reference)).toContain(pg15("c"));
+    expect(eager.docker.pulls()).toContain(pg15("c"));
   });
 });
 

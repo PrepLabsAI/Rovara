@@ -26,6 +26,9 @@ import {
   environmentSettingsPrefix,
 } from "./environments.js";
 
+/** DEC 254z-amend3: the variable the core reads the test services switch from, on a laptop and on AWS alike. */
+export const TEST_SERVICES_SETTING_VARIABLE = "ROVARA_TEST_SERVICES";
+
 /** The names the broker is given, as one variable. */
 export const BROKER_NAMES_VARIABLE = "AGENTX_NAMES";
 /** The constrained settings the broker is given, as one variable. */
@@ -147,7 +150,14 @@ export const BROKER_SETTINGS = {
   coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
   coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
   coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
+  // DEC 254z-amend3: test services, ON unless exactly "0" (the stack parameter TestServices, TEST_SERVICES_PARAMETER_VALUES). The broker's core reads it as ROVARA_TEST_SERVICES (the laptop's own switch).
+  // Not `tx`: Cloud's own table gives that code to its own test services switch, which is off by default; a code means one thing in both.
+  testServices: { code: "td", variable: TEST_SERVICES_SETTING_VARIABLE },
 } as const satisfies Record<string, BrokerSettingSpec>;
+
+/** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */
+export const TEST_SERVICES_PARAMETER_VALUES = ["1", "0"] as const;
+export const TEST_SERVICES_PARAMETER_DEFAULT = "1";
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;
 

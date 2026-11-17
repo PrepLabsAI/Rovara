@@ -60,6 +60,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/decisions", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/approve", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/reject", "decisions:decide"],
     ["POST", "/v1/app/decisions/plan/t1/request-changes", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/evidence-opened", "decisions:decide"],
     ["GET", "/v1/app/projects/payments/how-we-work", "full"], ["GET", "/v1/app/projects/payments/playbook", "full"],
+    // DEC 254z-amend3: the project's test environment state, read only.
+    ["GET", "/v1/app/projects/payments/test-environment", "full"],
     ["GET", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens/tok_1/revoke", "full"],
     ["POST", "/v1/app/people/p1/erase", "full"],
   ];
@@ -72,7 +74,8 @@ describe("the /v1/app route table", () => {
     // The laptop's own routes, the asks (not built on AWS), a playbook edit (Cloud's editor), other methods, extra or empty segments and other prefixes.
     for (const [method, path] of [
       ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
-      ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
+      ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"],
+      ["POST", "/v1/app/projects/payments/test-environment/propose"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();

@@ -90,7 +90,7 @@ import {
   writeOwnerFile,
 } from "./state-directory.js";
 import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-machine-worker-machines.js";
-import { prepareLocalTestServices } from "./test-services-install.js";
+import { applyTestServicesMarker, prepareLocalTestServices } from "./test-services-install.js";
 import { createOwnerImageService, createOwnerImageStore } from "./test-services-owner-list.js";
 import { createDockerImageRegistry } from "./docker-image-registry.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
@@ -483,7 +483,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     audit: { stage: (event) => registry.require("audit-sink").stage(event), record: (event) => registry.require("audit-sink").record(event) },
     log: (entry) => console.log(JSON.stringify(entry)),
   });
-  const testServices = await prepareLocalTestServices({ environment: options.environment, stateDirectory, docker: runner, ownerImages, log: (entry) => console.log(JSON.stringify(entry)) });
+  const testServicesLogLine = (entry: Record<string, unknown>): void => console.log(JSON.stringify(entry));
+  const testServices = await prepareLocalTestServices({ environment: options.environment, stateDirectory, docker: runner, ownerImages, log: testServicesLogLine });
+  // DEC 254z-amend3: the host's marker. Set (or cleared) once here, on the environment every reader of this process takes (the core's test environment reads it, some with `process.env` as their default, which is
+  // what `rovara up` passes), so a task whose environment needs dependencies runs without them and says why. Never the owner's switch: `ROVARA_TEST_SERVICES=0` stays the only opt-out.
+  applyTestServicesMarker(options.environment, testServices.unavailableReason);
   // Worker machines. The callback listener's port is not known until the handler exists, so it is read when a machine starts.
   const callbackServer: { current?: CallbackServer } = {};
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
@@ -516,7 +520,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     buildSystems: () => collectBuildSystemProfiles(registry),
     signer: await loadInvokeSigner(stateDirectory),
     docker: runner,
-    ...(testServices.services === undefined ? {} : { testServices: testServices.services }),
+    ...(testServices.services === undefined ? {} : { testServices: testServices.services, testServicesLog: testServicesLogLine }),
     ...(options.workerFetch === undefined ? {} : { fetch: options.workerFetch }),
   });
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);

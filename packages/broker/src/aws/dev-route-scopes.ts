@@ -180,6 +180,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // How we work (read only): no named scope reads a project's settings, so full access only.
   { method: "GET", path: "/v1/app/projects/{project}/how-we-work", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/playbook", requires: "full" },
+  // DEC 254z-amend3: a project's test environment state (read only: whether test services are on, why they are not available here, the catalog). Like how we work, no named scope reads it: full access only.
+  { method: "GET", path: "/v1/app/projects/{project}/test-environment", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

@@ -33,6 +33,8 @@ export interface LocalTestServices {
    * exactly their references, and `registry` and `catalogEnv` are placeholders (`OWNER_LIST_REGISTRY`, `OWNER_LIST_CATALOG_ENV`).
    */
   ownerImages?: readonly OwnerListEntry[] | undefined;
+  /** DEC 254z-amend3 (owner list only): `images` were NOT pulled at start-up; each is pulled by digest the first time a step needs it (local/lazy-service-images.ts). */
+  lazyPulls?: true | undefined;
   /** Where each worker's run folder is made (one folder per worker, outside every workspace). Default: `<state folder>/test-services`. */
   runDirectoryParent?: string | undefined;
 }

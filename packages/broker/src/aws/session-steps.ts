@@ -5,6 +5,7 @@ import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
+import { testServicesSwitchedOn } from "../core/test-env/test-services-switch.js";
 import { MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager } from "./sessions.js";
@@ -64,6 +65,11 @@ export interface SessionStepsDependencies {
   logGroupName: string;
   /** GET on the worker's /ping; resolves to what it reported, rejects when unreachable. */
   ping: (url: string) => Promise<WorkerPing | undefined>;
+  /**
+   * DEC 254z-amend3: whether the install's test services switch is on (ROVARA_TEST_SERVICES, anything but exactly "0"). On, the boot configuration carries `testServices`, which the contract renders as
+   * AGENTX_TEST_SERVICES=1 for a named-environment worker only; Code launches none, so its boot script is byte-identical either way (aws/hosted-test-services.ts says why test services are unavailable here).
+   */
+  testServices?: boolean;
 }
 
 /** The body of the worker's /ping, or of a failed boot's report in its place. */
@@ -134,6 +140,7 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           ...(settings.anthropicSecretArn ? { anthropicSecretArn: settings.anthropicSecretArn } : {}),
           ...(settings.openaiSecretArn ? { openaiSecretArn: settings.openaiSecretArn } : {}),
           ...(settings.modelFallback ? { modelFallback: settings.modelFallback } : {}),
+          ...(dependencies.testServices === true ? { testServices: true as const } : {}),
           logGroupName: dependencies.logGroupName,
         }, dependencies.bootScript());
         // Already base64 gzip, the form RunInstances takes (#229).
@@ -222,4 +229,5 @@ export const handler = createSessionStepsHandler({
   controlPlaneUrl: process.env.CONTROL_PLANE_URL ?? "",
   logGroupName: process.env.WORKER_LOG_GROUP_NAME ?? "",
   ping: (url) => pingWorker(url),
+  testServices: testServicesSwitchedOn(process.env),
 });
