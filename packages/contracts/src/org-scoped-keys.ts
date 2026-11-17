@@ -1017,3 +1017,11 @@ export function intakeOwnWriteKey(orgId: OrgId, ticketItemId: string, kind: Inta
 export function projectBrowserEvidenceRecipeKey(orgId: OrgId, name: string): OrgKey {
   return { pk: projectPk(orgId, name), sk: "BROWSER_EVIDENCE_RECIPE" };
 }
+
+/**
+ * Guided onboarding L2-1 (DEC 254o a): a company's claim on a project NAME it chose, beside the project's globally unique id. Only the company's
+ * own partition is ever read or written for a name, so whether another company uses the same name is never asked.
+ */
+export function orgProjectNameClaimKey(orgId: OrgId, name: string): OrgKey {
+  return { pk: orgScoped(orgId, "PROJECT_NAME"), sk: `NAME#${name}` };
+}

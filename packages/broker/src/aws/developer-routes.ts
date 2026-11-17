@@ -107,7 +107,7 @@ import { CompanyIssuerRecord, companyIssuerKey } from "../developer/company-issu
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
-import type { DeveloperTaskActions } from "./developer-task-actions.js";
+import type { DeveloperTaskActions } from "./developer-task-actions.js"; import type { ClientProjectNaming } from "./company-project-names.js";
 import {
   createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
   confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
@@ -204,13 +204,13 @@ export interface DeveloperRouteDependencies {
   /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
   lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
-  createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
+  createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
   clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
   /** Guided onboarding PR 6: one project from several repositories (all on the caller's company's installations, or nothing is created). */
-  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest) => Promise<{ name: string; latestRevision: number }>;
+  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
   /** Guided onboarding PR 6: one project per repository, with one result row each. */
-  createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest) => Promise<BulkCreateClientProjectsResponse>;
+  createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<BulkCreateClientProjectsResponse>;
   /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
   clientRepositoryChoices?: (developerId: string, query: { q?: string | undefined; limit?: number | undefined; after?: string | undefined }) => Promise<ClientRepositoryChoicesResponse>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */

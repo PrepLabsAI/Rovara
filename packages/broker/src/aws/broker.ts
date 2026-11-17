@@ -284,7 +284,7 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { bulkCreate, COMMIT_DEADLINE_MS, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { bulkCreate, COMMIT_DEADLINE_MS, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -2125,13 +2125,13 @@ async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   value: unknown,
-  checked?: { preflight?: PreflightOutcome; githubCompany?: { companyId: string | undefined; budget: ReturnType<typeof boundedCompanyReads> } },
+  checked?: { preflight?: PreflightOutcome; githubCompany?: { companyId: string | undefined; budget: ReturnType<typeof boundedCompanyReads> }; nameClaim?: { name: string } },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
   const companyBudget = checked?.githubCompany?.budget ?? boundedCompanyReads(dependencies.documentClient);
   const companyId = checked?.githubCompany === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : checked.githubCompany.companyId;
-  await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
+  await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget); if (checked?.nameClaim !== undefined && (companyId === undefined || definition.revision !== 1)) throw agentXError("FORBIDDEN", "a company's project name is claimed only by that company's first revision"); // Guided onboarding L2-1
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
   let ownershipTakenOver = false;
@@ -2217,7 +2217,7 @@ async function registerProject(
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
   await judgeAuthority((await readCatalogSnapshot()).newestRevision);
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight, { companyId, budget: companyBudget });
-  const now = new Date().toISOString();
+  const now = new Date().toISOString(); const nameClaimWrites = checked?.nameClaim === undefined ? [] : companyNameClaimWrites(dependencies.tableName, { companyId: companyId!, name: checked.nameClaim.name, projectId: definition.name, by: identity.ownerKey, at: now }); // L2-1: in the same transaction
   const record: RegisteredProjectRecord = {
     ...key,
     entityType: "PROJECT",
@@ -2308,7 +2308,7 @@ async function registerProject(
       } }] : []),
       ...(setupAdmissionRows?.transactionItems ?? []),
       ...accounts.items,
-      ...corePlan.writes,
+      ...corePlan.writes, ...nameClaimWrites,
       ] }));
       if (authority === "takeover") {
         ownershipTakenOver = true;
@@ -14465,12 +14465,12 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
   const projectExists = async (name: string) => ((await dependencies.documentClient.send(new QueryCommand({
     TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
-  })) as { Items?: unknown[] }).Items ?? []).length > 0;
+  })) as { Items?: unknown[] }).Items ?? []).length > 0; const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
   /**
    * Guided onboarding PR 6: one project from `repositories`, for `companyId` (the caller's, from membership). Every repository is checked against the
    * company's bindings with GitHub's live answer before any token is made for any of them; one that fails refuses the whole create, in one fixed answer.
    */
-  const createFromRepositories = async (developerId: string, companyId: string | undefined, repositories: readonly string[], options: { name?: string; setupCommands?: string[]; testCommands?: string[] }, commitBy: number) => {
+  const createFromRepositories = async (developerId: string, companyId: string | undefined, repositories: readonly string[], options: { name?: string; setupCommands?: string[]; testCommands?: string[] }, commitBy: number, naming?: ClientProjectNaming) => {
     const urls = repositories.map((repository) => `https://github.com/${repository}.git`);
     const budget = boundedCompanyReads(dependencies.documentClient);
     if (!await onCompanyInstallations(rules, companyId, urls, budget)) throw notAvailable();
@@ -14481,13 +14481,13 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       throw (error as { code?: unknown }).code === "NOT_FOUND" ? notAvailable() : unavailable();
     }
     const repositoryNames = uniqueRepositoryNames(found.map((entry) => entry.name));
-    const name = options.name ?? repositoryNames[0]!;
-    if (await projectExists(name)) throw nameTaken(name);
+    const name = options.name ?? repositoryNames[0]!; const nameOwner = names.owner(naming, companyId);
+    if (await names.taken(nameOwner, name)) throw nameTaken(name); const id = await names.idFor(nameOwner, name);
     const cwd = `repo/${repositoryNames[0]!}`;
     // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted. They run in the first repository.
     const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
     const definition = ProjectDefinitionSchema.parse({
-      name, revision: 1,
+      name: id, revision: 1,
       repositories: urls.map((url, index) => ({ name: repositoryNames[index]!, url, path: `repo/${repositoryNames[index]!}`, defaultBranch: found[index]!.defaultBranch, credentialRef: clientProjects.credentialRef })),
       setup: (options.setupCommands ?? []).map(command), readiness: (options.testCommands ?? []).map(command),
       orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
@@ -14498,13 +14498,13 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
     if (Date.now() > commitBy) throw unavailable();
     try {
       // Registration checks every repository's binding once more (its own budget), in the transaction's company.
-      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) } });
+      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) }, ...names.claim(nameOwner, name) });
     } catch (error) {
-      if (await projectExists(name).catch(() => false)) throw nameTaken(name);
+      if (await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable();
       if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
       throw error;
     }
-    return { name, latestRevision: 1 };
+    return { name: id, latestRevision: 1 };
   };
   return {
     ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }),
@@ -14532,7 +14532,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       catch { throw agentXError("RUNTIME_UNAVAILABLE", REPOSITORY_CHOICES_UNAVAILABLE); }
       return repositoryChoices(installations, marks, query);
     },
-    async createClientProject(developerId, input) {
+    async createClientProject(developerId, input, naming) {
       const url = `https://github.com/${input.repository}.git`;
       const budget = boundedCompanyReads(dependencies.documentClient);
       const companyId = await githubCallerCompany(dependencies, developerId, budget);
@@ -14544,36 +14544,36 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       }
       const found = companyId === undefined ? await clientProjects.repositoryDefaults(url) : await budget.read(() => clientProjects.repositoryDefaults(url));
       const repositoryName = projectRepositoryName(found.name);
-      const name = input.name ?? repositoryName;
-      if (await projectExists(name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
+      const name = input.name ?? repositoryName; const nameOwner = names.owner(naming, companyId);
+      if (await names.taken(nameOwner, name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`); const id = await names.idFor(nameOwner, name);
       const cwd = `repo/${repositoryName}`;
       // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
       const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
       const definition = ProjectDefinitionSchema.parse({
-        name, revision: 1,
+        name: id, revision: 1,
         repositories: [{ name: repositoryName, url, path: cwd, defaultBranch: found.defaultBranch, credentialRef: clientProjects.credentialRef }],
         setup: (input.setupCommands ?? []).map(command), readiness: (input.testCommands ?? []).map(command),
         orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
       });
       // As the person: their developer ID owns the project, so they administer it and it is listed for them.
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
-      await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget } });
-      return { name, latestRevision: 1 };
+      try { await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget }, ...names.claim(nameOwner, name) }); } catch (error) { if (nameOwner !== undefined && await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable(); throw error; } // L2-1
+      return { name: id, latestRevision: 1 };
     },
-    async createClientProjects(developerId, input) {
+    async createClientProjects(developerId, input, naming) {
       const commitBy = Date.now() + COMMIT_DEADLINE_MS;
       const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
       return createFromRepositories(developerId, companyId, input.repositories, {
         ...(input.name === undefined ? {} : { name: input.name }), ...(input.setupCommands === undefined ? {} : { setupCommands: input.setupCommands }),
         ...(input.testCommands === undefined ? {} : { testCommands: input.testCommands }),
-      }, commitBy);
+      }, commitBy, naming);
     },
-    async createClientProjectsBulk(developerId, input) {
+    async createClientProjectsBulk(developerId, input, naming) {
       const commitBy = Date.now() + COMMIT_DEADLINE_MS;
-      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
+      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient)); names.owner(naming, companyId);
       return bulkCreate(input.repositories, {
         now: Date.now, nameOf: (repository) => projectRepositoryName(repository.split("/")[1]!),
-        create: async (repository) => (await createFromRepositories(developerId, companyId, [repository], {}, commitBy)).name,
+        create: async (repository) => (await createFromRepositories(developerId, companyId, [repository], {}, commitBy, naming)).name,
       });
     },
   };
@@ -15561,3 +15561,10 @@ export const handler = createAwsBrokerHandler({
 
 /** One broker log line writer; company-scoped events wrap it with companyLog so the helper owns companyId. */
 function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.stringify({ component: "broker", ...entry })); }
+
+/** Guided onboarding L2-1: the client create's dependencies, so tests can call it with per-company naming before any route does (PR 19 wires the route). */
+export function clientProjectDependenciesForTests(input: AwsBrokerInput): ReturnType<typeof clientProjectRouteDependencies> {
+  const brokerInput: Omit<AwsBrokerInput, "core"> = { ...input };
+  delete (brokerInput as AwsBrokerInput).core;
+  return clientProjectRouteDependencies(brokerDependencies(brokerInput));
+}
