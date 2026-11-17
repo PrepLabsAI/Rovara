@@ -224,18 +224,20 @@ describe("the named TEST proof-only installation gate", () => {
     // Guided onboarding PR 4 (#836, DEC 254r item 2): named and foreign re-pinned for the sign-in Lambda's one Slack workspace token statement (secretsmanager CreateSecret,
     // PutSecretValue, GetSecretValue on agentx/<env>/slack-workspaces/*; developer-signin-infrastructure.test.ts pins it exactly). Verified: with only that statement removed, the old pins hold; legacy unchanged.
     // DEC 254za: all six re-pinned for the callback signing key's secret (legacy included): the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables and the dispatcher's conditional read.
+    // Batch 12 (second-merge re-pin of #872 over #865, plus #871's Linear webhook route; DEC 254za, DEC 254y, rule D): named and foreign re-pinned. Verified on this tree: with only
+    // LinearWebhookRoute and #865's one slack-workspaces statement removed, #872's approved pins hold exactly (named fd809c0e/98b1dae8, foreign ca40bea2/694d8393); legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "56585ffd2c1581b2920df568a77dfbcf6504d7fa41714a9baf824753185cc947",
-        withoutRoute: "f52329983db36a52bc1e2e90c98908fee2dc152a6891647adcdd9045e1ed29ac",
+        withRoute: "bdb2015d5b1c6109460a2c0792843ad287887a58563c9296b3eb6ffbadddeef4",
+        withoutRoute: "86a20df32bf44f4662ed5b42f5932509e5d889b2ec1cad136efaf698db863bd1",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "feb9693bf3da472c9a060e4c87221a9ae2b0a661ec4b0a9935f1b25663e76f8b",
-        withoutRoute: "524270619e97c8bd495ff0f6e56e52108dbed3a656829a0d32fd9de2b947c311",
+        withRoute: "d4e48c02332336afe846bfab4eca130bec50b27094b4a8afc2846e401faaa522",
+        withoutRoute: "d29f0fb5456b2e4611622ad9b60fb2d0fbb30cc787995df42373d1ae28091d58",
       },
       {
         label: "legacy",

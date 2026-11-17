@@ -155,7 +155,7 @@ describe("Slack company mode's switch (18a)", () => {
     for (const fn of ["SlackIngress", "ChannelApiIngress"]) {
       expect(variablesOf(named, fn).DEVELOPER_SIGNIN_TABLE_NAME, fn).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "DeveloperSignInTable", "AWS::DynamoDB::Table")[0] }, ""] });
     }
-    const broker = unpackedBrokerVariables(variablesOf(named, "Broker"));
+    const broker = unpackedBrokerVariables(variablesOf(named, "Broker"), named as never);
     expect(broker.SLACK_COMPANY_WORKSPACES).toEqual({ Ref: "SlackCompanyWorkspaces" });
     // Derived now (room in the 4 KB environment); the broker still reads "enabled".
     expect(broker.COMPANY_READS).toBe("enabled");
