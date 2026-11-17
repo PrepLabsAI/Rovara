@@ -2,7 +2,7 @@
 // mutant listed in the PR body: the citation match and its 3-line window, the commit binding, "a read that did not finish is not a pass", and the limits (citations, files, bytes, deadline).
 import { describe, expect, it } from "vitest";
 import {
-  CITATION_CHECK_LIMITS, PROSE_CODE_NAMES_MAX, PROSE_QUOTE_MIN_CHARS, SHOWN_QUOTE_MAX, checkCitations, checkClaims, codeNamesOf, effectiveCitationLimits, hasCodeToken, isSafeCitedPath, shownCitation,
+  CITATION_CHECK_LIMITS, PROSE_CODE_NAMES_MAX, PROSE_QUOTE_MIN_CHARS, PROSE_SENTENCE_MAX_CHARS, SHOWN_QUOTE_MAX, checkCitations, checkClaims, codeNamesOf, effectiveCitationLimits, hasCodeToken, isSafeCitedPath, shownCitation,
   type CitationFileReader, type CitationRef,
 } from "../../packages/broker/src/core/citations/citation-check.js";
 
@@ -151,15 +151,16 @@ describe("checkCitations: limits", () => {
     expect(check.complete).toBe(false);
   });
 
-  it("a file over maxFileBytes is unreadable; once the total passes maxTotalBytes that file and every later one are unreadable and not read", async () => {
+  it("a file over maxFileBytes is unreadable and still counts; once the total passes maxTotalBytes every later file is unreadable and not read", async () => {
     const big = "x".repeat(120);
     const small = `${quoteOf(1)}\n${"y".repeat(60)}`;
     const { read, calls } = reader({ [`api:big.ts@${SHA}`]: big, [`api:a.ts@${SHA}`]: small, [`api:b.ts@${SHA}`]: small, [`api:c.ts@${SHA}`]: small });
-    const check = await checkCitations(read, ["big.ts", "a.ts", "b.ts", "c.ts"].map((path) => ref(1, quoteOf(1), { path })), {
+    const check = await checkCitations(read, ["a.ts", "big.ts", "b.ts", "c.ts"].map((path) => ref(1, quoteOf(1), { path })), {
       commits, now: fixedNow, limits: { maxFileBytes: 100, maxTotalBytes: 150, concurrency: 1 },
     });
-    expect(check.results.map((result) => result.outcome === "source_found" ? "source_found" : (result as { reason: string }).reason)).toEqual(["file_too_large", "source_found", "total_bytes", "total_bytes"]);
-    expect(calls.map((call) => call.path)).toEqual(["big.ts", "a.ts", "b.ts"]);
+    expect(check.results.map((result) => result.outcome === "source_found" ? "source_found" : (result as { reason: string }).reason)).toEqual(["source_found", "file_too_large", "total_bytes", "total_bytes"]);
+    // The oversized file still counts toward the total (81 + 120 > 150): nothing after it is read.
+    expect(calls.map((call) => call.path)).toEqual(["a.ts", "big.ts"]);
     expect(check.complete).toBe(false);
   });
 
@@ -299,6 +300,17 @@ describe("prose mode (DEC 254zh): strict rules for answers and the wiki", () => 
     expect(result.claims[0]!.dropped).toBe("too_many_code_names");
   });
 
+  it("a sentence longer than PROSE_SENTENCE_MAX_CHARS is dropped; the code-name scan is linear on long word runs", async () => {
+    const { read } = reader(files);
+    const quote = "export function refundLimit(order: Order): number {";
+    const long = `refundLimit ${"a".repeat(PROSE_SENTENCE_MAX_CHARS)}`;
+    const result = await checkClaims(read, [{ sentence: long, citations: [at(1, quote)] }], { commits, now: fixedNow });
+    expect(result.claims[0]!.dropped).toBe("sentence_too_long");
+    const started = Date.now();
+    for (const run of ["a-".repeat(20_000), "a".repeat(40_000), "a.".repeat(20_000), "aB".repeat(20_000), "a_".repeat(20_000)]) codeNamesOf(run);
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
   it("codeNamesOf finds backticked spans and code-shaped words, each once; plain words are not code names", () => {
     expect(codeNamesOf("Use `npm  run build` then call refundLimit() in src/app.ts via RefundService and MAX_CENTS; see app.ts, `refundLimit` and snake_case. Refunds are Partial.")).toEqual([
       "npm run build", "refundLimit", "src/app.ts", "app.ts", "RefundService", "MAX_CENTS", "snake_case",
@@ -321,5 +333,47 @@ describe("prose mode (DEC 254zh): strict rules for answers and the wiki", () => 
     const { read } = reader(files);
     const result = await checkClaims(read, [{ sentence: "refundLimit exists.", citations: [at(1, "export function refundLimit(order: Order): number {")] }], { commits, now: fixedNow });
     expect(JSON.stringify(result)).not.toMatch(/verif/iu);
+  });
+});
+
+describe("review fixes (REVIEW-1)", () => {
+  it("M2: a reader that never answers cannot hang the check: the read gives up at its timeout and is unreadable", async () => {
+    const read: CitationFileReader = () => new Promise<string | undefined>(() => undefined);
+    const started = Date.now();
+    const check = await checkCitations(read, [ref(10, quoteOf(10))], { commits, limits: { readTimeoutMs: 30 } });
+    expect(check).toMatchObject({ complete: false, results: [{ outcome: "unreadable", reason: "deadline" }] });
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("L2: a quote that is not a string, or a reader that answers with a Buffer, never throws and never passes", async () => {
+    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
+    const odd = await checkCitations(read, [{ ...ref(10, undefined), quote: 42 as unknown as string }, { ...ref(10, undefined), quote: null as unknown as string }], { commits, now: fixedNow });
+    expect(odd.results.map((result) => result.outcome === "source_not_found" ? result.reason : result.outcome)).toEqual(["no_usable_quote", "no_usable_quote"]);
+    const buffer = await checkCitations(reader({ [`api:src/app.ts@${SHA}`]: Buffer.from(FILE) }).read, [ref(10, quoteOf(10))], { commits, now: fixedNow });
+    expect(buffer).toMatchObject({ complete: false, results: [{ outcome: "unreadable", reason: "read_failed" }] });
+  });
+
+  it("L3: invisible characters do not hide a code name", async () => {
+    expect(codeNamesOf("Use refund\u200BLimit here.")).toEqual(["refundLimit"]);
+    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
+    const result = await checkClaims(read, [{ sentence: "The cap is refund\u200BLimit.", citations: [ref(10, quoteOf(10))] }], { commits, now: fixedNow });
+    expect(result.claims[0]!.dropped).toBe("code_name_not_in_quote");
+  });
+
+  it("L5: an unreadable citation drops its sentence as unreadable; an unknown mode is prose; $ is an identifier character; call and camelCase shapes alone are code names", async () => {
+    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE, [`api:src/down.ts@${SHA}`]: new Error("x") });
+    const dropped = await checkClaims(read, [{ sentence: "It is down.", citations: [ref(1, quoteOf(1), { path: "src/down.ts" })] }], { commits, now: fixedNow });
+    expect(dropped.claims[0]!.dropped).toBe("unreadable");
+    const unknown = await checkCitations(read, [ref(undefined, quoteOf(10))], { commits, now: fixedNow, mode: "loose" as unknown as "plain" });
+    expect(unknown.results[0]).toMatchObject({ outcome: "source_not_found", reason: "line_required" });
+    expect(hasCodeToken("x = $refundLimit", "refundLimit")).toBe(false);
+    expect(hasCodeToken("x = refundLimit$", "refundLimit")).toBe(false);
+    expect(codeNamesOf("Then refund() runs.")).toEqual(["refund"]);
+    expect(codeNamesOf("Then orderTotal runs.")).toEqual(["orderTotal"]);
+  });
+
+  it("L5: a hostile repository name is inert when shown", () => {
+    const shown = shownCitation({ repo: "@everyone <img src=x> https://evil.example", path: "a.ts", commit: SHA, line: 1, quote: quoteOf(1) });
+    expect(shown.repo).not.toMatch(/@everyone|<img|https:\/\/evil/u);
   });
 });
