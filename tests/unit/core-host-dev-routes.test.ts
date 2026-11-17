@@ -194,7 +194,8 @@ describe("the core's handlers on the deployed API", () => {
     const playbook = { state, preview: vi.fn() } as never;
     const allowed = new Set(["payments"]);
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, playbook, canReadProject: async (_person, project) => allowed.has(project) }) });
-    const caller = remember(FAKE_COMPANY);
+    // A member: the grant decides (a live company owner or admin reads without one: core-host-playbook-route.test.ts).
+    const caller = remember(FAKE_COMPANY, "member");
     expect((await routes.route(get("/v1/app/projects/payments/playbook"), caller))?.statusCode).toBe(200);
     allowed.delete("payments");
     const hidden = await routes.route(get("/v1/app/projects/payments/playbook"), caller);
