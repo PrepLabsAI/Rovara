@@ -98,7 +98,7 @@ describe("connect start", () => {
     });
     expect(LINEAR_SCOPES).not.toContain("admin");
     expect(answer.body.expiresAt).toBe(new Date(Date.parse(TIME) + 600_000).toISOString());
-    expect(w.db.get(linearStateKey(state).pk, "META")).toMatchObject({ companyId: A, personId: PERSON, provider: "linear", status: "live" });
+    expect(w.db.get(linearStateKey(state).pk, "META")).toMatchObject({ companyId: A, personId: PERSON, provider: "linear", status: "live", indexExpiresAt: Date.parse(TIME) / 1000 + 600 + 86_400 });
     expect(w.stored()).not.toContain(state);
     expect(answer.raw).not.toContain(LINEAR_CLIENT_SECRET);
   });
@@ -334,6 +334,17 @@ describe("refresh", () => {
     expect(await storedRefresh(w)).toBe(w.linear.grants[0]!.current);
     expect((w.db.get(linearConnectionKey(A).pk, "META") as Record<string, unknown>).leaseId).toBeUndefined();
   });
+  it("a write that never lands gives the lease back and says unavailable", async () => {
+    const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
+    expire(w);
+    const db = { send: async (command: unknown) => {
+      if ((command as { input?: { UpdateExpression?: string } }).input?.UpdateExpression?.startsWith("SET sealedAccess") === true) throw Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" });
+      return w.db.send(command as never);
+    } };
+    const flaky = new LinearConnections({ documentClient: db, tableName: "State", sealer: w.sealer, fetch: w.linear.fetch, now: w.now, app: async () => ({ ...LINEAR_APP }), log: () => undefined });
+    await expect(flaky.accessToken(A)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect((w.db.get(linearConnectionKey(A).pk, "META") as Record<string, unknown>).leaseId).toBeUndefined();
+  });
   it("a misconfigured app (invalid_client) or Linear down is unavailable, never needs_reconnect", async () => {
     const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
     expire(w);
@@ -404,6 +415,15 @@ describe("disconnect", () => {
     // The workspace is free again: another company may now bind it.
     w.as(PERSON_B, B);
     expect((await w.connect(WORKSPACE_A)).status).toBe(200);
+  });
+  it("disconnects a company with more picks than the routing read's cap, clearing all of them", async () => {
+    const w = world(); w.as(PERSON, A, "owner"); await w.connect(WORKSPACE_A);
+    for (let i = 0; i < 502; i++) w.db.set({ ...linearTeamKey(A, `p${String(i)}`), entityType: "LINEAR_PROJECT_TEAM", companyId: A, project: `p${String(i)}`, teamId: "team-a-eng", teamKey: "ENG", teamName: "Engineering", setBy: PERSON, setAt: TIME });
+    w.asWeb(PERSON, A, "owner"); w.stepUp();
+    const answer = await w.web("DELETE", BASE);
+    expect(answer.status).toBe(200);
+    expect((answer.body.projects as string[]).length).toBe(502);
+    expect(w.db.get(linearTeamKey(A, "p501").pk, "PROJECT#p501")).toBeUndefined();
   });
   it("an owner of another company cannot disconnect A's connection (it is always the caller's own)", async () => {
     const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
