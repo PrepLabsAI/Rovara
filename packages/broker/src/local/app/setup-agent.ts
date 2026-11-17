@@ -16,7 +16,8 @@ import { startTask } from "../../core/task-flow/start.js";
 import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readState, startSetupAgent, stopSetupAgent, verifiedView, getSetupAgent, type SetupAgentView } from "../../core/setup-agent/agent.js";
 import { createEvalSpendSubject, EVAL_SPEND_KIND, readEvalSpendItem } from "../../core/setup-agent/eval-spend.js";
-import { confirmEvalDiscovery } from "../../core/setup-agent/eval-discovery.js";
+import { EVAL_NO_CAP_MESSAGE, confirmEvalDiscovery, readEvalDiscovery, setupEvalDiscoveryView, type EvalDiscoveryConfirmDeps } from "../../core/setup-agent/eval-discovery.js";
+import { boundEvalMonthlyCap } from "../../core/setup-agent/eval-reservation.js";
 import { SETUP_APPLY_KIND, confirmSetupAgent, createSetupProposalSubject, discardSetupApply, readSetupApply, type SetupApplyDeps } from "../../core/setup-agent/apply.js";
 import { setupStateOf, startProjectSetupCheck } from "../../core/setup-agent/check.js";
 import { SETUP_COMMAND_WORDS, checkPersonCommand, queueSetupCommand } from "../../core/setup-agent/command.js";
@@ -60,8 +61,6 @@ export interface LocalSetupAgentOptions {
   sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** `ROVARA_SETUP_AGENT=0`: the feature is off and every route and the worker's callback answer as an unknown path. */
   enabled: boolean;
-  /** DEC 253n: the monthly cap an eval spend item must fit (the trusted host's). Absent (a laptop has no eval budget): an eval confirmation is refused, nothing is proposed. */
-  evalMonthlyCapMicros?: number | undefined;
 }
 
 export interface LocalSetupAgent {
@@ -82,6 +81,7 @@ export interface LocalSetupAgent {
     check: (input: { project: string; requestId: string }) => Promise<LocalActionResult>;
     decideHost: (input: { project: string; host: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }) => Promise<LocalActionResult>;
     decideEval: (input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }) => Promise<LocalActionResult>;
+    evalConfirm: (input: { project: string; taskId: string; reportDigest: string; selection: string; paths: string[] }) => Promise<LocalActionResult>;
     decideProposal: (input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }) => Promise<LocalActionResult>;
   };
   /** TE-H1 slice 3: the pages and start command the last setup run suggested for browser evidence, read from its stored result (no code host call). Text for the owner to read; nothing is applied. */
@@ -133,6 +133,17 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     projectGrant: (person: Parameters<ReturnType<typeof localOwnerMembers>["projectGrant"]>[0], project: string) => localOwnerMembers().projectGrant({ ...person, ...(person.developerId === ownerDeveloperId ? { principal: options.owner } : {}) }, project),
   };
 
+  // DEC 253q: the eval confirm's trusted inputs: the members, the cap from the bound `eval-reservation` adapter only (none on a laptop: refused), and the code host's own read of the files.
+  const evalConfirmDeps = (deps: { latest: EvalDiscoveryConfirmDeps["latest"] }): EvalDiscoveryConfirmDeps => {
+    const monthlyCap = boundEvalMonthlyCap(options.registry);
+    return {
+      store, companyId, now: options.now, members: localMembers, ...(monthlyCap === undefined ? {} : { monthlyCap }), latest: (p) => deps.latest(p),
+      readFile: (repository, path, commit, readOptions) => codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+        .fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
+      log: (entry) => flow.log?.({ component: "setup-agent", ...entry }),
+    };
+  };
+
   const offerOfHost = (ask: SetupHostAsk): ApprovalOffer => ({ requestId: hostRequestId(ask), revision: HOST_ASK_REVISION, artifactDigest: hostAskDigest(ask), kind: "setup", risk: "high" });
 
   const view = async (project: string): Promise<SetupPageView | undefined> => {
@@ -159,6 +170,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     });
     const apply = await readSetupApply({ flow, store, companyId, now: options.now }, project);
     const evalSpend = await readEvalSpendItem({ store, companyId, members: localMembers }, project);
+    const evalDiscovery = setupEvalDiscoveryView(await readEvalDiscovery({ store, companyId }, project), evalSpend?.state, boundEvalMonthlyCap(options.registry) === undefined ? EVAL_NO_CAP_MESSAGE : undefined);
     const waiting = apply !== undefined && apply.state === "checking";
     void pointerTask;
     const cannotStart = !options.enabled ? "Setting a project up with Rovara is off on this install." : (await options.modelAccessConfigured()) ? undefined : "Rovara has no model key on this install, so it cannot run a setup. Set a model key, then restart `rovara up`.";
@@ -166,7 +178,8 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       project, revision: latest.revision, status: state.status, ...(state.failure === undefined ? {} : { failure: state.failure }), ...(state.stoppedBy === undefined ? {} : { stoppedBy: state.stoppedBy.name }),
       limits: state.limits, ...(cannotStart === undefined ? {} : { cannotStart }),
       ...(state.summary === undefined ? {} : { summary: { commandsRun: state.summary.commandsRun, spendCents: state.summary.spendCents, elapsedMin: Math.round(state.summary.elapsedMs / 60_000), hostAsks: state.summary.hostAsks, partial: state.summary.partial, stop: state.summary.stop } }),
-      items, verified: state.verified === true, ...(evalSpend === undefined ? {} : { evalSpend }),
+      items, verified: state.verified === true, ...(evalSpend === undefined ? {} : { evalSpend }), ...(evalDiscovery === undefined ? {} : { evalDiscovery }),
+      ...(evalDiscovery === undefined && boundEvalMonthlyCap(options.registry) === undefined ? { evalNoBudget: EVAL_NO_CAP_MESSAGE } : {}),
       journal: journal.map((entry) => ({ n: entry.n, source: entry.source, command: entry.command, exitCode: entry.exitCode, timedOut: entry.timedOut, flagged: entry.flagged, tail: entry.tail, blockedHosts: entry.blockedHosts })),
       hostAsks: asks.map((ask): SetupHostAskView => ({ host: ask.host, status: ask.state, international: isInternationalName(ask.host), ...(ask.from === undefined ? {} : { from: ask.from }), ...(ask.journalN === undefined ? {} : { journalN: ask.journalN }), ...(ask.state === "open" ? { approval: offerOfHost(ask) } : {}) })),
       check: { status: check.status, ...(check.failedStep === undefined ? {} : { failedStep: check.failedStep }) },
@@ -220,6 +233,10 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     check: (input) => guarded(async () => { await startProjectSetupCheck(flow, { project: input.project, requestId: input.requestId, startedBy: ownerDeveloperId }); return { ok: true, message: "Rovara is checking the project's setup." }; }),
     decideHost: (input) => guarded(() => decide(SETUP_HOST_KIND, hostAskSubjectId(companyId, input.project, input.host), input, input.decision === "approve" ? "That website is allowed for the next setup run." : "That website is refused.")),
     decideEval: (input) => guarded(() => decide(EVAL_SPEND_KIND, input.project, input, input.decision === "approve" ? "Eval spend is approved within this estimate. Each run still needs a monthly-cap reservation." : "Eval spend was rejected.")),
+    evalConfirm: (input) => guarded(async () => {
+      await confirmEvalDiscovery(evalConfirmDeps(await depsFor()), input.project, { taskId: input.taskId, reportDigest: input.reportDigest, selection: input.selection, paths: input.paths }, options.owner);
+      return { ok: true, message: "The eval is confirmed. Its spend estimate now waits for its own approval." };
+    }),
     decideProposal: (input) => guarded(() => decide(SETUP_APPLY_KIND, input.project, input, input.decision === "approve" ? "The project now uses these setup commands." : "That setup was rejected.")),
   };
 
@@ -265,12 +282,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       if (tail === "discard" && request.method === "POST") return json(200, { discarded: await discardSetupApply(deps, project, developerIdOf(caller.principal)) });
       // DEC 253n(1): confirm a selection from the latest setup run's eval report; the broker builds the eval plan from its own reads of the code host.
       if (tail === "eval-confirm" && request.method === "POST") {
-        return json(200, await confirmEvalDiscovery({
-          store, companyId, now: options.now, members: localMembers, ...(options.evalMonthlyCapMicros === undefined ? {} : { monthlyCapMicros: options.evalMonthlyCapMicros }), latest: (p) => deps.latest(p),
-          readFile: (repository, path, commit, readOptions) => codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
-            .fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
-          log: (entry) => flow.log?.({ component: "setup-agent", ...entry }),
-        }, project, bodyOf(request), caller.principal));
+        return json(200, await confirmEvalDiscovery(evalConfirmDeps(deps), project, bodyOf(request), caller.principal));
       }
       return undefined;
     } catch (error) {

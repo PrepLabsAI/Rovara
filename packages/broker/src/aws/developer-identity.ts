@@ -1,6 +1,5 @@
 import { SlackWorkspaceScopeSchema } from "@agentx/contracts";
 import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
-import { handleSlackInstallRequest, slackInstallSecretsFromSecretsManager } from "./slack-install-identity.js";
 import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
 // packages/broker/src/aws/developer-identity.ts
 // The DeveloperIdentity Lambda (spec 025 phase 25a): wires the sign-in server to AWS. The only
@@ -14,12 +13,14 @@ import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
 import type { ChannelByNameRequest, ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, EndDeveloperSessionsRequest, ListSignInClientsRequest, PutSignInClientRequest, RemoveSignInClientRequest, SlackAuthCheckRequest, SlackUserByEmailRequest, TaskChannelPeopleRequest, TaskPersonProofRequest } from "@agentx/contracts";
 import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
-import { createDeveloperIdentityHandler, type DeveloperIdentityConfig, type SlackInstallInvoke } from "../developer/server.js";
+import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
 import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js";
 import { DeveloperSignInStore, methodSince } from "../developer/store.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { companyIssuerProvider } from "../developer/company-issuer.js";
+import { CompanyInviteStore } from "../developer/company-invites.js";
+import { CompanyImportStore } from "../developer/company-import.js";
 import type { StepUpDependencies } from "../developer/step-up.js";
 import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
@@ -261,11 +262,16 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       tableName,
       now,
     }),
-    ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }) }),
+    ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
+      // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
+      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company }) }),
+    // DEC 254b (b): the operator's company import runs BEFORE the company layer is switched on, so it is there with the layer on or off.
+    companyImport: new CompanyImportStore({ documentClient, tableName, now }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
     extraPublicKeys: extraPublicKeysFromEnvironment(env, new KMSClient(region)),
     providers: {
-      slack: slackSignInProvider({ teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
+      // DEC 254e: with Code's company layer on, any Slack workspace may sign in (the company still comes only from membership).
+      slack: slackSignInProvider({ ...(company === undefined ? {} : { anyWorkspace: true }), teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
       ...(oidc === undefined ? {} : { oidc }),
     },
     directory,
@@ -273,8 +279,6 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
     now,
     log,
     ...stepUpOf(stepUpFromEnvironment(env, config.issuer, () => new SESv2Client(region), log)),
-    // Guided onboarding PR 4: Add to Slack's Slack side, beside the Slack app's client secret; with the company layer only.
-    ...(company === undefined ? {} : { slackInstall: (event: unknown) => handleSlackInstallRequest({ appClient: slackSecret, secrets: slackInstallSecretsFromSecretsManager(secrets, config.env), fetch }, event) }),
   });
 }
 
@@ -288,7 +292,7 @@ function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Para
 }
 
 export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-  | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SlackInstallInvoke) => {
+  | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest) => {
   built ??= createAwsDeveloperIdentityHandler(process.env);
   return built(event);
 };

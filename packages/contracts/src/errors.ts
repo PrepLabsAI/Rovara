@@ -114,9 +114,8 @@ export const AgentXErrorCodeSchema = z.enum([
   "LESSON_BUSY",
   // The feature is not on this install (Rovara on a laptop does not have it yet). A 404, so an older client that does not know the code treats it as an answer it has no words for. Appended: no code changes meaning.
   "NOT_AVAILABLE_HERE",
-  // Guided onboarding PR 4 (409): the Slack workspace is another Rovara company's; this company already holds a different Slack workspace.
-  "SLACK_WORKSPACE_TAKEN",
-  "SLACK_COMPANY_HAS_WORKSPACE",
+  // Guided onboarding PR 3: a company's GitHub connection can't be disconnected while its projects use repositories on it (409; the message names those projects, only the company's own). Appended: no code changes meaning.
+  "GITHUB_IN_USE",
 ]);
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";
@@ -180,6 +179,12 @@ export function errorStatus(code: AgentXErrorCode): number {
 export function agentXError(code: AgentXErrorCode, message: string): AgentXError {
   return new AgentXError(code, message, errorStatus(code));
 }
+
+/**
+ * Guided onboarding PR 3: what GITHUB_NOT_CONNECTED (403) says when the company's own GitHub App installation was uninstalled or suspended on GitHub, or a token for it is asked
+ * for after that (design section 3a). Said only to the company that installation is bound to; anyone else gets the ordinary refusal.
+ */
+export const GITHUB_DISCONNECTED_MESSAGE = "GitHub disconnected. Reconnect it in Company settings, Connections.";
 
 /** What a refusal to reach a repository through the org's GitHub connection says (GITHUB_NOT_CONNECTED, Plan 2). */
 export const githubNotConnectedMessage = (fullName: string) => `Rovara can't reach ${fullName} through your organization's GitHub connection. Connect it with: agentx github connect`;

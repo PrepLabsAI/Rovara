@@ -22,6 +22,9 @@ import { blockedReview, code, parserId, report, PARSER, TOKEN, tokenId } from ".
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { makeKey, signerOf } from "../unit/policy-hook-fixture.js";
 import { createAdminBroker } from "../support/admin-broker.js";
+import { createFakeOfferedModels } from "../support/offered-models-fake.js";
+import { companyEngineModelKey } from "../../packages/broker/src/core-host/company-engine-model.js";
+import type { OfferedModelsReader } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -33,7 +36,7 @@ const gateway = "https://gateway.example";
 const plain = (value: unknown): StoredDocument => JSON.parse(JSON.stringify(value)) as StoredDocument;
 const project = { name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.", repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "app" }] };
 
-async function world(options: { noSigner?: boolean } = {}) {
+async function world(options: { noSigner?: boolean; offeredModels?: OfferedModelsReader } = {}) {
   const w = createFakeWorld();
   w.clock.now = Date.now();
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
@@ -55,6 +58,7 @@ async function world(options: { noSigner?: boolean } = {}) {
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     ...(options.noSigner ? {} : { taskTokens: () => ({ signer: taskKeySigner(signerOf(key)), issuer: "https://api.example/v1/auth" }) }),
     origin: () => "https://api.example", now: () => new Date(w.clock.now), log: () => undefined,
+    ...(options.offeredModels === undefined ? {} : { offeredModels: options.offeredModels }),
     ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
     lessonsPeople: () => ({ approvers: async () => ({ complete: true, membershipVersion: 1, ownerIds: [], eligibleIds: [], lastEligibleLossAtMs: null }), onProjectRoster: async () => true, linkedAccounts: async () => [], displayName: async () => "Member", isErased: async () => false }),
     services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now) }),
@@ -248,4 +252,48 @@ it("applies FR-018 from the company's catalog and reads the broker's live worksp
   expect((await h.start(personA))?.statusCode).toBe(200);
   // B's identical project name has its own enabled policy and workspace counters.
   expect((await h.start(personB))?.statusCode).toBe(200);
+});
+
+it("DEC 254n (1): A's own engine model is A's step route and A's task token model; B keeps the install default; A's start is refused before anything once the gateway stops offering it", async () => {
+  const offered = createFakeOfferedModels();
+  offered.set(A, [MODEL, "zai.glm-5"]);
+  offered.set(B, [MODEL]);
+  const h = await world({ offeredModels: offered });
+  const broker = await createAdminBroker({ core: h.root });
+  await h.w.store.put({ item: { ...companyEngineModelKey(A), entityType: "COMPANY_ENGINE_MODEL", orgId: A, version: 1, model: "zai.glm-5", updatedAt: new Date(h.w.clock.now).toISOString(), updatedBy: personA } });
+  for (const [companyId, person, model] of [[A, personA, "zai.glm-5"], [B, personB, MODEL]] as const) {
+    const answer = await h.start(person);
+    expect(answer?.statusCode, answer?.body).toBe(200);
+    const { task: { taskId } } = z.object({ task: z.object({ taskId: z.string() }) }).parse(JSON.parse(answer!.body));
+    const workspaceId = z.string().parse((await h.w.store.get(taskKey(taskId)))!["workspaceId"]);
+    expect((await h.dispatchOnce()).failures).toEqual([]);
+    let job = await h.invocation(companyId, workspaceId);
+    expect((await h.callback(job, "result", { status: "SUCCEEDED" }))?.statusCode).toBe(200);
+    h.w.machines.finish(((await h.w.store.get(workspaceKey(companyId, workspaceId)))!["machine"] as { machineId: string }).machineId, job.operationId);
+    expect((await h.dispatchOnce()).failures).toEqual([]);
+    job = await h.invocation(companyId, workspaceId);
+    if (job.kind !== "task") throw new Error("expected a task invocation");
+    expect(job.payload.modelRoute).toEqual({ alias: model, api: "anthropic-messages", catalog: model });
+    const access = await broker.handler({ version: "2.0", routeKey: "GET /v1/internal/model-access", rawPath: "/v1/internal/model-access", rawQueryString: "", headers: { "x-agentx-callback-capability": job.callbackCapability }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } });
+    expect(access.statusCode, access.body).toBe(200);
+    const body = z.object({ apiKey: z.string() }).parse(JSON.parse(access.body));
+    expect(JSON.parse(Buffer.from(body.apiKey.split(".")[1]!, "base64url").toString())).toMatchObject({ cid: companyId, mdl: [model] });
+  }
+  // B has no model of its own: the gateway was asked only for A, at A's start.
+  expect(offered.asked).toEqual([A]);
+  // The gateway no longer offers A's model: A's next start is refused before anything is written or queued; B still starts.
+  offered.set(A, [MODEL]);
+  const tasksBefore = (await h.w.store.query({ pk: `ORG#${A}#TASKS` })).items.length;
+  const refused = await h.start(personA);
+  expect(refused?.statusCode).toBe(400);
+  expect(refused?.body).toContain("Pick another model in Company settings, AI and spending.");
+  expect(refused?.body).not.toContain("glm");
+  expect((await h.w.store.query({ pk: `ORG#${A}#TASKS` })).items).toHaveLength(tasksBefore);
+  expect((await (await h.w.queues.queue("task-dispatch")).receive({ maxMessages: 10 }))).toEqual([]);
+  expect((await h.start(personB))?.statusCode).toBe(200);
+  // The list cannot be read: refused with the fixed reason, never started on a guess.
+  offered.fail(true);
+  const unchecked = await h.start(personA);
+  expect(unchecked?.statusCode).toBe(503);
+  expect(unchecked?.body).toContain("couldn't be checked just now");
 });

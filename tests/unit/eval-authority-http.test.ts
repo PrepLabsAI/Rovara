@@ -8,13 +8,13 @@ import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, PluginConfigSchema, TASK_KEY_P
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import {
-  EVAL_AUTHORITY_AUDIENCE, EVAL_AUTHORITY_BODY_MAX_BYTES, EVAL_AUTHORITY_PATH, EVAL_RESERVATION_ADAPTER_NAME, evalAuthorityAdapter, evalReservationModules,
+  EVAL_AUTHORITY_AUDIENCE, EVAL_AUTHORITY_BODY_MAX_BYTES, EVAL_AUTHORITY_PATH, EVAL_CAP_AUDIENCE, EVAL_CAP_PATH, EVAL_RESERVATION_ADAPTER_NAME, evalAuthorityAdapter, evalReservationModules,
 } from "../../packages/broker/src/core-host/eval-authority-http.js";
 import { buildCoreRegistry, type CoreAdapterContext } from "../../packages/broker/src/core-host/registry.js";
 import { createAdapterRegistry, registerCodeDefaults } from "../../packages/broker/src/ports/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { evalSpendKey } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
-import { boundEvalReservation, createBoundEvalSpendCapabilities } from "../../packages/broker/src/core/setup-agent/eval-reservation.js";
+import { boundEvalMonthlyCap, boundEvalReservation, createBoundEvalSpendCapabilities } from "../../packages/broker/src/core/setup-agent/eval-reservation.js";
 import { evalSpendDigest, evalSpendInputsDigest } from "../../packages/contracts/src/eval-spend.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
@@ -343,5 +343,46 @@ describe("the approver a REAL approval records is what the adapter sends (and Cl
     // The separator matters: ("ab","c") and ("a","bc") are different people.
     const [x, y] = fixture.vectors.slice(-2);
     expect(x!.developerId).not.toBe(y!.developerId);
+  });
+});
+
+describe("DEC 253q(c): the eval monthly cap from Cloud's company budget (monthlyCapMicros)", () => {
+  const capOk = (body: unknown = { company: ORG_A, project: PROJECT, monthlyCapMicros: 25_000_000 }) => ok(body);
+  it("asks the gateway's cap read with a service token for exactly the company asked about, and answers its cap", async () => {
+    const g = gateway(() => capOk());
+    expect(await adapter(g.fetchImpl).monthlyCapMicros!({ company: ORG_A, project: PROJECT })).toBe(25_000_000);
+    expect(g.seen).toHaveLength(1);
+    expect(g.seen[0]!.url).toBe(`${GATEWAY}${EVAL_CAP_PATH}`);
+    expect(g.seen[0]!.init).toMatchObject({ method: "POST", redirect: "error" });
+    expect(bodyOf(g.seen[0]!)).toEqual({ company: ORG_A, project: PROJECT });
+    const [header, claims, signature] = tokenOf(g.seen[0]!).split(".");
+    expect(decode(header!)).toMatchObject({ alg: "RS256", typ: "rovara-service+jwt", kid: KID });
+    expect(decode(claims!)).toMatchObject({ iss: ISSUER, aud: EVAL_CAP_AUDIENCE, cid: ORG_A });
+    expect(verify("sha256", Buffer.from(`${header}.${claims}`), pair.publicKey, Buffer.from(signature!, "base64url"))).toBe(true);
+  });
+  it("answers no cap for any other answer: another company or project, a non-200, extra or missing members, a negative or fractional cap, unparseable JSON, a fault, the timeout (mutants: the company and project match, the strict schema)", async () => {
+    const replies: Array<() => Response | Promise<Response>> = [
+      () => capOk({ company: ORG_B, project: PROJECT, monthlyCapMicros: 1 }), () => capOk({ company: ORG_A, project: "other", monthlyCapMicros: 1 }),
+      () => new Response("{}", { status: 404 }), () => capOk({ company: ORG_A, project: PROJECT, monthlyCapMicros: 1, extra: true }), () => capOk({ company: ORG_A, project: PROJECT }),
+      () => capOk({ company: ORG_A, project: PROJECT, monthlyCapMicros: -1 }), () => capOk({ company: ORG_A, project: PROJECT, monthlyCapMicros: 1.5 }),
+      () => new Response("not json", { status: 200 }), () => { throw new Error("fault"); }, () => new Promise<Response>(() => undefined),
+    ];
+    for (const reply of replies) expect(await adapter(gateway(reply).fetchImpl).monthlyCapMicros!({ company: ORG_A, project: PROJECT })).toBeUndefined();
+  });
+  it("refuses before signing or sending for a company or project it could never ask about", async () => {
+    const g = gateway(() => capOk());
+    expect(await adapter(g.fetchImpl).monthlyCapMicros!({ company: "not an org", project: PROJECT })).toBeUndefined();
+    expect(await adapter(g.fetchImpl).monthlyCapMicros!({ company: ORG_A, project: "../x" })).toBeUndefined();
+    expect(g.seen).toHaveLength(0);
+  });
+  it("the install's cap source is the bound adapter's only: none bound (a laptop) or an adapter without it is no source", async () => {
+    const empty = createAdapterRegistry();
+    registerCodeDefaults(empty, { priceTable: { currency: "USD", models: {} } });
+    expect(boundEvalMonthlyCap(empty)).toBeUndefined();
+    const without: EvalReservationAdapter = { authority: async () => undefined, reserve: async () => undefined };
+    expect(boundEvalMonthlyCap({ names: () => ["x"], get: () => without } as never)).toBeUndefined();
+    const g = gateway(() => capOk());
+    const bound = boundEvalMonthlyCap({ names: (point: string) => (point === "eval-reservation" ? ["model-gateway"] : []), get: () => adapter(g.fetchImpl) } as never);
+    expect(await bound!({ company: ORG_A, project: PROJECT })).toBe(25_000_000);
   });
 });
