@@ -79,7 +79,12 @@ describe("hosted machine-size dispatcher", () => {
     await w.refused("FORBIDDEN", ROLE);
   });
   it("refuses a revoked membership", async () => { const w = world(); w.membership(A, "owner", true); const before = w.stored(); expect(await w.call()).toMatchObject({ statusCode: 401 }); expect(w.stored()).toBe(before); });
-  it.each(["x86-16-64", 12, null, "x".repeat(10240)])("refuses invalid size %# with fixed words", async (rowId) => { const w = world(); await w.refused("CONFIG_INVALID", "Choose one of the listed machine sizes", rowId, "pa", 400); });
+  it.each(["x86-16-64", "arm64-64-256", "arm64-12-48", "x86_64-64-256", 12, null, "x".repeat(10240)])("refuses invalid size %# with fixed words", async (rowId) => { const w = world(); await w.refused("CONFIG_INVALID", "Choose one of the listed machine sizes", rowId, "pa", 400); });
+  it.each(["arm64-16-64", "arm64-32-128", "x86_64-16-64", "x86_64-32-128"])("accepts the big size %s and lists all ten sizes with their cost words", async (rowId) => {
+    const w = world(); const r = await w.call("POST", rowId); expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body) as { currentSize: string; choices: Array<{ id: string; costNote?: string }> };
+    expect(body.currentSize).toBe(rowId); expect(body.choices).toHaveLength(10); for (const choice of body.choices) expect(typeof choice.costNote).toBe("string");
+  });
   it("refuses a missing size", async () => { const w = world(); const before = w.stored(); const r = await w.read("/v1/dev/projects/pa/machine-size", { method: "POST", headers: { authorization: "Bearer e30.eyJhenAiOiJjbG91ZC1wYWdlIn0.sig" }, body: "{}" }); expect(r.statusCode).toBe(400); expect(r.body).toContain("Choose one of the listed machine sizes"); expect(w.stored()).toBe(before); });
   it.each(["tasks:read", "profile:name"] as const)("refuses scoped client %s", async (scope) => { const w = world(); w.client("scoped", [scope]); await w.refused("FORBIDDEN", PAGE); });
   it.each(["tool", "cli"] as const)("refuses non-page client %s", async (kind) => { const w = world(); w.client(kind); await w.refused("FORBIDDEN", PAGE); });

@@ -27,7 +27,7 @@ export function validPeakMemory(value: unknown): value is number {
 }
 /**
  * Available ids are install policy, never arbitrary row shapes. An absent row means no suggested change. Memory picks the smallest listed size of the chip that fits with headroom (so a big
- * suite reaches 16 vCPU / 64 GB or 32 vCPU / 128 GB). Time only moves the pick up ONE size, and only for a suite of LONG_SUITE_MS or more; it never picks a size the memory does not allow to be exceeded.
+ * suite reaches 16 vCPU / 64 GB or 32 vCPU / 128 GB). Time only moves the pick up ONE size, and only for a suite of LONG_SUITE_MS or more; it never picks a size when no size fits the memory, and steps up only to a listed size of the same chip.
  */
 export function suggestMachine(input: { peakMemoryMiB?: number | undefined; suiteMs?: number; armVerdict: ArmVerdict; available: readonly string[]; currentRowId?: string }): { row?: MachineSizeRow; reasons: string[] } {
   if (!validPeakMemory(input.peakMemoryMiB)) return { reasons: ["peak memory not measured"] };

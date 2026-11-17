@@ -111,7 +111,7 @@ export async function machineCard(deps: TestEnvDeps, orgId: OrgId, project: stri
   const chosenLabel = chosen === undefined ? undefined : machineRowLabel(chosen);
   return {
     lines: [advice.headline, `Why: ${advice.reasons.join("; ")}`, `Your choice: ${chosenLabel ?? "none yet"}`, MACHINE_STORED_ONLY_LINE],
-    choices: MACHINE_SIZE_ROWS.map((row) => ({ id: row.id, label: machineRowLabel(row.id)!, ...(machineCostWords(row.id) === undefined ? {} : { costNote: machineCostWords(row.id)! }) })),
+    choices: MACHINE_SIZE_ROWS.map((row) => { const costNote = machineCostWords(row.id); return { id: row.id, label: machineRowLabel(row.id)!, ...(costNote === undefined ? {} : { costNote }) }; }),
     ...(facts?.peakMemoryMiB === undefined ? {} : { measuredPeakMemoryMiB: facts.peakMemoryMiB }),
     ...(facts?.suiteMs === undefined ? {} : { testTimeMs: facts.suiteMs }),
     ...(advice.row === undefined ? {} : { suggestedRowId: advice.row.id }), ...(chosen === undefined ? {} : { chosenRowId: chosen }),
