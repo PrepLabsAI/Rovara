@@ -501,8 +501,10 @@ describe("what a change of the list does to the worker's machine", () => {
     await h.service.approve({ requested: "postgres:15" });
     const two = (await install(h)).services!;
     expect(JSON.stringify(localTestServicesDigestPart(one, undefined))).not.toBe(JSON.stringify(localTestServicesDigestPart(two, undefined)));
-    const signedShape = { ...one, ownerImages: undefined };
+    // The signed path's part is what it was while no limits are set; the install's resolved limits (DEC 254zm 2) add one part, so a changed ceiling re-creates the idle machine.
+    const signedShape = { ...one, ownerImages: undefined, limits: undefined };
     expect((localTestServicesDigestPart(signedShape, undefined) as unknown[]).length).toBe(5);
+    expect((localTestServicesDigestPart({ ...signedShape, limits: one.limits }, undefined) as unknown[]).length).toBe(6);
     expect(ownerImageReferences(two.ownerImages!).size).toBe(6);
   });
 });

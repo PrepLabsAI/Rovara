@@ -45,7 +45,7 @@ describe("starting helpers under the ceilings", () => {
   const entryOf = (id: string): CatalogEntry => ownerCatalogOf(ownerStarterEntries())!.entries.find((entry) => entry.id === id)!;
   const cli = (answer?: (call: string[]) => { exitCode: number; stderr: string }): { cli: DockerCli; calls: string[][] } => {
     const calls: string[][] = [];
-    return { calls, cli: { run: async (call: string[]) => { calls.push(call); const refused = answer?.(call); return { exitCode: refused?.exitCode ?? 0, stdout: call[0] === "image" ? "null\n" : call[0] === "inspect" ? "running\n" : "", stderr: refused?.stderr ?? "" }; } } as unknown as DockerCli };
+    return { calls, cli: { run: async (call: string[]) => { calls.push(call); const refused = answer?.(call); return { exitCode: refused?.exitCode ?? 0, stdout: call[0] === "image" ? "null\n" : call[0] === "inspect" ? "running\n" : "", stderr: refused?.stderr ?? "" }; } } };
   };
   const input = (entries: CatalogEntry[], limits?: { containers: number; helperMemMiB: number }) => ({
     registry: "owner-list.invalid", edition: "public" as const, probeImage: WORKER_IMAGE, maxMemMiB: 65536, files, imageReferences: ownerImageReferences(ownerStarterEntries()),
@@ -132,7 +132,7 @@ describe("a run's start passes the configured ceilings on and reports an over-li
     await mkdir(join(root, "app"));
     const runParent = await temp("rsl-runs-");
     const seen: Array<Parameters<ServiceRunner["start"]>[0]> = [];
-    const runner: ServiceRunner = { start: (input) => { seen.push(input); return Promise.reject(new HelperStartError("over_limit", TEST_SERVICES_OVER_LIMIT_SENTENCE, "postgres")); } } as unknown as ServiceRunner;
+    const runner = { start: (input: Parameters<ServiceRunner["start"]>[0]) => { seen.push(input); return Promise.reject(new HelperStartError("over_limit", TEST_SERVICES_OVER_LIMIT_SENTENCE, "postgres")); } };
     const config: TestServicesConfig = {
       docker: fake.docker, registry: "123456789012.dkr.ecr.us-west-2.amazonaws.com", catalogEnv: "staging", edition: "public", probeImage: IMAGE, guardImage: IMAGE, maxMemMiB: 3072, runDirectoryParent: runParent,
       limits: { containers: 7, helperMemMiB: 300 }, catalog: () => Promise.resolve(catalog), runner, sleep: () => Promise.resolve(), log: () => undefined,
