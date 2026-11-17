@@ -284,7 +284,7 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { bulkCreate, COMMIT_DEADLINE_MS, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -14507,13 +14507,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
     return { name: id, latestRevision: 1 };
   };
   return {
-    ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }),
-    // Guided onboarding PR 19: a live company owner or admin creates too, only where every repository is checked against the company's GitHub bindings.
-    // The role and company come from the reader the isolation (githubCallerCompany) reads, never from the request.
-    ...(dependencies.githubBindings === undefined ? {} : { async companyProjectCreator(developerId: string) {
-      const membership = await dependencies.companies?.membershipOf?.(developerId);
-      return membership !== undefined && (membership.role === "owner" || membership.role === "admin") ? membership.companyId : undefined;
-    } }),
+    ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }), ...companyProjectCreatorOf(dependencies.githubBindings !== undefined, dependencies.companies),
     async clientRepositories(developerId) {
       if (dependencies.githubBindings === undefined) return clientProjects.repositories();
       const budget = boundedCompanyReads(dependencies.documentClient);

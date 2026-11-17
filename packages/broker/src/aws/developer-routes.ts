@@ -213,12 +213,6 @@ export interface DeveloperRouteDependencies {
   createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<BulkCreateClientProjectsResponse>;
   /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
   clientRepositoryChoices?: (developerId: string, query: { q?: string | undefined; limit?: number | undefined; after?: string | undefined }) => Promise<ClientRepositoryChoicesResponse>;
-  /**
-   * Guided onboarding PR 19 (design section 4, DEC 254l): the company this person is a live owner or admin of, read now by the same membership reader the
-   * create's repository isolation uses; undefined for anyone else. Absent where repositories are not checked against the company's GitHub bindings, so there
-   * only a Rovara administrator creates projects.
-   */
-  companyProjectCreator?: (developerId: string) => Promise<string | undefined>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -1168,6 +1162,16 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
   });
 }
+// Guided onboarding PR 19 (declared here, merged into the interface above, so the line-keyed company inventory rows above stay where they are).
+export interface DeveloperRouteDependencies {
+  /**
+   * Design section 4, DEC 254l: the company this person is a live owner or admin of, read now by the same membership reader the create's repository
+   * isolation uses; undefined for anyone else. Absent where repositories are not checked against the company's GitHub bindings, so there only a Rovara
+   * administrator creates projects.
+   */
+  companyProjectCreator?: (developerId: string) => Promise<string | undefined>;
+}
+
 /**
  * Guided onboarding PR 19: a signed-in person who is not a Rovara administrator may create projects (and read the repository pickers) only as a live owner or
  * admin of the company their sign-in resolved, by the isolation's own reader, and only while their sign-in record is not revoked. Never from the request.
