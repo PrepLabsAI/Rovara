@@ -1,9 +1,10 @@
 // Guided onboarding PR 6: several repositories in one project, one project per repository (bulk), and the repository picker, with company
 // isolation: two companies, each with its own GitHub installation; an unbound, a suspended and an unknown repository too.
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, type ClientRepositoriesResponse } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, orgProjectCatalogKey, type ClientRepositoriesResponse } from "@agentx/contracts";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { REPOSITORIES_NOT_AVAILABLE } from "../../packages/broker/src/aws/client-project-create.js";
+import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { createBroker, loadSlackBroker } from "../support/slack-broker.js";
 
@@ -27,7 +28,9 @@ const ownerOf = (url: string) => /^https:\/\/github\.com\/([^/]+)\//.exec(url)![
 
 beforeAll(loadSlackBroker);
 
-async function world(company: string = A, options: { live?: boolean; administrator?: boolean } = {}) {
+/** Guided onboarding PR 19: a live company membership row, read by the production reader (the sign-in table). */
+type Membership = { companyId: string; role: "owner" | "admin" | "member"; revokedAt?: string };
+async function world(company: string = A, options: { live?: boolean; administrator?: boolean; membership?: Membership; bindings?: boolean; amr?: "oidc" | "slack" } = {}) {
   const h = companyRouteHarness();
   const bindings = new GithubInstallationBindings(h.db, "state");
   await bindings.backfill(async () => []);
@@ -36,11 +39,21 @@ async function world(company: string = A, options: { live?: boolean; administrat
   await bindings.claim(A, 66, "paused", "operator");
   await bindings.claim(B, 88, "acme-b", "operator");
   h.deps.developer.clientRoutes = true;
-  h.claims.azp = "web-app"; h.claims.amr = "oidc"; h.claims.scope = "projects:create";
-  h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app", amr: "oidc", administrator: options.administrator ?? true, endsAt: 4_000_000_000 });
+  const amr = options.amr ?? "oidc";
+  h.claims.azp = "web-app"; h.claims.amr = amr; h.claims.scope = "projects:create";
+  h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app", amr, administrator: options.administrator ?? true, endsAt: 4_000_000_000 });
   h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, provider: "oidc" });
-  h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web", audience: "web-app", redirectUris: ["https://web.example.test/callback"], loopback: false, scopes: ["projects:create"], createdAt: TIME, updatedAt: TIME, updatedBy: "test" });
+  h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web", audience: "web-app", redirectUris: ["https://web.example.test/callback"], loopback: false, scopes: ["projects:create"], createdAt: TIME, updatedAt: TIME, updatedBy: "test",
+    ...(options.membership === undefined ? {} : { installLevel: true }) });
   const companyOf = vi.fn(async (): Promise<string | undefined> => company);
+  // PR 19: with a membership row, both the route (sign-in) and the create (isolation) read it live, through the production reader.
+  const reader = companyMembershipFromDynamo(h.db, "SignIn");
+  const membershipOf = vi.fn((personId: string) => reader.membershipOf!(personId));
+  if (options.membership !== undefined) {
+    h.db.set({ pk: `COMPANY_MEMBER#${PERSON}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: PERSON, joinedAt: TIME, ...options.membership });
+    companyOf.mockImplementation(async () => (await membershipOf(PERSON))?.companyId);
+    h.deps.developer.companies = { companyOf, membershipOf };
+  }
   const repositoryInstallation = vi.fn(async (url: string) => {
     const found = LIVE[ownerOf(url)];
     if (found === undefined) throw new Error("ghost-canary");
@@ -53,7 +66,7 @@ async function world(company: string = A, options: { live?: boolean; administrat
     workerBinding: async () => ({ deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" }),
     ...(options.live === false ? {} : { repositoryInstallation }),
   };
-  const extra = { documentClient: h.db, linking: h.deps.developer, clientProjects, companies: { companyOf }, githubBindings: bindings,
+  const extra = { documentClient: h.db, linking: h.deps.developer, clientProjects, companies: { companyOf, membershipOf }, ...(options.bindings === false ? {} : { githubBindings: bindings }),
     githubPullRequests: { installationIdFor: vi.fn(async (url: string) => { const found = LIVE[ownerOf(url)]; if (found === undefined) throw new Error("ghost-canary"); return found.installationId; }) },
     githubBindingInstallations: { get: async () => undefined, page: async () => ({ installations: [], more: false }) },
   };
@@ -62,7 +75,7 @@ async function world(company: string = A, options: { live?: boolean; administrat
   const call = (path: string, body?: unknown) => broker.handler({ rawPath: path.split("?")[0], rawQueryString: path.split("?")[1] ?? "", headers: { authorization: token, "x-company": B },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), requestContext: { requestId: "golden", http: { method: body === undefined ? "GET" : "POST" } } });
   const projectRows = () => h.db.find((item) => typeof item.pk === "string" && (item.pk.startsWith("PROJECT#") || item.pk === "PROJECT_CATALOG" || item.pk.includes("#PROJECT_CATALOG") || item.pk.startsWith("MEMBER#")));
-  return { ...h, bindings, companyOf, clientProjects, repositoryInstallation, extra, call, projectRows };
+  return { ...h, bindings, companyOf, membershipOf, clientProjects, repositoryInstallation, extra, call, projectRows };
 }
 const json = (response: { body: string }) => JSON.parse(response.body) as Record<string, unknown>;
 const REFUSED = { code: "CONFIG_INVALID", message: REPOSITORIES_NOT_AVAILABLE };
@@ -355,5 +368,137 @@ describe("the single-repository create", () => {
     expect(h.db.get("PROJECT#y", "REV#000000000001")).toBeUndefined();
     const created = await h.call("/v1/dev/client/projects", { repository: "acme-a/web" });
     expect(json(created)).toEqual({ name: "web", latestRevision: 1, access: "administrator", repositories: [{ name: "web", url: "https://github.com/acme-a/web.git", defaultBranch: "main", fullName: "acme-a/web" }], requestId: "golden" });
+  });
+});
+
+// Guided onboarding PR 19 (design section 4, DEC 254l): a live owner or admin of the caller's own company creates projects too; a member does not.
+describe("company owners and admins create projects", () => {
+  const FORBIDDEN = { code: "FORBIDDEN", message: "only a Rovara administrator can create a project" };
+  const ROUTES = [["/v1/dev/client/projects", { repository: "acme-a/web" }], ["/v1/dev/client/projects", { repositories: ["acme-a/web"] }],
+    ["/v1/dev/client/projects/bulk", { repositories: ["acme-a/web"] }], ["/v1/dev/client/repositories/available", undefined], ["/v1/dev/client/repositories", undefined]] as const;
+  const signedIn = (membership: Membership, options: { bindings?: boolean } = {}) => world(membership.companyId, { administrator: false, amr: "slack", membership, ...options });
+
+  it.each(["owner", "admin"] as const)("a Slack-signed-in %s creates one, several and one per repository, in their own company, and administers each", async (role) => {
+    const h = await signedIn({ companyId: A, role });
+    const single = await h.call("/v1/dev/client/projects", { repository: "acme-a/web" });
+    expect(single.statusCode).toBe(200);
+    expect(json(single)).toMatchObject({ name: "web", latestRevision: 1, access: "administrator" });
+    const many = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/api", "acme-a2/web"], name: "both" });
+    expect(json(many)).toMatchObject({ name: "both", access: "administrator" });
+    expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/docs"] })).results).toEqual([{ repository: "acme-a/docs", outcome: "created", project: "docs" }]);
+    for (const name of ["web", "both", "docs"]) {
+      expect(h.db.get(`PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(A);
+      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${name}`)).toMatchObject({ role: "administrator" });
+    }
+    const picker = await h.call("/v1/dev/client/repositories/available");
+    expect(picker.statusCode).toBe(200);
+    expect((json(picker).repositories as Array<{ fullName: string }>).map((row) => row.fullName)).toEqual(["acme-a/api", "acme-a/docs", "acme-a/web"]);
+    const listed = await h.call("/v1/dev/client/repositories");
+    expect(listed.statusCode).toBe(200);
+    expect((json(listed).installations as Array<{ accountLogin: string }>).map((row) => row.accountLogin)).toEqual(["acme-a", "paused"]);
+  });
+
+  it("A's admin cannot create from B's repository on any route, nor see B's repositories or projects in the picker", async () => {
+    const h = await signedIn({ companyId: A, role: "admin" });
+    h.db.set({ ...orgProjectCatalogKey(B, "b-own"), entityType: "PROJECT_CATALOG", name: "b-own" });
+    h.db.set({ pk: "PROJECT#b-own", sk: "REV#000000000001", entityType: "PROJECT", companyId: B, definition: { name: "b-own", revision: 1, repositories: [{ name: "web", url: "https://github.com/acme-a/web.git" }] } });
+    const single = await h.call("/v1/dev/client/projects", { repository: "acme-b/secret" });
+    expect(json(single)).toEqual({ error: { code: "CONFIG_INVALID", message: "the GitHub App cannot access acme-b/secret; install it on acme-b with access to that repository" }, requestId: "golden" });
+    expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-b/secret"] }))).toEqual({ error: REFUSED, requestId: "golden" });
+    expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-b/secret"] })).results).toEqual([{ repository: "acme-b/secret", outcome: "refused", reason: "not_available" }]);
+    expect(h.db.get("PROJECT#secret", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    for (const path of ["/v1/dev/client/repositories/available", "/v1/dev/client/repositories"]) {
+      const response = await h.call(path);
+      expect(response.statusCode).toBe(200);
+      for (const leak of ["acme-b", "b-own", "loose", B]) expect(response.body).not.toContain(leak);
+    }
+    // And B's admin, the other way round.
+    const b = await signedIn({ companyId: B, role: "admin" });
+    expect(json(await b.call("/v1/dev/client/projects", { repositories: ["acme-a/web"] }))).toEqual({ error: REFUSED, requestId: "golden" });
+    expect((await b.call("/v1/dev/client/projects", { repositories: ["acme-b/web"] })).statusCode).toBe(200);
+    expect(b.db.get("PROJECT#web", "REV#000000000001")?.companyId).toBe(B);
+  });
+
+  it("a plain member is refused on every route in the existing words, before any GitHub lookup or write", async () => {
+    const h = await signedIn({ companyId: A, role: "member" });
+    const before = h.projectRows().length;
+    for (const [path, body] of ROUTES) {
+      const response = await h.call(path, body);
+      expect(response.statusCode).toBe(403);
+      expect(json(response)).toEqual({ error: FORBIDDEN, requestId: "golden" });
+    }
+    // Neither the body nor the query can name a role or a company.
+    for (const response of [await h.call("/v1/dev/client/projects?role=admin", { repositories: ["acme-a/web"] }), await h.call(`/v1/dev/client/repositories/available?companyId=${A}&role=owner`)]) {
+      expect(json(response)).toEqual({ error: FORBIDDEN, requestId: "golden" });
+    }
+    expect(h.repositoryInstallation).not.toHaveBeenCalled();
+    expect(h.clientProjects.repositories).not.toHaveBeenCalled();
+    expect(h.projectRows()).toHaveLength(before);
+  });
+
+  it("a removed (revoked) owner or admin is refused, and so is a person whose sign-in record is revoked", async () => {
+    for (const role of ["owner", "admin"] as const) {
+      const h = await signedIn({ companyId: A, role, revokedAt: TIME });
+      for (const [path, body] of ROUTES) {
+        // No live membership: the sign-in itself is refused, in its one fixed answer.
+        const response = await h.call(path, body);
+        expect(response.statusCode).toBe(401);
+        expect((json(response).error as { code: string }).code).toBe("AUTH_REQUIRED");
+      }
+      expect(h.projectRows().filter((row) => String(row.pk).startsWith("PROJECT#"))).toHaveLength(0);
+      const gone = await signedIn({ companyId: A, role });
+      gone.db.set({ ...gone.db.get(`DEVELOPER#${PERSON}`, "META")!, revoked: true });
+      for (const [path, body] of ROUTES) expect(json(await gone.call(path, body))).toEqual({ error: FORBIDDEN, requestId: "golden" });
+      expect(gone.repositoryInstallation).not.toHaveBeenCalled();
+      const missing = await signedIn({ companyId: A, role });
+      missing.db.delete(`DEVELOPER#${PERSON}`, "META");
+      expect(missing.db.get(`DEVELOPER#${PERSON}`, "META")).toBeUndefined();
+      for (const [path, body] of ROUTES) expect(json(await missing.call(path, body))).toEqual({ error: FORBIDDEN, requestId: "golden" });
+    }
+  });
+
+  it("the role is read live at every call: demoted to member, the next call is refused", async () => {
+    const h = await signedIn({ companyId: A, role: "admin" });
+    expect((await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web"] })).statusCode).toBe(200);
+    h.db.set({ ...h.db.get(`COMPANY_MEMBER#${PERSON}`, "COMPANY")!, role: "member" });
+    expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-a/api"] }))).toEqual({ error: FORBIDDEN, requestId: "golden" });
+    expect(h.db.get("PROJECT#api", "REV#000000000001")).toBeUndefined();
+  });
+
+  it("is refused when the company isolation reads another company than the sign-in did", async () => {
+    const h = await signedIn({ companyId: A, role: "admin" });
+    // The sign-in reads A; the isolation reader (the create's) says this person administers B.
+    h.membershipOf.mockImplementation(async () => ({ companyId: B, role: "admin" }));
+    h.deps.developer.companies = { companyOf: async () => A };
+    for (const [path, body] of ROUTES) expect(json(await h.call(path, body))).toEqual({ error: FORBIDDEN, requestId: "golden" });
+    expect(h.repositoryInstallation).not.toHaveBeenCalled();
+  });
+
+  it("is off where repositories are not checked against company GitHub bindings: company admins are refused, the Rovara administrator is not", async () => {
+    const h = await signedIn({ companyId: A, role: "owner" }, { bindings: false });
+    for (const [path, body] of ROUTES) expect(json(await h.call(path, body))).toEqual({ error: FORBIDDEN, requestId: "golden" });
+    expect(h.clientProjects.repositories).not.toHaveBeenCalled();
+    const admin = await world(A, { bindings: false });
+    expect((await admin.call("/v1/dev/client/projects", { repository: "acme-a/web" })).statusCode).toBe(200);
+  });
+
+  it("leaves the Rovara administrator byte-identical, and lets one whose company role is only member create as before", async () => {
+    const { readFileSync } = await import("node:fs");
+    const h = await world(A);
+    h.repositoryInstallation.mockImplementation(async () => ({ installationId: 77, suspended: false }));
+    h.extra.githubPullRequests.installationIdFor.mockImplementation(async () => 77);
+    const created = await h.call("/v1/dev/client/projects", { repository: "example/demo" });
+    expect(JSON.stringify(created) + "\n").toBe(readFileSync("tests/fixtures/github-company-goldens/client-create-legacy.json", "utf8"));
+    expect(JSON.stringify(await h.call("/v1/dev/client/projects", {})) + "\n").toBe(readFileSync("tests/fixtures/github-company-goldens/client-missing-field-legacy.json", "utf8"));
+    // On a company-layout install the Rovara administrator signs in to the install's own company; a member role there changes nothing.
+    const member = await world(IMPLICIT_COMPANY_ID, { membership: { companyId: IMPLICIT_COMPANY_ID, role: "member" } });
+    await member.bindings.claim(IMPLICIT_COMPANY_ID, 99, "loose", "operator");
+    for (const [path, body] of [["/v1/dev/client/projects", { repository: "loose/x" }], ["/v1/dev/client/projects", { repositories: ["loose/y"] }], ["/v1/dev/client/projects/bulk", { repositories: ["loose/z"] }],
+      ["/v1/dev/client/repositories/available", undefined], ["/v1/dev/client/repositories", undefined]] as const) {
+      expect((await member.call(path, body)).statusCode).toBe(200);
+    }
+    expect(member.db.get("PROJECT#x", "REV#000000000001")?.companyId).toBe(IMPLICIT_COMPANY_ID);
+    expect(member.db.get(`MEMBER#${PERSON}`, "PROJECT#y")).toMatchObject({ role: "administrator" });
   });
 });

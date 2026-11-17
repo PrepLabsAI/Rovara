@@ -14457,7 +14457,7 @@ function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: 
 const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
 
 /** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. Guided onboarding PR 6: or from several, or one per repository. */
-function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyReads"> {
+function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyProjectCreator" | "companyReads"> {
   const clientProjects = dependencies.clientProjects;
   if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
   const rules = { ...(dependencies.githubBindings === undefined ? {} : { bindings: dependencies.githubBindings }),
@@ -14508,6 +14508,12 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
   };
   return {
     ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }),
+    // Guided onboarding PR 19: a live company owner or admin creates too, only where every repository is checked against the company's GitHub bindings.
+    // The role and company come from the reader the isolation (githubCallerCompany) reads, never from the request.
+    ...(dependencies.githubBindings === undefined ? {} : { async companyProjectCreator(developerId: string) {
+      const membership = await dependencies.companies?.membershipOf?.(developerId);
+      return membership !== undefined && (membership.role === "owner" || membership.role === "admin") ? membership.companyId : undefined;
+    } }),
     async clientRepositories(developerId) {
       if (dependencies.githubBindings === undefined) return clientProjects.repositories();
       const budget = boundedCompanyReads(dependencies.documentClient);

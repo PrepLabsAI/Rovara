@@ -213,6 +213,12 @@ export interface DeveloperRouteDependencies {
   createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<BulkCreateClientProjectsResponse>;
   /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
   clientRepositoryChoices?: (developerId: string, query: { q?: string | undefined; limit?: number | undefined; after?: string | undefined }) => Promise<ClientRepositoryChoicesResponse>;
+  /**
+   * Guided onboarding PR 19 (design section 4, DEC 254l): the company this person is a live owner or admin of, read now by the same membership reader the
+   * create's repository isolation uses; undefined for anyone else. Absent where repositories are not checked against the company's GitHub bindings, so there
+   * only a Rovara administrator creates projects.
+   */
+  companyProjectCreator?: (developerId: string) => Promise<string | undefined>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -1162,6 +1168,16 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
   });
 }
+/**
+ * Guided onboarding PR 19: a signed-in person who is not a Rovara administrator may create projects (and read the repository pickers) only as a live owner or
+ * admin of the company their sign-in resolved, by the isolation's own reader, and only while their sign-in record is not revoked. Never from the request.
+ */
+async function companyMayCreateProjects(deps: DeveloperRouteDependencies, creator: { developerId: string; companyId?: string }): Promise<boolean> {
+  if (deps.companyProjectCreator === undefined || creator.companyId === undefined) return false;
+  if (await deps.companyProjectCreator(creator.developerId) !== creator.companyId) return false;
+  const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${creator.developerId}`);
+  return person !== undefined && person.revoked !== true;
+}
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
 /**
@@ -1196,7 +1212,8 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   if (creating || bulk || choosing || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
     const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
     requireRouteScope(route, creator);
-    if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+    // Guided onboarding PR 19: or a live owner or admin of the caller's own company; the Rovara administrator's path is unchanged and reads nothing more.
+    if (!creator.administrator && !await companyMayCreateProjects(deps, creator)) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
     if (choosing) {
       if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
       const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
