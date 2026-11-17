@@ -35,7 +35,7 @@ export const preapprovalHashKey = (companyId: string, hash: string) => ({ pk: co
  */
 export const inviteLinkKey = (companyId: string, hash: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "INVITE_LINK"), sk: `SECRET#${z.string().regex(/^[a-f0-9]{64}$/).parse(hash)}` });
 export const CompanyInviteLink = z.object({
-  entityType: z.literal("COMPANY_INVITE_LINK"), companyId: OrgIdSchema, status: z.enum(["live", "used"]),
+  entityType: z.literal("COMPANY_INVITE_LINK"), companyId: OrgIdSchema, status: z.enum(["live", "used", "withdrawn"]),
   expiresAt: z.number().int().positive(), createdAt: z.iso.datetime(), createdBy: z.union([z.literal("operator"), CompanyPersonId]),
   emailHash: z.string().regex(/^[a-f0-9]{64}$/),
   usedBy: CompanyPersonId.optional(), usedAt: z.iso.datetime().optional(),
@@ -124,7 +124,8 @@ export class CompanySignInStore {
    * DEC 254h: join by an invite link's secret, whatever the sign-in method and whether or not the identity has an email. The secret must be live,
    * unexpired and stored under exactly this company, and its pre-approval still live and the very one it was made with. One transaction writes
    * the membership and spends both, so exactly one person ever joins by one secret. Every failure is the one "not invited" answer; a person who
-   * is already a member anywhere spends nothing.
+   * is already a member anywhere spends nothing. A live member of this very company is signed in as before whatever `invite=` says (the secret is
+   * then neither checked nor spent, and the sign-in is not "joined by invite"): an admitted sign-in never means a secret was valid.
    */
   async joinByInvite(input: { personId: string; companyId: string; inviteHash: string }): Promise<CompanyJoin> {
     if (!CompanyPersonId.safeParse(input.personId).success || !OrgIdSchema.safeParse(input.companyId).success || !/^[a-f0-9]{64}$/.test(input.inviteHash)) return refused();
@@ -209,10 +210,13 @@ export class CompanySignInStore {
     const key = preapprovalHashKey(companyId, hash);
     const row = CompanyPreapproval.safeParse(await this.read(key));
     if (!row.success) return false;
+    // DEC 254h: its invite link's row is marked too, in the same transaction (the join checks the pre-approval anyway; expired rows age out by TTL).
+    const link: Write[] = row.data.inviteHash === undefined ? [] : [{ Update: { TableName: this.input.tableName, Key: inviteLinkKey(companyId, row.data.inviteHash),
+      UpdateExpression: "SET #status = :withdrawn", ConditionExpression: "attribute_exists(pk) AND #status = :live", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":withdrawn": "withdrawn", ":live": "live" } } }];
     await this.operatorWrite(companyId, "company-preapproval-withdraw", [{ Update: {
       TableName: this.input.tableName, Key: key, UpdateExpression: "SET #status = :withdrawn", ConditionExpression: "attribute_exists(pk) AND createdAt = :at",
       ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":withdrawn": "withdrawn", ":at": row.data.createdAt },
-    } }], createdBy);
+    } }, ...(row.data.status === "live" ? link : [])], createdBy);
     return true;
   }
   async list(companyId: string): Promise<{ preapprovals: Array<z.infer<typeof CompanyPreapproval> & { emailHash: string }>; more: boolean }> {
@@ -224,7 +228,8 @@ export class CompanySignInStore {
       const row = CompanyPreapproval.extend({ pk: z.literal(pk), sk: z.string().regex(/^EMAIL#[a-f0-9]{64}$/) }).safeParse(item);
       if (!row.success) throw unavailable();
       // The invite link's hash stays in the table: a list shows none of it.
-      const { inviteHash: _link, ...shown } = CompanyPreapproval.parse(row.data);
+      const shown: Partial<z.infer<typeof CompanyPreapproval>> & Omit<z.infer<typeof CompanyPreapproval>, "inviteHash"> = CompanyPreapproval.parse(row.data);
+      delete shown.inviteHash;
       return { ...shown, emailHash: row.data.sk.slice(6) };
     });
     return { preapprovals, more: answer.LastEvaluatedKey !== undefined };

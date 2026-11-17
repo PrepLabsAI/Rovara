@@ -102,6 +102,11 @@ it("the broker forwarding seam runtime-refuses every operator kind and malformed
   expect(await forward(good)).toEqual({ expiresAt: 1_800_000_000 }); invoke.mockClear();
   for (const event of [ { ...good, kind: "company-create" }, { ...good, role: "admin" }, { ...good, companyId: "private-canary" }, { ...good, createdBy: undefined }, { ...good, expiresInHours: 0 }, { ...good, inviteHash: undefined }, { ...good, inviteHash: "rvlink_private-canary" } ]) expect(await forward(event as Parameters<typeof forward>[0])).toBe(false);
   expect(invoke).not.toHaveBeenCalled();
+  // A stored invitation whose expiry did not come back: 404, and the secret is never shown.
+  const h = await inviteWorld();
+  h.deps.developer.companyPreapprovals = async () => ({});
+  const blind = await h.post();
+  expect(blind.statusCode).toBe(404); expect(blind.body).not.toContain("rvlink_");
   // A reply whose expiry is not a positive whole number is no answer.
   for (const reply of ['{"ok":true,"expiresAt":"soon"}', '{"ok":true,"expiresAt":-1}', '{"ok":false,"error":"unavailable"}']) {
     expect(await routes.companyPreapprovalsThroughLambda(async () => ({ Payload: Buffer.from(reply) }))(good)).toBe(false);

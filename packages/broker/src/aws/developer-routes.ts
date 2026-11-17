@@ -1800,7 +1800,7 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   catch { throw notFound(); }
   if (answer === undefined || answer === false) throw notFound();
   if (link === undefined) return { ok: true };
-  // A stored pre-approval whose expiry did not come back: its secret was stored but cannot be answered, so the inviter tries again (as for any refusal).
+  // A stored pre-approval whose expiry did not come back (a broken reply): the secret is never shown; the inviter withdraws that invitation and invites again.
   if (answer.expiresAt === undefined) throw notFound();
   return { ok: true, invite: { secret: link.secret, expiresAt: new Date(answer.expiresAt * 1000).toISOString() } };
 }

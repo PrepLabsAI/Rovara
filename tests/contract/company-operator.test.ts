@@ -129,7 +129,8 @@ it("broker forwarding refuses every operator kind and admin preapprovals", async
   const member = { kind: "company-preapprove" as const, companyId, email: "person@example.test", role: "member" as const, expiresInHours: 24, createdBy: personId, inviteHash: "c".repeat(64) };
   expect(await forward(member)).toEqual({}); expect(invoke).toHaveBeenCalledTimes(1); invoke.mockClear();
   // DEC 254h: a pre-approval always carries its invite link's hash.
-  const { inviteHash: _hash, ...noLink } = member;
+  const noLink: Partial<typeof member> = { ...member };
+  delete noLink.inviteHash;
   expect(await forward(noLink as never)).toBe(false);
   for (const kind of operatorKinds) {
     expect(await forward({ ...member, kind, role: "admin" } as never)).toBe(false);

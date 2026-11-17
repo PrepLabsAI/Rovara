@@ -120,6 +120,7 @@ describe("invite link secret (DEC 254h)", () => {
     const short = await mint(w, owner, "short@example.test", 1);
     const withdrawn = await mint(w, owner, "gone@example.test");
     expect((await w.call("DELETE", `${PATH}/${emailIndexKey("gone@example.test").pk.slice(6)}`, owner)).status).toBe(200);
+    expect(linkRow(w, X, withdrawn.secret)).toMatchObject({ status: "withdrawn" });
     // Withdrawn, then the same email invited again: the old secret stays dead, the new one works.
     const replaced = await mint(w, owner, "gone@example.test");
     expect((await w.signIn("noemail", { company: X, invite: withdrawn.secret })).refused).toBe(NOT_INVITED);
@@ -178,8 +179,9 @@ describe("invite link secret (DEC 254h)", () => {
     expect(await refused({ client_id: "web-app", redirect_uri: "https://cloud.example.test/callback", company: X, invite: "" })).toContain("unexpected-400");
     expect(await refused({ client_id: "web-app", redirect_uri: "https://cloud.example.test/callback", company: X, invite: invite.secret, acr_values: "step-up" })).toContain("unexpected-400");
     // A client bound to company X (not install-level): it signs people in to X, but never with a secret.
-    const { installLevel: _level, webApp: _web, ...bound } = w.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!;
-    w.db.set({ ...bound, sk: "CLIENT#x-app", clientId: "x-app", companyId: X });
+    const bound: Record<string, unknown> = { ...w.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, sk: "CLIENT#x-app", clientId: "x-app", companyId: X };
+    delete bound.installLevel; delete bound.webApp;
+    w.db.set(bound);
     expect(await refused({ client_id: "x-app", redirect_uri: "https://cloud.example.test/callback", invite: invite.secret })).toContain("unexpected-400");
     expect(w.db.find((row) => row.entityType === "AUTH_REQUEST")).toHaveLength(before);
     expect(await refused({ client_id: "x-app", redirect_uri: "https://cloud.example.test/callback" })).toContain("unexpected-200");
