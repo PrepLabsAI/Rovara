@@ -219,6 +219,18 @@ describe("features: the routes", () => {
   });
 });
 
+describe("store faults on the feature routes", () => {
+  it("a store that fails on a write is a fixed 503 that echoes nothing (never a raw 500)", async () => {
+    const { world, routes, as } = await setup();
+    const admin = as(FAKE_COMPANY, "admin", "admin-1");
+    vi.spyOn(world.store, "transact").mockRejectedValue(new Error("secret-canary down"));
+    const answer = await routes.route(post("/v1/app/org/report/features", { name: "Anything" }), admin);
+    expect(answer?.statusCode).toBe(503);
+    expect(answer!.body).not.toContain("secret-canary");
+    vi.restoreAllMocks();
+  });
+});
+
 describe("filing and moving a task", () => {
   async function filed() {
     const w = await setup({ [`${FAKE_COMPANY}|payments|maint-pay`]: "manage", [`${FAKE_COMPANY}|ledger|maint-led`]: "manage", [`${OTHER}|payments|maint-b`]: "manage", [`${FAKE_COMPANY}|payments|viewer`]: "view" });

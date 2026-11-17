@@ -204,6 +204,22 @@ describe("features: the company boundary", () => {
   });
 });
 
+describe("rows whose key does not match their own fields", () => {
+  it("a feature row or a task assignment under a sort key that is not its own is not read", async () => {
+    const w = world();
+    const f = await w.a.create({ name: "Real" }, ada);
+    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: f.id, source: "chosen" }, ada);
+    const feature = (await w.store.get(reportFeatureKey(A, f.id)))!;
+    const assignment = (await w.store.get(reportTaskFeatureKey(A, TASK)))!;
+    await w.store.delete({ key: { pk: feature.pk, sk: feature.sk } });
+    await w.store.delete({ key: { pk: assignment.pk, sk: assignment.sk } });
+    await w.store.put({ item: { ...feature, sk: `FEATURE#ft_${"e".repeat(20)}` } });
+    await w.store.put({ item: { ...assignment, sk: `TASKFEAT#${TASK2}` } });
+    expect(await w.a.list()).toEqual([]);
+    expect(await w.a.taskFeature(TASK2)).toBeUndefined();
+  });
+});
+
 describe("a task's feature: the rule order", () => {
   const sources = FEATURE_SOURCES;
   const pairs = sources.flatMap((existing) => sources.map((incoming) => [existing, incoming] as const));
