@@ -7,7 +7,8 @@
 // The company's tokens are only ever read for the company asking (`linearCompanyApiAccess`), so another company's token is never used for its projects.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DecryptCommand, EncryptCommand, type KMSClient } from "@aws-sdk/client-kms";
-import { linearAppIntakeDeliver } from "./linear-app-intake.js";
+import { OrgIdSchema } from "@agentx/contracts";
+import { createLinearApiAccess } from "../plugins/tracker/linear/api.js";
 import { LinearAppSettingsSchema, LinearConnections, linearAppSecretName, type LinearAppSettings, type LinearSealer } from "./linear-connections.js";
 import type { LinearConnectWiring } from "./linear-connect-routes.js";
 import type { LinearWebhookWiring } from "./linear-app-webhook.js";
@@ -60,9 +61,17 @@ export function linearCompanyWiring(input: {
   return {
     connections,
     connect: { connections, app, fetch: fetchImpl, log: input.log },
-    webhook: { connections, app, now: Date.now, log: input.log, deliver: linearAppIntakeDeliver({ connections, app, fetch: fetchImpl, log: input.log }) },
+    webhook: { connections, app, now: Date.now, log: input.log },
   };
 }
 
-/** The Linear tracker's access for ONE company over its OAuth connection (moved to linear-app-intake.ts, PR 20). */
-export { linearCompanyApiAccess } from "./linear-app-intake.js";
+/**
+ * The Linear tracker's access for ONE company over its OAuth connection: every call sends that company's own access token (`Bearer`), refreshed as needed. The app acts as
+ * itself (actor=app), so what it writes is Rovara's own.
+ */
+export function linearCompanyApiAccess(connections: Pick<LinearConnections, "accessToken">, companyId: string, fetchImpl?: typeof fetch) {
+  const company = OrgIdSchema.parse(companyId);
+  return createLinearApiAccess({
+    apiKey: async () => `Bearer ${await connections.accessToken(company)}`, companyId: company, ownAccountIsRovara: true, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }),
+  });
+}

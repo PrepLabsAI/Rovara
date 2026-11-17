@@ -140,6 +140,12 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
   if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
 
+  // DEC 254n (1): a company whose own engine model the gateway does not offer it now (or whose list cannot be read) starts nothing: refused here, before the limits, the admission and any machine.
+  if (deps.startModelCheck !== undefined) {
+    const modelRefusal = await deps.startModelCheck();
+    if (modelRefusal !== undefined) return refused(modelRefusal);
+  }
+
   const understandFirst = asWorkflow && (deps.understandFirst ?? ROVARA_CODE_V2_FOR_NEW_ORGS);
   // A workflow with no Quick or Full path is Understand's to choose on version 1.1.0; anywhere else the explicit path is required.
   if (asWorkflow && request.workflowPath === undefined && !understandFirst) return refused(agentXError("CONFIG_INVALID", WORKFLOW_PATH_REQUIRED));

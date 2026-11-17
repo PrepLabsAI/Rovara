@@ -87,6 +87,38 @@ describe("the app's settings", () => {
     expect(await read()).toEqual(LINEAR_APP);
     expect(send).toHaveBeenCalledTimes(2);
   });
+  it("through the broker's wiring, unauthenticated webhook POSTs with no app secret make one secret read per 30 seconds, answer 503 before the body is read, and a set secret is not remembered as missing", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(NOW);
+      let secret: string | undefined;
+      const send = vi.fn(async () => { if (secret === undefined) throw Object.assign(new Error("Secrets Manager can't find the specified secret."), { name: "ResourceNotFoundException" }); return { SecretString: secret }; });
+      const documentClient = { send: vi.fn() };
+      const wiring = linearCompanyWiring({ env: { CHATGPT_CONNECTION_KEY_ARN: "test-linear-key" }, documentClient, tableName: "State", kms: { send: vi.fn() } as never, secrets: { send } as never, connectorSecretPrefix: "agentx/x/connectors/", log: () => undefined })!;
+      const post = (rawBody: string | undefined, signature = "00") => handleLinearAppWebhook(wiring.webhook, { rawBody, headers: { "linear-signature": signature } });
+      // Not set up: every POST is 503 with the fixed words, whatever its body (none, not JSON, oversized), and only the first one reads the secret.
+      for (const body of [undefined, "{not json", "x".repeat(1_048_577), JSON.stringify({ type: "Issue" })]) expect(await post(body)).toEqual({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: "Linear app webhooks are not set up" } } });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(documentClient.send).not.toHaveBeenCalled();
+      vi.setSystemTime(NOW + 29_999);
+      expect((await post("{}")).status).toBe(503);
+      expect(send).toHaveBeenCalledTimes(1);
+      // After the window, one new read.
+      vi.setSystemTime(NOW + 30_001);
+      expect((await post("{}")).status).toBe(503);
+      expect(send).toHaveBeenCalledTimes(2);
+      // Once the secret is set (and the missing answer has run out), it is read and used: a bad signature is now refused (401), not "not set up".
+      secret = JSON.stringify(LINEAR_APP);
+      vi.setSystemTime(NOW + 60_002);
+      expect((await post("{}")).status).toBe(401);
+      expect(send).toHaveBeenCalledTimes(3);
+      // A good read is kept as good (5 minutes), not as missing: removing the secret changes nothing within that time and nothing is read again.
+      secret = undefined;
+      vi.setSystemTime(NOW + 60_002 + 299_000);
+      expect((await post("{}")).status).toBe(401);
+      expect(send).toHaveBeenCalledTimes(3);
+    } finally { vi.useRealTimers(); }
+  });
   it("without the token key nothing is wired (routes unknown, webhook 404)", () => {
     expect(linearCompanyWiring({ env: {}, documentClient: { send: vi.fn() }, tableName: "State", kms: { send: vi.fn() } as never, secrets: { send: vi.fn() } as never, connectorSecretPrefix: "agentx/x/connectors/", log: () => undefined })).toBeUndefined();
   });

@@ -2,7 +2,7 @@
 // audience), which Rovara's own API never accepts unless the client has full access (spec 066), and may ask Rovara what
 // a signed-in person can do.
 import { z } from "zod";
-import { OrgIdSchema } from "./company-scope.js";
+import { OrgIdSchema, OrgRoleSchema } from "./company-scope.js";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE } from "./developer.js";
 import { publicHttpsUrlProblem } from "./mcp-connector.js";
 
@@ -117,7 +117,24 @@ export const AccessCheckResponseSchema = z.object({
   /** `administrator` (spec 065): a project the person administers, which task access alone does not list. */
   projects: z.array(z.object({ name: z.string().min(1), access: z.enum(["granted", "channel", "administrator"]) }).strict()),
   notices: z.array(z.string()),
-}).strict();
+  /**
+   * DEC 253z/254: the person's company and company role, read from LIVE membership on this call (never a token claim or anything the caller sent), and the
+   * company's name when it has a stored profile. All absent on a Code with no company records. `companyRole` is the company role (owner, admin, member),
+   * not `administrator` (install administrator).
+   */
+  companyId: OrgIdSchema.optional(),
+  companyRole: OrgRoleSchema.optional(),
+  companyName: z.string().min(1).max(80).optional(),
+  /**
+   * DEC 254b (f): true only when THIS session's own sign-in joined the company by consuming a live pre-approval (an invite) for the session's company.
+   * Recorded by Code's sign-in server on the session when it was minted; never from a claim, a request or an access rule. Absent otherwise (already a
+   * member, a legacy join, a session with no company, a check by developer id, a Code with no company layer). Sent only with the company.
+   * It describes the whole session (every check on it, also after refreshes), not "just joined". Absent does NOT mean "not the invited person": a
+   * sign-in that spent the invite but then failed (an expired code, a refused step-up) leaves the person a member, and later sign-ins never carry it.
+   */
+  joinedByInvite: z.boolean().optional(),
+}).strict().refine((answer) => (answer.companyId === undefined) === (answer.companyRole === undefined) && (answer.companyName === undefined || answer.companyId !== undefined)
+  && (answer.joinedByInvite === undefined || answer.companyId !== undefined), "a company comes with its role, and a name or an invite join only with a company");
 export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;
 
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----
@@ -163,6 +180,65 @@ export const CreateClientProjectRequestSchema = z.object({
   testCommands: z.array(z.string().trim().min(1).max(1_000)).max(16).optional(),
 }).strict();
 export type CreateClientProjectRequest = z.infer<typeof CreateClientProjectRequestSchema>;
+
+/**
+ * Guided onboarding PR 6: the most repositories one create names (a project holds at most 32, `project-node.ts`), and the most a bulk create names.
+ * A body over the cap is refused whole.
+ */
+export const CLIENT_PROJECT_REPOSITORIES_MAX = 32;
+const ClientRepositoryNameSchema = CreateClientProjectRequestSchema.shape.repository;
+const uniqueRepositories = z.array(ClientRepositoryNameSchema).min(1).max(CLIENT_PROJECT_REPOSITORIES_MAX)
+  .refine((list) => new Set(list.map((name) => name.toLowerCase().replace(/\.git$/, ""))).size === list.length, "repositories must be different");
+/**
+ * Guided onboarding PR 6: `POST /v1/dev/client/projects` with `repositories` (instead of `repository`): ONE project holding every named repository
+ * (1 to 32, each `owner/name` as the single form checks, no repeats ignoring case). Every repository must be on a GitHub App installation bound to the
+ * caller's company; one that is not refuses the whole create, and nothing is written. The commands run in the first repository.
+ */
+export const CreateClientProjectsRequestSchema = z.object({
+  repositories: uniqueRepositories,
+  name: CreateClientProjectRequestSchema.shape.name,
+  setupCommands: CreateClientProjectRequestSchema.shape.setupCommands,
+  testCommands: CreateClientProjectRequestSchema.shape.testCommands,
+}).strict();
+export type CreateClientProjectsRequest = z.infer<typeof CreateClientProjectsRequestSchema>;
+
+/** Guided onboarding PR 6: `POST /v1/dev/client/projects/bulk` (projects:create): one project per repository, each named after its repository. */
+export const BulkCreateClientProjectsRequestSchema = z.object({ repositories: uniqueRepositories }).strict();
+export type BulkCreateClientProjectsRequest = z.infer<typeof BulkCreateClientProjectsRequestSchema>;
+/**
+ * Why one repository of a bulk create made no project, in fixed words:
+ * - `not_available`: not on a GitHub installation connected to the caller's company (another company's, an unconnected or suspended installation,
+ *   or no such repository: the same answer for each);
+ * - `name_taken`: a project with the repository's name exists; create it on its own with another name;
+ * - `unavailable`: GitHub or Rovara could not be reached for it; send it again;
+ * - `not_started`: the call ran out of time before this one; send it again.
+ */
+export const BULK_PROJECT_REFUSALS = ["not_available", "name_taken", "unavailable", "not_started"] as const;
+export type BulkProjectRefusal = typeof BULK_PROJECT_REFUSALS[number];
+export interface BulkCreateClientProjectsResponse {
+  /** One row per requested repository, in the order asked. */
+  results: Array<{ repository: string; outcome: "created"; project: string } | { repository: string; outcome: "refused"; reason: BulkProjectRefusal }>;
+}
+
+/** Guided onboarding PR 6: the most repositories one page of `GET /v1/dev/client/repositories/available` shows, and its default. */
+export const REPOSITORY_CHOICES_PAGE_MAX = 100;
+export const REPOSITORY_CHOICES_PAGE_DEFAULT = 50;
+/**
+ * Guided onboarding PR 6: `GET /v1/dev/client/repositories/available?q=&limit=&after=` (projects:create): the repositories the caller's company's
+ * connected (bound, not suspended) GitHub installations reach, sorted by `fullName`, each with the caller's company's projects that already hold it
+ * (another company's projects are never named). `q` filters by a case-insensitive part of `fullName`; `after` is the previous page's `next`.
+ * `incomplete` is true when an installation reaches more repositories than GitHub listed (the first 100 of each are read).
+ */
+export interface ClientRepositoryChoicesResponse {
+  repositories: Array<{ installationId: number; accountLogin: string; fullName: string; githubRepositoryId: number; private: boolean; defaultBranch: string; projects: string[] }>;
+  next?: string;
+  incomplete: boolean;
+}
+export const RepositoryChoicesQuerySchema = z.object({
+  q: z.string().max(100).regex(/^[A-Za-z0-9_./-]*$/).optional(),
+  limit: z.coerce.number().int().min(1).max(REPOSITORY_CHOICES_PAGE_MAX).optional(),
+  after: z.string().min(3).max(201).regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/).optional(),
+}).strict();
 
 /** `GET /v1/dev/client/projects/{project}`: a project the signed-in person may use; needs no scope. */
 export interface ClientProjectResponse {

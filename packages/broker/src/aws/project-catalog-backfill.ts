@@ -6,7 +6,7 @@ import {
   orgProjectCatalogKey, orgProjectCatalogPk, orgSettingsKey, projectRevisionKey,
 } from "@agentx/contracts";
 import type { CoreBackfillDependencies } from "./core-project-backfill.js";
-import { recordInCompany } from "./company-check.js";
+import { ownPartitionRow, recordInCompany } from "./company-check.js";
 
 type Row = Record<string, unknown>;
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
@@ -15,7 +15,8 @@ const requestSchema = z.object({
   action: z.enum(["discover", "verify", "unmark", "undo-run"]), companyId: OrgIdSchema.optional(), runId: runSchema.optional(),
   dryRun: z.boolean().default(true), mark: z.boolean().default(false), continuation: z.string().max(2048).optional(),
 }).strict().refine(r => r.action === "discover" || (r.companyId !== undefined && r.runId !== undefined))
-  .refine(r => !r.mark || r.action === "verify").refine(r => r.continuation === undefined || r.action === "discover");
+  // Only the implicit company reads the flag: a named company's own partition is authoritative without one (see project-settings.ts), so marking it would change nothing.
+  .refine(r => !r.mark || (r.action === "verify" && r.companyId === IMPLICIT_COMPANY_ID)).refine(r => r.continuation === undefined || r.action === "discover");
 const cursorSchema = z.object({ tableName: z.string(), after: AgentXNameSchema }).strict();
 const fail = () => new Error("catalog backfill unavailable");
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -59,6 +60,12 @@ async function all(deps: Deps, pk: string, prefix: string) {
 function nameOf(row: Row) {
   const name = AgentXNameSchema.parse(typeof row["sk"] === "string" && row["sk"].startsWith("PROJECT#") ? row["sk"].slice(8) : undefined);
   if (row["entityType"] !== "PROJECT_CATALOG" || row["name"] !== name || !revision.safeParse(row["latestRevision"]).success) throw fail();
+  return name;
+}
+/** A row of the company's own catalog partition: Code's writers and the switch-over move may leave `name` out (the sort key carries it). */
+function ownNameOf(row: Row) {
+  const name = AgentXNameSchema.parse(typeof row["sk"] === "string" && row["sk"].startsWith("PROJECT#") ? row["sk"].slice(8) : undefined);
+  if (row["entityType"] !== "PROJECT_CATALOG" || (Object.hasOwn(row, "name") && row["name"] !== name) || !revision.safeParse(row["latestRevision"]).success) throw fail();
   return name;
 }
 function coreMatches(core: Row, source: Row, companyId: string) {
@@ -134,21 +141,23 @@ async function verify(deps: Deps, companyId: string, runId: string, mark: boolea
       if (copy === undefined || !coreMatches(copy, source, companyId)) { conflicts.push(name); break; }
     }
   }
+  // The company partition is authoritative: a project registered there directly (no shared row) is the company's own and is reported as `extra`, not a failure. Every own row must
+  // still be well formed, name no other company, and select a revision of that name in the same partition; every shared project of this company must be in it, not behind it.
   const actual = new Set<string>();
   for (const row of own) {
-    const name = nameOf(row); actual.add(name);
+    const name = ownNameOf(row); actual.add(name);
     const selected = await get(deps, projectRevisionKey(companyId, name, row["latestRevision"] as number));
     const selectedDefinition = selected?.["definition"] as { name?: unknown; revision?: unknown } | undefined;
-    if (selectedDefinition?.name !== name || selectedDefinition.revision !== row["latestRevision"] || row["companyId"] !== companyId || !expected.has(name) || (row["latestRevision"] as number) < expected.get(name)!
-      || selected?.["entityType"] !== "PROJECT" || (selected["companyId"] !== undefined && selected["companyId"] !== companyId)) conflicts.push(name);
+    if (selectedDefinition?.name !== name || selectedDefinition.revision !== row["latestRevision"] || !ownPartitionRow(row, companyId) || (expected.has(name) && (row["latestRevision"] as number) < expected.get(name)!)
+      || selected?.["entityType"] !== "PROJECT" || !ownPartitionRow(selected, companyId)) conflicts.push(name);
   }
   const missing = [...expected.keys()].filter(n => !actual.has(n)), extra = [...actual].filter(n => !expected.has(n));
-  if (missing.length || extra.length || conflicts.length) return { ok: false, written: 0, missing, extra, conflicts: [...new Set(conflicts)] };
+  if (missing.length || conflicts.length) return { ok: false, written: 0, missing, extra, conflicts: [...new Set(conflicts)] };
   if (mark && own.length > 99) throw fail();
   if (!mark || dryRun) return { ok: true, written: 0, missing, extra, conflicts };
   const writes: Write[] = own.map((row, index) => index === 0
     ? { Put: { TableName: deps.tableName, Item: { ...row, backfillMarked: true }, ...fence(row) } }
-    : { ConditionCheck: { TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, nameOf(row)), ...fence(row) } });
+    : { ConditionCheck: { TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, ownNameOf(row)), ...fence(row) } });
   writes.push({ Put: { TableName: deps.tableName, Item: { ...orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX"), verifiedAt: new Date((deps.now ?? Date.now)()).toISOString(), count: own.length, runId }, ...fence(undefined) } });
   await deps.documentClient.send(new TransactWriteCommand({ TransactItems: writes }));
   return { ok: true, written: 1 };
@@ -157,15 +166,17 @@ async function undo(deps: Deps, companyId: string, runId: string, dryRun: boolea
   const flagKey = orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX");
   if (await get(deps, flagKey) !== undefined) return { ok: false, written: 0, error: "conflict" };
   const rows = await all(deps, orgProjectCatalogPk(companyId), "PROJECT#"), writes: Write[] = [];
+  // Rows in the partition without `companyId` are the company's own (Code's writers, the switch-over move) and are never this run's: they are kept. Any row naming another company
+  // refuses the whole undo; a row this run tagged always carries the company (the run wrote it).
   for (const row of rows) {
-    const name = nameOf(row);
+    const name = ownNameOf(row);
     if (row["backfillMarked"] === true) return { ok: false, written: 0, error: "conflict" };
-    if (row["companyId"] !== companyId) return { ok: false, written: 0, error: "conflict" };
+    if (!ownPartitionRow(row, companyId) || (row["backfillRunId"] === runId && row["companyId"] !== companyId)) return { ok: false, written: 0, error: "conflict" };
     const copies = await all(deps, projectRevisionKey(companyId, name, 1).pk, "REV#");
     const tagged = copies.filter(copy => copy["backfillRunId"] === runId);
     if (tagged.length > 0 && (row["backfillRunId"] !== runId || copies.some(copy => copy["backfillRunId"] !== runId))) return { ok: false, written: 0, error: "conflict" };
     for (const copy of copies) {
-      if (copy["companyId"] !== companyId) return { ok: false, written: 0, error: "conflict" };
+      if (!ownPartitionRow(copy, companyId) || (copy["backfillRunId"] === runId && copy["companyId"] !== companyId)) return { ok: false, written: 0, error: "conflict" };
       if (copy["backfillRunId"] !== runId) continue;
       const def = copy["definition"] as { revision?: unknown } | undefined;
       const rev = revision.parse(def?.revision);
