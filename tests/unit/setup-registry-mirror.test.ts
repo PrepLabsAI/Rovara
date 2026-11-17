@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { canonicalJson, orgProjectCatalogKey, projectCatalogKey, projectRevisionKey, type JsonValue } from "@agentx/contracts";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { planCoreProjectWrites, coreCopyRefusalWords, CORE_COPY_REFUSED } from "../../packages/broker/src/aws/core-project-backfill.js";
+import { planCoreProjectWrites } from "../../packages/broker/src/aws/core-project-backfill.js";
+import { coreCopyRefusalWords, CORE_COPY_REFUSED } from "../../packages/broker/src/aws/core-copy-refusal.js";
 import { SETUP_REGISTRY_MOVED, createSetupRegistryMirror } from "../../packages/broker/src/aws/setup-registry-mirror.js";
 import { projectKey } from "../../packages/broker/src/aws/project-records.js";
 import { setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
@@ -180,6 +181,8 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
   it("refuses a candidate that is not exactly the next revision after its base", async () => {
     const { world } = await setupWorld({ legacy: [["payments", FAKE_COMPANY]] });
     await seedCandidate(world, FAKE_COMPANY, "payments", LOW);
+    // A core row for revision 3 exists too, so only the "exactly the next revision" rule can refuse base 1 -> 3.
+    await world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 3), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(projectDefinition("payments", 3))) as JsonValue } });
     const mirror = createSetupRegistryMirror({ store: world.store, companyId: FAKE_COMPANY });
     for (const row of [{ project: "payments", baseRevision: 1, candidateRevision: 3 }, { project: "payments", baseRevision: 2, candidateRevision: 2 }, { project: "payments", baseRevision: 0, candidateRevision: 1 }]) {
       await expect(mirror.itemsFor(row, "2026-11-17T00:00:00.000Z"), JSON.stringify(row)).rejects.toMatchObject({ code: "invalid", message: SETUP_REGISTRY_MOVED });
