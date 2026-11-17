@@ -157,7 +157,8 @@ export async function listInvolvedTasks(deps: TaskFlowDeps, caller: TaskCaller, 
     let stopped = false;
     for (const [position, item] of page.items.entries()) {
       examined += 1;
-      if (typeof item["sk"] === "string") lastSk = item["sk"];
+      // Only a sort key a writer could have made can be a continuation (a malformed one is skipped below and never becomes a cursor the next call would refuse).
+      if (typeof item["sk"] === "string" && ROW_SK.test(item["sk"])) lastSk = item["sk"];
       const shown = await visibleTask(deps, caller, pk, item);
       if (shown !== undefined) tasks.push(shown);
       if (tasks.length >= limit || examined >= INVOLVED_EXAMINE_MAX) {

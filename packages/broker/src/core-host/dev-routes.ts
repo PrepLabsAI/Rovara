@@ -65,6 +65,7 @@ export const COMPANY_RULES_NO_ANSWER = "The company rules service did not answer
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 export const SESSION_CAP_UNREADABLE = "This install's session limit could not be read, so no token was made. Try again later, or ask whoever runs the install.";
 const PROJECT_NOT_FOUND = "project not found";
+export const INVOLVED_UNAVAILABLE = "Your involved tasks could not be listed right now. Try again in a moment.";
 
 /** The deployed caller, as the broker's sign-in vouches for it. */
 export interface DeployedCaller {
@@ -251,6 +252,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       }
       // A start by a person with no member company is no core company's: the old broker starts it, as before. (Every other route refuses below.)
       if (starting && !unreadable && (membership === undefined || membership === null)) return undefined;
+      // The involved list says "nothing" only when it is sure: a membership that could not be read is a fixed outage answer, never an empty list.
+      if (unreadable && path === TASK_START && request.method === "GET") return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", INVOLVED_UNAVAILABLE));
       // Fail closed: no member company, a malformed one or an unknown role is a sign-in refusal, never the install's company.
       if (membership === undefined || membership === null || typeof membership !== "object" || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || !OrgRoleSchema.safeParse(membership.role).success) return unauthenticated();
       const companyId = membership.companyId;

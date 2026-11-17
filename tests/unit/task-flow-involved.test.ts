@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { DeveloperTaskListItemSchema, queryAll, type Principal } from "@agentx/contracts";
+import { involvedOnCore, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
@@ -384,5 +385,100 @@ describe("GET /v1/dev/tasks on the core's route function", () => {
     }
     const ok = await handleTaskRoute(w.a.flow, { method: "GET", path: "/v1/dev/tasks?involved=1&limit=1", caller: { principal: person(COMPANY_A_ID, ALICE) } });
     expect(ok?.status).toBe(200);
+  });
+});
+
+/** The store with its `query` answered by `answer` (a store that returns what a real one should not, or stalls); everything else is the real store. */
+function withQuery(store: MemoryDocumentStore, answer: () => Promise<{ items: Array<Record<string, unknown>>; cursor?: string }>): MemoryDocumentStore {
+  return new Proxy(store, { get: (target, property) => (property === "query" ? answer : typeof (target as never)[property] === "function" ? ((target as never)[property] as (...args: unknown[]) => unknown).bind(target) : (target as never)[property]) });
+}
+
+describe("the re-checks and bounds, one by one (review M-1 to M-3, L-3, L-4)", () => {
+  it("skips a row whose own partition key is not the caller's, even if every field agrees (a store answering from another partition)", async () => {
+    const { w, taskA } = await world();
+    allow(w, COMPANY_A_ID, ALICE, taskA);
+    await writeInvolvedRow({ store: w.store }, rowFor(taskA, ALICE));
+    const good = (await queryAll(w.store, { pk: involvedPartition(COMPANY_A_ID, ALICE) }))[0]!;
+    const stub = { ...w.a.deps, store: withQuery(w.store, async () => ({ items: [{ ...good, pk: involvedPartition(COMPANY_A_ID, BOB) }] })) };
+    expect((await listInvolvedTasks(stub, caller(COMPANY_A_ID, ALICE))).tasks).toEqual([]);
+    const honest = { ...w.a.deps, store: withQuery(w.store, async () => ({ items: [good] })) };
+    expect((await listInvolvedTasks(honest, caller(COMPANY_A_ID, ALICE))).tasks).toHaveLength(1);
+  });
+
+  it("checks the task's own company, not only the owner's index row: a task of another company with an index row that names this one is not listed", async () => {
+    const { w, taskA } = await world();
+    allow(w, COMPANY_A_ID, ALICE, taskA);
+    await writeInvolvedRow({ store: w.store }, rowFor(taskA, ALICE));
+    expect((await list(w, COMPANY_A_ID, ALICE)).tasks).toHaveLength(1);
+    await w.store.put({ item: { ...(await w.store.get(taskKey(taskA.taskId)))!, companyId: COMPANY_B_ID } });
+    expect((await list(w, COMPANY_A_ID, ALICE)).tasks).toEqual([]);
+  });
+
+  it("reads at most ten pages in one call: pages with no rows that still carry a continuation end in a fixed refusal, never an endless loop or a silently empty list", async () => {
+    const { w } = await world();
+    let calls = 0;
+    const stub = { ...w.a.deps, store: withQuery(w.store, async () => { calls += 1; return { items: [], cursor: "more" }; }) };
+    await expect(listInvolvedTasks(stub, caller(COMPANY_A_ID, ALICE))).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(calls).toBe(10);
+    // With a cursor of its own to resume from, the same stall hands that cursor back.
+    calls = 0;
+    const sk = `TASK#2026-11-09T10:00:00.000Z#${randomUUID()}`;
+    const cursor = Buffer.from(JSON.stringify({ sk })).toString("base64url");
+    const resumed = await listInvolvedTasks(stub, caller(COMPANY_A_ID, ALICE), { cursor });
+    expect(calls).toBe(10);
+    expect(resumed.tasks).toEqual([]);
+    expect(Buffer.from(resumed.nextCursor!, "base64url").toString()).toBe(JSON.stringify({ sk }));
+  });
+
+  it("clamps a page to 50 tasks and refuses a cursor over 400 characters or outside base64url", async () => {
+    const w = twoCompanies();
+    await w.a.registerProject();
+    for (let i = 0; i < 55; i += 1) {
+      w.a.clock.advance(1);
+      const task = await startTask(w.a, `bulk ${i}`);
+      allow(w, COMPANY_A_ID, ALICE, task);
+      await writeInvolvedRow({ store: w.store }, rowFor(task, ALICE));
+    }
+    const page = await list(w, COMPANY_A_ID, ALICE, { limit: 5_000 });
+    expect(page.tasks).toHaveLength(50);
+    expect(page.nextCursor).toBeDefined();
+    const valid = Buffer.from(JSON.stringify({ sk: `TASK#2026-11-09T10:00:00.000Z#${randomUUID()}` })).toString("base64url");
+    expect(valid.length).toBeLessThan(400);
+    await expect(list(w, COMPANY_A_ID, ALICE, { cursor: valid + "A".repeat(400) })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(list(w, COMPANY_A_ID, ALICE, { cursor: valid + "=" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("a malformed sort key in the partition is skipped and never becomes the cursor the next call would refuse", async () => {
+    const { w, taskA } = await world();
+    allow(w, COMPANY_A_ID, ALICE, taskA);
+    await writeInvolvedRow({ store: w.store }, rowFor(taskA, ALICE));
+    await w.store.put({ item: { pk: involvedPartition(COMPANY_A_ID, ALICE), sk: "TASK#9999-junk", entityType: "TASK_INVOLVED" } });
+    // The junk key sorts first (newest first): it is skipped, the real row fills the page, and nothing is left to continue from.
+    const first = await list(w, COMPANY_A_ID, ALICE, { limit: 1 });
+    expect(first.tasks.map((task) => task.taskId)).toEqual([taskA.taskId]);
+    expect(first.nextCursor).toBeUndefined();
+    const all = await list(w, COMPANY_A_ID, ALICE);
+    expect(all.tasks.map((task) => task.taskId)).toEqual([taskA.taskId]);
+  });
+});
+
+describe("the AWS boundary's involved list answer", () => {
+  const caller = { developerId: "d".repeat(64), sessionId: "s", name: "Maya" };
+  const request = { method: "GET", path: "/v1/dev/tasks?involved=1", headers: {} };
+  const answering = (statusCode: number | undefined, body = "{}"): CoreTaskEntry => ({ route: async () => (statusCode === undefined ? undefined : { statusCode, headers: {}, body }) });
+  const none = { involved: true, tasks: [] };
+
+  it("is an empty involved list with no core entry, nothing the core serves, a sign-in refusal or a missing route; never the ordinary list", async () => {
+    expect(await involvedOnCore(undefined, request, caller)).toEqual(none);
+    expect(await involvedOnCore(answering(undefined), request, caller)).toEqual(none);
+    expect(await involvedOnCore(answering(401), request, caller)).toEqual(none);
+    expect(await involvedOnCore(answering(404), request, caller)).toEqual(none);
+  });
+
+  it("passes the core's list on, and any other refusal in the core's words", async () => {
+    const listed = { involved: true, tasks: [{ taskId: randomUUID() }] };
+    expect(await involvedOnCore(answering(200, JSON.stringify(listed)), request, caller)).toEqual(listed);
+    await expect(involvedOnCore(answering(400, JSON.stringify({ error: { code: "CONFIG_INVALID", message: "limit must be a whole number from 1 to 50" } })), request, caller)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(involvedOnCore(answering(503, JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "down" } })), request, caller)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 });

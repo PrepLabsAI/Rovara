@@ -11,7 +11,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { INVOLVED_UNAVAILABLE, COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { involvedRowKey, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -605,6 +605,15 @@ describe("the tasks I was added to on the deployed API (web task channel C5)", (
     expect(await titles(aliceB)).toEqual([`Task of ${OTHER}`]);
     // Naming the other company changes nothing.
     expect(await titles(aliceA, `${LIST}&org=${OTHER}&companyId=${OTHER}`, { "x-company": OTHER })).toEqual([`Task of ${FAKE_COMPANY}`]);
+  });
+
+  it("answers an outage, not an empty list, when membership cannot be read for the involved list", async () => {
+    const { app, remember } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf: async () => { throw new Error("membership store down"); }, wiring: () => WIRED });
+    const answer = await routes.route(get(LIST), remember(FAKE_COMPANY, "member", "alice"));
+    expect(answer?.statusCode).toBe(503);
+    expect(JSON.parse(answer!.body)).toMatchObject({ error: { code: "RUNTIME_UNAVAILABLE", message: INVOLVED_UNAVAILABLE } });
+    expect(answer!.body).not.toContain("down");
   });
 
   it("refuses a caller who is no member (the sign-in words), a script token (it reaches a task's read only), and a bad limit or cursor (fixed words)", async () => {
