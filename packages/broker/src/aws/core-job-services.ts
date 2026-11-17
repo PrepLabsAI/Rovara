@@ -106,7 +106,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   const sessionScan = { cursor: undefined as string | undefined };
   const notifyScan = { cursor: undefined as string | undefined };
   const mergeScan = { cursor: undefined as string | undefined, complete: false };
-  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, ...options.notification });
+  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, inbox: true, ...options.notification });
   return {
     "session-sweep": pass(async (store, deadlineMs) => {
       const deps = depsFor(store);
