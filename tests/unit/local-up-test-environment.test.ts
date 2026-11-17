@@ -9,7 +9,7 @@ import { RANGE_IN_USE_SENTENCE, applyTestServicesMarker, hostUsesRunRange, prepa
 import { createOwnerImageService, createOwnerImageStore } from "../../packages/broker/src/local/test-services-owner-list.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { registerTestEnvCommand } from "../../packages/cli/src/up/test-env-command.js";
-import { IMPLICIT_COMPANY_ID, TestEnvironmentBodySchema, testEnvDigest, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, TestEnvironmentBodySchema, testEnvDigest, testServicesLimitInvalidSentence, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { readApprovedTestEnvironment, recordTestEnvProveReport, testEnvProposalKey } from "../../packages/broker/src/core/test-env/environment.js";
@@ -194,6 +194,27 @@ describe("rovara up: what the switches start", () => {
       await launch(environment, launched);
       expect(launched.calls.filter((call) => call[0] === "pull")).toEqual([]);
     }
+  });
+
+  it("DEC 254zm 2: the ceilings default to about 12 containers, 1 GiB a helper and 40% of the VM, an owner setting raises them, and a bad setting stops test services in fixed words naming it", async () => {
+    const owner = (docker: FakeDocker) => createOwnerImageService({ store: createOwnerImageStore({ store: new MemoryDocumentStore({ indexes: [] }), companyId: IMPLICIT_COMPANY_ID }), docker, now: () => 0 });
+    const install = async (environment: NodeJS.ProcessEnv, docker = new FakeDocker(), signed?: () => boolean) =>
+      prepareLocalTestServices({ environment, stateDirectory: tmpdir(), docker, interfaces: {}, ownerImages: owner(docker), ...(signed === undefined ? {} : { signedKeysPresent: signed }) });
+    expect((await install({})).services!.limits).toEqual({ containers: 12, helperMemoryMiB: 1024, memoryPercent: 40 });
+    expect((await install({ ROVARA_TEST_SERVICES_MAX_CONTAINERS: "30", ROVARA_TEST_SERVICES_MAX_HELPER_MEMORY_MIB: "2048", ROVARA_TEST_SERVICES_MAX_MEMORY_PERCENT: "70" })).services!.limits).toEqual({ containers: 30, helperMemoryMiB: 2048, memoryPercent: 70 });
+    for (const variable of ["ROVARA_TEST_SERVICES_MAX_CONTAINERS", "ROVARA_TEST_SERVICES_MAX_HELPER_MEMORY_MIB", "ROVARA_TEST_SERVICES_MAX_MEMORY_PERCENT"]) {
+      for (const bad of ["", "0", "-1", "1.5", "lots", "99999"]) {
+        for (const signed of [undefined, () => true]) {
+          const docker = new FakeDocker();
+          const answer = await install({ [variable]: bad }, docker, signed);
+          expect(answer, `${variable}=${bad}`).toMatchObject({ services: undefined, catalog: undefined, unavailable: testServicesLimitInvalidSentence(variable), unavailableReason: "other" });
+          if (bad !== "") expect(answer.unavailable).not.toContain(bad);
+          expect(docker.calls).toHaveLength(0);
+        }
+      }
+    }
+    // Switched off with "0": a bad setting is not read at all (nothing is refused, nothing is offered).
+    expect(await install({ ROVARA_TEST_SERVICES: "0", ROVARA_TEST_SERVICES_MAX_CONTAINERS: "x" })).toMatchObject({ services: undefined, unavailable: undefined });
   });
 
   it("the host's marker: set to the fixed reason when test services cannot run here, cleared when they can or are switched off, and the owner's switch is never touched", () => {

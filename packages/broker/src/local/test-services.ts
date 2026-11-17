@@ -11,8 +11,8 @@ import { createHash } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  CATALOG_FILE, CATALOG_SIGNATURE_FILE, catalogImageReference, catalogPins, catalogRepositoryName, loadSignedCatalog,
-  type CatalogEdition, type OwnerListEntry, type VerifiedCatalog,
+  CATALOG_FILE, CATALOG_SIGNATURE_FILE, TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE, TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE, catalogImageReference, catalogPins, catalogRepositoryName, loadSignedCatalog,
+  type CatalogEdition, type OwnerListEntry, type TestServicesLimits, type VerifiedCatalog,
 } from "@agentx/contracts";
 import type { DockerRunner } from "./docker-runner.js";
 
@@ -37,6 +37,11 @@ export interface LocalTestServices {
   lazyPulls?: true | undefined;
   /** Where each worker's run folder is made (one folder per worker, outside every workspace). Default: `<state folder>/test-services`. */
   runDirectoryParent?: string | undefined;
+  /**
+   * DEC 254zm 2: the resource ceilings (the defaults, or what the owner raised them to; `resolveTestServicesLimits`). Present, the guard enforces them (`maxMemoryMiB` above is then only the worker's per-run total) and the
+   * worker is told the first two, so a run that cannot fit is refused before anything starts. Absent, the guard's own defaults (the same numbers) apply and the worker uses them too.
+   */
+  limits?: TestServicesLimits | undefined;
 }
 
 /** The worker's environment for test services. Never a secret: a registry host, names and paths. */
@@ -48,6 +53,7 @@ export function testServicesEnvironment(services: LocalTestServices, input: { ru
     AGENTX_TEST_SERVICES_RUN_DIR: input.runDirectory,
     AGENTX_WORKER_IMAGE: input.workerImageId,
     ...(services.maxMemoryMiB === undefined ? {} : { AGENTX_TEST_SERVICES_MAX_MEM_MIB: String(services.maxMemoryMiB) }),
+    ...(services.limits === undefined ? {} : { [TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE]: String(services.limits.containers), [TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE]: String(services.limits.helperMemoryMiB) }),
     ...(services.ownerImages === undefined ? {} : { AGENTX_TEST_SERVICES_OWNER_IMAGES: JSON.stringify(services.ownerImages.map((entry) => ({ reference: entry.reference, family: entry.family, version: entry.version }))) }),
     ...(notPulled.length === 0 ? {} : { AGENTX_TEST_SERVICES_NOT_PULLED: notPulled.join(",") }),
   };
@@ -56,8 +62,9 @@ export function testServicesEnvironment(services: LocalTestServices, input: { ru
 /** What changes the machine's configuration beyond its environment: the images the guard lets start. */
 export function localTestServicesDigestPart(services: LocalTestServices, imageId: string | undefined): unknown {
   const base = [services.registry, services.catalogEnv, [...services.images].sort(), services.maxMemoryMiB ?? null, imageId ?? null];
-  // The signed path's digest is what it always was; an owner list adds its own part.
-  return services.ownerImages === undefined ? base : [...base, services.ownerImages.map((entry) => entry.reference).sort()];
+  // The signed path's digest is what it always was; an owner list adds its own part, and so do limits (a changed ceiling re-creates the idle machine and its guard).
+  const withOwnerList = services.ownerImages === undefined ? base : [...base, services.ownerImages.map((entry) => entry.reference).sort()];
+  return services.limits === undefined ? withOwnerList : [...withOwnerList, { limits: [services.limits.containers, services.limits.helperMemoryMiB, services.limits.memoryPercent] }];
 }
 
 // ---- the catalog
@@ -174,10 +181,11 @@ export async function removePulledTestServiceImages(input: { docker: DockerRunne
  * What `DockerWorkerMachines` is given from a prepare: the options when at least one image is on this machine, otherwise none, so a worker is never told about test services it has nothing to start for (it would
  * list the feature and refuse every plan). `rovara up` calls this after `prepareTestServiceImages`, and gives the answer (or nothing) to the machines.
  */
-export function localTestServicesFrom(input: { registry: string; catalogEnv: string; prepared: PreparedTestServiceImages; maxMemoryMiB?: number; runDirectoryParent?: string }): LocalTestServices | undefined {
+export function localTestServicesFrom(input: { registry: string; catalogEnv: string; prepared: PreparedTestServiceImages; maxMemoryMiB?: number; runDirectoryParent?: string; limits?: TestServicesLimits }): LocalTestServices | undefined {
   if (input.prepared.images.length === 0) return undefined;
   return {
     registry: input.registry, catalogEnv: input.catalogEnv, images: input.prepared.images, notPulled: input.prepared.notPulled,
     ...(input.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: input.maxMemoryMiB }), ...(input.runDirectoryParent === undefined ? {} : { runDirectoryParent: input.runDirectoryParent }),
+    ...(input.limits === undefined ? {} : { limits: input.limits }),
   };
 }
