@@ -4,8 +4,9 @@ import { describe, expect, it } from "vitest";
 import type { SetupProposal } from "@agentx/contracts";
 import {
   VERIFY_CONCURRENCY, VERIFY_DEADLINE_MS, VERIFY_LINE_SLACK, VERIFY_QUOTE_MIN_CHARS, VERIFY_READ_TIMEOUT_MS, VERIFY_READS_MAX,
-  citationHolds, verifyProposal, verifyProposalDetailed, type CitationFileReader,
+  verifyProposal, verifyProposalDetailed,
 } from "../../packages/broker/src/core/setup-agent/proposal-verify.js";
+import { citationHolds, type CitationFileReader } from "../../packages/broker/src/core/citations/citation-check.js";
 
 const SHA = "a".repeat(40);
 const SHA2 = "b".repeat(64);
