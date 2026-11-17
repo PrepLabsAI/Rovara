@@ -10,7 +10,7 @@ import { z } from "zod";
 /** The window the activity ranking looks at, in days. */
 export const WIKI_MAP_ACTIVITY_DAYS = 90;
 /** Bounds (all shown in the map's `limits`): repositories mapped, areas listed per repository, commit-count request budget per project, module pages per repository and pages per project. */
-export const WIKI_MAP_LIMITS = { repositories: 20, areasPerRepository: 20, activityRequests: 120, modulePagesPerRepository: 40, pagesPerProject: 300, directoryWalkRequests: 80, directoryWalkDepth: 6, treeEntries: 200_000 } as const;
+export const WIKI_MAP_LIMITS = { repositories: 20, areasPerRepository: 40, activityRequests: 160, modulePagesPerRepository: 40, pagesPerProject: 300, directoryWalkRequests: 80, directoryWalkDepth: 6, treeEntries: 200_000 } as const;
 
 const line = (max: number) => z.string().min(1).max(max).regex(/^[^\p{Cc}\p{Cf}]*$/u, "one plain line");
 const count = z.number().int().min(0).max(10_000_000);
@@ -48,9 +48,10 @@ export const WikiMapRepoSchema = z.object({
   commit: z.string().regex(/^[a-f0-9]{40}$/u).optional(),
   /** Files counted: everything not skipped. */
   files: count,
-  skipped: z.object({ generated: count, vendored: count, lockfiles: count, secret: count }).strict(),
+  /** Files not counted, by why. `assets`: images, fonts, archives and other binary files. `secret`: a count only, never a name. */
+  skipped: z.object({ generated: count, vendored: count, lockfiles: count, assets: count, secret: count }).strict(),
   languages: z.array(WikiMapLanguageSchema).max(9),
-  /** The biggest areas (folders), at most `limits.areasPerRepository`. */
+  /** The biggest areas (folders) by file count, at most `limits.areasPerRepository`. Module pages are made for the source ones, in this order of activity. */
   areas: z.array(WikiMapAreaSchema).max(WIKI_MAP_LIMITS.areasPerRepository),
   testFolders: z.array(line(300)).max(10),
   /** Generated and vendored folders that were skipped (paths only, never secret-shaped ones). */
@@ -59,7 +60,14 @@ export const WikiMapRepoSchema = z.object({
   activity: z.object({ status: z.enum(["ok", "partial", "unavailable"]), reason: line(200).optional(), days: z.literal(WIKI_MAP_ACTIVITY_DAYS) }).strict(),
   /** Pages a wiki would write for this repository: the repository page plus module pages. */
   pages: z.object({ repository: z.literal(1), modules: count, modulesCapped: z.boolean() }).strict(),
-}).strict();
+}).strict().superRefine((repo, context) => {
+  // A map that is not whole must say so, in the same words every time, and a whole one must not.
+  const issue = (path: string, message: string): void => context.addIssue({ code: "custom", path: [path], message });
+  if (repo.status === "partial" && (repo.partial === undefined || !repo.partial.startsWith("partial: "))) issue("partial", "a partial map says \"partial: <reason>\"");
+  if (repo.status !== "partial" && repo.partial !== undefined) issue("partial", "only a partial map has a partial reason");
+  if (repo.status === "unavailable" && repo.unavailable === undefined) issue("unavailable", "an unavailable repository says why");
+  if (repo.status !== "unavailable" && repo.unavailable !== undefined) issue("unavailable", "only an unavailable repository has that sentence");
+});
 export type WikiMapRepo = z.infer<typeof WikiMapRepoSchema>;
 
 /** The chips under "Tell Rovara what matters". `defaultOn`: generated and vendored folders are skipped unless the person turns that off; the other two are suggestions that start off. */
@@ -81,7 +89,7 @@ export const WikiFileMapSchema = z.object({
   /** An ISO time. */
   computedAt: z.string().max(40),
   repositories: z.array(WikiMapRepoSchema).max(WIKI_MAP_LIMITS.repositories),
-  /** False when any repository is partial or unavailable, or the project has more repositories than `limits.repositories`. */
+  /** False when any repository is partial or unavailable, any activity ranking is partial or missing, or the project has more repositories than `limits.repositories`. */
   complete: z.boolean(),
   /** Set when the project has more repositories than were mapped. */
   repositoriesOmitted: count,
@@ -92,6 +100,8 @@ export const WikiFileMapSchema = z.object({
     /** Pages a build would write: a start page, the repository pages, module pages (capped per repository and per project), a cross-repository page when there are two or more repositories, and three fixed project pages. */
     pages: count,
     pagesCapped: z.boolean(),
+    /** False when the page count rests on a map that is not whole (a repository partial, unavailable or left out): the real count may be higher. */
+    complete: z.boolean(),
     /** No dollar amount is carried. */
     price: z.literal("not_priced_yet"),
   }).strict(),

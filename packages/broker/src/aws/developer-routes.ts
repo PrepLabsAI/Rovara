@@ -1877,10 +1877,11 @@ export function developerTaskRouteDependencies(
       const dependencies = await identityDependencies(task);
       const resolved = await resolveTaskPickerPersonWithId(dependencies, task, slackUserId);
       const proof = await checkTaskPersonIdentity(dependencies, task, resolved.identity.developerId);
-      if (!proof.eligible || proof.identity.developerId !== resolved.identity.developerId || proof.identity.slackUserId !== resolved.identity.slackUserId) {
+      const resolvedSlackUserId = resolved.identity.slackUserId;
+      if (!proof.eligible || proof.identity.developerId !== resolved.identity.developerId || resolvedSlackUserId === undefined || proof.identity.slackUserId !== resolvedSlackUserId) {
         throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
       }
-      return { personId: resolved.personId, developerId: resolved.identity.developerId, slackUserId: resolved.identity.slackUserId, channelMember: proof.channelMember };
+      return { personId: resolved.personId, developerId: resolved.identity.developerId, slackUserId: resolvedSlackUserId, channelMember: proof.channelMember };
     },
     taskPeopleChannel: async (taskId) => {
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
@@ -1905,9 +1906,10 @@ export function developerTaskRouteDependencies(
       admission.assertOpen();
       const bySlack = new Map(answer.users.map((user) => [user.id, user]));
       return identities.map((identity) => {
-        const user = bySlack.get(identity.slackUserId);
-        if (user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
-        return { subject: { developerId: identity.developerId, slackUserId: identity.slackUserId }, identity, eligible: true,
+        const slackUserId = identity.slackUserId;
+        const user = slackUserId === undefined ? undefined : bySlack.get(slackUserId);
+        if (slackUserId === undefined || user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+        return { subject: { developerId: identity.developerId, slackUserId }, identity, eligible: true,
           channelMember: task.share === undefined || user.memberOf.includes(task.share.channelId) };
       });
       },

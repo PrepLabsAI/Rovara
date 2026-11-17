@@ -19,7 +19,7 @@ export function area(path: string, extra: Partial<Area> = {}): Area {
 
 export function repoEntry(name: string, areas: Area[], extra: Partial<WikiFileMap["repositories"][number]> = {}): WikiFileMap["repositories"][number] {
   return {
-    name, url: `https://github.com/example/${name}`, status: "ok", files: 100, skipped: { generated: 0, vendored: 0, lockfiles: 0, secret: 0 }, languages: [], areas, testFolders: [], skippedFolders: [],
+    name, url: `https://github.com/example/${name}`, status: "ok", files: 100, skipped: { generated: 0, vendored: 0, lockfiles: 0, assets: 0, secret: 0 }, languages: [], areas, testFolders: [], skippedFolders: [],
     activity: { status: "ok", days: 90 }, pages: { repository: 1, modules: areas.length, modulesCapped: false }, ...extra,
   };
 }
@@ -27,7 +27,7 @@ export function repoEntry(name: string, areas: Area[], extra: Partial<WikiFileMa
 export function fileMap(repositories: WikiFileMap["repositories"], chips: WikiFileMap["chips"] = [], modulePagesPerRepository = 40): WikiFileMap {
   return {
     version: 1, project: "beacon", computedAt: "2026-11-17T10:00:00.000Z", repositories, complete: true, repositoriesOmitted: 0, chips,
-    forecast: { repositories: repositories.length, files: 0, pages: 0, pagesCapped: false, price: "not_priced_yet" },
+    forecast: { repositories: repositories.length, files: 0, pages: 0, pagesCapped: false, complete: true, price: "not_priced_yet" },
     limits: { activityDays: 90, modulePagesPerRepository, pagesPerProject: 300, areasPerRepository: 20 },
   };
 }
