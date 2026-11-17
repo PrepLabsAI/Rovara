@@ -20,6 +20,7 @@ import { DeveloperSignInStore, methodSince } from "../developer/store.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { companyIssuerProvider } from "../developer/company-issuer.js";
 import { CompanyInviteStore } from "../developer/company-invites.js";
+import { CompanyImportStore } from "../developer/company-import.js";
 import type { StepUpDependencies } from "../developer/step-up.js";
 import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
@@ -264,6 +265,8 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
     ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
       // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
       companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company }) }),
+    // DEC 254b (b): the operator's company import runs BEFORE the company layer is switched on, so it is there with the layer on or off.
+    companyImport: new CompanyImportStore({ documentClient, tableName, now }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
     extraPublicKeys: extraPublicKeysFromEnvironment(env, new KMSClient(region)),
     providers: {

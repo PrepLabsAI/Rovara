@@ -41,6 +41,7 @@ import { showTaskE2EReplays, startTaskE2EReplay } from "./admin/task-e2e-replay.
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
 import { describeCompanyInvite, inviteExpiryHours, listCompanyInvites } from "./admin/company-invites.js";
+import { companyImportId, describeCompanyImport, previewCompanyImport } from "./admin/company-import.js";
 import { describeSignInClient, listSignInClients, newClientSecret, signInClientId, signInClientRegistration, signInClientUpdate, type SignInClientAddOptions, type SignInClientUpdateOptions } from "./admin/sign-in-clients.js";
 import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
 import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
@@ -834,6 +835,30 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       if (state !== "on" && state !== "off") throw agentXError("CONFIG_INVALID", "say on or off");
       const { globals, result } = await runInviteChange(command, { kind: "set_company_self_serve", open: state === "on" }, options.yes);
       services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, selfServe: state === "on" ? "open" : "closed" }, globals.json));
+    });
+
+  // DEC 254b (b): copy one company of the install's old layout into Code's company records, before Code's company sign-in is switched on.
+  const adminCompany = admin.command("company").description("Code's company records, for an install administrator");
+  adminCompany
+    .command("import")
+    .description("copy one company's members and roles from the install's old records into Code's company records; previews only, unless --apply (which shows the change and asks first)")
+    .requiredOption("--from-install <company-id>", "the install's company id (org_...); it stays the same in Code's records")
+    .option("--undo", "remove exactly the rows an import wrote and nobody changed since", false)
+    .option("--apply", "make the change; without it nothing is written", false)
+    .option("--yes", "with --apply: apply without asking; the change is still printed", false)
+    .action(async (options: { fromInstall: string; undo: boolean; apply: boolean; yes: boolean }, command: Command) => {
+      const companyId = companyImportId(options.fromInstall);
+      if (options.yes && !options.apply) throw agentXError("CONFIG_INVALID", "--yes works only with --apply");
+      const globals = globalOptions(command);
+      if (!options.apply) {
+        const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+        const preview = await previewCompanyImport({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, companyId, options.undo ? "undo" : "import", services.fetchImplementation);
+        services.stdout.write(globals.json ? formatSuccess(preview, true) : describeCompanyImport(preview));
+        return;
+      }
+      const change: AdminChangeInput = options.undo ? { kind: "undo_install_company_import", companyId } : { kind: "import_install_company", companyId };
+      const { result } = await runInviteChange(command, change, options.yes);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, companyId }, globals.json));
     });
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");

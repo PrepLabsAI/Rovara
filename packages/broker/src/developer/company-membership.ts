@@ -13,9 +13,11 @@ export const CompanyPersonId = z.string().regex(/^[a-f0-9]{64}$/);
 export const CompanyEmail = z.string().trim().min(3).max(320).email();
 export const CompanyExpiryHours = z.number().int().min(1).max(720);
 // DEC 253z: a company is made by an operator, or by its first owner with an operator's invite code ("self-serve", naming that person). Old rows ("operator") still read.
+// DEC 254b (b): "import" was copied by an operator from the install's old company layout, at `importedAt` (its undo deletes only that record).
 export const CompanyRecord = z.object({ entityType: z.literal("COMPANY"), companyId: OrgIdSchema, name: z.string().min(1).max(80), status: z.literal("active"), createdAt: z.iso.datetime(),
-  createdBy: z.enum(["operator", "self-serve"]), selfServedBy: z.string().regex(/^[a-f0-9]{64}$/).optional() })
-  .refine((record) => (record.createdBy === "self-serve") === (record.selfServedBy !== undefined), "a self-serve company names its first owner");
+  createdBy: z.enum(["operator", "self-serve", "import"]), selfServedBy: z.string().regex(/^[a-f0-9]{64}$/).optional(), importedAt: z.iso.datetime().optional() })
+  .refine((record) => (record.createdBy === "self-serve") === (record.selfServedBy !== undefined), "a self-serve company names its first owner")
+  .refine((record) => (record.createdBy === "import") === (record.importedAt !== undefined), "an imported company names its import time");
 /** A new company id: 128 random bits in base 36, as the operator's create has always made them. */
 export const generateCompanyId = () => `org_${BigInt(`0x${randomBytes(16).toString("hex")}`).toString(36).padStart(20, "0").slice(-20)}`;
 export const CompanyPreapproval = z.object({
