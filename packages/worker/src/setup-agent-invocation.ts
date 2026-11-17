@@ -14,6 +14,7 @@ import { TASK_SANDBOX_IMAGE_ENVIRONMENT, sandboxNetworkFromEnvironment, type Tas
 import type { RunNetwork } from "./setup-network.js";
 import { setupModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { EVAL_WORKER_IMAGE_VARIABLE } from "./verification/eval-wiring.js";
 
 export interface SetupInvocationDependencies {
   rootPath: string;
@@ -72,7 +73,7 @@ export async function runSetupAgentInvocation(
   const conversationId = invocation.payload.conversationId;
   const result = await runSetupAgent({
     rootPath: canonicalRoot, operationId: invocation.operationId, basedOnRevision: invocation.projectRevision, limits: setup.limits, price,
-    repositories: manifest.repositories, commits: setup.commits,
+    repositories: manifest.repositories, commits: setup.commits, evalImage: environment[EVAL_WORKER_IMAGE_VARIABLE],
     ...(manifest.meta === undefined ? {} : { metaRepo: manifest.meta.name }),
     ports: {
       startNetwork: async () => (sharedNetwork !== undefined ? sharedRunNetwork(sharedNetwork) : startRunNetwork(docker, { taskId: invocation.operationId, image, workspace: await setupWorkspaceKey(canonicalRoot) })),
