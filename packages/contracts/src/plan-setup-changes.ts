@@ -1,7 +1,7 @@
 // L4-SC (DEC 254z c, DEC 254zw): the plan's "Setup change" section. When a task changes the setup itself (adds an outside service, a dependency, a variable or a command), the PLANNER proposes the
 // change in the plan; a maintainer approves it there, bound to the plan's digest (the stored plan holds these items, so the approval of the plan is the approval of exactly them); it raises the plan's
 // risk by one level; and after the pull request merges Rovara offers "Update setup" through the setup candidate -> check -> approve flow (core/setup-agent/plan-update.ts). The coding agent never writes
-// a mock: it is told this list and may not add to it (core/setup-agent/plan-mock-guard.ts flags a mock or fixture file the plan did not name).
+// a mock: it is told this list and may not add to it (core/setup-agent/plan-setup.ts marks an OpenAPI mock source the plan did not name, and the pull request is then high risk).
 //
 // An item is data only and all of it is fixed-shape text: no secret value ever travels in a plan (a `variable` is a NAME), and a `mock` names the OpenAPI description a Rovara-made fake is built from
 // (general-fakes.ts), never an answer the agent made up.
