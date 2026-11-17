@@ -63,7 +63,8 @@ export interface FlowEventContext { orgId: OrgId; project: string }
 export function flowEventsOf(before: WorkflowSnapshot | undefined, after: WorkflowSnapshot, context: FlowEventContext): WorkEventInput[] {
   try {
     if (before !== undefined && (before.revision === after.revision || before.taskId !== after.taskId)) return [];
-    const at = instantOf(after.updatedAt);
+    // Strictly after the snapshot before, so two waits of one task never share an instant (the report orders by time, and a tie would be settled by an id hash).
+    const at = instantOf(before === undefined ? after.updatedAt : new Date(Math.max(Date.parse(after.updatedAt), Date.parse(before.updatedAt) + 1)).toISOString());
     const common = { version: 1 as const, at, orgId: context.orgId, project: context.project, taskId: after.taskId };
     const id = (kind: WorkEventInput["kind"], source: string): string => workEventId({ kind, taskId: after.taskId, source });
     const system = { kind: "system" as const };

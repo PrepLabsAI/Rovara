@@ -895,7 +895,6 @@ async function trackOne(
     }
     if (action !== undefined) {
       items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision, task.workflow), ...action.steps);
-      try { items.push(...(deps.workEvents?.(task, task.workflow, action.workflow, 100 - items.length) ?? [])); } catch { /* an event is never the reason a pass fails */ }
       // The dispatch the new workflow state is due for becomes a row through the task-flow core, and its milestones rows through the milestone hook: all in this one commit.
       if (action.dispatch !== undefined) items.push((deps.dispatchRow ?? defaultDispatchRow)({ companyId: task.orgId, taskId: task.taskId, ...action.dispatch }, stamp));
       for (const requested of action.milestones) items.push(...deps.milestones.items(requested.milestone, requested.n, { definitionVersion: action.workflow.definitionVersion }));
@@ -915,6 +914,8 @@ async function trackOne(
         at: stamp, text: merged.headByRovara ? PUSH_WAS_MINE_MESSAGE : SOMEONE_ELSE_PUSHED_MESSAGE,
       }));
     }
+    // Slice A4: the work events of the workflow change, appended LAST so the room they are given is what is really left in the transaction (an event is never the reason a pass is refused).
+    if (action !== undefined) { try { items.push(...(deps.workEvents?.(task, task.workflow, action.workflow, 100 - items.length) ?? [])); } catch { /* an event is never the reason a pass fails */ } }
     // A write that lost a race (the version, the workflow's revision) is a failed condition, not a fault: read again and try again.
     const committed = await deps.store.transact(items).catch((error: unknown) => {
       // A transaction that lost its race with another writer after the store's own retries is the same as a failed condition.

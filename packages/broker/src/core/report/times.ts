@@ -14,10 +14,11 @@
 // The timeline is the `waiting_changed` events in time order: each begins a stretch that lasts until the next, until the task ended (the report's `endedAt`) or, for an open task, now. An event after the end is not
 // counted. `person` and `none` never mix with `agent`: the classes are exclusive, so the three times never overlap and never exceed the wall time. Nothing here names a person (no event does).
 import {
-  INDEX_EXPIRY_ATTRIBUTE, WORK_EVENT_RETENTION_MONTHS, WorkEventSchema, companyOfKey, when, workEventMonths, workEventPartition, workEventShard,
+  WORK_EVENT_RETENTION_MONTHS, companyOfKey, when, workEventMonths, workEventPartition, workEventShard,
   type DocumentStore, type OrgId, type StoredDocument, type WorkEvent,
 } from "@agentx/contracts";
 import { rowBelongsToCompany } from "../company-read-rows.js";
+import { workEventOfRow } from "../work-events/work-events.js";
 
 /** The numbers of one task. All six or none. */
 export interface TaskTimes {
@@ -34,8 +35,6 @@ export const TIMES_PAGE = 500;
 export const TIMES_PAGES_MAX = 6;
 export const TIMES_EVENTS_MAX = 1_000;
 
-const STORED_ONLY = new Set(["pk", "sk", "entityType", INDEX_EXPIRY_ATTRIBUTE]);
-
 export interface TimesTask { taskId: string; project: string; orgId: OrgId }
 
 /**
@@ -47,8 +46,12 @@ export function foldTimes(events: readonly WorkEvent[], task: TimesTask, endAt: 
     .sort((a, b) => (a.at === b.at ? (a.id < b.id ? -1 : 1) : a.at < b.at ? -1 : 1));
   if (!own.some((event) => event.kind === "task_started")) return undefined;
   const waits = own.flatMap((event) => (event.kind === "waiting_changed" ? [{ at: Date.parse(event.at), event }] : []));
-  if (waits.length === 0) return undefined;
+  // Covered from the start: the first wait is the one the start wrote, at the instant the task started. Otherwise the time before the first wait would be missing, and the numbers are not known.
+  const startedAt = Date.parse(own.find((event) => event.kind === "task_started")!.at);
+  if (waits.length === 0 || waits[0]!.at !== startedAt) return undefined;
   const end = Math.max(waits[0]!.at, endAt ?? now);
+  // Nothing counted (the task ended before its first wait, a clock that disagrees): not known, never a row of zeros.
+  if (end <= waits[0]!.at) return undefined;
   const times: TaskTimes = { workingMs: 0, decisionsMs: 0, prReviewMs: 0, waitingSystemMs: 0, sendBacksRovara: 0, sendBacksPeople: 0 };
   waits.forEach(({ at, event }, index) => {
     if (event.kind !== "waiting_changed" || at >= end) return;
@@ -74,7 +77,7 @@ export function timesOfStored(value: unknown): TaskTimes | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   const names = ["workingMs", "decisionsMs", "prReviewMs", "waitingSystemMs", "sendBacksRovara", "sendBacksPeople"] as const;
-  if (Object.keys(record).length !== names.length || !names.every((name) => typeof record[name] === "number" && Number.isSafeInteger(record[name]) && (record[name] as number) >= 0)) return undefined;
+  if (Object.keys(record).length !== names.length || !names.every((name) => typeof record[name] === "number" && Number.isSafeInteger(record[name]) && (record[name]) >= 0)) return undefined;
   return Object.fromEntries(names.map((name) => [name, record[name]])) as unknown as TaskTimes;
 }
 
@@ -104,11 +107,11 @@ export async function readTaskTimes(store: Pick<DocumentStore, "query">, task: T
       const read: { items: StoredDocument[]; cursor?: string } = await store.query({ pk, sk: { op: "between", low: startedAt, high: `${to}~` }, filter: when.eq("taskId", task.taskId), limit: TIMES_PAGE, ...(cursor === undefined ? {} : { cursor }) });
       for (const row of read.items) {
         if (!rowBelongsToCompany(row, task.orgId) || companyOfKey(row.pk) !== task.orgId) { skipped += 1; continue; }
-        const parsed = WorkEventSchema.safeParse(Object.fromEntries(Object.entries(row).filter(([name]) => !STORED_ONLY.has(name))));
+        const parsed = workEventOfRow(row);
         // A row of this task that cannot be read makes the numbers unknown: counting around it would understate the time.
-        if (!parsed.success) return { times: undefined, skipped };
-        if (parsed.data.orgId !== task.orgId) { skipped += 1; continue; }
-        events.push(parsed.data);
+        if (parsed === undefined) return { times: undefined, skipped };
+        if (parsed.orgId !== task.orgId) { skipped += 1; continue; }
+        events.push(parsed);
         if (events.length > TIMES_EVENTS_MAX) return { times: undefined, skipped };
       }
       cursor = read.cursor;

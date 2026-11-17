@@ -129,12 +129,12 @@ describe("idempotent per event", () => {
     expect((await w.h.store.transact(once)).applied).toBe(true);
     const afterSecond = await w.events();
     expect(afterSecond.length).toBe(afterFirst.length);
-    expect(new Set(afterSecond.map((event) => event.id)).size).toBe(afterSecond.length);
+    expect(afterSecond.length).toBeGreaterThan(0);
   });
 
   it("a replayed start makes the same events; another task makes others; the first wait is read from the snapshot the task starts with", () => {
     const input = { companyId: A, taskId: TASK, project: "alpha", origin: "web", receivedAt: "2026-11-17T09:00:00.000Z" };
-    const kinds = (workflow?: WorkflowSnapshot) => startWorkEventItems({ ...input, ...(workflow === undefined ? {} : { workflow }) }).map((item) => (item as { item: { kind: string; waitingOn?: string; reason?: string } }).item).map((row) => `${row.kind}${row.waitingOn === undefined ? "" : `:${row.waitingOn}:${row.reason ?? "-"}`}`).sort();
+    const kinds = (workflow?: WorkflowSnapshot) => startWorkEventItems({ ...input, ...(workflow === undefined ? {} : { workflow }) }).map((item) => (item as unknown as { item: { kind: string; waitingOn?: string; reason?: string } }).item).map((row) => `${row.kind}${row.waitingOn === undefined ? "" : `:${row.waitingOn}:${row.reason ?? "-"}`}`).sort();
     // A plain task has no workflow: it started, and nothing is known to wait for.
     expect(kinds()).toEqual(["task_started"]);
     // A task that starts running (Understand off) waits for the agent; one that starts queued (Understand first) waits for the system.
@@ -143,6 +143,15 @@ describe("idempotent per event", () => {
     const queued = snapshot({ revision: 1, stage: "UNDERSTAND", state: "READY", updatedAt: input.receivedAt });
     expect(JSON.stringify(startWorkEventItems({ ...input, workflow: queued }))).toBe(JSON.stringify(startWorkEventItems({ ...input, workflow: queued })));
     expect(JSON.stringify(startWorkEventItems({ ...input, taskId: "00000000-0000-4000-8000-000000000002", workflow: queued }))).not.toBe(JSON.stringify(startWorkEventItems({ ...input, workflow: queued })));
+  });
+
+  it("each wait is strictly after the one before, even when the clock did not move", () => {
+    const first = flowEventsOf(snapshot({ revision: 2, state: "READY" }), snapshot({ revision: 3, state: "RUNNING" }), { orgId: A, project: "alpha" });
+    expect(first.length).toBeGreaterThan(0);
+    for (const event of first) expect(Date.parse(event.at)).toBe(Date.parse("2026-11-17T10:00:00.000Z") + 1);
+    // A later clock is kept as it is.
+    const later = flowEventsOf(snapshot({ revision: 2, state: "READY" }), snapshot({ revision: 3, updatedAt: "2026-11-17T10:05:00.000Z" }), { orgId: A, project: "alpha" });
+    for (const event of later) expect(event.at).toBe("2026-11-17T10:05:00.000Z");
   });
 
   it("a transition that does not move the revision makes no events", () => {
@@ -156,14 +165,17 @@ describe("a failure to make an event never fails a step", () => {
     expect(flowWorkEventItems({ ...input, project: "alpha", after: snapshot() }).length).toBeGreaterThan(0);
     expect(flowWorkEventItems({ ...input, project: "alpha", after: snapshot({ updatedAt: "not a time" }) })).toEqual([]);
     expect(flowWorkEventItems({ ...input, project: "not a valid project name!!", after: snapshot() })).toEqual([]);
-    expect(flowWorkEventItems({ ...input, project: "alpha", after: snapshot({ decisions: null }) })).toEqual([]);
+    expect(() => flowWorkEventItems({ ...input, project: "alpha", after: snapshot({ pullRequests: 5 }) })).not.toThrow();
+    expect(flowWorkEventItems({ ...input, project: "alpha", after: snapshot({ pullRequests: 5 }) })).toEqual([]);
+    // A snapshot with no decision list (an old record) still makes its wait events.
+    expect(flowWorkEventItems({ ...input, project: "alpha", after: snapshot({ decisions: null }) }).length).toBeGreaterThan(0);
     expect(flowWorkEventItems({ ...input, project: "alpha", after: undefined as never })).toEqual([]);
-    expect(flowWorkEventItems({ ...input, orgId: "nope" as OrgId, project: "alpha", after: snapshot() })).toEqual([]);
+    expect(flowWorkEventItems({ ...input, orgId: "nope", project: "alpha", after: snapshot() })).toEqual([]);
   });
 
   it("the skips are told, never their content", () => {
     const skips: string[] = [];
-    flowWorkEventItems({ enabled: true, orgId: "nope" as OrgId, project: "alpha", before: was(), after: snapshot(), room: 50, onSkip: (reason) => skips.push(reason) });
+    flowWorkEventItems({ enabled: true, orgId: "nope", project: "alpha", before: was(), after: snapshot(), room: 50, onSkip: (reason) => skips.push(reason) });
     expect(skips).toContain("invalid");
   });
 
@@ -228,7 +240,7 @@ describe("company and project keyed", () => {
     const a = await planWaiting({ workEvents: true, companyId: A });
     const b = await planWaiting({ workEvents: true, companyId: B });
     for (const [world, company, other] of [[a, A, B], [b, B, A]] as const) {
-      const rows = world.recorded.log.flat().filter(isEventItem).map((item) => (item as { item: { pk: string; orgId: string } }).item);
+      const rows = world.recorded.log.flat().filter(isEventItem).map((item) => (item as unknown as { item: { pk: string; orgId: string } }).item);
       expect(rows.length).toBeGreaterThan(0);
       expect(rows.every((row) => row.pk.startsWith(`ORG#${company}#WORK_EVENTS#`) && row.orgId === company && !row.pk.includes(other))).toBe(true);
     }

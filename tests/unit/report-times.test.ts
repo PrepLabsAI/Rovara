@@ -41,7 +41,7 @@ function world() {
     const items = reportStartItems({ companyId: company, taskId, project, title: `Task ${String(input.n)}`, origin: "app", receivedAt: input.startedAt });
     expect((await store.transact(items)).applied).toBe(true);
     const workflow = input.merged === undefined ? undefined : { stage: "MERGED", state: "COMPLETE", outcome: "MERGED", path: "FULL", updatedAt: input.merged, pullRequests: [{ url: "https://github.com/acme/web/pull/7", state: "MERGED" }] };
-    await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, taskId, project, title: `Task ${String(input.n)}`, createdAt: input.startedAt, ...(input.closedAt === undefined ? {} : { closedAt: input.closedAt }), ...(workflow === undefined ? {} : { workflow: workflow as never }) } });
+    await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, taskId, project, title: `Task ${String(input.n)}`, createdAt: input.startedAt, ...(input.closedAt === undefined ? {} : { closedAt: input.closedAt }), ...(workflow === undefined ? {} : { workflow: workflow }) } });
     if (input.merged !== undefined) await store.put({ item: { ...codeMilestoneKey(taskId, "merged", 1), entityType: "CODE_MILESTONE", orgId: company, taskId, kind: "merged", at: input.merged, text: "merged" } });
     await put(input.events ?? [], company, taskId, project);
     return taskId;
@@ -62,7 +62,7 @@ describe("the time split, attributed", () => {
 
   it("a pull request review is not a decision wait, an answer is not a pull request review, and spend or a block is a decision wait", () => {
     const task = { taskId: id(1), project: "alpha", orgId: A };
-    const fold = (spec: Spec[], end: string) => foldTimes(spec.map((one) => event(A, id(1), "alpha", one)) as never, task, Date.parse(end), NOW)!;
+    const fold = (spec: Spec[], end: string) => foldTimes(spec.map((one) => event(A, id(1), "alpha", one)), task, Date.parse(end), NOW)!;
     const only = (reason: string, on = "person") => fold([started(at(9)), wait(at(9), on, reason)], at(10));
     expect(only("pr_review")).toMatchObject({ prReviewMs: 60 * MIN, decisionsMs: 0, workingMs: 0, waitingSystemMs: 0 });
     for (const reason of ["answer", "plan_approval", "spend_approval", "blocked", "design_choice"]) expect(only(reason)).toMatchObject({ decisionsMs: 60 * MIN, prReviewMs: 0, workingMs: 0, waitingSystemMs: 0 });
@@ -75,9 +75,9 @@ describe("the time split, attributed", () => {
   it("an event after the end is not counted, and an open task runs to now", async () => {
     const task = { taskId: id(1), project: "alpha", orgId: A };
     const spec = [started(at(9)), wait(at(9), "agent"), wait(at(11), "person", "pr_review"), wait(at(13), "agent")];
-    const folded = foldTimes(spec.map((one) => event(A, id(1), "alpha", one)) as never, task, Date.parse(at(12)), NOW)!;
+    const folded = foldTimes(spec.map((one) => event(A, id(1), "alpha", one)), task, Date.parse(at(12)), NOW)!;
     expect(folded).toMatchObject({ workingMs: 120 * MIN, prReviewMs: 60 * MIN });
-    const open = foldTimes(spec.map((one) => event(A, id(1), "alpha", one)) as never, task, undefined, Date.parse(at(14)))!;
+    const open = foldTimes(spec.map((one) => event(A, id(1), "alpha", one)), task, undefined, Date.parse(at(14)))!;
     expect(open).toMatchObject({ workingMs: 120 * MIN + 60 * MIN, prReviewMs: 120 * MIN });
     const w = world();
     const taskId = await w.seed({ n: 2, startedAt: at(9), events: spec });
@@ -114,7 +114,7 @@ describe("absent is not zero", () => {
     for (const taskId of [noStart, noWait, broken]) expect(rows.get(taskId)).toBeDefined();
     for (const taskId of [noStart, noWait, broken]) expect(Object.keys(rows.get(taskId)!)).not.toContain("workingMs");
     const many = await w.seed({ n: 4, startedAt: at(9), events: [started(at(9)), wait(at(9), "agent")] });
-    for (let n = 0; n < TIMES_EVENTS_MAX + 2; n += 1) await w.store.put({ item: workEventRow(event(A, id(4), "alpha", { kind: "step_started", at: at(9, 30), source: `s${String(n)}`, step: "plan" } as Spec)) });
+    for (let n = 0; n < TIMES_EVENTS_MAX + 2; n += 1) await w.store.put({ item: workEventRow(event(A, id(4), "alpha", { kind: "step_started", at: at(9, 30), source: `s${String(n)}`, step: "plan" })) });
     expect(Object.keys((await w.read(A)).tasks.find((task) => task.taskId === many)!)).not.toContain("workingMs");
   });
 
@@ -131,6 +131,21 @@ describe("absent is not zero", () => {
     expect(timesOfStored({ workingMs: 1, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 })).toEqual({ workingMs: 1, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 });
     for (const bad of [undefined, null, [], {}, { workingMs: 1 }, { workingMs: -1, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 }, { workingMs: 1.5, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 },
       { workingMs: 1, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0, extra: 1 }]) expect(timesOfStored(bad)).toBeUndefined();
+  });
+});
+
+describe("covered from the start, or not known", () => {
+  const task = { taskId: id(1), project: "alpha", orgId: A };
+  const fold = (spec: Spec[], end: string | undefined = at(11)) => foldTimes(spec.map((one) => event(A, id(1), "alpha", one)), task, end === undefined ? undefined : Date.parse(end), NOW);
+
+  it("the first wait must be the one the start wrote; a first wait later than the start leaves the time before it unaccounted, so nothing is claimed", () => {
+    expect(fold([started(at(9)), wait(at(9), "agent")])).toBeDefined();
+    expect(fold([started(at(9)), wait(at(9, 30), "agent")])).toBeUndefined();
+  });
+
+  it("a task that counted no time at all is not known, not a row of zeros", () => {
+    expect(fold([started(at(9)), wait(at(9), "agent")], at(9))).toBeUndefined();
+    expect(fold([started(at(9)), wait(at(9), "agent")], at(8))).toBeUndefined();
   });
 });
 
@@ -217,7 +232,7 @@ describe("a read that fails", () => {
     const w = world();
     await w.seed({ n: 1, startedAt: at(9), events: MAIN });
     const failing = { ...w.store, get: w.store.get.bind(w.store), getMany: w.store.getMany.bind(w.store), update: w.store.update.bind(w.store), transact: w.store.transact.bind(w.store),
-      query: async (request: { pk: string }) => { if (request.pk.includes("WORK_EVENTS")) throw new Error("boom"); return w.store.query(request as never); } };
+      query: async (request: { pk: string }) => { if (request.pk.includes("WORK_EVENTS")) throw new Error("boom"); return w.store.query(request); } };
     await expect(readCompanyReportTasks(failing as never, A, { from: "2026-11-01T00:00:00.000Z" }, NOW)).rejects.toThrow();
   });
 });
