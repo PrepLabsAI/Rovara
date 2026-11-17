@@ -94,7 +94,10 @@ export const WikiDisputedItemSchema = z.object({
   markedAt: z.string(),
   reason: z.string().optional(),
 }).strict();
-export const WikiDisputedResponseSchema = z.object({ project: z.string(), items: z.array(WikiDisputedItemSchema) }).strict();
+/** The most disputed marks one answer holds. */
+export const WIKI_DISPUTED_MAX = 100;
+/** `more`: the list was cut at `WIKI_DISPUTED_MAX` (close some marks and read again). */
+export const WikiDisputedResponseSchema = z.object({ project: z.string(), items: z.array(WikiDisputedItemSchema).max(WIKI_DISPUTED_MAX), more: z.boolean() }).strict();
 export type WikiDisputedResponse = z.infer<typeof WikiDisputedResponseSchema>;
 
 // ---- Fixed words ----------------------------------------------------------------------------------------------------------------------------------------------------------------------

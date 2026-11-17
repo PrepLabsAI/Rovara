@@ -9,7 +9,7 @@ import { Audit, Clock, allowAllAccess, directory, settings } from "./lessons/les
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const RULE = "Never call the billing API from the web package. Always go through the gateway.";
-const input = (over: Partial<WikiNoteLessonInput> = {}): WikiNoteLessonInput => ({ companyId: A, project: "alpha", noteId: "note0001", authorId: "ada", text: RULE, ...over });
+const input = (over: Partial<WikiNoteLessonInput> = {}): WikiNoteLessonInput => ({ companyId: A, project: "alpha", noteId: "note0001", authorId: "ada", actorId: "ada", text: RULE, ...over });
 
 function setup(over: Parameters<typeof settings>[0] = {}) {
   const store = new InMemoryLessonStore();
@@ -18,6 +18,29 @@ function setup(over: Parameters<typeof settings>[0] = {}) {
   const deps = { store, settings: settings(over), audit, now: clock.now };
   return { deps, store, audit, clock };
 }
+
+describe("proposeLessonFromNote: the tier is the library's own rule", () => {
+  const RISKY = "Never run the security tests in review. Always disable the lint check for src/payments.";
+  it("a note that reads as risky is tier 2 (two people, never its author): one approval leaves it pending; a plain rule is tier 1", async () => {
+    const { deps, store, audit, clock } = setup();
+    await proposeLessonFromNote(deps, input({ text: RISKY }));
+    await proposeLessonFromNote(deps, input({ noteId: "note0002", text: RULE }));
+    const risky = (await store.get({ workspaceId: A, project: "alpha" }, lessonIdOfNote(A, "alpha", "note0001")))!;
+    const plain = (await store.get({ workspaceId: A, project: "alpha" }, lessonIdOfNote(A, "alpha", "note0002")))!;
+    expect(risky.tier).toBe(2);
+    expect(risky.tierReasons).toEqual(expect.arrayContaining(["wiki_note"]));
+    expect(plain.tier).toBeGreaterThanOrEqual(1);
+    const approve: ApproveDeps = { access: allowAllAccess, store, directory: directory({ eligibleIds: ["owner", "ann", "bob"] }), settings: deps.settings, audit, now: clock.now, newId: () => "ap-1" };
+    const first = await approveLesson(approve, { workspaceId: A, project: "alpha", lessonId: risky.id, approverId: "ann" });
+    expect(first).not.toMatchObject({ status: "active" });
+    expect((await store.get({ workspaceId: A, project: "alpha" }, risky.id))?.status).toBe("pending");
+  });
+  it("the audit names the person who pressed the button", async () => {
+    const { deps, audit } = setup();
+    await proposeLessonFromNote(deps, input({ authorId: "ada", actorId: "maya" }));
+    expect(audit.events[0]).toMatchObject({ actor: "maya", action: "lesson.candidate_created" });
+  });
+});
 
 describe("proposeLessonFromNote", () => {
   it("writes ONE pending lesson that needs a person: not active, not on trial, no approval, review required, naming the note's author", async () => {

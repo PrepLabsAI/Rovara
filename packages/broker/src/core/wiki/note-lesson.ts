@@ -11,6 +11,7 @@ import type { OrgId } from "@agentx/contracts";
 import { WIKI_LESSON_BODY_MAX } from "@agentx/contracts";
 import { firstExpiry, pendingExpiry } from "../../lessons/expiry.js";
 import { cleanForLearning, requestsCapabilityChange } from "../../lessons/guards.js";
+import { classifyTier } from "../../lessons/tier.js";
 import { emitAudit, modeAllows, resolveLearning, type LearningSettingsReader } from "../../lessons/policy.js";
 import type { LessonAuditSink } from "../../lessons/ports.js";
 import type { LessonStore } from "../../lessons/store.js";
@@ -22,6 +23,8 @@ export interface WikiNoteLessonInput {
   noteId: string;
   /** The person who wrote the note (the lesson names them as its author, so erasing them deletes it). */
   authorId: string;
+  /** The person who pressed the button (the note's author or a maintainer): the audit names them. */
+  actorId: string;
   text: string;
   /** The file the note is tied to; it becomes the lesson's scope. */
   file?: { repo: string; path: string } | undefined;
@@ -62,24 +65,34 @@ export async function proposeLessonFromNote(deps: WikiNoteLessonDeps, input: Wik
   if (await deps.store.seenOnce(key, marker)) return { state: "already_proposed", lessonId: id };
 
   const now = deps.now();
+  const stages = ["PLAN", "IMPLEMENT", "REVIEW"] as const;
+  const scope = input.file === undefined ? {} : { repos: [input.file.repo], paths: [input.file.path] };
+  // The tier is the library's own rule on this text (reviewer stage, escalation words, commands, paths): a note that reads as risky needs two people, never the author, exactly like any other lesson.
+  // A person's note is at least tier 1 (never applied by itself), and a "never" result is refused.
+  const decision = classifyTier({ type: "convention", stages: [...stages], scope, citations: [], title, description: "", body, provenance: { minTrust: "member", audience: { kind: "project" } } }, {}, { tier: 1, reasons: ["wiki_note"] });
+  if (decision.tier === "never") return { state: "refused" };
   const lesson: Lesson = LessonSchema.parse({
     id, version: 1, workspaceId: key.workspaceId, project: key.project,
-    scope: input.file === undefined ? {} : { repos: [input.file.repo], paths: [input.file.path] },
-    type: "convention", stages: ["PLAN", "IMPLEMENT", "REVIEW"],
+    scope,
+    type: "convention", stages: [...stages],
     title, description: "", body, citations: [],
     // A person's own words, from a note a person wrote: member trust, a strong signal, but NOT a "member correction" (nothing here lets it go live on trial) and not proved against any code.
     provenance: {
       sourceEvents: [], sourceKinds: [], authors: [input.authorId], supportTasks: [], sources: [`member:${input.authorId}`], inputSources: [`member:${input.authorId}`], measured: false,
       minTrust: "member", audience: { kind: "project" }, reflectorRun: "wiki-note", model: "none", memberSignal: true,
     },
-    tier: 1, tierReasons: ["wiki_note"], status: "pending", reviewRequired: true, pendingExpiresAt: pendingExpiry(now),
+    tier: decision.tier, tierReasons: decision.reasons, status: "pending", reviewRequired: true, pendingExpiresAt: pendingExpiry(now),
     counters: { loaded: 0, helpful: 0, harmful: 0, citationStale: 0 }, staleAt: [], expiresAt: firstExpiry("convention", now, resolved.expiryDays), approvals: [], createdAt: now, updatedAt: now,
   });
   // A lost race with another write to the project's lessons is retried on a fresh set version; the lesson's id is the note's, so it can never be written twice.
   let written = false;
-  for (let attempt = 0; attempt < 3 && !written; attempt += 1) written = (await deps.store.commit(key, await deps.store.setVersion(key), [lesson], now)).ok;
+  for (let attempt = 0; attempt < 3 && !written; attempt += 1) {
+    written = (await deps.store.commit(key, await deps.store.setVersion(key), [lesson], now)).ok;
+    // Another suggest of the same note that won the race has set the marker by now: this one is the same lesson.
+    if (!written && (await deps.store.seenOnce(key, marker))) return { state: "already_proposed", lessonId: id };
+  }
   if (!written) throw new Error("the lesson could not be written");
   await deps.store.markOnce(key, marker);
-  await emitAudit(deps.audit, { action: "lesson.candidate_created", workspaceId: key.workspaceId, project: key.project, lessonId: id, actor: input.authorId, facts: { type: "convention" } });
+  await emitAudit(deps.audit, { action: "lesson.candidate_created", workspaceId: key.workspaceId, project: key.project, lessonId: id, actor: input.actorId, facts: { type: "convention" } });
   return { state: "proposed", lessonId: id };
 }

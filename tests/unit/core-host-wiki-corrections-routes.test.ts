@@ -3,7 +3,7 @@
 // lesson (never approves), the disputed list. The role is read live from membership on every request; two projects and two companies never meet; refusals are fixed words with no echo.
 import { describe, expect, it } from "vitest";
 import {
-  WIKI_ACTION_FAILED, WIKI_BAD_REQUEST, WIKI_LESSONS_OFF, WIKI_LESSON_REFUSED, WIKI_NEEDS_MAINTAINER, WIKI_NEEDS_WORKING_ROLE, WIKI_NOT_A_RULE, WIKI_NOTE_NOT_FOUND, WIKI_NOTE_NOT_YOURS, WIKI_NO_SUCH_CLAIM,
+  WIKI_ACTION_FAILED, WIKI_BAD_REQUEST, WIKI_DISPUTED_MAX, WIKI_LESSONS_OFF, WIKI_LESSON_REFUSED, WIKI_NEEDS_MAINTAINER, WIKI_NEEDS_WORKING_ROLE, WIKI_NOT_A_RULE, WIKI_NOTE_NOT_FOUND, WIKI_NOTE_NOT_YOURS, WIKI_NO_SUCH_CLAIM,
   WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TOO_MANY, WIKI_UNAVAILABLE, WIKI_LIMITS, redactText, type OrgId, type OrgRole, type ProjectRole, type WikiPageWrite,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -379,6 +379,23 @@ describe("the disputed list", () => {
   });
 });
 
+describe("the disputed list is bounded", () => {
+  it("holds at most WIKI_DISPUTED_MAX marks and says it was cut; each person is looked up once", async () => {
+    const asked: string[] = [];
+    const w = await seeded();
+    for (let i = 0; i < WIKI_DISPUTED_MAX + 20; i += 1) await w.a.addFlag("alpha", { pageId: "overview", claimId: i % 2 === 0 ? "c0001" : "c0002", by: { kind: "person", personId: "ada" }, reason: "r" });
+    w.clock.t += 60_000;
+    await w.a.writePage("alpha", page("rewritten"));
+    const answer = await w.call(A, "maya", "GET", "/v1/app/projects/alpha/wiki/disputed", undefined, { displayName: async (person) => { asked.push(person); return "Ada"; } });
+    expect(answer.status).toBe(200);
+    expect(answer.body["items"]).toHaveLength(WIKI_DISPUTED_MAX);
+    expect(answer.body["more"]).toBe(true);
+    expect(asked).toEqual(["ada"]);
+    const few = await seeded();
+    expect((await few.call(A, "maya", "GET", "/v1/app/projects/alpha/wiki/disputed")).body["more"]).toBe(false);
+  });
+});
+
 describe("suggest a note as a lesson", () => {
   const RULE = "Never call the billing API from the web package; always go through the gateway.";
   it("the note's author suggests; the port gets the note's author, text and file from the STORED note, and the answer says it is proposed", async () => {
@@ -386,7 +403,7 @@ describe("suggest a note as a lesson", () => {
     const stored = await w.a.addNote("alpha", { pageId: "overview", text: RULE, authorId: "ada", file: { repo: "web", path: "src/a.ts" } });
     const answer = await w.call(A, "ada", "POST", `${PAGE}/notes/${stored.noteId}/suggest-lesson`, {});
     expect(answer).toMatchObject({ status: 200, body: { state: "proposed", lessonId: "wn_testlesson0001" } });
-    expect(w.suggested).toEqual([{ companyId: A, project: "alpha", noteId: stored.noteId, authorId: "ada", text: RULE, file: { repo: "web", path: "src/a.ts" } }]);
+    expect(w.suggested).toEqual([{ companyId: A, project: "alpha", noteId: stored.noteId, authorId: "ada", actorId: "ada", text: RULE, file: { repo: "web", path: "src/a.ts" } }]);
   });
   it("a maintainer may suggest another person's note (the lesson still names the note's author); another contributor, a viewer and no role may not", async () => {
     const w = await seeded();
@@ -396,7 +413,7 @@ describe("suggest a note as a lesson", () => {
     expect((await w.call(A, "mallory", "POST", `${PAGE}/notes/${stored.noteId}/suggest-lesson`, {})).status).toBe(404);
     expect(w.suggested).toEqual([]);
     expect((await w.call(A, "maya", "POST", `${PAGE}/notes/${stored.noteId}/suggest-lesson`, {})).status).toBe(200);
-    expect(w.suggested[0]?.authorId).toBe("ada");
+    expect(w.suggested[0]).toMatchObject({ authorId: "ada", actorId: "maya" });
   });
   it("takes no body field (a lesson's text and author are the note's, never the request's)", async () => {
     const w = await seeded();

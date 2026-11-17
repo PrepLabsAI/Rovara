@@ -15,7 +15,7 @@
 //  - A repository no longer in the project has its pages deleted before anything is read or written (`pruneRepositories`), as on the read routes.
 //  - Refusals are fixed words; nothing a caller sent is echoed; a store fault is a fixed 503.
 import {
-  WIKI_ACTION_FAILED, WIKI_BAD_REQUEST, WIKI_LESSONS_OFF, WIKI_LESSON_REFUSED, WIKI_NEEDS_MAINTAINER, WIKI_NEEDS_WORKING_ROLE, WIKI_NOT_A_RULE, WIKI_NOTE_NOT_FOUND, WIKI_NOTE_NOT_YOURS,
+  WIKI_ACTION_FAILED, WIKI_BAD_REQUEST, WIKI_DISPUTED_MAX, WIKI_LESSONS_OFF, WIKI_LESSON_REFUSED, WIKI_NEEDS_MAINTAINER, WIKI_NEEDS_WORKING_ROLE, WIKI_NOT_A_RULE, WIKI_NOTE_NOT_FOUND, WIKI_NOTE_NOT_YOURS,
   WIKI_NO_SUCH_CLAIM, WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TOO_MANY, WIKI_UNAVAILABLE,
   WikiAddNoteRequestSchema, WikiCorrectionsResponseSchema, WikiDisputedResponseSchema, WikiIdSchema, WikiMarkWrongRequestSchema, WikiMarkedResponseSchema, WikiNoBodySchema, WikiNoteAddedResponseSchema,
   WikiNoteApprovedResponseSchema, WikiNoteDeletedResponseSchema, WikiPageIdSchema, WikiProjectSchema, WikiResolvedResponseSchema, WikiSuggestedResponseSchema, wikiNoteLooksLikeRule,
@@ -162,9 +162,18 @@ async function readPerson(ctx: Ctx, pageId: string): Promise<WikiPageRead> {
   return read;
 }
 
+const names = new WeakMap<Ctx, Map<string, string>>();
 async function nameOf(ctx: Ctx, personId: string): Promise<string> {
   if (personId === WIKI_FORMER_MEMBER || ctx.input.wiring.displayName === undefined) return WIKI_FORMER_MEMBER_NAME;
-  try { return (await ctx.input.wiring.displayName(personId)) ?? WIKI_FORMER_MEMBER_NAME; } catch { return WIKI_FORMER_MEMBER_NAME; }
+  // One lookup for each person in a request (the disputed list can name the same person many times).
+  const known = names.get(ctx) ?? new Map<string, string>();
+  names.set(ctx, known);
+  const seen = known.get(personId);
+  if (seen !== undefined) return seen;
+  let name = WIKI_FORMER_MEMBER_NAME;
+  try { name = (await ctx.input.wiring.displayName(personId)) ?? WIKI_FORMER_MEMBER_NAME; } catch { /* a name that cannot be read is "a former member" */ }
+  known.set(personId, name);
+  return name;
 }
 
 /** The note on this page, or a refusal. The page's own notes only: a note id from another page, project or company is "not there". */
@@ -241,7 +250,7 @@ async function suggestLesson(ctx: Ctx, pageId: string, noteId: string) {
   if (suggest === undefined) throw agentXError("NOT_FOUND", WIKI_LESSONS_OFF);
   // A note whose author is gone cannot name them on a lesson.
   if (note.authorId === WIKI_FORMER_MEMBER) throw agentXError("CONFIG_INVALID", WIKI_LESSON_REFUSED);
-  const result = await guarded(async () => await suggest({ companyId: ctx.input.companyId, project: ctx.project, noteId: note.noteId, authorId: note.authorId, text: note.text, ...(note.file === undefined ? {} : { file: note.file }) }));
+  const result = await guarded(async () => await suggest({ companyId: ctx.input.companyId, project: ctx.project, noteId: note.noteId, authorId: note.authorId, actorId: ctx.input.personId, text: note.text, ...(note.file === undefined ? {} : { file: note.file }) }));
   if (result.state === "off") throw agentXError("NOT_FOUND", WIKI_LESSONS_OFF);
   if (result.state === "too_long") throw agentXError("CONFIG_INVALID", WIKI_NOT_A_RULE);
   if (result.state === "refused") throw agentXError("CONFIG_INVALID", WIKI_LESSON_REFUSED);
@@ -273,7 +282,9 @@ const DISPUTED_PAGES_AT_ONCE = 8;
 async function disputedAnswer(ctx: Ctx) {
   const index = await guarded(async () => await ctx.store.readIndex(ctx.project));
   const items: Array<Record<string, unknown>> = [];
-  for (let from = 0; from < index.length; from += DISPUTED_PAGES_AT_ONCE) {
+  let more = false;
+  // The list is bounded (`WIKI_DISPUTED_MAX`): a person who marks many claims, or marks that pile up, can never make the answer too big to send. The oldest pages first; `more` says the list was cut.
+  for (let from = 0; from < index.length && !more; from += DISPUTED_PAGES_AT_ONCE) {
     const reads = await guarded(async () => await Promise.all(index.slice(from, from + DISPUTED_PAGES_AT_ONCE).map(async (entry) => await ctx.store.readPage(ctx.project, entry.pageId, "person"))));
     for (const read of reads) {
       if (read === undefined) continue;
@@ -282,16 +293,18 @@ async function disputedAnswer(ctx: Ctx) {
         if (flag.createdAt === undefined || flag.by === undefined || flag.createdAt >= read.page.writtenAt) continue;
         const claim = flag.claimId === undefined ? undefined : read.page.claims.find((candidate) => candidate.claimId === flag.claimId);
         if (flag.claimId !== undefined && claim === undefined) continue;
+        if (items.length >= WIKI_DISPUTED_MAX) { more = true; break; }
         const markedBy = flag.by.kind === "person" ? await nameOf(ctx, flag.by.personId) : flag.by.kind === "task" ? "a task step" : "an answer";
         items.push({
           flagId: flag.flagId, pageId: read.page.pageId, pageTitle: read.page.title, ...(claim === undefined ? {} : { claimId: claim.claimId, claimText: claim.text }), markedBy, markedAt: flag.createdAt,
           ...(flag.reason === undefined ? {} : { reason: flag.reason }),
         });
       }
+      if (more) break;
     }
   }
   items.sort((a, b) => String(a["markedAt"]).localeCompare(String(b["markedAt"])) || String(a["flagId"]).localeCompare(String(b["flagId"])));
-  return WikiDisputedResponseSchema.parse({ project: ctx.project, items });
+  return WikiDisputedResponseSchema.parse({ project: ctx.project, items, more });
 }
 
 /** A store refusal in the route's fixed words (a refusal never echoes what the caller sent). */
