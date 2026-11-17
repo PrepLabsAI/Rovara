@@ -13,7 +13,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   OrgIdSchema,
   OrgRoleSchema,
-  SCRIPT_TOKEN_DEFAULT_DAYS,
+  SCRIPT_TOKEN_DEFAULT_DAYS, SCRIPT_TOKEN_PERMISSIONS,
   SCRIPT_TOKEN_MAX_DAYS,
   SCRIPT_TOKENS_LIMIT_MESSAGE,
   SCRIPT_TOKENS_PER_PERSON_MAX,
@@ -222,7 +222,7 @@ export async function createScriptToken(deps: ScriptTokenDependencies, caller: S
   const input = parsed.data;
   const days = input.days ?? SCRIPT_TOKEN_DEFAULT_DAYS;
   const projects = [...input.projects].sort();
-  const permissions = (["read", "start", "lessons"] as const).filter((permission) => input.permissions.includes(permission));
+  const permissions = SCRIPT_TOKEN_PERMISSIONS.filter((permission) => input.permissions.includes(permission));
   const { orgId, developerId } = caller;
   const fingerprint = sha256({ route: "script_token_create", name: input.name, projects, permissions, days });
   const markKey = agentRequestKey(orgId, developerId, input.requestId);

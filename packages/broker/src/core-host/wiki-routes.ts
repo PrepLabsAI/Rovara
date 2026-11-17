@@ -9,7 +9,7 @@
 //    the project's (`wikiPartition`). No route reads across projects or companies; there is no company-wide wiki read.
 //  - Who reads: any project role. A live owner or admin of the company, or a person with a grant on the project (the setup run's `lifecycleAccess` standing: `manage` or `view`). Anyone
 //    else, a project the company does not have, a malformed name and another company's project all get the same 404 "project not found". A missing page is its own fixed 404.
-//  - A script token never reaches these routes (the dev routes refuse it before this file; the MCP `wiki` permission is M1's). Nothing here writes.
+//  - The dev routes admit a script token only with the dedicated `wiki` permission and this project in its scope. Nothing here writes.
 //  - A repository no longer in the project (removed, whichever path removed it) has its pages and every cross-repo page naming it deleted before the read (`pruneRepositories`).
 //  - People never see a stored quote, a flag's author or reason, or a claim id's text beyond the claim: the answers are built field by field and parsed with the contract's strict schemas.
 //  - Refusals are fixed words; nothing a caller sent is echoed, and a store fault is a fixed 503.
