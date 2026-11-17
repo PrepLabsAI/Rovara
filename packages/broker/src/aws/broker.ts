@@ -5,6 +5,9 @@ import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
+import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
+import { slackInstallThroughLambda } from "./slack-install-identity.js";
+import { isSlackWorkspaceRemovedEvent, SlackWorkspaceRemovedEventSchema } from "./slack-workspace-removal.js";
 import { refuseBrowserEvidenceOnCloud } from "./browser-evidence-seam.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
@@ -578,6 +581,8 @@ interface AwsBrokerDependencies {
   companies?: CompanyMembershipReader;
   /** Install workspace for the additive operator backfill; independent of sign-in being enabled. */
   slackWorkspaceLegacyTeamId?: string;
+  /** Guided onboarding PR 4: Add to Slack's wiring (named environments with the company layer); absent, a Slack removal event is refused. */
+  slackInstall?: SlackInstallWiring;
   documentClient: DynamoDBDocumentClient;
   s3: S3Client;
   /** Starts deleting an ec2-ebs workspace's instance and volume (#84). */
@@ -1020,6 +1025,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         await workspaces.bind(parsed.data.companyId, parsed.data.teamId, parsed.data.by);
         return json({ outcome: "bound" }, "slack-workspace");
       } catch { return json({ outcome: "refused" }, "slack-workspace", 404); }
+    }
+    // Guided onboarding PR 4: the Slack ingress's verified app_uninstalled / tokens_revoked. IAM protects the direct invoke; the company comes from the team's binding.
+    if (isSlackWorkspaceRemovedEvent(event)) {
+      const parsed = SlackWorkspaceRemovedEventSchema.safeParse(event);
+      if (!parsed.success || dependencies.slackInstall === undefined) return json({ outcome: "refused" }, "slack-workspace", 404);
+      try { return json(await handleSlackWorkspaceRemoved({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, wiring: dependencies.slackInstall }, parsed.data), "slack-workspace"); }
+      catch { return json({ outcome: "failed" }, "slack-workspace", 500); }
     }
     if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-claim") {
       try {
@@ -15254,6 +15266,12 @@ const ec2Sessions = new SessionManager({
   },
 });
 const github = createGitHubAppCredentials(secretsManager);
+/** Guided onboarding PR 4: Add to Slack (slack-company-install.ts), with the company layer only. Slack's side (the app's client secret, the code exchange, the token store's
+ * writer) runs in DeveloperIdentity (slack-install-identity.ts), which this broker already invokes; the broker never reads the Slack app secret. */
+const slackInstallWiring: SlackInstallWiring | undefined = process.env.COMPANY_SIGNIN !== "enabled" || !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined : {
+  slack: slackInstallThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: process.env.DEVELOPER_IDENTITY_FUNCTION_ARN, Payload: payload }))),
+  log: brokerLogLine,
+};
 const githubCredentials = github.provider;
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
   .update("agentx:repository-grants:v3")
@@ -15280,7 +15298,9 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     setDisplayName: setDisplayNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     ...(process.env.COMPANY_SIGNIN === "enabled" ? { companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
-      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }) } : {}),
+      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
+      // Guided onboarding PR 4: Add to Slack (slack-company-install.ts).
+      ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
@@ -15361,6 +15381,7 @@ const sqs = new SQSClient(awsClientConfiguration);
 export const handler = createAwsBrokerHandler({
   core: coreRoot,
   ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
+  ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
   documentClient,
   s3,
   tableName: requiredEnvironment("STATE_TABLE_NAME"),

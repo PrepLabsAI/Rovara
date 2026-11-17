@@ -204,7 +204,13 @@ describe("developer sign-in infrastructure (named environments)", () => {
 
   it("lets DeveloperIdentity read only its own company sign-in secret besides the Slack secret, and the Slack adapter's signing secret", () => {
     const reads = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((s) => allows(s, "secretsmanager:GetSecretValue"));
-    expect(reads).toHaveLength(3);
+    expect(reads).toHaveLength(4);
+    // Guided onboarding PR 4: the fourth is the per-company Slack token store's family only (create, read, put; no delete).
+    const slackWorkspaces = reads.filter((s) => JSON.stringify(s.Resource).includes("slack-workspaces"));
+    expect(slackWorkspaces).toHaveLength(1);
+    expect(actionsOf(slackWorkspaces[0]!).sort()).toEqual(["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]);
+    expect(JSON.stringify(slackWorkspaces[0]!.Resource)).toContain(":secret:agentx/staging/slack-workspaces/*");
+    expect(slackWorkspaces[0]!.Condition).toBeUndefined();
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain(":secret:agentx/staging/developer-oidc-??????");
     // Spec 062 Phase 7c1b: its Slack directory reads go through the adapter's commands once SlackViaChannel is on.
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain("ChannelApiSlackAdapterSecret");
@@ -602,6 +608,18 @@ describe("task-token key and membership IAM", () => {
       }
     }
     expect([reads, families]).toEqual([1, 1]);
+    // Guided onboarding PR 4: DeveloperIdentity's Slack token store statement (asserted in full above and in the tuples below), taken out so the digest pins everything else.
+    let slackInstall = 0;
+    for (const [, policy] of ofType(remainder, "AWS::IAM::Policy")) {
+      const document = policy.Properties.PolicyDocument as { Statement: Statement[] };
+      document.Statement = document.Statement.filter((s) => {
+        if (!JSON.stringify(s.Resource).includes("/slack-workspaces/*")) return true;
+        expect(JSON.stringify(policy.Properties.Roles)).toContain("DeveloperSignInFunctionServiceRole");
+        slackInstall += 1;
+        return false;
+      });
+    }
+    expect(slackInstall).toBe(1);
     // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts; its shape is asserted here, then it is taken out so the digest still pins everything else.
     withoutCoreEngine(remainder);
     // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
@@ -1602,7 +1620,10 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples,
+/** Guided onboarding PR 4 (Add to Slack): DeveloperIdentity writes, reads (to revoke) and overwrites each company's bot token in the token store's family; no delete, no tags. */
+const slackInstallTuples: AccessTuple[] = ["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"].map((action) =>
+  ["role:DeveloperSignInFunctionServiceRole", "Allow", action, "arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/slack-workspaces/*", "{}"] as AccessTuple);
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...slackInstallTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
 ].sort(byText);
 
