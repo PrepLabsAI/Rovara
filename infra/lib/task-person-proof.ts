@@ -20,6 +20,9 @@ export interface TaskPersonProofProps {
 
 /** Isolated read-only proof workload for the owner-approved named TEST environment. */
 export class TaskPersonProof extends Construct {
+  /** L2-2 (18a): Slack company mode adds its token and binding reads to this role, under this condition too. */
+  readonly role: iam.IRole;
+  readonly install: CfnCondition;
   constructor(scope: Construct, id: string, props: TaskPersonProofProps) {
     super(scope, id);
     if (props.naming.env !== APPROVED_ENV) throw new Error("Task Person proof is available only in agentxlivetest123");
@@ -40,6 +43,8 @@ export class TaskPersonProof extends Construct {
     });
     const proofRoleResource = proofRole.node.defaultChild as iam.CfnRole;
     proofRoleResource.cfnOptions.condition = install;
+    this.role = proofRole;
+    this.install = install;
 
     const proof = new lambdaNodejs.NodejsFunction(this, "Function", {
       runtime: lambda.Runtime.NODEJS_22_X,

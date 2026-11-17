@@ -148,6 +148,8 @@ export const BROKER_SETTINGS = {
   // Core switch-on blocker (2026-11-17): the switch, and the model gateway's host and agent model (the stack parameters CoreEngine, CoreModelGatewayHost and CoreAgentModel), packed
   // to make room for the gateway settings in the broker's 4 KB.
   coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
+  /** DEC 254o (b), L2-2: Slack company mode for workspaces other than SLACK_TEAM_ID (stack parameter SlackCompanyWorkspaces; the broker also needs COMPANY_SIGNIN=enabled). */
+  slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES" },
   coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
   coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
   // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
