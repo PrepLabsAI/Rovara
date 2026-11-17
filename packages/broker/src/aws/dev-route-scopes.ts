@@ -68,6 +68,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/client/projects/{project}/archive", requires: "full" },
   { method: "GET", path: "/v1/dev/client/projects/{project}/restore-preview", requires: "full" },
   { method: "POST", path: "/v1/dev/client/projects/{project}/restore", requires: "full" },
+  // L2-5 c: "no evals" for the project's latest finished setup run (the same people as the skips); full access only.
+  { method: "PUT", path: "/v1/dev/client/projects/{project}/setup-status/eval-none", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },

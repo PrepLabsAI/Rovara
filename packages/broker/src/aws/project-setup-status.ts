@@ -3,6 +3,7 @@
 //
 //   GET /v1/dev/client/projects/{project}/setup-status          any member of the project's company
 //   PUT /v1/dev/client/projects/{project}/setup-status/skips    a company owner or admin, or the project's administrator
+//   PUT /v1/dev/client/projects/{project}/setup-status/eval-none  the same people: confirm (or take back) "no evals" for the project's latest finished setup run (L2-5 c)
 //
 // "Progress is read from the real state, not a saved wizard position": every row is derived on each request, from records Code already keeps:
 //   repos        the project's latest revision (the same row `GET /v1/dev/client/projects/{project}` reads)
@@ -13,7 +14,8 @@
 //   linear       the SEAM for PR #838's team pick (`SetupStatusReaders.linearTeam`); absent on code/next, so optional or skipped
 //   invites      no Code state: optional or skipped
 //   firstTask    whether the project has any task that is not a setup run (the byWorkspaceProject index, then each workspace's task)
-// The only stored state is which optional rows were skipped (`SETUP_SKIPS#<project>` in the company's partition), changed with an audit row in the same transaction.
+// The only stored state is which optional rows were skipped (`SETUP_SKIPS#<project>` in the company's partition) and a person's "no evals" answer for one setup run
+// (`SETUP_EVAL_NONE#<project>`, L2-5 c), each changed with an audit row in the same transaction.
 //
 // Rules held here:
 //   - The company is the caller's, from live membership, and the project must be that company's (`recordInCompany` on its latest revision); every key below is built from it. Another company's
@@ -23,14 +25,14 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, agentXError, companyScoped, redactAndCap, workspaceProjectIndexValue,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, agentXError, companyScoped, redactAndCap, workspaceProjectIndexValue,
   type DocumentKey, type DocumentStore, type OrgId, type ProjectSetupChecklist, type SetupJournalEntry, type SetupProposal, type SetupRowState, type SetupSkippableRow, type SetupStatusRow, type StoredDocument,
   WORKSPACE_PROJECT_INDEX,
 } from "@agentx/contracts";
 import { readModelSelectionPolicy, PolicyUnreadable } from "../core/model-selection/policy-store.js";
 import { SETUP_AGENT_FAILURES, readState } from "../core/setup-agent/agent.js";
-import { readEvalDiscovery } from "../core/setup-agent/eval-discovery.js";
-import { journalKey, setupPartition } from "../core/setup-agent/keys.js";
+import { evalDiscoveryKey, readEvalDiscovery } from "../core/setup-agent/eval-discovery.js";
+import { journalKey, setupAgentKey, setupPartition } from "../core/setup-agent/keys.js";
 import { taskKey, taskPointerKey } from "../core/task-flow/keys.js";
 import { taskPointerKey as legacyTaskPointerKey } from "../developer/task-records.js";
 import { recordInCompany } from "./company-check.js";
@@ -43,6 +45,10 @@ export const SETUP_STATUS_UNREADABLE = "the project's setup status could not be 
 export const NOT_A_SETUP_ADMIN = "only the project's administrators or a company owner or admin can change the setup checklist";
 export const SETUP_SKIPS_BODY = "send the row (slackChannel, linear or invites) and skipped (true or false), and nothing else";
 export const SETUP_SKIPS_STALE = "the checklist changed while you were saving; try again";
+export const NOT_AN_EVAL_ADMIN = "only the project's administrators or a company owner or admin can confirm how work is checked";
+export const EVAL_NONE_BODY = "send noEvals (true or false), and nothing else";
+export const EVAL_NONE_NEEDS_SETUP = "Finish the setup run first, then confirm how work is checked.";
+export const EVAL_ALREADY_CONFIRMED = "The eval for this setup run is already confirmed.";
 
 /** The most workspaces looked at, newest first, when asking whether the project has a task. */
 const TASK_PROBE_WORKSPACES = 25;
@@ -60,6 +66,9 @@ const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADA
 
 /** The project's skipped optional rows: one record per company and project, in the company's own partition. The company id is an org id (never a '#'). */
 export const setupSkipsKey = (companyId: string, project: string): DocumentKey => ({ pk: companyScoped(OrgIdSchema.parse(companyId), `SETUP_SKIPS#${project}`), sk: "META" });
+
+/** The person's "no evals" answer for one setup run: one record per company and project, in the company's own partition. */
+export const setupEvalNoneKey = (companyId: string, project: string): DocumentKey => ({ pk: companyScoped(OrgIdSchema.parse(companyId), `SETUP_EVAL_NONE#${project}`), sk: "META" });
 
 // ---- what the route supplies (the reads that need the route's own seams)
 
@@ -148,6 +157,90 @@ export async function putSkip(input: {
 
 const orderedRows = (rows: readonly SetupSkippableRow[]): SetupSkippableRow[] => SETUP_SKIPPABLE_ROWS.filter((row) => rows.includes(row));
 
+// ---- "no evals" (L2-5 c)
+
+export interface EvalNoneRecord { taskId: string; revision: number; confirmedAt: string; confirmedBy: string }
+
+/** The project's "no evals" answer. No record: none. A record that names another company or project, or does not parse, is unreadable (never applied). */
+export async function readEvalNone(client: Client, tableName: string, companyId: string, project: string): Promise<EvalNoneRecord | undefined> {
+  const item = asRecord((await client.send(new GetCommand({ TableName: tableName, Key: setupEvalNoneKey(companyId, project), ConsistentRead: true })) as { Item?: unknown }).Item);
+  if (item === undefined) return undefined;
+  const { taskId, revision, confirmedAt, confirmedBy } = item;
+  if (item["entityType"] !== "PROJECT_SETUP_EVAL_NONE" || item["companyId"] !== companyId || item["project"] !== project || typeof taskId !== "string" || taskId === "" || taskId.length > 160
+    || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1 || typeof confirmedAt !== "string" || confirmedAt.length > 40 || !Number.isFinite(Date.parse(confirmedAt))
+    || typeof confirmedBy !== "string" || confirmedBy === "" || confirmedBy.length > 256) throw unreadable();
+  return { taskId, revision, confirmedAt, confirmedBy };
+}
+
+/** The project's latest setup run, when it ended with a whole proposal (the checklist's "setup run" row is done); else undefined. */
+async function finishedSetupRun(client: Client, tableName: string, companyId: OrgId, project: string, revision: number, now: () => number): Promise<string | undefined> {
+  const store = readOnlyStore(client, tableName);
+  const pointer = await store.get(setupAgentKey(companyId, project));
+  const taskId = pointer?.["taskId"];
+  if (typeof taskId !== "string" || taskId === "") return undefined;
+  const view = (await readState({ store, companyId, now }, project, revision)).view;
+  return view.status === "ready" && view.summary?.partial !== true && view.taskId === taskId ? taskId : undefined;
+}
+
+/**
+ * `PUT .../setup-status/eval-none`: a person who may change the checklist confirms that the project runs NO evals (`noEvals: true`), or takes that back (`false`). The answer is bound to the
+ * project's latest setup run that ended with a whole proposal: a later setup run needs a new answer. Refused: a person who may not change the checklist (403, before the body is read), no
+ * finished setup run (409), a run whose eval is already confirmed (409: no edit after confirmation). A repeat of what is stored writes nothing. The change and its audit row are one
+ * transaction, conditional on what was read.
+ */
+export async function putEvalNone(input: {
+  documentClient: Client; tableName: string; now: () => number; companyId: string; project: string; revision: number; personId: string; mayChange: boolean; body: () => unknown;
+}): Promise<{ project: string; noEvals: boolean; taskId: string | null }> {
+  if (!input.mayChange) throw agentXError("FORBIDDEN", NOT_AN_EVAL_ADMIN);
+  const body = ProjectSetupEvalNoneBodySchema.safeParse(input.body());
+  if (!body.success) throw agentXError("CONFIG_INVALID", EVAL_NONE_BODY);
+  const companyId = OrgIdSchema.parse(input.companyId);
+  const client = input.documentClient;
+  let current: EvalNoneRecord | undefined;
+  let run: string | undefined;
+  let confirmed: boolean;
+  try {
+    current = await readEvalNone(client, input.tableName, companyId, input.project);
+    run = await finishedSetupRun(client, input.tableName, companyId, input.project, input.revision, input.now);
+    const discovery = run === undefined ? undefined : await readEvalDiscovery({ store: readOnlyStore(client, input.tableName), companyId }, input.project);
+    confirmed = discovery !== undefined && discovery.taskId === run && discovery.state === "confirmed";
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "RUNTIME_UNAVAILABLE") throw error;
+    throw unreadable();
+  }
+  const key = setupEvalNoneKey(companyId, input.project);
+  const at = new Date(input.now()).toISOString();
+  const audit = (noEvals: boolean, taskId: string) => ({ Put: { TableName: input.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${at}#${randomUUID()}`, entityType: "COMPANY_LOG",
+    event: "project_setup_eval_none_changed", companyId, personId: input.personId, projectName: input.project, noEvals, taskId }, ConditionExpression: "attribute_not_exists(pk)" } });
+  const held = current === undefined ? { ConditionExpression: "attribute_not_exists(pk)" } : { ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": current.revision } };
+  let items: unknown[];
+  let answer: { project: string; noEvals: boolean; taskId: string | null };
+  if (body.data.noEvals) {
+    if (run === undefined) throw agentXError("CHANGE_STALE", EVAL_NONE_NEEDS_SETUP);
+    if (confirmed) throw agentXError("CHANGE_STALE", EVAL_ALREADY_CONFIRMED);
+    answer = { project: input.project, noEvals: true, taskId: run };
+    if (current?.taskId === run) return answer;
+    items = [{ Put: { TableName: input.tableName, Item: { ...key, entityType: "PROJECT_SETUP_EVAL_NONE", companyId, project: input.project, taskId: run, revision: (current?.revision ?? 0) + 1, confirmedAt: at, confirmedBy: input.personId }, ...held } },
+      // What the answer was decided on must still hold when it is written: the run is still the project's latest, and its eval was not confirmed meanwhile.
+      { ConditionCheck: { TableName: input.tableName, Key: setupAgentKey(companyId, input.project), ConditionExpression: "#taskId = :run", ExpressionAttributeNames: { "#taskId": "taskId" }, ExpressionAttributeValues: { ":run": run } } },
+      { ConditionCheck: { TableName: input.tableName, Key: evalDiscoveryKey(companyId, input.project, run), ConditionExpression: "attribute_not_exists(pk) OR #state <> :confirmed",
+        ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":confirmed": "confirmed" } } },
+      audit(true, run)];
+  } else {
+    answer = { project: input.project, noEvals: false, taskId: null };
+    if (current === undefined) return answer;
+    items = [{ Delete: { TableName: input.tableName, Key: key, ...held } }, audit(false, current.taskId)];
+  }
+  try {
+    await client.send(new TransactWriteCommand({ TransactItems: items as never }));
+  } catch (error) {
+    const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | undefined)?.CancellationReasons;
+    if (reasons?.some((reason) => reason?.Code === "ConditionalCheckFailed") === true || (error as { name?: unknown }).name === "ConditionalCheckFailedException") throw agentXError("CHANGE_STALE", SETUP_SKIPS_STALE);
+    throw unreadable();
+  }
+  return answer;
+}
+
 // ---- the rows
 
 function reposRow(definition: SetupStatusInput["definition"]): ProjectSetupChecklist["repos"] {
@@ -226,10 +319,16 @@ async function setupRunRow(input: SetupStatusInput, client: Client, companyId: O
 async function evalConfirmRow(input: SetupStatusInput, client: Client, companyId: OrgId, setupDone: boolean): Promise<ProjectSetupChecklist["evalConfirm"]> {
   const discovery = await readEvalDiscovery({ store: readOnlyStore(client, input.tableName), companyId }, input.project);
   const blocked = setupDone ? {} : { blockedBy: "setupRun" as const };
+  const suites = discovery === undefined ? undefined : discovery.report.suites.map((suite) => ({ selection: suite.selection, questions: suite.questions.length }));
+  if (discovery?.state === "confirmed") return { state: "done", report: "confirmed", suites: suites!, ...(discovery.confirmedSelection === undefined ? {} : { confirmedSelection: discovery.confirmedSelection }) };
+  // L2-5 c: a person's "no evals" counts only for the run it was given for, and only while that run is the project's latest finished one.
+  const none = await readEvalNone(client, input.tableName, companyId, input.project);
+  if (none !== undefined && setupDone) {
+    const run = await finishedSetupRun(client, input.tableName, companyId, input.project, input.definition.revision, input.now);
+    if (run !== undefined && run === none.taskId) return { state: "done", report: "no_evals", ...(suites === undefined ? {} : { suites }), noEvals: { confirmedAt: none.confirmedAt } };
+  }
   if (discovery === undefined) return { state: "needs_you", report: "none", ...blocked };
-  const suites = discovery.report.suites.map((suite) => ({ selection: suite.selection, questions: suite.questions.length }));
-  if (discovery.state === "confirmed") return { state: "done", report: "confirmed", suites, ...(discovery.confirmedSelection === undefined ? {} : { confirmedSelection: discovery.confirmedSelection }) };
-  return { state: "needs_you", report: "reported", suites, ...blocked };
+  return { state: "needs_you", report: "reported", suites: suites!, ...blocked };
 }
 
 async function aiAndSpendRow(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<ProjectSetupChecklist["aiAndSpend"]> {
