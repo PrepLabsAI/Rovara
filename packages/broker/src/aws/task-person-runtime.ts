@@ -303,3 +303,29 @@ export function createTaskPersonRuntime(input: {
     },
   };
 }
+
+/**
+ * Web task channel C3 (plan 4.1 rule 3, plan 4.2 "Dispatch"): the dispatcher's `readCompanyMembership` port. It is one strong, projected
+ * `COMPANY_MEMBER#<developerId>` / `COMPANY` GetItem on the sign-in table (the dispatcher role's grant names exactly this key and these fields).
+ * Without a sign-in table no port is added, so every `web` identity stays unavailable.
+ */
+export function withTaskPersonMembershipRead(
+  client: { send(command: GetCommand, options?: { abortSignal?: AbortSignal }): Promise<unknown> },
+  signInTableName: string | undefined,
+  ports: TaskPersonRuntimePorts,
+): TaskPersonRuntimePorts {
+  if (signInTableName === undefined || signInTableName.trim() === "") return ports;
+  return {
+    ...ports,
+    async readCompanyMembership({ developerId, projection, abortSignal }) {
+      const response = await client.send(new GetCommand({
+        TableName: signInTableName,
+        Key: membershipKey(developerId),
+        ConsistentRead: true,
+        ProjectionExpression: projection.map((_, index) => `#p${index}`).join(", "),
+        ExpressionAttributeNames: Object.fromEntries(projection.map((attribute, index) => [`#p${index}`, attribute])),
+      }), { abortSignal });
+      return (response as { Item?: Record<string, unknown> }).Item;
+    },
+  };
+}

@@ -546,7 +546,8 @@ describe("D4 labels: one person's two identities are told apart by method", () =
     const result = await view([
       slackRow(TASK_A, P_SAM, SAM, "Maya Chen"), subjectRow(TASK_A, P_SAM, SAM_ID),
       webRow(TASK_A, { name: "Maya Chen" }), subjectRow(TASK_A, P_GALE, GALE_ID),
-      peopleRow(TASK_A, [{ ...SAM_ENTRY, name: "Maya Chen" }]),
+      // C3: a web identity is shown only with a role someone gave it.
+      peopleRow(TASK_A, [{ ...SAM_ENTRY, name: "Maya Chen" }, { ...GALE_ENTRY("commenter"), name: "Maya Chen" }]),
     ], [
       slackCheck(SAM_ID, SAM, "Maya Chen"),
       { subject: { developerId: GALE_ID }, identity: { ...ID_FIELDS, name: "Maya Chen", method: "github" }, eligible: true, channelMember: true },
@@ -559,7 +560,7 @@ describe("D4 labels: one person's two identities are told apart by method", () =
       slackRow(TASK_A, P_SAM, SAM, "Maya Chen"), subjectRow(TASK_A, P_SAM, SAM_ID),
       slackRow(TASK_A, P_BAY, BAY, "Maya Chen"), subjectRow(TASK_A, P_BAY, BAY_ID),
       webRow(TASK_A, { name: "Gale GitHub" }), subjectRow(TASK_A, P_GALE, GALE_ID),
-      peopleRow(TASK_A, [{ ...SAM_ENTRY, name: "Maya Chen" }, { ...BAY_ENTRY, name: "Maya Chen" }]),
+      peopleRow(TASK_A, [{ ...SAM_ENTRY, name: "Maya Chen" }, { ...BAY_ENTRY, name: "Maya Chen" }, GALE_ENTRY("commenter")]),
     ], [
       slackCheck(SAM_ID, SAM, "Maya Chen"), slackCheck(BAY_ID, BAY, "Maya Chen"),
       { subject: { developerId: GALE_ID }, identity: { ...ID_FIELDS, method: "github" }, eligible: true, channelMember: true },

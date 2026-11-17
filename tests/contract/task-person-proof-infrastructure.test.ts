@@ -346,8 +346,9 @@ describe("the named TEST proof-only installation gate", () => {
     const policy = Object.entries(resources).find(([id, resource]) => id.includes("TaskPersonProofDispatcherPolicy") && resource.Type === "AWS::IAM::Policy")?.[1];
     expect(policy).toBeDefined();
     const statements = (policy!.Properties!.PolicyDocument as { Statement: Array<Record<string, unknown>> }).Statement;
-    expect(statements).toHaveLength(3);
-    const getItem = statements.find((statement) => JSON.stringify(statement.Action).includes("dynamodb:GetItem"));
+    expect(statements).toHaveLength(4);
+    const getItem = statements.find((statement) => JSON.stringify(statement.Action).includes("dynamodb:GetItem") && JSON.stringify(statement.Condition).includes("DEVELOPER#*"));
+    const companyMemberGetItem = statements.find((statement) => JSON.stringify(statement.Condition ?? {}).includes("COMPANY_MEMBER#*"));
     const denyUnprojectedGetItem = statements.find((statement) => statement.Sid === "DenyGetItemUnlessSpecificAttributes");
     const invoke = statements.find((statement) => JSON.stringify(statement.Action).includes("lambda:InvokeFunction"));
     const dispatcherEntries = Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
@@ -364,6 +365,16 @@ describe("the named TEST proof-only installation gate", () => {
       Condition: {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVELOPER#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName"] },
+        Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
+      },
+    });
+    expect(companyMemberGetItem).toEqual({
+      Effect: "Allow",
+      Action: ["dynamodb:GetItem"],
+      Resource: [{ "Fn::GetAtt": [tableId, "Arn"] }],
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy"] },
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     });
