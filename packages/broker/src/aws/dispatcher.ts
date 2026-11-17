@@ -18,7 +18,7 @@ import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
-import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
+import { createTaskPersonRuntime, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
@@ -461,13 +461,13 @@ export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings
   const personRuntime = proofArn === undefined || proofArn.trim() === "" || (workspaces === undefined && !SlackTeamIdSchema.safeParse(slackTeamId).success) ? undefined : createTaskPersonRuntime({
     ...(workspaces === undefined ? {} : { workspaces }),
     admission,
-    ports: taskPersonRuntimePorts({
+    ports: withTaskPersonMembershipRead(taskAuthorityDocumentClient, process.env.DEVELOPER_SIGNIN_TABLE_NAME, taskPersonRuntimePorts({
       admission,
       stateTableName,
       signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME,
       proofArn,
       slackTeamId,
-    }),
+    })),
     stateTableName,
     slackTeamId,
     now: () => Date.now(),

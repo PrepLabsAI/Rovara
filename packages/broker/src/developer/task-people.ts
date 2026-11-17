@@ -227,10 +227,15 @@ async function transact(deps: TaskPeopleDependencies, items: readonly TransactIt
   await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [...items] }));
 }
 
+/**
+ * C3 (plan 3 item 5, 4.2 "PEOPLE without a Slack share"): a task gets its People list once its creator passes their own proof path, eligible and
+ * present: a `slack` creator through fresh Slack proof (on a task with no share, any eligible creator is present, as before), a `web` creator through
+ * the web proof (live membership in the task's company and a live grant). A task with no share sets no addPeopleUrl (viewOf).
+ */
 async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPeople> {
-  if (!enabled(deps) || !open(task) || task.share === undefined || !Number.isSafeInteger(task.workflow?.revision)) return denied();
+  if (!enabled(deps) || !open(task) || !Number.isSafeInteger(task.workflow?.revision)) return denied();
   const proof = await checked(deps, task, task.developerId, admission);
-  if (!proof.eligible || !proof.channelMember || proof.identity.developerId !== task.developerId) return denied();
+  if (!proof.eligible || !taskPersonPresent(proof) || proof.identity.developerId !== task.developerId) return denied();
   const existing = await personByDeveloper(deps, task.taskId, task.developerId);
   if (existing !== undefined && !samePrincipal(existing.identity, proof.identity)) return denied();
   const createdAt = new Date(deps.now()).toISOString();
@@ -243,8 +248,10 @@ async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecor
     { Put: { TableName: deps.tableName, Item: { ...peopleKey(task.taskId), ...people }, ConditionExpression: "attribute_not_exists(pk)" } },
     { ConditionCheck: {
       TableName: deps.tableName, Key: taskKey(task.taskId),
-      ConditionExpression: "#developerId = :developerId AND workflow.#revision = :taskRevision AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#developerId": "developerId", "#revision": "revision" },
+      // C3: an unshared task's list is made only while it is still unshared (its creator's presence was proved for that case).
+      ConditionExpression: "#developerId = :developerId AND workflow.#revision = :taskRevision AND attribute_not_exists(closedAt)"
+        + (task.share === undefined ? " AND attribute_not_exists(#share)" : ""),
+      ExpressionAttributeNames: { "#developerId": "developerId", "#revision": "revision", ...(task.share === undefined ? { "#share": "share" } : {}) },
       ExpressionAttributeValues: { ":developerId": task.developerId, ":taskRevision": task.workflow!.revision },
     } },
   ];
@@ -276,7 +283,7 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
     for (const person of current.people) {
       if (person.role !== "owner") { nextEntries.push(person); continue; }
       const proof = await checked(deps, task, person.developerId, admission);
-      nextEntries.push(proof.eligible && proof.channelMember ? person : { ...person, role: proof.eligible ? "commenter" : "denied" });
+      nextEntries.push(proof.eligible && taskPersonPresent(proof) ? person : { ...person, role: proof.eligible ? "commenter" : "denied" });
     }
     const orphaned = !nextEntries.some((person) => person.role === "owner");
     if (orphaned === current.orphaned && nextEntries.every((entry, index) => entry.role === current.people[index]!.role)) return current;
@@ -318,7 +325,7 @@ async function authorizeColdInitialization(
 ): Promise<void> {
   if (ownerOnly && caller.developerId !== task.developerId) return denied();
   const proof = await checked(deps, task, caller.developerId, admission);
-  if (!proof.eligible || !proof.channelMember) return denied();
+  if (!proof.eligible || !taskPersonPresent(proof)) return denied();
 }
 
 async function currentPeopleForCaller(
@@ -335,11 +342,19 @@ async function currentPeopleForCaller(
   return reconcile(deps, task, await initialize(deps, task, admission), admission);
 }
 
+/**
+ * The role a person holds with no PEOPLE entry. A present `slack` identity (in the task's channel) is an implicit commenter, as before (D2).
+ * C3: a `web` identity holds only a role someone gave it (D3: owners add people explicitly), so being a member with a grant alone reaches no task.
+ */
+function implicitRole(proof: TaskPersonCheck): TaskRole | null {
+  return proof.eligible && taskPersonPresent(proof) && taskPersonKindOf(proof.identity) === "slack" ? "commenter" : null;
+}
+
 function effectiveRoleFromProof(explicit: PersonEntry | undefined, proof: TaskPersonCheck): TaskRole | null {
   if (explicit?.role === "denied" || !proof.eligible) return null;
-  if (explicit?.role === "owner") return proof.channelMember ? "owner" : null;
+  if (explicit?.role === "owner") return taskPersonPresent(proof) ? "owner" : null;
   if (explicit?.role === "commenter" || explicit?.role === "viewer") return explicit.role;
-  return proof.channelMember ? "commenter" : null;
+  return implicitRole(proof);
 }
 
 async function effectiveRole(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, developerId: string,
@@ -394,7 +409,7 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
   const takeoverProof = enabled(deps) && open(task) && people.orphaned && callerRole !== null
     ? await checked(deps, task, caller.developerId, admission)
     : undefined;
-  const canTakeOwnership = takeoverProof?.eligible === true && takeoverProof.channelMember;
+  const canTakeOwnership = takeoverProof?.eligible === true && taskPersonPresent(takeoverProof);
   const thread = task.share === undefined ? undefined : SlackThreadSchema.safeParse({
     teamId: task.share.teamId, channelId: task.share.channelId, threadTs: task.share.threadTs,
   });
@@ -552,7 +567,7 @@ export async function resolveTaskPeopleAccess(
   const proof = people.orphaned ? await checked(deps, task, developerId) : undefined;
   return {
     role, peopleRevision: people.revision, ownerActorIds: owners, orphaned: people.orphaned,
-    canTakeOwnership: people.orphaned && role !== null && proof?.eligible === true && proof.channelMember,
+    canTakeOwnership: people.orphaned && role !== null && proof?.eligible === true && taskPersonPresent(proof),
   };
 }
 
@@ -575,7 +590,7 @@ export async function resolveTaskDispatchPeople(
     if (person.role !== "owner") continue;
     try {
       const proof = await checkedFresh(deps, task, person.developerId);
-      if (proof.eligible && proof.channelMember) owners.push(taskOwnerKey(person.developerId, task.taskId));
+      if (proof.eligible && taskPersonPresent(proof)) owners.push(taskOwnerKey(person.developerId, task.taskId));
     } catch {
       unknown = true;
     }
@@ -585,15 +600,18 @@ export async function resolveTaskDispatchPeople(
 }
 
 export async function getTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {
-  const admission = deps.createTaskPeopleDisplayAdmission?.() ?? unavailable();
+  const optional = deps.createTaskPeopleDisplayAdmission?.();
+  if (optional === undefined) return getUnsharedTaskPeople(deps, caller, taskId);
+  const admission = optional;
   try {
     admission.assertOpen();
     const task = await loadTask(deps, taskId);
     admission.assertOpen();
     const people = await currentPeopleForCaller(deps, task, caller, false, admission);
     await authorizedRead(deps, task, people, caller, admission);
-    if (deps.listTaskPeople === undefined) return unavailable();
-    const displayChecks = await deps.listTaskPeople(task, admission);
+    // C3: a task with no Slack share has no channel directory to list; its People are exactly its registered people, each proved on its own path.
+    if (task.share !== undefined && deps.listTaskPeople === undefined) return unavailable();
+    const displayChecks = task.share === undefined ? [] : await deps.listTaskPeople!(task, admission);
     admission.assertOpen();
     const view = await viewOf(deps, task, people, caller, displayChecks, admission);
     admission.assertOpen();
@@ -601,6 +619,18 @@ export async function getTaskPeople(deps: TaskPeopleDependencies, caller: Develo
   } finally {
     admission.close();
   }
+}
+
+/**
+ * C3: the People view of a task with no Slack share on an install with no Slack display reads (no display admission). A Slack-shared task still
+ * needs the admission and its complete channel directory, exactly as before.
+ */
+async function getUnsharedTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {
+  const task = await loadTask(deps, taskId);
+  if (task.share !== undefined) return unavailable();
+  const people = await currentPeopleForCaller(deps, task, caller, false);
+  await authorizedRead(deps, task, people, caller);
+  return viewOf(deps, task, people, caller, []);
 }
 
 /** A polling-safe capability read: it checks only META, PEOPLE and the caller's current proof. */
@@ -618,7 +648,7 @@ export async function getTaskPeopleCapabilities(
   let canTakeOwnership = false;
   if (enabled(deps) && open(task) && current.orphaned) {
     const proof = await checked(deps, task, caller.developerId);
-    canTakeOwnership = proof.eligible && proof.channelMember;
+    canTakeOwnership = proof.eligible && taskPersonPresent(proof);
   }
   return {
     peopleRevision: current.revision,
@@ -683,9 +713,9 @@ export async function changeTaskPeople(
   if (mapping === undefined) return denied();
   const proof = await checked(deps, task, input.targetDeveloperId);
   if (!samePrincipal(mapping.identity, proof.identity) || (input.role !== "denied" && !proof.eligible)
-    || (input.role === "owner" && !proof.channelMember)) return denied();
+    || (input.role === "owner" && !taskPersonPresent(proof))) return denied();
   const existing = people.people.find((person) => person.developerId === input.targetDeveloperId);
-  const beforeRole = existing?.role ?? (proof.eligible && proof.channelMember ? "commenter" : null);
+  const beforeRole = existing?.role ?? implicitRole(proof);
   if (existing?.role === input.role) throw agentXError("CONFIG_INVALID", "that person already has this task role");
   if (existing?.role === "owner" && input.role !== "owner" && people.people.filter((person) => person.role === "owner").length === 1) {
     throw agentXError("CONFIG_INVALID", "a task must retain an effective owner");
@@ -717,7 +747,7 @@ export async function takeTaskOwnership(
   const mapping = await personByDeveloper(deps, taskId, caller.developerId);
   if (mapping === undefined) return denied();
   const proof = await checked(deps, task, caller.developerId);
-  if (!proof.eligible || !proof.channelMember || !samePrincipal(mapping.identity, proof.identity)) return denied();
+  if (!proof.eligible || !taskPersonPresent(proof) || !samePrincipal(mapping.identity, proof.identity)) return denied();
   const existing = people.people.find((person) => person.developerId === caller.developerId);
   if (existing?.role === "denied") return denied();
   const beforeRole = existing?.role ?? "commenter";
