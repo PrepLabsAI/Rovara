@@ -2,8 +2,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { canonicalJson, OrgIdSchema, OrgRoleSchema, StoredProjectDefinitionSchema, orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
-import { Membership, membershipKey } from "./company-check.js";
+import { canonicalJson, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, StoredProjectDefinitionSchema, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
+import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { GithubInstallationBindings } from "./github-credentials.js";
 import { projectKey } from "./project-records.js";
 import { projectMemberKey } from "./admin-actions.js";
@@ -35,7 +35,7 @@ const mappingSchema = z.object({
     || input.projectNames.length + input.bindings.length + input.people.length + input.grants.length > 100) ctx.addIssue({ code: "custom", message: "invalid input" });
 });
 type Mapping = z.infer<typeof mappingSchema>;
-const requestSchema = z.object({ ...mappingSchema.shape, dryRun: z.boolean().default(true), limit: z.number().int().min(1).max(25).default(25), continuation: z.string().min(1).max(2048).optional() }).strict();
+const requestSchema = z.object({ ...mappingSchema.shape, dryRun: z.boolean().default(true), runId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).optional(), limit: z.number().int().min(1).max(25).default(25), continuation: z.string().min(1).max(2048).optional() }).strict();
 const cursorSchema = z.object({ version: z.literal(1), digest: z.string().regex(/^[a-f0-9]{64}$/), phase: z.number().int().min(0).max(3), index: z.number().int().min(0).max(100), after: z.string().regex(/^REV#[0-9]{12,16}$/).optional() }).strict();
 type Cursor = z.infer<typeof cursorSchema>;
 export interface CoreBackfillReport { scanned: number; written: number; skippedExisting: number; skippedConflict: number; failed: number; more: boolean; continuation?: string; refused?: "invalid_input"; issues: Array<{ phase: number; index: number; reason: "conflict" | "unavailable" | "source_missing" }> }
@@ -65,16 +65,24 @@ function sourceDefinition(source: Row) {
   return parsed.data;
 }
 function matchingRevision(row: Row, source: Row, company: string) {
-  const content = (value: Row) => Object.fromEntries(Object.entries(value).filter(([key]) => !["pk", "sk", "companyId"].includes(key)));
+  const content = (value: Row) => Object.fromEntries(Object.entries(value).filter(([key]) => !["pk", "sk", "companyId", "backfillRunId"].includes(key)));
   return row["entityType"] === "PROJECT" && owned(row, company) && equal(content(row), content(source));
 }
 /** The broker appends these writes to its legacy transaction. Backfill supplies the explicit operator company.
- * A missing company in forward mode is a reported skip, with zero core reads. */
-export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string): Promise<{ status: "ready" | "existing" | "unknown_company"; writes: Write[] }> {
+ * Forward writes follow D1 when the legacy source has no explicit company. */
+export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string, backfillRunId?: string): Promise<{ status: "ready" | "existing" | "unknown_company"; writes: Write[] }> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw conflict();
   const source = value as Row;
-  const companyValue = mappedCompany === undefined ? source["companyId"] : mappedCompany;
-  if (companyValue === undefined) return { status: "unknown_company", writes: [] };
+  // Forward registration keeps the pre-catalog behavior until the implicit
+  // company's catalog has been verified. Operator backfill supplies a mapping
+  // and continues to use D1 attribution without consulting this rollout flag.
+  if (mappedCompany === undefined && source["companyId"] === undefined) {
+    const flag = await get(deps, orgSettingsKey(IMPLICIT_COMPANY_ID, "PROJECT_CATALOG_INDEX"));
+    if (flag === undefined) return { status: "unknown_company", writes: [] };
+    if (!z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) }).safeParse(flag).success) throw conflict();
+  }
+  // D1: legacy projects without an explicit company belong to the implicit company.
+  const companyValue = mappedCompany === undefined ? source["companyId"] ?? IMPLICIT_COMPANY_ID : mappedCompany;
   const parsedCompany = OrgIdSchema.safeParse(companyValue);
   if (!parsedCompany.success || !owned(source, parsedCompany.data)) throw conflict();
   const company = parsedCompany.data, definition = sourceDefinition(source);
@@ -99,10 +107,10 @@ export async function planCoreProjectWrites(deps: State, value: unknown, mappedC
     );
   }
   const writes: Write[] = [...historyChecks];
-  if (existing === undefined) writes.push({ Put: { TableName: deps.tableName, Item: { ...source, ...revisionKey, companyId: company }, ...fence(undefined) } });
+  if (existing === undefined) writes.push({ Put: { TableName: deps.tableName, Item: { ...source, ...revisionKey, companyId: company, ...(backfillRunId === undefined ? {} : { backfillRunId }) }, ...fence(undefined) } });
   else writes.push({ ConditionCheck: { TableName: deps.tableName, Key: revisionKey, ...fence(existing) } });
   if (latest === undefined || latest < definition.revision) {
-    writes.push({ Put: { TableName: deps.tableName, Item: { ...catalog, ...catalogKey, entityType: "PROJECT_CATALOG", companyId: company, name: definition.name, latestRevision: definition.revision }, ...fence(catalog) } });
+    writes.push({ Put: { TableName: deps.tableName, Item: { ...Object.fromEntries(Object.entries(catalog ?? {}).filter(([key]) => key !== "backfillRunId")), ...catalogKey, ...(backfillRunId !== undefined && (catalog === undefined || catalog["backfillRunId"] === backfillRunId) ? { backfillRunId } : {}), entityType: "PROJECT_CATALOG", companyId: company, name: definition.name, latestRevision: definition.revision }, ...fence(catalog) } });
   } else writes.push({ ConditionCheck: { TableName: deps.tableName, Key: catalogKey, ...fence(catalog) } });
   return { status: existing !== undefined && latest !== undefined && latest >= definition.revision ? "existing" : "ready", writes };
 }
@@ -128,9 +136,9 @@ function bounded(deps: CoreBackfillDependencies) {
 function parseRequest(value: unknown, deps: CoreBackfillDependencies) {
   if (Buffer.byteLength(JSON.stringify(value) ?? "") > 65_536) throw unavailable();
   const request = requestSchema.parse(value);
-  const { dryRun, limit, continuation, ...rawMapping } = request;
+  const { dryRun, limit, continuation, runId, ...rawMapping } = request;
   const mapping = mappingSchema.parse(rawMapping);
-  const digest = createHash("sha256").update(canonicalJson({ mapping, dryRun, tableName: deps.tableName, signInTableName: deps.signInTableName })).digest("hex");
+  const digest = createHash("sha256").update(canonicalJson({ mapping, dryRun, ...(runId === undefined ? {} : { runId }), tableName: deps.tableName, signInTableName: deps.signInTableName })).digest("hex");
   let cursor: Cursor = { version: 1, digest, phase: 0, index: 0 };
   if (continuation !== undefined) {
     if (!/^[A-Za-z0-9_-]+$/.test(continuation)) throw unavailable();
@@ -141,7 +149,7 @@ function parseRequest(value: unknown, deps: CoreBackfillDependencies) {
     const lengths = [mapping.projectNames.length, mapping.bindings.length, mapping.people.length, mapping.grants.length];
     if (cursor.index >= lengths[cursor.phase]!) throw unavailable();
   }
-  return { mapping, dryRun, limit, cursor };
+  return { mapping, dryRun, limit, cursor, runId };
 }
 const encode = (cursor: Cursor) => Buffer.from(JSON.stringify(cursor)).toString("base64url");
 function grantKey(personId: string, projectName: string) { return { pk: `MEMBER#${personId}`, sk: `PROJECT#${projectName}` }; }
@@ -249,7 +257,8 @@ export async function backfillCorePage(dependencies: CoreBackfillDependencies, v
           next = { ...cursor, after: String(source["sk"]) };
         }
         if (sourceDefinition(source).name !== name) throw conflict();
-        const plan = await planCoreProjectWrites(deps, source, mapping.companyId);
+        if (request.runId !== undefined && !recordInCompany(source, mapping.companyId)) throw conflict();
+        const plan = await planCoreProjectWrites(deps, source, mapping.companyId, request.runId);
         written = plan.status === "ready";
         if (written) await transact(deps, [ { ConditionCheck: { TableName: deps.tableName, Key: projectKey(name, sourceDefinition(source).revision), ...fence(source) } }, ...plan.writes ], dryRun);
         if (!dryRun && written && (await planCoreProjectWrites(deps, source, mapping.companyId)).status !== "existing") throw unavailable();

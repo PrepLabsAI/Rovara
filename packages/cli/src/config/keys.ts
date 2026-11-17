@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_ENGINE_BROKER_WIRED, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_AGENT_MODEL_PATTERN, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
@@ -27,6 +27,10 @@ export interface ConfigKey {
   e2eAgentModel?: true;
   /** The coding roles' fallback model (Task 4.10D): `none`, or a Bedrock model of the pinned catalog that passes the one-token test call before anything changes. */
   fallbackModel?: true;
+  /** The core engine's model gateway settings come as a pair (core-host/gateway-model-access.ts): the other key of the pair, named so config set can say when one is set without the other. */
+  corePairedWith?: string;
+  /** How the stored value is shown (list, get and the change line), where it is not the value the person typed: coreEngine.modelGatewayUrl stores the host and shows the origin. */
+  shown?: (stored: string) => string;
   /** Model keys pass a one-token test call before anything changes (FR-049). */
   model?: ModelRole;
   /** The value to store, or CONFIG_INVALID saying what is allowed. */
@@ -55,6 +59,44 @@ const coreEngineValue = (key: string, wired: boolean = CORE_ENGINE_BROKER_WIRED)
 };
 /** The switch's parser as it will be once the broker is wired (tests only). */
 export const coreEngineValueWhenWired = (value: string): string => coreEngineValue("coreEngine.switch", true)(value);
+
+/** Empty (the default) or `none`: the core engine's model gateway is not configured, and the core refuses the switch by name. Stored as empty, the stack parameter's default. */
+const CORE_GATEWAY_UNSET = new Set(["", "none"]);
+
+/**
+ * coreEngine.modelGatewayUrl: empty, or the model gateway's https origin. Checked before any deploy, as the broker reads it: https, no user name or password, no path, query or
+ * fragment, and a host the stack parameter takes (lowercase DNS labels, an optional port, at most CORE_MODEL_GATEWAY_HOST_MAX_LENGTH characters). Stored as that host: the stack
+ * parameter CoreModelGatewayHost holds it and the functions read `https://<host>` (a URL's slashes cannot be packed into the broker's settings). The refusal never echoes the value,
+ * which could hold credentials.
+ */
+export const coreModelGatewayUrl = (key: string) => (value: string): string => {
+  const trimmed = value.trim();
+  if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
+  const allowed = `empty (none) or the model gateway's https origin, such as https://gateway.example.com, with no user name, password, path, query or fragment and a host of at most ${CORE_MODEL_GATEWAY_HOST_MAX_LENGTH} characters`;
+  let url: URL;
+  try { url = new URL(trimmed); } catch { return refuse(key, allowed); }
+  const lowered = trimmed.toLowerCase();
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || trimmed.includes("@")
+    || (lowered !== url.origin && lowered !== `${url.origin}/`)) return refuse(key, allowed);
+  if (url.host.length > CORE_MODEL_GATEWAY_HOST_MAX_LENGTH || !new RegExp(CORE_MODEL_GATEWAY_HOST_PATTERN, "u").test(url.host)) return refuse(key, allowed);
+  return url.host;
+};
+
+/** What `config list` and `config get` show for coreEngine.modelGatewayUrl: the origin the functions read, from the host the stack holds. */
+export const coreModelGatewayShown = (stored: string): string => (stored === "" ? "" : `https://${stored}`);
+
+/**
+ * coreEngine.agentModel: empty, or an Anthropic model id this Rovara's model catalog knows (the gateway's agent route speaks Anthropic Messages; a Bedrock `us.anthropic....` id is
+ * refused: the gateway maps the Anthropic id to the company's own key or Bedrock role).
+ */
+export const coreAgentModel = (key: string) => (value: string): string => {
+  const trimmed = value.trim();
+  if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
+  if (trimmed.length > CORE_AGENT_MODEL_MAX_LENGTH || !new RegExp(CORE_AGENT_MODEL_PATTERN, "u").test(trimmed) || catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined) {
+    return refuse(key, "empty (none) or an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock id)");
+  }
+  return trimmed;
+};
 
 const oneOf = (key: string, values: readonly string[]) => (value: string): string =>
   (values.includes(value.trim()) ? value.trim() : refuse(key, `one of ${values.join(", ")}`));
@@ -126,6 +168,11 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   // Migration plan v3.2 lane E2: the core engine switch, named environments only.
   { key: "coreEngine.switch", description: "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do (at most two); drain: no new task starts on the core, and the tasks it already runs finish there (set drain and wait until none is in flight before off). A running task keeps the engine it started on. The core's scheduled jobs run only while this is not off. NOT ACTIVE YET: only off is accepted until the broker runs the core engine",
     target: parameter("control-plane", "CoreEngine"), defaultValue: CORE_ENGINE_DEFAULT, parse: coreEngineValue("coreEngine.switch") },
+  // Core switch-on blocker (2026-11-17): where the core's model calls go, kept across upgrades. Both are needed; either empty leaves the core refusing work by name.
+  { key: "coreEngine.modelGatewayUrl", description: "the Cloud model gateway's https origin the core engine's agents call AI through (no path or credentials); empty (the default, or none) leaves the core engine refusing work. Set coreEngine.agentModel too",
+    target: parameter("control-plane", CORE_MODEL_GATEWAY_HOST_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.agentModel", shown: coreModelGatewayShown, parse: coreModelGatewayUrl("coreEngine.modelGatewayUrl") },
+  { key: "coreEngine.agentModel", description: "the Anthropic model id every core engine step runs on through the model gateway, such as claude-sonnet-4-6; empty (the default, or none) leaves the core engine refusing work. Set coreEngine.modelGatewayUrl too",
+    target: parameter("control-plane", CORE_AGENT_MODEL_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.modelGatewayUrl", parse: coreAgentModel("coreEngine.agentModel") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
 ];
 
