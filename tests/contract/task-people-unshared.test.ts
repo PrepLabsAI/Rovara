@@ -86,7 +86,7 @@ interface World {
 
 function harness(world: World = {}) {
   const db = new FakeDynamoDb();
-  db.set(world.task ?? webTask() as unknown as Record<string, unknown>);
+  db.set((world.task ?? webTask()) as unknown as Record<string, unknown>);
   const sent: unknown[] = [];
   const documentClient = { send: async (command: unknown) => { sent.push(command); return db.send(command as never); } };
   const records: Record<string, DeveloperRecord> = {
@@ -151,7 +151,7 @@ describe("PEOPLE for a task with no Slack share", () => {
     ["has no grant on the project", { grants: { [GALE_ID]: false } }],
     ["has a revoked sign-in", { revoked: [GALE_ID] }],
   ])("writes no People list when the web creator %s", async (_label, world) => {
-    const h = harness(world as World);
+    const h = harness(world);
     expect((await errorOf(getTaskPeople(h.peopleDeps, GALE_CALLER, TASK_A))).code).toBe("TASK_ACCESS_DENIED");
     expect(h.people()).toBeUndefined();
     expect(h.db.find((item) => String(item.sk).startsWith("PERSON"))).toEqual([]);
@@ -185,7 +185,7 @@ describe("present web owners and the People lifecycle on an unshared task", () =
     ["moves to another company", { memberships: { [GALE_ID]: COMPANY_B } }],
     ["loses the project grant", { grants: { [GALE_ID]: false } }],
   ])("a sole web owner who %s makes dispatch OWNERLESS, and reconcile demotes them", async (_label, world) => {
-    const h = webPeople(world as World);
+    const h = webPeople(world);
     await expect(resolveTaskDispatchPeople(h.peopleDeps, webTask())).resolves.toStrictEqual({ peopleRevision: 3, ownerActorIds: [], status: "OWNERLESS" });
     await expect(resolveTaskPeopleAccess(h.peopleDeps, webTask(), WREN_ID)).resolves.toMatchObject({ role: "commenter", orphaned: true, peopleRevision: 4, canTakeOwnership: true });
     expect(h.people()).toMatchObject({ revision: 4, orphaned: true, people: [GALE("denied"), WREN("commenter")] });
@@ -294,6 +294,6 @@ describe("the dispatcher's membership read (withTaskPersonMembershipRead)", () =
 
   it.each([[undefined], [""], ["  "]])("adds no membership read without a sign-in table (%j), so web identities stay unavailable", (table) => {
     const send = vi.fn();
-    expect(withTaskPersonMembershipRead({ send }, table, basePorts).readCompanyMembership).toBeUndefined();
+    expect("readCompanyMembership" in withTaskPersonMembershipRead({ send }, table, basePorts)).toBe(false);
   });
 });
