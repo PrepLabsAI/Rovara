@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- route answers are parsed JSON read field by field */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- route answers are parsed JSON read field by field */
 // Answers feed the wiki (lead 4, J5): the gap list read from answer records, "Not right", and the flag on a wiki claim whose own place Code could not find. Two projects and two companies never meet,
 // one person cannot inflate a topic, no asker is ever named, an erased or expired record takes its gap with it, every list is bounded, and a flag is only ever added by Code's own check.
 import { describe, expect, it } from "vitest";
