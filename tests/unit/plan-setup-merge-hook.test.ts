@@ -23,7 +23,7 @@ async function withPlan(items: PlanSetupChangeItem[] | undefined, options: { app
   const at = "2026-11-09T10:00:00.000Z";
   const artifact = { id: "11111111-1111-4111-8111-111111111111", type: "plan", version: 1, sha256, producer: "agentx-worker-untrusted", objectKey: "plans/p.json", createdAt: at, format: "structured" };
   const approve = { requestId: "22222222-2222-4222-8222-222222222222", workflowRevision: 1, decision: "APPROVE", actorId: "a".repeat(64), actorRole: "TASK_OWNER", reason: "Approved.", artifactDigest: sha256, at };
-  await w.world.store.update({ key: taskKey(TASK_ID), ops: [change.set(["workflow", "artifacts"], [artifact] as never), change.set(["workflow", "decisions"], (options.approved === false ? [] : [approve]) as never)] });
+  await w.world.store.update({ key: taskKey(TASK_ID), ops: [change.set(["workflow", "artifacts"], [artifact] as never), change.set(["workflow", "decisions"], (options.approved === false ? [] : [approve]))] });
   const reader = { get: async (key: string) => (key === "plans/p.json" ? new TextEncoder().encode(text) : undefined) };
   const tracking = createMergeTrackingService({
     flow: { ...w.h.deps, artifacts: reader }, registry: w.registry, companyId: ORG, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),

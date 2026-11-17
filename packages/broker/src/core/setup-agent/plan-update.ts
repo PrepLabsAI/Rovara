@@ -14,7 +14,7 @@
 //   - no model, no network.
 // The offer holds only what the approved plan held (names, spec file names, commands) and the pull requests' own addresses; never a secret value (a variable is a name, and not carried).
 import {
-  INDEX_EXPIRY_ATTRIBUTE, PLAN_SETUP_MOCKS_MAX, PlanSetupChangesSchema, ProjectDefinitionSchema, SETUP_CHANGE_CARRIED_KINDS, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, change, parseCommandLine, queryAll, setupChangeLines, setupChangesDigest,
+  PLAN_SETUP_MOCKS_MAX, PlanSetupChangesSchema, ProjectDefinitionSchema, SETUP_CHANGE_CARRIED_KINDS, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, change, parseCommandLine, queryAll, setupChangeLines, setupChangesDigest,
   when, GENERAL_FAKES_MAX_SERVICES,
   type DocumentKey, type OrgId, type PlanSetupChangeItem, type PlanSetupChanges, type ProjectCommand, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -24,7 +24,6 @@ import { waitingSetupApply, storeSetupCandidate, type SetupApplyDeps } from "./a
 import { setupPartition } from "./keys.js";
 import { refusedCommand } from "./refused-command.js";
 
-export const SETUP_UPDATE_KEEP_SECONDS = 90 * 86_400;
 export const SETUP_UPDATE_STATES = ["offered", "applied", "dismissed"] as const;
 export type SetupUpdateState = (typeof SETUP_UPDATE_STATES)[number];
 
@@ -70,8 +69,7 @@ export async function setupUpdateOfferItems(
     pullRequests: merged.map((pullRequest) => ({ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url })),
     state: "offered", offeredAt: now,
   };
-  const expires = Object.fromEntries([[INDEX_EXPIRY_ATTRIBUTE, Math.floor(Date.parse(now) / 1000) + SETUP_UPDATE_KEEP_SECONDS]]);
-  return [{ kind: "put", item: { ...setupUpdateKey(task.orgId, task.project, task.taskId), ...(JSON.parse(JSON.stringify(offer)) as Record<string, never>), ...expires } }];
+  return [{ kind: "put", item: { ...setupUpdateKey(task.orgId, task.project, task.taskId), ...(JSON.parse(JSON.stringify(offer)) as Record<string, never>) } }];
 }
 
 /** An offer row read back: only a row of this company and project with a state this code knows and items that still check. Anything else is not an offer. */

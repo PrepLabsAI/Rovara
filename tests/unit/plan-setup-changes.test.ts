@@ -11,10 +11,10 @@ import { cardOfItem, type DecisionItem } from "../../packages/broker/src/core/de
 import { structuredPlanRules } from "../../packages/broker/src/core/plan/prompts.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
-const mock = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s1", kind: "mock", service: "Stripe", variable: "STRIPE_API_URL", spec: "payments/openapi/stripe.yaml", reason: "The refund code calls Stripe.", ...over }) as PlanSetupChangeItem;
-const command = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s2", kind: "command", area: "test", repo: "demo", line: "npm run test:refunds", reason: "A new test target.", ...over }) as PlanSetupChangeItem;
-const variable = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s3", kind: "variable", name: "STRIPE_WEBHOOK_SECRET", reason: "The webhook handler reads it.", ...over }) as PlanSetupChangeItem;
-const dependency = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s4", kind: "dependency", service: "Redis", reason: "The queue needs it.", ...over }) as PlanSetupChangeItem;
+const mock = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s1", kind: "mock", service: "Stripe", variable: "STRIPE_API_URL", spec: "payments/openapi/stripe.yaml", reason: "The refund code calls Stripe.", ...over });
+const command = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s2", kind: "command", area: "test", repo: "demo", line: "npm run test:refunds", reason: "A new test target.", ...over });
+const variable = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s3", kind: "variable", name: "STRIPE_WEBHOOK_SECRET", reason: "The webhook handler reads it.", ...over });
+const dependency = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s4", kind: "dependency", service: "Redis", reason: "The queue needs it.", ...over });
 
 const proved = { proposed: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 } }], proves: { unit: ["1", "2"] } };
 const claims = [{ id: "1", text: "Retry in src/retry/backoff.ts." }, { id: "2", text: "A retry is never charged twice." }];

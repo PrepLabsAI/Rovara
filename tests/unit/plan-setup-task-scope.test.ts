@@ -15,7 +15,7 @@ import { assessRisk, type RiskInput } from "../../packages/broker/src/core/proof
 import { rovaraStatusLines, setupChangeSection } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { planDocument } from "../support/plan-documents.js";
 
-const mock = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s1", kind: "mock", service: "Stripe", variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml", reason: "The refund code calls Stripe.", ...over }) as PlanSetupChangeItem;
+const mock = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s1", kind: "mock", service: "Stripe", variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml", reason: "The refund code calls Stripe.", ...over });
 const command = (): PlanSetupChangeItem => ({ id: "s2", kind: "command", area: "test", repo: "demo", line: "npm run test:refunds", reason: "A new test target." });
 const setting = (over: Partial<GeneralFakesSetting> = {}): GeneralFakesSetting => ({ enabled: true, services: [{ variable: "PAYMENTS_API_URL", spec: "repo/demo/openapi/payments.yaml" }], ...over });
 
@@ -45,7 +45,7 @@ describe("a plan-approved mock applies to this task only", () => {
   it("sends none of the task's mocks when they do not fit with the project's (all or nothing), and a damaged setting adds none of its own", () => {
     const services = Array.from({ length: GENERAL_FAKES_MAX_SERVICES }, (_, index) => ({ variable: `SVC_${String(index)}_URL` }));
     expect(fakesFor({ enabled: true, services }, [mock()])).toEqual({ services });
-    expect(fakesFor({ enabled: "yes" } as never, [mock()])).toEqual({ services: [{ variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] });
+    expect(fakesFor({ enabled: "yes" }, [mock()])).toEqual({ services: [{ variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] });
   });
 });
 
