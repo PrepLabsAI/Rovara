@@ -1,6 +1,6 @@
 import { locateWorkspace, type WorkspaceLocation } from "./workspace-location.js";
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
@@ -41,7 +41,14 @@ export async function loadOwnedTask(deps: TaskFlowDeps, caller: TaskCaller, task
 export async function loadReadableTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskRecord> {
   const task = await readTask(deps, taskId);
   if (caller.principal.companyId !== deps.companyId || task === undefined || task.companyId !== deps.companyId) throw taskNotFound();
-  const allowed = deps.access.canRead === undefined ? await deps.access.canAct(caller.principal, task) : await deps.access.canRead(caller.principal, task);
+  let allowed: boolean;
+  try {
+    allowed = deps.access.canRead === undefined ? await deps.access.canAct(caller.principal, task) : await deps.access.canRead(caller.principal, task);
+  } catch (error) {
+    // A person the task's People list refuses reads exactly as for a task that does not exist (the People proof's own denial says the task has a list). Any other failure stays a failure.
+    if (error instanceof AgentXError && error.code === "TASK_ACCESS_DENIED") throw taskNotFound();
+    throw error;
+  }
   if (!allowed) throw taskNotFound();
   return task;
 }

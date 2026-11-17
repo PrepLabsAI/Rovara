@@ -226,7 +226,9 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const taskId = loaded.request.subject.id;
       const decidedExtra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
       // The live access fences of every approver the engine accepted (the People revision): a change of who may act between the check and the commit refuses the decision.
-      const extra = [...decidedExtra, ...actors.flatMap((entry) => entry?.items ?? [])];
+      const fences = new Map<string, TransactItem>();
+      for (const item of actors.flatMap((entry) => entry?.items ?? [])) fences.set(JSON.stringify(item), item);
+      const extra = [...decidedExtra, ...fences.values()];
       return {
         ops: [...workflowWriteOps(workflow, after).ops, change.set("updatedAt", at)],
         extra,

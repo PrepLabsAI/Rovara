@@ -191,10 +191,10 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
    * transaction. Only meaningful where the host gave the rule; `isOwner` keeps the task's own person otherwise.
    */
   const ownerActingOf = async (principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<NonNullable<Awaited<ReturnType<NonNullable<typeof deps.access.ownerActing>>>> | undefined> => {
-    const rule = deps.access.ownerActing;
-    if (rule === undefined || typeof principal.personId !== "string") return undefined;
+    const access = deps.access;
+    if (access.ownerActing === undefined || typeof principal.personId !== "string") return undefined;
     try {
-      const acting = await rule.call(deps.access, principal, task);
+      const acting = await access.ownerActing(principal, task);
       if (acting === undefined) return undefined;
       // The engine records one actor under the owner id it knows: the person's own owner key. A rule that names another actor is not believed.
       const own = taskOwnerKey(principal.personId, task.taskId);
@@ -302,7 +302,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       } while (cursor !== undefined && read < DECISION_SOURCE_TASKS_MAX && calls < DECISION_SOURCE_TASKS_MAX / DECISION_SOURCE_PAGE);
       // The tasks the person was added to (the involved rows): ids only, each judged like the rest.
       if (options.involvedTaskIds !== undefined) {
-        let involved: readonly string[] = [];
+        let involved: readonly string[];
         try { involved = await options.involvedTaskIds(caller); } catch { involved = []; }
         const ids = (Array.isArray(involved) ? involved : []).filter((id): id is string => typeof id === "string" && TASK_ID.test(id) && !seen.has(id)).slice(0, INVOLVED_TASKS_MAX);
         for (let start = 0; start < ids.length; start += DECISION_SOURCE_PARALLEL) {

@@ -430,7 +430,7 @@ describe("the deployed approvers point: co-owners (the task-owner seam)", () => 
     const { approvers } = seamWorld(async (asked) => { seen.push(asked); return asked.principal.personId === "bea"; });
     const { request, proof } = bea();
     expect(await approvers.verify(request, proof)).toMatchObject({ approved: true, approver: { companyId: A, personId: "bea" } });
-    expect(seen).toEqual([{ companyId: A, principal: expect.objectContaining({ companyId: A, personId: "bea" }), task: { taskId: TASK_A, developerId: "ada", project: "demo" } }]);
+    expect(seen).toEqual([{ companyId: A, principal: expect.objectContaining({ companyId: A, personId: "bea" }) as unknown, task: { taskId: TASK_A, developerId: "ada", project: "demo" } }]);
   });
 
   it("refuses when the seam says no, throws, or answers anything but true; the task's own person is not accepted by the stored record alone once the seam is given", async () => {

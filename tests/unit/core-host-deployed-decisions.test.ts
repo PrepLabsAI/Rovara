@@ -2,7 +2,7 @@
 // project grant and fail closed; a card lists only the task's own person's waiting documents, in their own company, while they are a member with the grant; an act re-checks that live authority,
 // carries the approvers point's own proof (lane L2a's issuer) through the real approval gate, and records the approver only as the task's owner.
 import { createHash, randomUUID } from "node:crypto";
-import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import {
   DecisionCardsViewSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
@@ -516,8 +516,8 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
       expect(await listFor(t, who), who).toEqual([]);
       const item = await shown(t);
       expect(await t.deps.performer.approve(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID() }), who).toEqual({ kind: "refused", reason: "forbidden" });
-      expect(await t.deps.performer.reject(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID(), reason: "x" }), who).toEqual({ kind: "refused", reason: "forbidden" });
-      expect(await t.deps.performer.requestChanges(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID(), reason: "x" }), who).toEqual({ kind: "refused", reason: "forbidden" });
+      expect(await t.deps.performer.reject(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID(), reason: "other" }), who).toEqual({ kind: "refused", reason: "forbidden" });
+      expect(await t.deps.performer.requestChanges!(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID(), reason: "x" }), who).toEqual({ kind: "refused", reason: "forbidden" });
       expect(t.point.proofs.issue, who).not.toHaveBeenCalled();
       expect(await decided(t), who).toBe(false);
     }
@@ -612,7 +612,7 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     await expect(decide(async () => { throw new Error("people down zzq"); })).rejects.toMatchObject({ code: "not_the_approver" });
     await expect(decide(async () => undefined)).rejects.toMatchObject({ code: "not_the_approver" });
     // The same rule answering yes decides, as the co-owner, under the authority it names.
-    const decided = await decide(async (_approver, task) => ({ actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PA, t.taskId), taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 3 } }] }));
+    const decided = await decide(async () => ({ actorId: taskOwnerKey(PB, t.taskId), authority: { actorId: taskOwnerKey(PB, t.taskId), ownerIds: [taskOwnerKey(PA, t.taskId), taskOwnerKey(PB, t.taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 3 } }] }));
     expect(decided.extra).toEqual([expect.objectContaining({ kind: "check" })]);
   });
 
@@ -648,6 +648,20 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     expect((await t.stored(other)).stage).toBe("PLAN_REVIEW");
   });
 
+  it("without the host's owner rule only the task's own person decides (Code's rule), and nobody else is let in by the fallback", async () => {
+    const t = await hexSetup();
+    const taskId = await t.waitingTask(PA);
+    const access = t.runtime.flow.deps.access;
+    access.ownerActing = undefined;
+    const bare = deployedDecisionCards({ runtime: t.runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
+    const items = await bare.sources.list(cardCaller(PA, ORG, { stepUp: false }));
+    expect(items.map((entry) => entry.taskId)).toEqual([taskId]);
+    expect(await bare.sources.list(cardCaller(PB, ORG, { stepUp: false }))).toEqual([]);
+    const item = { item: items[0]!, card: projectDecisionCards(items).cards[0]! };
+    expect(await bare.performer.approve(cardCaller(PB), { ...item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
+    expect(t.point.proofs.issue).not.toHaveBeenCalled();
+  });
+
   it("reads the involved ids defensively: a throw, a malformed or foreign id, a repeat and an over-long list never widen or break the listing", async () => {
     const own = randomUUID();
     const t = await hexSetup({ people: true, involved: async () => { throw new Error("involved down zzq"); } });
@@ -659,7 +673,7 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     expect((await wide.sources.list(cardCaller(PA, ORG, { stepUp: false }))).map((entry) => entry.taskId)).toEqual([mine]);
     const store = t.runtime.flow.deps.store;
     const reads = vi.fn(store.get.bind(store));
-    const counting = new Proxy(store, { get: (target, property) => (property === "get" ? reads : typeof Reflect.get(target, property) === "function" ? (Reflect.get(target, property) as (...args: unknown[]) => unknown).bind(target) : Reflect.get(target, property)) });
+    const counting = new Proxy(store, { get: (target, property): unknown => { const value: unknown = Reflect.get(target, property); return property === "get" ? reads : typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value; } });
     const counted = { companyId: ORG, flow: { deps: { ...t.runtime.flow.deps, store: counting } } } as unknown as CoreRuntime;
     const bounded = deployedDecisionCards({ runtime: counted, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log, involvedTaskIds: async () => ids });
     await bounded.sources.list(cardCaller(PA, ORG, { stepUp: false }));
@@ -675,8 +689,8 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     await t.seedPeople(taskId, [[PA, "owner"], [PB, "owner"], [PC, "commenter"], [PD, "viewer"]]);
     const companyOf = async (caller: { principal: Principal }) => t.memberships.get(caller.principal.personId);
     const routes = createCoreDevRoutes({ app: t.app, companyOf, wiring: async (runtime) => ({ origin: () => "https://api.example", ...deployedDevWiringParts({ runtime, registry: t.registry, people: t.people, decisionProofs: t.point.proofs }) }) });
-    const get = async (personId: string, extra: { scriptToken?: { tokenId: string } } = {}) => routes.route(TASK_GET(taskId), { principal: principalOf(personId), client: "app", ...extra } as never);
-    return { ...t, taskId, get };
+    const get = async (personId: string, extra: { scriptToken?: { tokenId: string } } = {}) => routes.route(TASK_GET(taskId), { principal: principalOf(personId), client: "app", ...extra });
+    return { ...t, taskId, get, routes };
   }
 
   it("lets the owner, a co-owner, a commenter and a viewer read it, and nobody else; the read says nothing of a task a stranger cannot see", async () => {
@@ -684,10 +698,13 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     for (const who of [PA, PB, PC, PD]) {
       const reply = await t.get(who);
       expect(reply?.statusCode, who).toBe(200);
-      expect(JSON.parse(reply!.body).task).toMatchObject({ taskId: t.taskId, project: "payments" });
+      expect((JSON.parse(reply!.body) as { task: unknown }).task).toMatchObject({ taskId: t.taskId, project: "payments" });
     }
     const stranger = await t.get(PE);
-    expect(stranger?.statusCode).not.toBe(200);
+    // The same answer as for a task that does not exist (no existence leak, whether or not the task has a People list).
+    const missing = await t.routes.route(TASK_GET(randomUUID()), { principal: principalOf(PE), client: "app" });
+    expect(stranger?.statusCode).toBe(404);
+    expect(stranger?.body).toBe(missing?.body);
     expect(stranger?.body ?? "").not.toContain(t.taskId);
   });
 
