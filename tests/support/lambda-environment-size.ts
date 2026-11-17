@@ -46,6 +46,8 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   // Epoch-seconds parameters allow 12 digits; the workspace limits are small counts (six digits is generous).
   DeveloperSignInSlackSince: "999999999999",
   DeveloperOidcSince: "999999999999",
+  // DEC 254h: GitHub sign-in's since is epoch seconds too (12 digits); its switch takes AllowedValues' longest, "disabled".
+  DeveloperGithubSince: "999999999999",
   SlackMemberWorkspaceLimit: "999999",
   SlackOrganizationWorkspaceLimit: "999999",
   // Free-text parameters with no length limit, at a realistic worst (their defaults are "cognito:groups", '["agentx-admin"]' and "github-agentx-sdlc").

@@ -18,17 +18,29 @@ export const DeveloperSignInSettingsSchema = z.object({
   }).strict()
     .refine((oidc) => (oidc.requiredClaim === undefined) === (oidc.requiredValues === undefined), "requiredClaim and requiredValues must be set together or not at all")
     .optional(),
+  /**
+   * DEC 254h: GitHub sign-in (served only while Code's company layer is on). Only the OAuth app's client id and the name of the secret holding its
+   * client secret; the owner stores that secret, and nothing here reads or writes it.
+   */
+  github: z.object({
+    clientId: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/),
+    clientSecretName: z.string().regex(/^agentx\/[a-z0-9-]+\/developer-github$/),
+  }).strict().optional(),
   /** FR-045: when each method was last turned on, in epoch seconds. A session started before it was
    * ended by the disable in between, so it stays ended. Kept while the method is off. */
   since: z.object({
     slack: z.number().int().nonnegative().max(999_999_999_999).optional(),
     oidc: z.number().int().nonnegative().max(999_999_999_999).optional(),
+    github: z.number().int().nonnegative().max(999_999_999_999).optional(),
   }).strict().optional(),
   updatedAt: z.iso.datetime(),
   updatedBy: z.string().min(1).max(2048),
 }).strict()
-  .refine((settings) => settings.slack || settings.oidc !== undefined, "enable Slack sign-in, company sign-in, or both (FR-010)")
+  .refine((settings) => settings.slack || settings.oidc !== undefined || settings.github !== undefined, "enable Slack sign-in, company sign-in, or both (FR-010), or GitHub sign-in")
   .superRefine((settings, context) => {
+    if (settings.github !== undefined && settings.github.clientSecretName !== githubSecretName(settings.env)) {
+      context.addIssue({ code: "custom", path: ["github", "clientSecretName"], message: `must be ${githubSecretName(settings.env)}` });
+    }
     if (settings.oidc !== undefined && settings.oidc.clientSecretName !== oidcSecretName(settings.env)) {
       context.addIssue({ code: "custom", path: ["oidc", "clientSecretName"], message: `must be ${oidcSecretName(settings.env)}` });
     }
@@ -40,6 +52,8 @@ export interface StoredDeveloperSignIn { settings?: DeveloperSignInSettings; sla
 export const signInParameterName = (env: string) => `${environmentSettingsPrefix(env)}signin`;
 export const slackTeamIdParameterName = (env: string) => `${environmentSettingsPrefix(env)}slack/teamId`;
 export const oidcSecretName = (env: string) => `agentx/${env}/developer-oidc`;
+/** DEC 254h: the secret the sign-in function reads GitHub's client secret from (`{"clientSecret": "..."}`), stored by the owner, never by the CLI. */
+export const githubSecretName = (env: string) => `agentx/${env}/developer-github`;
 
 const firstIssue = (error: z.ZodError) => `${error.issues[0]?.path.join(".") ?? ""} ${error.issues[0]?.message ?? ""}`.trim();
 
@@ -97,8 +111,14 @@ export const SIGN_IN_PARAMETER_NAMES = [
   "DeveloperSignInSlackSince", "DeveloperOidcSince",
 ] as const;
 
+/** DEC 254h: GitHub sign-in's parameters, declared only by named environments from this release on. Sent only once GitHub has been turned on. */
+export const GITHUB_SIGN_IN_PARAMETER_NAMES = ["DeveloperSignInGithub", "DeveloperGithubClientId", "DeveloperGithubSince"] as const;
+
 /** The enabled-since parameters (FR-045), which a control plane from before them lacks. */
 export const SIGN_IN_SINCE_PARAMETER_NAMES: ReadonlySet<string> = new Set(["DeveloperSignInSlackSince", "DeveloperOidcSince"]);
+
+/** Whether GitHub sign-in was ever turned on (so its parameters are set, including to turn it off). */
+export const githubEverOn = (settings: DeveloperSignInSettings | undefined) => settings?.github !== undefined || settings?.since?.github !== undefined;
 
 export function signInStackParameters(stored: StoredDeveloperSignIn): Record<string, string> {
   const oidc = stored.settings?.oidc;
@@ -113,14 +133,19 @@ export function signInStackParameters(stored: StoredDeveloperSignIn): Record<str
     DeveloperSignInSlackSince: String(stored.settings?.since?.slack ?? 0),
     DeveloperOidcSince: String(stored.settings?.since?.oidc ?? 0),
   };
-  return values;
+  // A control plane from before GitHub sign-in lacks these parameters, so a Slack or company sign-in change never sends them.
+  if (!githubEverOn(stored.settings)) return values;
+  return { ...values, DeveloperSignInGithub: stored.settings?.github === undefined ? "disabled" : "enabled",
+    DeveloperGithubClientId: stored.settings?.github?.clientId ?? "", DeveloperGithubSince: String(stored.settings?.since?.github ?? 0) };
 }
 
-export function describeSignIn(settings: DeveloperSignInSettings | undefined): string[] {
+/** `withGithub`: also a GitHub line (by default only once GitHub sign-in was ever turned on, so older output is unchanged). */
+export function describeSignIn(settings: DeveloperSignInSettings | undefined, withGithub = githubEverOn(settings)): string[] {
   const oidc = settings?.oidc;
   const requirement = oidc?.requiredClaim === undefined ? "" : `, requires ${oidc.requiredClaim}: ${(oidc.requiredValues ?? []).join(" or ")}`;
   return [
     `Slack sign-in: ${settings?.slack === true ? "on" : "off"}`,
     oidc === undefined ? "Company sign-in: off" : `Company sign-in: on (${oidc.displayName}, ${oidc.issuer}, client ${oidc.clientId}${requirement})`,
+    ...(withGithub ? [settings?.github === undefined ? "GitHub sign-in: off" : `GitHub sign-in: on (client ${settings.github.clientId}; secret ${settings.github.clientSecretName})`] : []),
   ];
 }
