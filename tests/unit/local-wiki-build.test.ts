@@ -21,7 +21,8 @@ const github = Object.assign(Object.create(fake), { kind: "github" }) as FakeCod
 const registryOf = { names: () => ["github"], get: () => github } as never;
 const projectOf = (name: string, archived = false) => ({ archived, definition: { name, revision: 1, repositories: [{ name, url: URL, defaultBranch: "main" }] } });
 const PROJECTS: Record<string, ReturnType<typeof projectOf>> = { app: projectOf("app"), site: projectOf("site"), old: projectOf("old", true) };
-const owner = { principal: { roles: ["owner"], personId: "owner-1", displayName: "Owner" } } as never;
+const ownerPrincipal = { roles: ["owner"], personId: "owner-1", displayName: "Owner" };
+const owner = { principal: ownerPrincipal } as never;
 const id = () => randomUUID();
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
 const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
@@ -34,7 +35,7 @@ function setup(options: { model?: boolean; starter?: boolean } = {}) {
   const flow = { store, projects: { latest: async (name: string) => PROJECTS[name] } } as never;
   const now = () => Date.parse("2026-11-17T12:00:00Z");
   const wikiMap = createLocalWikiMap({ flow, registry: registryOf, now });
-  const routes = createLocalWikiBuild({ flow, wikiMap, owner: owner.principal, now, modelAccessConfigured: async () => options.model ?? true, ...(options.starter === false ? {} : { starter: (): FakeStarter => starter }) });
+  const routes = createLocalWikiBuild({ flow, wikiMap, owner: ownerPrincipal as never, now, modelAccessConfigured: async () => options.model ?? true, ...(options.starter === false ? {} : { starter: (): FakeStarter => starter }) });
   const call = async (request: ReturnType<typeof get>, caller = owner) => {
     const answer = await routes.routes(request, caller);
     if (answer === undefined) return undefined;

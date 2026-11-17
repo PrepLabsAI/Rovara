@@ -21,6 +21,7 @@ const ADMIN = "person-admin";
 const VIEWER = "person-viewer";
 const OUTSIDER = "person-outsider";
 const T0 = Date.parse("2026-11-17T12:00:00.000Z");
+const clock = { now: T0 };
 const API_FILE = "export function startServer(port: number) {\n  return listen(port, routes);\n}\n";
 
 const PAGE_CLAIM = { claimId: "c0001", text: "A claim", citations: [{ repo: "api", path: "src/server.ts", commit: API_SHA, line: 1, quote: "export function startServer(port: number) {" }], source: "found" as const, checkedAt: "2026-11-17T09:00:00.000Z" };
@@ -43,7 +44,7 @@ function world(options: { company?: OrgId; manages?: string[]; views?: string[];
   const standing = async (person: string, project: string): Promise<WikiBuildStanding> => (person === ADMIN && manages.includes(project) ? { access: "manage" } : person === VIEWER && views.includes(project) ? { access: "view" } : { access: "none" });
   const map = fileMap([repoEntry("api", [area("src", { rank: 1 })]), repoEntry("web", [area("app", { rank: 1 })])]);
   const build: WikiBuildDeps = {
-    store, companyId: company, now: () => T0, starter, standing, modelAccessConfigured: true, aiKey: async () => "connected", fileMap: async () => map,
+    store, companyId: company, now: () => clock.now, starter, standing, modelAccessConfigured: true, aiKey: async () => "connected", fileMap: async () => map,
     defaultBranchHeads: async () => [{ repo: "api", commit: API_SHA }, { repo: "web", commit: WEB_SHA }], limitSetting: async () => ({ budgetCents: 1_000, pageReserveCents: 100 }),
     recordBuild: async (record) => { records.push(record); }, ...options.deps,
   };
@@ -374,10 +375,12 @@ describe("audit tokens and a pointer that moved (review M1, L3)", () => {
     const requestId = id();
     await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: true });
     await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: false });
-    expect(w.audited.map((entry) => [entry.on, entry.token])).toEqual([[true, "false>true"], [false, "true>false"]]);
-    // The same flip again, from the same state, is a repeat of the same record.
+    expect(w.audited.map((entry) => [entry.on, entry.token.split("@")[0]])).toEqual([[true, "false>true"], [false, "true>false"]]);
+    // The same flip a third time (A, B, A) is a new act and carries a new token once the clock has moved.
+    clock.now += 1000;
     await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: true });
-    expect(w.audited.at(-1)!.token).toBe("false>true");
+    expect(w.audited.at(-1)!.token.split("@")[0]).toBe("false>true");
+    expect(w.audited.at(-1)!.token).not.toBe(w.audited[0]!.token);
 
     await seedWiki(w, "beacon", ["overview"]);
     const del = id();
@@ -391,7 +394,7 @@ describe("audit tokens and a pointer that moved (review M1, L3)", () => {
     const started = id();
     await startWikiControl(w.controls, ADMIN, "beacon", { requestId: started });
     const first = w.audited.filter((entry) => entry.action === "start_requested").at(-1)!;
-    expect(first.token).toBe("none");
+    expect(first.token.startsWith("none@")).toBe(true);
   });
 
   it("deleting the build's rows leaves the pointer of a run that started after the pointer was read", async () => {

@@ -19,8 +19,9 @@ import { wikiBuildPartition, wikiBuildRowKey } from "./keys.js";
 import { continueWikiBuild, readWikiBuildPointer, startWikiBuild, stopWikiBuild, wikiBuildState, type WikiBuildDeps, type WikiBuildView } from "./run.js";
 
 /**
- * What an audit record names. `token` is the state the act found (the run's task id, the switch's old value, the wiki's last build): it goes into the record's event id, so a REUSED request
- * id that acts on a different state (a second flip of the switch, a delete after a rebuild) gets its own record, while a true repeat (same id, same state) still records once.
+ * What an audit record names. `token` is the state the act found (the run's task id, the switch's old value, the wiki's last build) AND the time of the act: it goes into the record's event id,
+ * so a REUSED request id that acts again (a second flip of the switch, the same flip after two others, a delete after a rebuild) always gets its own record. Only a repeat in the very same
+ * millisecond records once; a client's retry may record twice, which loses nothing (the audit sink dedupes by event id, and an act must never hide behind an earlier record).
  */
 export interface WikiControlDetails { requestId: string; on?: boolean; token: string }
 
@@ -77,7 +78,7 @@ const isStale = (entry: WikiIndexEntry): boolean => entry.flagged || entry.claim
 
 /** The task id of the project's current or last build run, or "none": the state a start, continue, stop or refresh found. */
 async function runToken(deps: WikiControlsDeps, project: string): Promise<string> {
-  try { return (await readWikiBuildPointer(deps.build.store, deps.build.companyId, project))?.taskId ?? "none"; } catch { return "unread"; }
+  try { return `${(await readWikiBuildPointer(deps.build.store, deps.build.companyId, project))?.taskId ?? "none"}@${String(deps.build.now())}`; } catch { return `unread@${String(deps.build.now())}`; }
 }
 
 async function indexOf(deps: WikiControlsDeps, project: string): Promise<WikiIndexEntry[]> {
@@ -150,7 +151,7 @@ export async function refreshWikiControl(deps: WikiControlsDeps, personId: strin
 export async function agentsSwitchControl(deps: WikiControlsDeps, personId: string, project: string, rawBody: unknown): Promise<Answer> {
   const body = bodyOf(WikiAgentSwitchBodySchema, rawBody);
   await requireManage(deps, personId, project);
-  await recorded(deps, "agents_switched", project, { requestId: body.requestId, on: body.on, token: `${String(await wikiAgentSwitchIsOn(deps.agents, project))}>${String(body.on)}` });
+  await recorded(deps, "agents_switched", project, { requestId: body.requestId, on: body.on, token: `${String(await wikiAgentSwitchIsOn(deps.agents, project))}>${String(body.on)}@${String(deps.build.now())}` });
   try { await setWikiAgentSwitch(deps.agents, project, body.on); } catch { throw agentXError("RUNTIME_UNAVAILABLE", WIKI_CONTROLS_WORDS.unreadable); }
   return withView(deps, personId, project, 200);
 }
@@ -190,7 +191,7 @@ export async function deleteWikiControl(deps: WikiControlsDeps, personId: string
   await requireManage(deps, personId, project);
   if ((await wikiBuildState(deps.build, project)).status === "running") throw agentXError("WORKSPACE_BUSY", WIKI_CONTROLS_WORDS.deleteWhileRunning);
   const last = await deps.wiki.lastBuild(project).catch(() => undefined);
-  await recorded(deps, "delete_requested", project, { requestId: body.requestId, token: `${last?.buildId ?? "none"}:${String((await indexOf(deps, project)).length)}` });
+  await recorded(deps, "delete_requested", project, { requestId: body.requestId, token: `${last?.buildId ?? "none"}:${String((await indexOf(deps, project)).length)}@${String(deps.build.now())}` });
   let deleted: ProjectWikiDeletion;
   try { deleted = await deleteProjectWiki({ store: options.store, companyId: deps.build.companyId, now: options.now }, project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", WIKI_CONTROLS_WORDS.unreadable); }
   return { status: 200, deleted, message: WIKI_CONTROLS_WORDS.deleted, view: await wikiControlsView(deps, personId, project) };

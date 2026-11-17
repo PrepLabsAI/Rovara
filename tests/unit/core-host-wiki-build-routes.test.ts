@@ -8,6 +8,7 @@ import {
   type WikiPageWrite,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { wikiBuildPartition } from "../../packages/broker/src/core/wiki-build/keys.js";
 import { readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
@@ -93,7 +94,7 @@ async function buildWorld(options: { wired?: boolean; gateway?: boolean; withSta
     }),
   };
   const starters: FakeStarter[] = [];
-  const starter = new FakeStarter(world.store);
+  const starter = new FakeStarter(world.store as unknown as MemoryDocumentStore);
   const inputs: WikiBuildStarterInput[] = [];
   const wikiBuild: HostedWikiBuildWiring = {
     standing, modelAccessConfigured: () => options.gateway ?? true, map, ...(options.aiKey === undefined ? {} : { aiKey: options.aiKey }),
@@ -374,17 +375,18 @@ describe("hosted wiki build controls: the rest of each control", () => {
 });
 
 describe("hosted wiki build controls: the audit event ids and the start rule", () => {
-  it("a reused request id that acts on another state gets its own audit event id; a true repeat keeps the same one", async () => {
+  it("a reused request id that acts again always gets its own audit event id, even the third flip (A, B, A)", async () => {
     const { world, person, call } = await buildWorld();
     const owner = person("p-owner", FAKE_COMPANY, "owner");
     const requestId = id();
-    await call(post(WB("payments", "/agents"), { requestId, on: true }), owner);
-    await call(post(WB("payments", "/agents"), { requestId, on: false }), owner);
-    await call(post(WB("payments", "/agents"), { requestId, on: true }), owner);
+    for (const on of [true, false, true]) {
+      world.clock.now += 1000;
+      await call(post(WB("payments", "/agents"), { requestId, on }), owner);
+    }
     const ids = wikiEvents(world).map((event) => event.eventId);
     expect(ids).toHaveLength(3);
-    expect(new Set(ids).size).toBe(2);
-    expect(ids[0]).toBe(ids[2]);
+    // Every act is its own record, even the third flip (A, B, A) under the same request id.
+    expect(new Set(ids).size).toBe(3);
     expect(wikiEvents(world).map((event) => event.details?.["on"])).toEqual([true, false, true]);
   });
 
