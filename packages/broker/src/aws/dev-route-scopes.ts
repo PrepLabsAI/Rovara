@@ -180,6 +180,12 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // How we work (read only): no named scope reads a project's settings, so full access only.
   { method: "GET", path: "/v1/app/projects/{project}/how-we-work", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/playbook", requires: "full" },
+  // Guided onboarding L2-3: a project's setup run (it spends model money and runs the repository's commands): full access only, then a live company owner or admin, or the project's
+  // administrator, to change; a project user may read it.
+  { method: "GET", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/stop", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
