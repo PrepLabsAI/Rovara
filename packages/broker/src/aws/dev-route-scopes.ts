@@ -202,6 +202,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/discard", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/decide", requires: "full" },
+  // L4-SF (d): allow or refuse a website a setup run asked for: a company owner or admin (the high-risk rule), a fresh step-up, bound to the exact ask.
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/host-decide", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

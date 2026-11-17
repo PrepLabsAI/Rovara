@@ -10,6 +10,8 @@
 //   POST /v1/app/projects/{project}/setup-agent/discard    drop the waiting candidate ({ requestId })
 //   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): a fresh step-up, then the risk-based
 //                                                         approver rule (DEC 254z b), through the approval gate, bound to the candidate's digest and revision
+//   POST /v1/app/projects/{project}/setup-agent/host-decide  allow or refuse a website a setup run asked for (L4-SF d): the high-risk rule (a company owner or admin, either answer), a fresh step-up, through
+//                                                         the approval gate, bound to the exact ask (its host and when it was asked); the journal lists each open ask's `approval` and `canDecide`
 //
 // Confirm, discard and decide are served only where the deployment wires the hosted approval (`approval`): without it a confirm would leave a candidate nothing can approve.
 //
@@ -24,7 +26,7 @@
 //     transaction; the others' before the act, so nothing is done when the record cannot be written.
 //   - A start needs the company on the core for NEW tasks and the install's model gateway (which meters the run); otherwise a fixed 503 and nothing is written.
 //   - Bodies are the core's strict schemas (a request id and nothing else for start and stop: limits, payer and goal never come from the client).
-import { AgentXError, agentXError, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
+import { AgentXError, SetupHostSchema, agentXError, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { startTask } from "../core/task-flow/start.js";
@@ -32,12 +34,12 @@ import { cancelTask } from "../core/task-flow/cancel.js";
 import { SetupAgentStartBodySchema, SetupAgentStopBodySchema, getSetupAgent, readState, startSetupAgent, stopSetupAgent, type SetupAgentDeps } from "../core/setup-agent/agent.js";
 import type { SetupApplyDeps } from "../core/setup-agent/apply.js";
 import { SETUP_APPLY_KIND, SetupConfirmBodySchema, confirmSetupAgent, discardSetupApply, readSetupApply, setupCandidateRisk, waitingSetupApply } from "../core/setup-agent/apply.js";
-import { SETUP_RISK_APPROVER, setupApproverAllows, type SetupRisk } from "../core/setup-agent/setup-risk.js";
+import { SETUP_RISK_APPROVER, setupApproverAllows, setupHostApproverAllows, type SetupRisk } from "../core/setup-agent/setup-risk.js";
 import type { GateResult } from "../core/decisions/approval-gate.js";
-import { setupApproverRefusal, setupCardOf, setupDecisionRequestId, type HostedSetupApproval } from "./setup-approval.js";
+import { SETUP_HOST_NEEDS_ADMIN, setupApproverRefusal, setupCardOf, setupDecisionRequestId, setupHostCardOf, type HostedSetupApproval } from "./setup-approval.js";
 import { z } from "zod";
 import { readSetupJournal } from "../core/setup-agent/journal.js";
-import { listHostAsks } from "../core/setup-agent/host-ask.js";
+import { HOST_ASK_REVISION, SETUP_HOST_KIND, hostAskDigest, hostAskSubjectId, hostDecisionRequestId, listHostAsks, readOpenHostAsk } from "../core/setup-agent/host-ask.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { ensureCoreInUse } from "./engine-stamp.js";
 
@@ -49,6 +51,7 @@ export const SETUP_RUN_AUDIT_UNAVAILABLE = "The record of this change could not 
 export const SETUP_APPROVAL_UNAVAILABLE = "Approving a project's setup isn't available on this install yet.";
 export const SETUP_NOTHING_WAITING = "There is no setup waiting for a decision. Open the project's setup again.";
 export const SETUP_DECIDE_ON_A_PAGE = "A setup is decided right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
+export const SETUP_NO_HOST_WAITING = "That website is not waiting for a decision any more. Open the project's setup again.";
 export const SETUP_PROOF_UNAVAILABLE = "Your approval could not be proved just now, so nothing was decided. Try again.";
 
 /** Why a person may manage a project's setup run, as the audit record names it. */
@@ -99,9 +102,18 @@ const DecideBodySchema = z.object({
   seen: z.object({ revision: z.number().int().min(1), artifactDigest: z.string().regex(/^[a-f0-9]{64}$/u) }).strict(),
   reason: z.string().max(500).optional(),
 }).strict();
+const HostDecideBodySchema = z.object({
+  /** The id the page was offered for this ask (`host-<hash>`, host-ask.ts `hostDecisionRequestId`): its own namespace, apart from task and setup decisions' ids. */
+  requestId: z.string().regex(/^host-[A-Za-z0-9_-]{2,122}$/u),
+  host: SetupHostSchema,
+  outcome: z.enum(["approve", "reject"]),
+  /** The ask as the person saw it: its one revision and digest (the host and when it was asked). */
+  seen: z.object({ revision: z.number().int().min(1), artifactDigest: z.string().regex(/^[a-f0-9]{64}$/u) }).strict(),
+  reason: z.string().max(500).optional(),
+}).strict();
 const DiscardBodySchema = z.object({ requestId: z.string().uuid() }).strict();
 
-const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide))?$/u;
+const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|host-decide))?$/u;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 
 /** Whether this method and path is the hosted setup run's. */
@@ -110,7 +122,7 @@ export function isSetupRunPath(path: string, method: string): boolean {
   if (match === null) return false;
   const tail = match[2];
   if (method === "GET") return tail === undefined || tail === "journal";
-  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide";
+  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide" || tail === "host-decide";
   return false;
 }
 
@@ -210,6 +222,40 @@ async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval,
   return json(200, { project, decision, risk: result.record.risk, revision: result.record.revision, replayed: result.status === "replayed" });
 }
 
+/**
+ * Allow or refuse a website the setup run asked for (L4-SF d): a fresh step-up, the high-risk rule on the person's live standing (a company owner or admin, either answer), the point's proof bound to the
+ * exact ask, then the gate (which loads the ask again, re-checks the rule and the host's own refusal list on approval). The ask is found by the project and host the person named, in THIS company only.
+ */
+async function decideHost(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, raw: unknown): Promise<BrokerResponse> {
+  if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", SETUP_APPROVAL_UNAVAILABLE);
+  const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
+  const body = parsed(HostDecideBodySchema, raw);
+  const { flow, companyId } = input;
+  const personId = input.principal.personId;
+  let who: Awaited<ReturnType<HostedSetupApproval["standing"]>>;
+  try { who = await approval.standing(personId, project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_UNREADABLE); }
+  if (!setupHostApproverAllows(who)) throw agentXError("FORBIDDEN", SETUP_HOST_NEEDS_ADMIN);
+  const host = body.host.toLowerCase();
+  const ask = await readOpenHostAsk({ store: flow.store, now: input.now }, companyId, project, host);
+  if (ask === undefined) throw agentXError("CHANGE_STALE", SETUP_NO_HOST_WAITING);
+  // The decision is made on THIS ask as it stands: the id and the digest are the ones the broker derives from it, so a person's earlier look at another ask of the same host (an older one) decides nothing.
+  if (body.requestId !== hostDecisionRequestId(ask) || body.seen.revision !== HOST_ASK_REVISION || body.seen.artifactDigest !== hostAskDigest(ask)) throw agentXError("CHANGE_STALE", SETUP_NO_HOST_WAITING);
+  const subjectId = hostAskSubjectId(companyId, project, ask.host);
+  const card = setupHostCardOf(subjectId, body.seen.artifactDigest);
+  let credential: { method: string; token: string };
+  try {
+    credential = await approval.issueHost({ companyId, personId, stepUp, requestId: body.requestId, kind: "setup_host", subjectId, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
+  } catch {
+    throw agentXError("FORBIDDEN", SETUP_PROOF_UNAVAILABLE);
+  }
+  const result = await approval.gate.decide({
+    companyId, kind: SETUP_HOST_KIND, subjectId, requestId: body.requestId, outcome: body.outcome, seen: body.seen,
+    credentials: [{ method: credential.method, token: credential.token }], card, ...(body.reason === undefined ? {} : { reason: body.reason }),
+  });
+  if (result.status === "refused") throw gateRefusal(result);
+  return json(200, { project, host: ask.host, decision: body.outcome === "approve" ? "approved" : "refused", replayed: result.status === "replayed" });
+}
+
 /** One request on a hosted setup-run path (`isSetupRunPath`), after the dev routes checked the company from membership. Always answers. */
 export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<BrokerResponse> {
   try {
@@ -277,8 +323,16 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       const after = Number(new URL(input.request.path, "http://core").searchParams.get("after") ?? "0");
       if (!Number.isInteger(after) || after < 0 || after > 400) throw agentXError("CONFIG_INVALID", "after: a journal position");
       const state = await readState(deps, project, latest.definition.revision);
+      // An open ask carries what the person decides it on (L4-SF d): the id and digest of the ask as it stands, and whether THIS person may (a company owner or admin, read now).
+      let mayDecide = false;
+      if (input.wiring.approval !== undefined) {
+        try { mayDecide = setupHostApproverAllows(await input.wiring.approval.standing(input.principal.personId, project)); } catch { mayDecide = false; }
+      }
       const asks = (await listHostAsks({ store: flow.store, now: input.now }, companyId, project, ["open", "approved", "refused"])).slice(0, 50)
-        .map((ask) => ({ host: ask.host, status: ask.state, ...(ask.journalN === undefined ? {} : { journalN: ask.journalN }), ...(ask.from === undefined ? {} : { from: ask.from }) }));
+        .map((ask) => ({
+          host: ask.host, status: ask.state, ...(ask.journalN === undefined ? {} : { journalN: ask.journalN }), ...(ask.from === undefined ? {} : { from: ask.from }),
+          ...(ask.state === "open" && input.wiring.approval !== undefined ? { canDecide: mayDecide, approval: { requestId: hostDecisionRequestId(ask), revision: HOST_ASK_REVISION, artifactDigest: hostAskDigest(ask), kind: "setup_host", risk: "high" } } : {}),
+        }));
       if (state.pointer === undefined) return json(200, { status: state.view.status, entries: [], hostAsks: asks });
       return json(200, { status: state.view.status, entries: await readSetupJournal({ store: flow.store }, { orgId: companyId, project, taskId: state.pointer.taskId }, after), hostAsks: asks });
     }
@@ -294,7 +348,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       const answer = await startSetupAgent(deps, project, body);
       return json(answer.status, { ...answer.view, canManage: true });
     }
-    if (tail === "confirm" || tail === "discard" || tail === "decide") {
+    if (tail === "confirm" || tail === "discard" || tail === "decide" || tail === "host-decide") {
       const approval = input.wiring.approval;
       if (approval === undefined) throw agentXError("NOT_FOUND", SETUP_APPROVAL_UNAVAILABLE);
       if (tail === "confirm") {
@@ -307,6 +361,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
         await recorded(input, auditEvent(input, "setup_run.discard_requested", `setup_run.discard:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
         return json(200, { discarded: await discardSetupApply(deps, project, personId) });
       }
+      if (tail === "host-decide") return await decideHost(input, approval, project, raw);
       return await decide(input, approval, project, raw);
     }
     if (tail === "stop") {

@@ -3,7 +3,6 @@
 //   - Who: the owner of this install, on the API session. A script token never reaches these routes (a setup run spends model money by the minute and runs the repository's own commands).
 //   - A person's command, a website, and the use of a setup are the owner's own acts on the page: the routes here answer them with the page's words and never decide them (`SETUP_COMMAND_WORDS.pageOnly`).
 //   - The decision of a website or of a proposal goes through the approval gate, which asks the Approvers seam about the page's own session proof.
-import { createHash } from "node:crypto";
 import { AgentXError, IMPLICIT_COMPANY_ID, agentXError, setupItemsOf, setupItemHandling, type AdapterRegistry, type ApprovalProof, type OrgId, type Principal, type SetupVerification } from "@agentx/contracts";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { localResultOf } from "../../core/decisions/local-actions.js";
@@ -21,7 +20,7 @@ import { boundEvalMonthlyCap } from "../../core/setup-agent/eval-reservation.js"
 import { SETUP_APPLY_KIND, confirmSetupAgent, createSetupProposalSubject, discardSetupApply, readSetupApply, type SetupApplyDeps } from "../../core/setup-agent/apply.js";
 import { setupStateOf, startProjectSetupCheck } from "../../core/setup-agent/check.js";
 import { SETUP_COMMAND_WORDS, checkPersonCommand, queueSetupCommand } from "../../core/setup-agent/command.js";
-import { SETUP_HOST_KIND, approvedHostsOf, forgetApprovedHost, createSetupHostSubject, hostAskDigest, hostAskSubjectId, HOST_ASK_REVISION, isInternationalName, listHostAsks, type SetupHostAsk } from "../../core/setup-agent/host-ask.js";
+import { SETUP_HOST_KIND, approvedHostsOf, forgetApprovedHost, createSetupHostSubject, hostAskDigest, hostAskSubjectId, hostDecisionRequestId, HOST_ASK_REVISION, isInternationalName, listHostAsks, type SetupHostAsk } from "../../core/setup-agent/host-ask.js";
 import type { SetupAgentCallbackDeps } from "../../core/setup-agent/callback.js";
 import { readSetupJournal } from "../../core/setup-agent/journal.js";
 import type { DecisionSubject } from "../../core/decisions/approval-gate.js";
@@ -39,10 +38,9 @@ const bodyOf = (request: BrokerRequest): unknown => {
   if (request.body === undefined || request.body === "") return {};
   try { return JSON.parse(request.body) as unknown; } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
 };
-const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 
 /** The request id a host ask's decision is made under: it names the ask as the owner saw it (the host and when it was asked), so a later ask for the same host is another decision. */
-export const hostRequestId = (ask: Pick<SetupHostAsk, "orgId" | "project" | "host" | "askedAt">): string => `host-${sha(`${hostAskSubjectId(ask.orgId, ask.project, ask.host)}\n${ask.askedAt}`).slice(0, 40)}`;
+export const hostRequestId = hostDecisionRequestId;
 /** The request id a proposal's decision is made under. */
 export const proposalRequestId = (digest: string, candidateRevision: number): string => `setup-${digest.slice(0, 40)}-${String(candidateRevision)}`;
 

@@ -37,6 +37,8 @@ import { taskKey } from "../core/task-flow/keys.js";
 
 /** L4-D: the subject type of a project's setup candidate (apply.ts `createSetupProposalSubject`). */
 export const SETUP_PROPOSAL_SUBJECT = "setup_proposal";
+/** L4-SF (d): the subject type of a setup run's website ask (host-ask.ts `createSetupHostSubject`); its id is the ask's subject id (a hash of the company, project and host). */
+export const SETUP_HOST_SUBJECT = "setup_host";
 /** The one way to answer a decision on a deployed install: a fresh step-up, proved for one act. */
 export const STEP_UP_APPROVAL_METHOD = "rovara-step-up";
 /** How long an issued proof is good for: the act follows the step-up check at once. */
@@ -55,6 +57,7 @@ const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const NONCE = /^[A-Za-z0-9_-]{43}$/u;
 const KIND = /^[A-Za-z0-9_.-]{1,64}$/u;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
+const HOST_SUBJECT_ID = /^[a-f0-9]{32}$/u;
 const CLAIM_ID = /^(org_[0-9a-z]{20})\.([a-f0-9]{64})\.([0-9a-f-]{36})$/u;
 const ANSWERS: ReadonlySet<unknown> = new Set<ApprovalAnswer>(["approve", "reject", "request_changes"]);
 const FACTORS: ReadonlySet<unknown> = new Set<unknown>(STEP_UP_METHODS);
@@ -81,7 +84,7 @@ interface ProofClaims {
   m: string; // step-up factor
   e: number; // expires (ms)
   n: string; // the one-time part
-  t?: typeof SETUP_PROPOSAL_SUBJECT; // the subject type when it is not a task (L4-D)
+  t?: typeof SETUP_PROPOSAL_SUBJECT | typeof SETUP_HOST_SUBJECT; // the subject type when it is not a task (L4-D, L4-SF)
 }
 
 const b64 = (value: Buffer | string): string => Buffer.from(value).toString("base64url");
@@ -152,6 +155,17 @@ export function issueSetupStepUpApproval(key: Buffer, input: SetupStepUpApproval
   return signProof(key, { ...claimsOf({ ...rest, taskId: project }, nowMs), t: SETUP_PROPOSAL_SUBJECT });
 }
 
+/** What one act on a setup run's website ask binds (L4-SF d): as `StepUpApprovalInput`, with the ask's subject id in place of the task. The ask's digest (the host and when it was asked) is `artifactDigest`. */
+export type SetupHostStepUpApprovalInput = Omit<StepUpApprovalInput, "taskId"> & { subjectId: string };
+
+/** A proof of one act on a website ask (L4-SF d), for the hosted setup route. Same rules as `issueSetupStepUpApproval`; the token names its subject type, so it never stands for a task or a setup candidate. */
+export function issueSetupHostStepUpApproval(key: Buffer, input: SetupHostStepUpApprovalInput, nowMs: number): { method: typeof STEP_UP_APPROVAL_METHOD; token: string } {
+  if (typeof input?.subjectId !== "string" || !HOST_SUBJECT_ID.test(input.subjectId)) throw new Error("a step-up approval cannot be issued for this input");
+  const { subjectId, ...rest } = input;
+  checkProofInput({ ...rest, taskId: TASK_ID_FOR_CHECK });
+  return signProof(key, { ...claimsOf({ ...rest, taskId: subjectId }, nowMs), t: SETUP_HOST_SUBJECT });
+}
+
 /** The signed claims of a token, or undefined for anything this file did not sign or cannot read whole. */
 function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   if (typeof token !== "string" || token.length > TOKEN_MAX || !token.startsWith(TOKEN_PREFIX)) return undefined;
@@ -172,7 +186,7 @@ function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   if (typeof c["c"] !== "string" || typeof c["p"] !== "string" || typeof c["r"] !== "string" || typeof c["q"] !== "string" || typeof c["s"] !== "string" || !Number.isSafeInteger(c["v"]) || typeof c["d"] !== "string"
     || !ANSWERS.has(c["o"]) || !Array.isArray(card) || card.length !== 2 || typeof card[0] !== "string" || typeof card[1] !== "string" || typeof c["a"] !== "string"
     || typeof c["m"] !== "string" || !Number.isSafeInteger(c["e"]) || typeof c["n"] !== "string" || !NONCE.test(c["n"])
-    || (Object.hasOwn(c, "t") && c["t"] !== SETUP_PROPOSAL_SUBJECT)) return undefined;
+    || (Object.hasOwn(c, "t") && c["t"] !== SETUP_PROPOSAL_SUBJECT && c["t"] !== SETUP_HOST_SUBJECT)) return undefined;
   return c as unknown as ProofClaims;
 }
 
@@ -239,10 +253,15 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       if (request?.settlesClaims !== true) return refuse(NEEDS_SETTLING_CALLER);
       const companyId = request.companyId;
       const subject = request.subject;
-      // A core task (its own person decides), or a project's setup candidate (L4-D: a live member here; the setup subject's rule decides who at the candidate's risk). Nothing else.
-      const setup = subject?.type === SETUP_PROPOSAL_SUBJECT;
+      // A core task (its own person decides), a project's setup candidate (L4-D: a live member here; the setup subject's rule decides who at the candidate's risk), or a setup run's website ask (L4-SF d: a
+      // live member here; the host subject's rule decides who, and the proof names the ask's own id, which hashes the company, project and host). Nothing else.
+      const setupProposal = subject?.type === SETUP_PROPOSAL_SUBJECT;
+      const setupHost = subject?.type === SETUP_HOST_SUBJECT;
+      const setup = setupProposal || setupHost;
       if (typeof companyId !== "string" || !OrgIdSchema.safeParse(companyId).success || typeof subject?.id !== "string"
-        || !(setup ? PROJECT_NAME.test(subject.id) && request.projectName === subject.id : subject.type === "task" && TASK_ID.test(subject.id))) return refuse("no_rule_for_this_request");
+        || !(setupProposal ? PROJECT_NAME.test(subject.id) && request.projectName === subject.id
+          : setupHost ? HOST_SUBJECT_ID.test(subject.id) && typeof request.projectName === "string" && PROJECT_NAME.test(request.projectName)
+            : subject.type === "task" && TASK_ID.test(subject.id))) return refuse("no_rule_for_this_request");
       if (proof.requestId !== request.requestId || typeof request.requestId !== "string") return refuse("other_request");
       if (proof.revision !== request.revision) return refuse("other_revision");
       if (proof.artifactDigest !== request.artifactDigest) return refuse("other_content");
@@ -251,7 +270,7 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       if (claims.c !== companyId) return refuse("wrong_company");
       if (claims.r !== decisionRequestIdOf(request.requestId)) return refuse("other_request");
       if (claims.q !== request.kind) return refuse("other_kind");
-      if (claims.s !== subject.id || (setup ? claims.t !== SETUP_PROPOSAL_SUBJECT : claims.t !== undefined)) return refuse("other_subject");
+      if (claims.s !== subject.id || (setup ? claims.t !== subject.type : claims.t !== undefined)) return refuse("other_subject");
       if (claims.v !== request.revision) return refuse("other_revision");
       if (claims.d !== request.artifactDigest) return refuse("other_content");
       if (claims.o !== (request.outcome ?? "approve")) return refuse("other_answer");

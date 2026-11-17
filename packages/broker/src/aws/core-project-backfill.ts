@@ -7,6 +7,7 @@ import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { GithubInstallationBindings } from "./github-credentials.js";
 import { projectKey } from "./project-records.js";
 import { projectMemberKey } from "./admin-actions.js";
+import { setupPartition } from "../core/setup-agent/keys.js";
 
 type Row = Record<string, unknown>;
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
@@ -113,6 +114,21 @@ export async function planCoreProjectWrites(deps: State, value: unknown, mappedC
     writes.push({ Put: { TableName: deps.tableName, Item: { ...Object.fromEntries(Object.entries(catalog ?? {}).filter(([key]) => key !== "backfillRunId")), ...catalogKey, ...(backfillRunId !== undefined && (catalog === undefined || catalog["backfillRunId"] === backfillRunId) ? { backfillRunId } : {}), entityType: "PROJECT_CATALOG", companyId: company, name: definition.name, latestRevision: definition.revision }, ...fence(catalog) } });
   } else writes.push({ ConditionCheck: { TableName: deps.tableName, Key: catalogKey, ...fence(catalog) } });
   return { status: existing !== undefined && latest !== undefined && latest >= definition.revision ? "existing" : "ready", writes };
+}
+/** What a registration is told when the core's copy of the project is refused. */
+export const CORE_COPY_REFUSED = "core project copy refused";
+/**
+ * L4-SF (c): the same refusal, in clearer words when the cause is a setup change waiting for approval (hosted setup approval: the core holds a candidate revision the old registry has not been given). The
+ * check only reads the company's own proposal row; anything it cannot read or does not find gives the plain words.
+ */
+export async function coreCopyRefusalWords(deps: State, company: string | undefined, project: string): Promise<string> {
+  try {
+    const owner = OrgIdSchema.safeParse(company === undefined ? IMPLICIT_COMPANY_ID : company);
+    if (!owner.success || !nameSchema.safeParse(project).success) return CORE_COPY_REFUSED;
+    const row = await get(deps, { pk: setupPartition(owner.data, project), sk: "APPLY" });
+    if (row?.["entityType"] === "SETUP_APPLY" && row["state"] === "checking") return `${CORE_COPY_REFUSED}: a setup change for this project is waiting for approval. Approve or discard it, then register again`;
+  } catch { /* the plain words */ }
+  return CORE_COPY_REFUSED;
 }
 /** Fence the legacy ownership evidence in the same transaction, without duplicating a history check. */
 export function guardCoreProjectSource(deps: State, source: unknown, writes: Write[]): Write[] {

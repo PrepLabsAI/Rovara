@@ -1,6 +1,6 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { createBrokerCoreServices } from "./core-job-services.js";
-import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
+import { coreCopyRefusalWords, guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
@@ -2349,7 +2349,7 @@ async function registerProject(
       if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
-    catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+    catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record.companyId, definition.name)); }
 
     // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
     if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
@@ -2455,7 +2455,7 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
       corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest!);
       corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
     }
-    catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+    catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest?.companyId, projectName)); }
     if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
     const repairLegacy = snapshot.catalog?.latestRevision !== targetRevision;
     if (!repairLegacy && corePlan.status !== "ready") return;
