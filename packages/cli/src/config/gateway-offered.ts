@@ -4,7 +4,7 @@
 //
 // Fail closed: no admin sign-in, a gateway that is not set up, an answer that is not the contract (OfferedAgentModels), a time-out or any other failure refuses the change, in fixed
 // words. Nothing of the broker's or gateway's answer is echoed except the offered model names themselves (each already held to the contract's model-name characters).
-import { CORE_OFFERED_MODELS_ADMIN_PATH, OfferedAgentModelsSchema, agentXError } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, OfferedAgentModelsSchema, agentXError, isCoreAgentModelId } from "@agentx/contracts";
 
 /** The longest the read may take. */
 export const GATEWAY_OFFERED_TIMEOUT_MS = 15_000;
@@ -25,9 +25,19 @@ export interface GatewayOfferedInputs {
 async function boundedJson(response: Response): Promise<unknown> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > GATEWAY_OFFERED_BODY_MAX_BYTES) throw new Error("too large");
-  const text = await response.text();
-  if (Buffer.byteLength(text) > GATEWAY_OFFERED_BODY_MAX_BYTES) throw new Error("too large");
-  return JSON.parse(text) as unknown;
+  // Read with a running byte cap: a chunked answer with no length is never buffered past the limit.
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = response.body?.getReader();
+  for (;;) {
+    if (reader === undefined) break;
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > GATEWAY_OFFERED_BODY_MAX_BYTES) { await reader.cancel().catch(() => undefined); throw new Error("too large"); }
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
 /** Refuses (fixed words) unless the model gateway offers `value` to the administrator's company now. */
@@ -61,6 +71,10 @@ export async function requireGatewayOffers(input: GatewayOfferedInputs): Promise
   if (!parsed.success) throw unreadable();
   const names = parsed.data.models.map((entry) => entry.model);
   if (names.includes(value)) return;
-  const examples = [...names.filter((name) => !name.startsWith("claude-")), ...names.filter((name) => name.startsWith("claude-"))].slice(0, GATEWAY_OFFERED_EXAMPLES);
-  throw agentXError("CONFIG_INVALID", `${notChanged}: the model gateway does not offer ${value} to this company; it offers ${examples.join(", ")}${names.length > examples.length ? `, and ${names.length - examples.length} more` : ""}; nothing changed`);
+  // Only names this setting can hold are offered as examples (the gateway's names may be longer or carry upper case).
+  const settable = names.filter(isCoreAgentModelId);
+  const examples = [...settable.filter((name) => !name.startsWith("claude-")), ...settable.filter((name) => name.startsWith("claude-"))].slice(0, GATEWAY_OFFERED_EXAMPLES);
+  const offers = examples.length === 0 ? "it offers no model this setting can hold" : `it offers ${examples.join(", ")}${settable.length > examples.length ? `, and ${settable.length - examples.length} more` : ""}`;
+  // DEC 254g: the agent model is the whole install's; this is the administrator's company's list (the gateway still refuses at run time for a company it does not offer it to).
+  throw agentXError("CONFIG_INVALID", `${notChanged}: the model gateway does not offer ${value} to this company; ${offers}; nothing changed`);
 }

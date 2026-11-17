@@ -280,6 +280,8 @@ function proxyRequestKey(proxy: ModelProxyOptions, api?: InvocationModelRoute["a
  * and every route on another API keep their catalog limit.
  */
 export const GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS = 64_000;
+/** Claude by any of its names: the engine name (`claude-...`) or a Bedrock id or profile (`anthropic.claude-...`, `us.anthropic.claude-...`). Claude keeps its catalog limit on every route. */
+const isClaudeFamilyCatalog = (catalog: string): boolean => isClaudeAgentModel(catalog) || /(?:^|[./])claude-/u.test(catalog);
 
 /** What a model the installed catalogs do not know (a company's own) is given: no reasoning, no images, a modest window. */
 const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 16_384 };
@@ -307,7 +309,7 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
     models: [{
       id: route.alias, name: route.alias, api: route.api, baseUrl,
       reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow,
-      maxTokens: route.api === "anthropic-messages" && !isClaudeAgentModel(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
+      maxTokens: route.api === "anthropic-messages" && !isClaudeFamilyCatalog(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
       compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),

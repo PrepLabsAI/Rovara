@@ -75,8 +75,6 @@ const TRANSPORT_DETAILS: ReadonlyMap<string, { classify: number; report?: number
   ["check the API key and its permissions", { classify: 401 }],
   // The model proxy's 403 whose body says the account cannot use the model (model-runtime MODEL_NOT_ENABLED_DETAIL): read as `key-rejected ModelNotEnabled` below.
   ["the model is not available for this account", { classify: 403, report: 403, signal: MODEL_NOT_ENABLED_SIGNAL }],
-  // DEC 254g: the model gateway's 400 for a model it does not offer the company (model-runtime MODEL_NOT_OFFERED_DETAIL): read as `model-not-found ModelNotOffered`.
-  [MODEL_NOT_OFFERED_DETAIL, { classify: 404, report: 400, signal: MODEL_NOT_OFFERED_SIGNAL }],
   ["the API key was refused; check that it is valid and has not expired", { classify: 401, report: 401 }],
   ["check the key's credit balance and spending limit", { classify: 402, report: 402 }],
   ["check model availability and the provider allowlist", { classify: 404, report: 404 }],

@@ -15360,7 +15360,8 @@ const coreRoot = createBrokerCoreRoot({
 const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
 
 // DEC 254g: the gateway's offered models for an administrator's config set; set only where the gateway's origin is.
-const coreOfferedModels = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
+const offeredModelsKms = new KMSClient(awsClientConfiguration);
+const coreOfferedModels = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, offeredModelsKms));
 
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;

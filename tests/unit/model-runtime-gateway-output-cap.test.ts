@@ -60,6 +60,19 @@ describe("every other routed model keeps its catalog limit (today's behaviour)",
     expect(await maxTokensAsked("claude-sonnet-4-6", "anthropic")).toEqual({ registered: catalog, sent: catalog });
   });
 
+  it("a Bedrock Claude id or profile on an Anthropic Messages route (a local model-proxy route) keeps its catalog limit", async () => {
+    for (const name of ["us.anthropic.claude-opus-4-6-v1", "anthropic.claude-sonnet-4-6", "global.anthropic.claude-opus-4-5-20251101-v1:0"]) {
+      const catalog = catalogModelByName(name)?.model.maxTokens;
+      if (catalog === undefined) continue;
+      const { runtime } = await routedRuntime(name, "amazon-bedrock", () => answer(name));
+      expect(runtime.getModel("rovara-route", name)!.maxTokens, name).toBe(catalog);
+    }
+    const opus = catalogModelByName("us.anthropic.claude-opus-4-6-v1")!.model.maxTokens;
+    expect(opus).toBeGreaterThan(GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS);
+    const { runtime } = await routedRuntime("us.anthropic.claude-opus-4-6-v1", "amazon-bedrock", () => answer("x"));
+    expect(runtime.getModel("rovara-route", "us.anthropic.claude-opus-4-6-v1")!.maxTokens).toBe(opus);
+  });
+
   it("a route on another API keeps its catalog limit, whatever the model", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const transport = vi.fn(async (_input: unknown, init?: RequestInit) => { bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>); return new Response("", { status: 500 }); }) as unknown as typeof fetch;

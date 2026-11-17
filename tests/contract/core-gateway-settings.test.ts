@@ -282,6 +282,14 @@ describe("agentx config set", () => {
       expect(gateway.records).toEqual([]);
     });
 
+    it("names as examples only ids this setting can hold", async () => {
+      const gateway = withGateway(offering(["Acme.Upper-Case", `a${"b".repeat(80)}`, "zai.glm-4.7"]));
+      const { result } = await run("zai.glm-5", gateway);
+      await expect(result).rejects.toThrow("the model gateway does not offer zai.glm-5 to this company; it offers zai.glm-4.7; nothing changed");
+      const none = await run("zai.glm-5", withGateway(offering(["Acme.Upper-Case"])));
+      await expect(none.result).rejects.toThrow("it offers no model this setting can hold; nothing changed");
+    });
+
     it("matches exactly: a near name (another profile, case, version) is not offered", async () => {
       for (const value of ["us.zai.glm-5", "zai.glm-5:0", "zai.glm-5."]) {
         const { cloudFormation, result } = await run(value, withGateway(offering([GLM])));

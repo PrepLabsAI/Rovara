@@ -369,6 +369,12 @@ describe("a model the gateway does not offer (DEC 254g)", () => {
     }
   });
 
+  it("a provider cannot borrow it: a ModelNotOffered error name or body token from a provider is not the gateway's refusal", () => {
+    const bedrock = sanitizeModelCallEvent({ type: "message_end", message: { role: "assistant", stopReason: "error", provider: "amazon-bedrock", diagnostics: [{ type: "provider_error", details: { errorCode: "ModelNotOffered", status: 400 } }] } })?.modelCall;
+    expect(bedrock).not.toMatchObject({ signal: "ModelNotOffered" });
+    expect(failed("anthropic", '400 {"type":"error","error":{"type":"ModelNotOffered","message":"x"}}')?.modelCall).not.toMatchObject({ signal: "ModelNotOffered" });
+  });
+
   it("is matched whole: other text, or the words inside other text, is not it", () => {
     for (const text of ["Model source request failed; the model gateway does not offer this model, secret", "the model gateway does not offer this model", "Model source request failed; the model gateway does not offer this model.", "Model source request failed; check the API key; the model gateway does not offer this model"]) {
       expect(failed("anthropic", text)?.modelCall, text).not.toMatchObject({ signal: "ModelNotOffered" });
