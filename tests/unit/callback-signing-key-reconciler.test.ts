@@ -30,7 +30,7 @@ const named = () => {
   vi.stubEnv("SLACK_THREADS_TABLE_NAME", "threads");
   vi.stubEnv("SLACK_SECRET_ARN", "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf");
 };
-const run = async () => ((await import("../../packages/broker/src/aws/session-reconciler.js")).handler as () => Promise<Record<string, unknown>>)();
+const run = async () => ((await import("../../packages/broker/src/aws/session-reconciler.js")).handler as unknown as () => Promise<Record<string, unknown>>)();
 const events = () => logs.flatMap((line) => { try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; } });
 
 describe("the reconciler's callback signing key", () => {

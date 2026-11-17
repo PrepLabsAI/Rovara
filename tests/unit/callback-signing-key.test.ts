@@ -1,4 +1,4 @@
-import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+import type { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CALLBACK_SIGNING_KEY_SECRET_VARIABLE, CALLBACK_SIGNING_KEY_UNAVAILABLE, forgetCallbackSigningKey, loadCallbackSigningKey, loadedCallbackSigningKey,
@@ -13,6 +13,9 @@ function reader(answer: () => Promise<{ SecretString?: string }>): CallbackSigni
   const commands: GetSecretValueCommand[] = [];
   return { commands, async send(command) { commands.push(command); return answer(); } };
 }
+
+/** The refusal a promise ends with (a promise that does not refuse fails the test). */
+const caught = (promise: Promise<unknown>): Promise<Error> => promise.then(() => { throw new Error("expected a refusal"); }, (error: unknown) => error as Error);
 
 afterEach(() => forgetCallbackSigningKey());
 
@@ -55,7 +58,7 @@ describe("loading the callback signing key from Secrets Manager", () => {
       if (calls === 1) throw Object.assign(new Error(`AccessDeniedException: not allowed to read ${ARN} ${KEY}`), { name: "AccessDeniedException" });
       return { SecretString: KEY };
     });
-    const failure = await loadCallbackSigningKey(env, secrets).catch((error: unknown) => error as Error);
+    const failure = await caught(loadCallbackSigningKey(env, secrets));
     expect(failure).toBeInstanceOf(Error);
     expect(failure.message).toBe(CALLBACK_SIGNING_KEY_UNAVAILABLE);
     expect(failure.name).toBe("CallbackSigningKeyUnavailable");
@@ -74,7 +77,7 @@ describe("loading the callback signing key from Secrets Manager", () => {
     ["30 bytes in 15 two-byte letters (the length is in bytes, not characters)", { SecretString: "é".repeat(15) }],
   ])("refuses %s, with the fixed message and nothing of the value", async (_name, answer) => {
     const secrets = reader(async () => answer);
-    const failure = await loadCallbackSigningKey(env, secrets).catch((error: unknown) => error as Error);
+    const failure = await caught(loadCallbackSigningKey(env, secrets));
     expect(failure.message).toBe(CALLBACK_SIGNING_KEY_UNAVAILABLE);
     if ("SecretString" in answer && answer.SecretString !== "") expect(failure.message).not.toContain(answer.SecretString);
     expect(() => loadedCallbackSigningKey()).toThrow(CALLBACK_SIGNING_KEY_UNAVAILABLE);

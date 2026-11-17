@@ -19,13 +19,6 @@ const legacy = Template.fromStack(new ControlPlaneStack(new App(), "CallbackKeyL
 const variablesOf = (resource: Resource): Record<string, unknown> => (resource.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables ?? {};
 const functions = (template: typeof named) => Object.entries(template.Resources).filter(([, resource]) => resource.Type === "AWS::Lambda::Function");
 const secretOf = (template: typeof named, name: string) => Object.entries(template.Resources).find(([, resource]) => resource.Type === "AWS::SecretsManager::Secret" && resource.Properties.Name === name)!;
-const statementsOf = (template: typeof named, logicalPrefix: string): Statement[] => {
-  const [, fn] = functions(template).find(([id]) => id.startsWith(logicalPrefix))!;
-  const roleId = (fn.Properties.Role as { "Fn::GetAtt": string[] })["Fn::GetAtt"][0]!;
-  return Object.values(template.Resources)
-    .filter((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties.Roles).includes(`"${roleId}"`))
-    .flatMap((resource) => (resource.Properties.PolicyDocument as { Statement: Statement[] }).Statement);
-};
 
 const READERS = {
   named: ["Broker", "EvalBatchTick", "SessionsReconciler"],
