@@ -3,7 +3,7 @@
 // Two companies throughout: company B's Linear workspace has a team id and a Linear user id that are the SAME strings as company A's.
 import { createHmac, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { AuditEvent, OrgId, Principal } from "@agentx/contracts";
+import { intakeItemIdOf, type AuditEvent, type OrgId, type Principal } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
 import { RecordingStore } from "../support/intake-world.js";
@@ -18,6 +18,7 @@ import { HOSTED_INTAKE_ROUTES } from "../../packages/broker/src/aws/developer-ro
 import { devRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { withCoreRoutes } from "../../packages/broker/src/aws/core-engine-root.js";
 import { listWaitingIntakeItems } from "../../packages/broker/src/core/intake/store.js";
+import { ingestIntake } from "../../packages/broker/src/core/intake/engine.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
 
 const PERSON_B = "e".repeat(64);
@@ -159,6 +160,19 @@ describe("Linear account links (company-scoped, first wins)", () => {
     status = "connected"; organizationId = WORKSPACE_D.id; expect(await resolve(A, account)).toBeUndefined();
     organizationId = WORKSPACE_A.id; live = false; expect(await resolve(A, account)).toBeUndefined();
   });
+
+  it("refuses a live principal that is not the linked person in this company", async () => {
+    const store = new RecordingStore();
+    await linkLinearAccount(store, { companyId: A, organizationId: WORKSPACE_A.id, linearUserId: "user-maya", personId: MAYA, linkedAt: TIME });
+    const account = { provider: "linear", tenant: "", accountId: "user-maya" };
+    for (const answer of [{ companyId: B, personId: MAYA }, { companyId: A, personId: DEV }]) {
+      const resolve = linearAccountResolver({
+        store, connections: { connection: async () => ({ organizationId: WORKSPACE_A.id, status: "connected" }) as never },
+        principalOf: async () => ({ ...answer, displayName: "x", roles: ["member"], provider: "hosted" }),
+      });
+      expect(await resolve(A, account)).toBeUndefined();
+    }
+  });
 });
 
 describe("Linear app events start work on hosted Code", () => {
@@ -206,6 +220,35 @@ describe("Linear app events start work on hosted Code", () => {
     expect(w.starts).toEqual([]);
     expect(w.logs.some((e) => e.event === "linear.intake_not_wired" && e.companyId === A)).toBe(true);
     expect(await listWaitingIntakeItems({ store: w.store, now: () => w.now }, A, "alpha")).toEqual([]);
+  });
+});
+
+describe("the hosted intake's own checks", () => {
+  it("start and dismiss refuse a presser the identity does not vouch for as that person in that company, and a malformed ticket id", async () => {
+    const store = new RecordingStore();
+    let answer: Principal | undefined;
+    const started: string[] = [];
+    const intake = createHostedIntake({
+      connections: { connection: async () => undefined }, fenceKey: intakeFenceKeyOf("k"), now: () => Date.parse(TIME), log: () => undefined,
+      companyFor: async () => ({
+        store, identity: { getPrincipal: async () => answer }, access: { checkStart: async () => ({ allowed: true }) },
+        flow: { start: (async () => { started.push("x"); return { task: { taskId: randomUUID() } }; }) as never }, audit: { record: async () => undefined },
+      }),
+    });
+    // A real waiting ticket (an outsider's), so a refused dismiss is the presser check and not a missing item.
+    const ports = await intake.intakeFor(A);
+    await ingestIntake(ports!, { orgId: A, project: "alpha", channel: "tracker", externalRef: { system: "linear", id: "ENG-9", url: "https://linear.app/acme/issue/ENG-9/x" }, title: "t", actor: { kind: "unknown" } });
+    const item = intakeItemIdOf("linear", "ENG-9");
+    expect((await listWaitingIntakeItems({ store, now: () => Date.parse(TIME) }, A, "alpha")).map((entry) => entry.itemId)).toEqual([item]);
+    for (const wrong of [undefined, { companyId: B, personId: DEV }, { companyId: A, personId: MAYA }]) {
+      answer = wrong === undefined ? undefined : { ...wrong, displayName: "x", roles: ["admin"], provider: "hosted" };
+      expect(await intake.start(A, "alpha", item, DEV)).toEqual({ outcome: "forbidden" });
+      expect(await intake.dismiss(A, "alpha", item, DEV)).toBe(false);
+    }
+    answer = { companyId: A, personId: DEV, displayName: "x", roles: ["admin"], provider: "hosted" };
+    for (const bad of ["A".repeat(32), "a".repeat(31), "../x"]) expect(await intake.start(A, "alpha", bad, DEV)).toEqual({ outcome: "not_found" });
+    expect(started).toEqual([]);
+    expect(await intake.dismiss(A, "alpha", item, DEV)).toBe(true);
   });
 });
 
@@ -297,6 +340,18 @@ describe("waiting-ticket routes", () => {
       expect([answer.status, (answer.body.error as { message: string }).message]).toEqual([404, INTAKE_NO_TICKET]);
       expect(JSON.stringify(answer.body)).not.toContain(id);
     }
+  });
+
+  it("re-reads the membership row itself: a revoked row, or a row in another company than the reader said, is asked to sign in again", async () => {
+    const w = await waitingWorld();
+    w.as(PERSON);
+    w.h.deps.companies = { companyOf: async () => A };
+    w.h.db.set({ ...membershipKey(PERSON), entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId: A, role: "admin", joinedAt: TIME, revokedAt: TIME });
+    expect((await w.call("GET", list())).status).toBe(401);
+    w.h.db.set({ ...membershipKey(PERSON), entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId: B, role: "admin", joinedAt: TIME });
+    expect((await w.call("GET", list())).status).toBe(401);
+    w.h.db.set({ ...membershipKey(PERSON), entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId: A, role: "admin", joinedAt: TIME });
+    expect((await w.call("GET", list())).status).toBe(200);
   });
 
   it("without the core's intake the routes are unknown before anyone is authenticated", async () => {
