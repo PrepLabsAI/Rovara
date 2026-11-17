@@ -15,7 +15,7 @@ describe("the starter copies in the contracts", () => {
     expect(entries).toHaveLength(OWNER_STARTER_IMAGES.length);
     entries.forEach((entry, index) => {
       const starter = OWNER_STARTER_IMAGES[index]!;
-      expect(entry.reference.startsWith(`${REGISTRY}/agentx-staging-test-services/`)).toBe(true);
+      expect(entry.reference.startsWith(`${REGISTRY}/agentx-staging--test-services/`)).toBe(true);
       expect(digestOf(entry.reference)).toBe(digestOf(starter.reference));
       expect(entry).toEqual({ reference: entry.reference, family: starter.family, version: starter.version });
       expect(OwnerListEntrySchema.safeParse(entry).success).toBe(true);

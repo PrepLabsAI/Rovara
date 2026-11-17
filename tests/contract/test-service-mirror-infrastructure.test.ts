@@ -43,13 +43,16 @@ describe("the test service starter copies (DEC 254zm)", () => {
   it("names five repositories, one per starter, from the starter list's own digests", () => {
     const mirrors = testServiceMirrorRepositories("staging");
     expect(mirrors.map((mirror) => mirror.repositoryName)).toEqual([
-      "agentx-staging-test-services/postgres-16/postgres", "agentx-staging-test-services/postgres-17/postgres", "agentx-staging-test-services/mysql-8/mysql",
-      "agentx-staging-test-services/redis-7/redis", "agentx-staging-test-services/mongo-7/mongo",
+      "agentx-staging--test-services/postgres-16/postgres", "agentx-staging--test-services/postgres-17/postgres", "agentx-staging--test-services/mysql-8/mysql",
+      "agentx-staging--test-services/redis-7/redis", "agentx-staging--test-services/mongo-7/mongo",
     ]);
     expect(mirrors.map((mirror) => `sha256:${mirror.digest}`)).toEqual(OWNER_STARTER_IMAGES.map((image) => image.reference.slice(image.reference.indexOf("@") + 1)));
     expect(mirrors.map((mirror) => mirror.tag)).toEqual(OWNER_STARTER_IMAGES.map((image) => `${image.version}-${image.reference.slice(image.reference.indexOf("@sha256:") + 8, image.reference.indexOf("@sha256:") + 20)}`));
     // Outside the environment's ECR pull-through prefix (`agentx-<env>/`), which the worker role may import into and create repositories under.
     for (const mirror of mirrors) expect(mirror.repositoryName.startsWith(`${environmentPullThroughPrefix("staging")}/`)).toBe(false);
+    // Nor any other environment's: the double hyphen is in no environment name, so `agentx-<other env>/` never matches.
+    for (const mirror of mirrors) expect(mirror.repositoryName.split("/")[0]).toBe("agentx-staging--test-services");
+    expect(() => environmentPullThroughPrefix("staging--test-services")).toThrow();
     expect(() => testServiceMirrorRepositories("Staging")).toThrow();
     expect(() => testServiceMirrorRepositories("")).toThrow();
   });

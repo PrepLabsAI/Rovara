@@ -81,6 +81,8 @@ ts_address_pools() {
   printf '{"data-root": "%s", "default-address-pools": %s}\n' "$DOCKER_DATA_ROOT" "$pools" >/etc/docker/daemon.json || { mv -f /etc/docker/daemon.json.before-test-services /etc/docker/daemon.json; return 1; }
   if systemctl restart docker.service; then rm -f /etc/docker/daemon.json.before-test-services; bash /usr/local/libexec/rovara-container-firewall; return; fi
   mv -f /etc/docker/daemon.json.before-test-services /etc/docker/daemon.json
+  # The failed restart may have tripped systemd's start limit; clear it so the restart on the original file is not refused.
+  systemctl reset-failed docker.service 2>/dev/null || true
   systemctl restart docker.service && bash /usr/local/libexec/rovara-container-firewall
   return 1
 }
@@ -88,7 +90,7 @@ ts_address_pools() {
 # The install's copies, as the worker image names them. Fixed form only, at most TS_MAX_IMAGES; anything else is none.
 ts_mirror_references() {
   local registry=$1 environment=$2 line count=0 pattern
-  pattern="^${registry//./\\.}/agentx-${environment}-test-services/[a-z0-9]+-[0-9]{1,3}/[a-z0-9]+@sha256:[a-f0-9]{64}\$"
+  pattern="^${registry//./\\.}/agentx-${environment}--test-services/[a-z0-9]+-[0-9]{1,3}/[a-z0-9]+@sha256:[a-f0-9]{64}\$"
   timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
     --entrypoint node "$AGENTX_WORKER_IMAGE" "$TS_CLI" refs "$registry" "$environment" 2>/dev/null | while IFS= read -r line; do
     count=$((count + 1))

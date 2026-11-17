@@ -181,6 +181,9 @@ describe("the test-services stage on a worker", () => {
     expect(readFileSync(h.daemon, "utf8")).toBe('{"data-root": "/mnt/workspace/.docker"}\n');
     expect(existsSync(`${h.daemon}.before-test-services`)).toBe(false);
     expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(2);
+    const log = calls(h);
+    expect(log.indexOf("systemctl reset-failed docker.service")).toBeGreaterThan(log.indexOf("systemctl restart docker.service"));
+    expect(log.indexOf("systemctl reset-failed docker.service")).toBeLessThan(log.lastIndexOf("systemctl restart docker.service"));
     expect(envLines(h)).toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
     expect(calls(h).some((line) => line.startsWith("docker pull"))).toBe(false);
   });
@@ -193,7 +196,7 @@ describe("the test-services stage on a worker", () => {
   });
 
   it("takes only references of the fixed form for THIS registry and environment, and with none it changes nothing on the host", () => {
-    const h = host({ refs: [`docker.io/library/postgres@sha256:${"1".repeat(64)}`, `${REGISTRY}/agentx-prod-test-services/postgres-16/postgres@sha256:${"2".repeat(64)}`, `${REGISTRY}/agentx-staging-test-services/postgres-16/postgres:16`, `999988887777.dkr.ecr.us-west-2.amazonaws.com/agentx-staging-test-services/postgres-16/postgres@sha256:${"3".repeat(64)}`] });
+    const h = host({ refs: [`docker.io/library/postgres@sha256:${"1".repeat(64)}`, `${REGISTRY}/agentx-prod--test-services/postgres-16/postgres@sha256:${"2".repeat(64)}`, `${REGISTRY}/agentx-staging--test-services/postgres-16/postgres:16`, `999988887777.dkr.ecr.us-west-2.amazonaws.com/agentx-staging--test-services/postgres-16/postgres@sha256:${"3".repeat(64)}`] });
     expect(runStage(h).status).not.toBe(0);
     expect(envLines(h)).toEqual(["AWS_REGION=us-west-2", "AGENTX_SANDBOX_IMAGE=x"]);
     expect(readFileSync(h.daemon, "utf8")).toBe('{"data-root": "/mnt/workspace/.docker"}\n');
@@ -201,7 +204,7 @@ describe("the test-services stage on a worker", () => {
   });
 
   it("takes at most eight references, whatever the worker image prints", () => {
-    const many = Array.from({ length: 12 }, (_, index) => `${REGISTRY}/agentx-staging-test-services/postgres-${String(index + 10)}/postgres@sha256:${String(index % 10).repeat(64)}`);
+    const many = Array.from({ length: 12 }, (_, index) => `${REGISTRY}/agentx-staging--test-services/postgres-${String(index + 10)}/postgres@sha256:${String(index % 10).repeat(64)}`);
     const h = host({ refs: many });
     expect(runStage(h).status).toBe(0);
     expect(readFileSync(h.pulled, "utf8").trim().split("\n")).toHaveLength(8);
