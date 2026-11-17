@@ -1,4 +1,5 @@
 import { SlackWorkspaceScopeSchema } from "@agentx/contracts";
+import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
 import { handleSlackInstallRequest, slackInstallSecretsFromSecretsManager } from "./slack-install-identity.js";
 import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
@@ -229,7 +230,7 @@ export function stepUpFromEnvironment(env: NodeJS.ProcessEnv, issuer: string, se
 
 let built: ReturnType<typeof createDeveloperIdentityHandler> | undefined;
 
-export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, workspaces?: SlackCallerWorkspaces): ReturnType<typeof createDeveloperIdentityHandler> {
+export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, workspaces?: SlackCallerWorkspaces, legacyTeamId?: string): ReturnType<typeof createDeveloperIdentityHandler> {
   const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
   const config = developerIdentityConfigFromEnvironment(env);
   const secrets = new SecretsManagerClient(region);
@@ -269,7 +270,7 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       ...(oidc === undefined ? {} : { oidc }),
     },
     directory,
-    ...(workspaces === undefined ? {} : { directoryForWorkspace: createWorkspaceSlackDirectory({ legacy: directory, workspaces, fetch, now }) }),
+    ...(workspaces === undefined ? {} : { directoryForWorkspace: createWorkspaceSlackDirectory({ legacy: directory, workspaces, fetch, now, ...(legacyTeamId === undefined ? {} : { legacyTeamId }) }) }),
     now,
     log,
     ...stepUpOf(stepUpFromEnvironment(env, config.issuer, () => new SESv2Client(region), log)),
@@ -289,7 +290,7 @@ function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Para
 
 export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
   | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SlackInstallInvoke) => {
-  built ??= createAwsDeveloperIdentityHandler(process.env);
+  built ??= identityFromEnvironment(process.env);
   return built(event);
 };
 
@@ -297,12 +298,18 @@ export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | Ta
 export function createWorkspaceSlackDirectory(options: {
   legacy: ReturnType<typeof slackDirectory>;
   workspaces?: SlackCallerWorkspaces;
+  /**
+   * L2-2 PR 18c: the install's team, and a request naming no workspace, keep today's answer exactly. Company mode needs company sign-in, and with company sign-in on and no
+   * company directory today's DeveloperIdentity answers every directory read "slack_unavailable" (server.ts); refusing here gives that same answer.
+   */
+  legacyTeamId?: string;
   fetch: typeof fetch;
   now(): number;
 }) {
   const cache = new Map<string, ReturnType<typeof slackDirectory>>();
   return async (value: unknown): Promise<ReturnType<typeof slackDirectory>> => {
     if (options.workspaces === undefined) return options.legacy;
+    if (options.legacyTeamId !== undefined && (value === undefined || (value !== null && typeof value === "object" && (value as { teamId?: unknown }).teamId === options.legacyTeamId))) throw new SlackWorkspaceRefused();
     const workspaces = options.workspaces;
     try {
       const parsed = SlackWorkspaceScopeSchema.safeParse(value);
@@ -317,4 +324,12 @@ export function createWorkspaceSlackDirectory(options: {
       return directory;
     } catch { throw new SlackWorkspaceRefused(); }
   };
+}
+
+/** L2-2 PR 18c: with Slack company mode on (slack-company-wiring.ts), the company directory for other teams; off, today's handler. */
+function identityFromEnvironment(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentityHandler> {
+  const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
+  const dynamo = new DynamoDBClient(region);
+  const wiring = slackCompanyDependenciesFromEnvironment(env, { documentClient: DynamoDBDocumentClient.from(dynamo), dynamo, secrets: new SecretsManagerClient(region) });
+  return wiring === undefined ? createAwsDeveloperIdentityHandler(env) : createAwsDeveloperIdentityHandler(env, wiring.workspaces, wiring.legacyTeamId);
 }

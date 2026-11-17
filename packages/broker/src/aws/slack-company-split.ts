@@ -71,9 +71,9 @@ export function slackCompanyServes(event: unknown, legacyTeamId: string | undefi
 }
 
 /** The legacy view of the broker's dependencies: everything as given, without the company path. */
-export function withoutSlackCompanyMode<T extends { workspaces?: unknown; slackInstallTeamOnly?: string }>(dependencies: T, installTeamId?: string): T {
-  const { workspaces: _company, ...legacy } = dependencies;
-  void _company;
+export function withoutSlackCompanyMode<T extends { workspaces?: unknown; slackCompanies?: unknown; slackInstallTeamOnly?: string }>(dependencies: T, installTeamId?: string): T {
+  const { workspaces: _company, slackCompanies: _members, ...legacy } = dependencies;
+  void _company; void _members;
   // Defence in depth: in this view another team's channel binding is "not bound" (slackCompanyProject), whatever route names it.
   return (installTeamId === undefined ? legacy : { ...legacy, slackInstallTeamOnly: installTeamId }) as T;
 }
@@ -104,4 +104,78 @@ export function companyThenInstallLinkCodes<R>(company: LinkCodes, install: { pr
 /** The install's unscoped adapter codes, exactly as the legacy handler serves them (channel-links.ts), for companyThenInstallLinkCodes. */
 export function installAdapterLinkCodes(links: ChannelLinkDependencies) {
   return { preview: (code: string) => previewLinkCode(links, code), redeem: (personId: string, code: string) => redeemLinkCode(links, personId, code) };
+}
+
+/**
+ * L2-2 PR 18c: the team a Slack Lambda event names. Slack's own HTTP requests: the Events API's `team_id`, an interactivity payload's `team.id` (or its user's `team_id`), a
+ * slash command's `team_id`. The Lambda's own hand-offs: `thread.teamId`, `teamId`, or a handed-off message's `actor.tenant`. `{ named: false }` when the event carries no team
+ * field at all (url_verification, the channel API's adapter paths); a present but unreadable value is still named (team undefined), so it never reaches today's handler.
+ */
+export function slackIngressTeam(event: unknown): { named: false } | { named: true; team: string | undefined } {
+  if (event === null || typeof event !== "object" || Array.isArray(event)) return { named: false };
+  const value = event as { requestContext?: unknown; body?: unknown; isBase64Encoded?: unknown; thread?: unknown; teamId?: unknown; message?: unknown; event?: unknown };
+  // Every team field present is collected; today's handler serves the event only if all of them name the install's team (a missing field is fine).
+  const found: unknown[] = [];
+  const object = (candidate: unknown): Record<string, unknown> | undefined => (candidate !== null && typeof candidate === "object" && !Array.isArray(candidate) ? candidate as Record<string, unknown> : undefined);
+  const field = (record: Record<string, unknown> | undefined, name: string) => { if (record !== undefined && name in record) found.push(record[name]); };
+  const nested = (record: Record<string, unknown> | undefined, name: string, inner: string) => {
+    if (record === undefined || !(name in record)) return;
+    const child = object(record[name]);
+    if (child === undefined) found.push(undefined); else field(child, inner);
+  };
+  const answer = (): { named: false } | { named: true; team: string | undefined } => {
+    if (found.length === 0) return { named: false };
+    const first = found[0];
+    return { named: true, team: typeof first === "string" && found.every((team) => team === first) ? first : undefined };
+  };
+  if (value.requestContext === undefined) {
+    // The Lambda's own hand-offs: thread.teamId, teamId, a handed-off message's actor.tenant (and conversation.tenant), a /rovara hand-off's event.teamId.
+    const record = value as Record<string, unknown>;
+    nested(record, "thread", "teamId");
+    field(record, "teamId");
+    const message = object(value.message);
+    nested(message, "actor", "tenant");
+    nested(message, "conversation", "tenant");
+    nested(record, "event", "teamId");
+    return answer();
+  }
+  if (value.body === undefined || value.body === null || value.body === "") return { named: false };
+  if (typeof value.body !== "string" || value.body.length > 1_048_576) return { named: true, team: undefined };
+  const body = value.isBase64Encoded === true ? Buffer.from(value.body, "base64").toString("utf8") : value.body;
+  const fromObject = (parsed: unknown) => {
+    const record = object(parsed);
+    if (record === undefined) return { named: true as const, team: undefined };
+    // Slack: the event's workspace, each authorization's installation, the context team; interactivity's team and user team. The channel API: the tenant fields.
+    field(record, "team_id");
+    field(record, "context_team_id");
+    if ("authorizations" in record) {
+      const list = record.authorizations;
+      if (!Array.isArray(list)) found.push(undefined);
+      else for (const entry of list) { const item = object(entry); if (item === undefined) found.push(undefined); else field(item, "team_id"); }
+    }
+    nested(record, "team", "id");
+    nested(record, "user", "team_id");
+    field(record, "tenant");
+    nested(record, "conversation", "tenant");
+    nested(record, "to", "tenant");
+    return answer();
+  };
+  if (/^\s*[[{]/u.test(body)) {
+    try { return fromObject(JSON.parse(body)); } catch { return { named: true, team: undefined }; }
+  }
+  try {
+    const form = new URLSearchParams(body);
+    const payload = form.get("payload");
+    if (payload !== null) return fromObject(JSON.parse(payload));
+    if (form.has("team_id")) found.push(form.get("team_id"));
+    return answer();
+  } catch { return { named: true, team: undefined }; }
+}
+
+/** The Slack Lambda's two handlers. Fail closed: only an event naming no team, or exactly the install's team in every field, reaches today's handler. */
+export function splitBySlackIngressTeam<E, R>(legacy: (event: E) => R, company: (event: E) => R, legacyTeamId: string): (event: E) => R {
+  return (event) => {
+    const found = slackIngressTeam(event);
+    return (found.named && found.team !== legacyTeamId ? company : legacy)(event);
+  };
 }

@@ -953,6 +953,9 @@ export class ControlPlaneStack extends Stack {
         ]);
         fn.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
       }
+      // L2-2 PR 18c: the Slack Lambda's company factory needs the environment's name (the token path) and the install's team (always the legacy path); "" while off.
+      slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
       addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.parameter.valueAsString);
     }
     if (taskParameters !== undefined) {

@@ -10,7 +10,7 @@ type Template = { Parameters?: Record<string, unknown>; Conditions?: Record<stri
 export const SLACK_COMPANY_POLICIES = ["SlackIngress", "ChannelApi", "DeveloperTaskNotifier", "DeveloperIdentity", "SlackIngressMembers", "ChannelApiMembers", "SessionReconciler", "SlackOrchestrator"] as const;
 /** Each consumer function's logical-id prefix and the variables the switch adds to it. */
 const VARIABLES: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
-  [/^SlackIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME"]],
+  [/^SlackIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME", "AGENTX_ENV", "SLACK_TEAM_ID"]],
   [/^ChannelApiIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME"]],
   [/^DeveloperTaskNotifierFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES"]],
   [/^DeveloperSignInFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME"]],

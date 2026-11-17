@@ -141,6 +141,9 @@ describe("Slack company mode's switch (18a)", () => {
       expect(variablesOf(named, fn).SLACK_COMPANY_WORKSPACES, fn).toStrictEqual(off("enabled"));
     }
     expect(variablesOf(named, "DeveloperSignInFunction").STATE_TABLE_NAME).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] }, ""] });
+    // 18c: the Slack Lambda's factory inputs, "" while off.
+    expect(variablesOf(named, "SlackIngress").AGENTX_ENV).toStrictEqual({ "Fn::If": [on, "staging", ""] });
+    expect(variablesOf(named, "SlackIngress").SLACK_TEAM_ID).toStrictEqual({ "Fn::If": [on, { Ref: "SlackTeamId" }, ""] });
     for (const fn of ["SlackIngress", "ChannelApiIngress"]) {
       expect(variablesOf(named, fn).DEVELOPER_SIGNIN_TABLE_NAME, fn).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "DeveloperSignInTable", "AWS::DynamoDB::Table")[0] }, ""] });
     }

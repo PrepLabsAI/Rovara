@@ -4,6 +4,7 @@ import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-ba
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
+import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
 import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
@@ -582,6 +583,8 @@ interface CodeBuildRecord {
 interface AwsBrokerDependencies {
   workspaces?: SlackWorkspaceAccess;
   companies?: CompanyMembershipReader;
+  /** L2-2 PR 18c: the membership reader Slack company mode brings (slack-company-wiring.ts); given only to the company handler, never to the install team's legacy handler. */
+  slackCompanies?: CompanyMembershipReader;
   /** Install workspace for the additive operator backfill; independent of sign-in being enabled. */
   slackWorkspaceLegacyTeamId?: string;
   /** Guided onboarding PR 4: Add to Slack's wiring (named environments with the company layer); absent, a Slack removal event is refused. */
@@ -996,7 +999,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   }
   // L2-2 PR 18b (slack-company-split.ts): without `workspaces` (Slack company mode off) this is today's handler, unchanged. With it, SLACK_TEAM_ID's team and every request
   // naming no team get a handler built without `workspaces` (today's legacy path); every other team gets the company path.
-  const company = dependencies.workspaces === undefined ? undefined : brokerEventHandler(core, dependencies);
+  const company = dependencies.workspaces === undefined ? undefined
+    : brokerEventHandler(core, { ...dependencies, ...(dependencies.companies === undefined && dependencies.slackCompanies !== undefined ? { companies: dependencies.slackCompanies } : {}) });
   return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : withoutSlackCompanyMode(dependencies, dependencies.slackWorkspaceLegacyTeamId ?? "")), company, dependencies.slackWorkspaceLegacyTeamId);
 }
 
@@ -1019,6 +1023,8 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         return json({ error: "core_event_failed" }, "core-engine", 500);
       }
     }
+    // L2-2 PR 18c: the Slack Lambda (no State write, #126) asks for an unlinked person's link notice; only the company handler has `workspaces`, so the install's team is refused.
+    if (dependencies.workspaces !== undefined && isSlackLinkNoticeEvent(event)) return json(await answerSlackLinkNotice(dependencies, event), "slack-link-notice");
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (dependencies.workspaces !== undefined) return json({ error: { code: "FORBIDDEN", message: SLACK_WEB_SIGNIN_NOTICE } }, "slack-ingress", 403);
@@ -15413,8 +15419,13 @@ const chatgpt = chatGptKeyArn === undefined || chatGptKeyArn === "" ? undefined 
 const cloudWatch = new CloudWatchClient(awsClientConfiguration);
 const sqs = new SQSClient(awsClientConfiguration);
 
+// L2-2 PR 18c: Slack company mode (both switches on, slack-company-wiring.ts); off, nothing is added and the broker is today's.
+const slackCompany = slackCompanyDependenciesFromEnvironment(process.env, { documentClient, dynamo: dynamoClient, secrets: secretsManager,
+  ...(process.env.DEVELOPER_TOKEN_ISSUER ? { linkOrigin: process.env.DEVELOPER_TOKEN_ISSUER } : {}) });
+
 export const handler = createAwsBrokerHandler({
   core: coreRoot,
+  ...(slackCompany === undefined ? {} : { workspaces: slackCompany.workspaces, ...(slackCompany.companies === undefined ? {} : { slackCompanies: slackCompany.companies }) }),
   ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
   ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
   ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
