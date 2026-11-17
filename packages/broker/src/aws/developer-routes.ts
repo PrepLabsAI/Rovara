@@ -132,6 +132,8 @@ export interface DeveloperApiConfiguration {
   coreTasks?: CoreTaskEntry;
   /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only while the core switch serves. Absent: every /v1/app/* path answers "route not found", reading nothing. */
   coreApp?: CoreAppEntry;
+  /** Guided onboarding PR 16: whether archiving this company's project takes effect (its new tasks start on the core engine, which reads the archived state). Absent: an archive is refused. */
+  projectArchiveTakesEffect?: (companyId: string) => boolean;
   /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */
   taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
   taskChannelPeople?: (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse>;
@@ -1164,6 +1166,7 @@ async function routeClientLifecycle(deps: DeveloperRouteDependencies, request: A
     documentClient: deps.documentClient, tableName: deps.tableName, now: deps.now,
     membershipOf: async (personId) => await reader.membershipOf!(personId),
     grantRole: async (personId, project) => (await projectGrant(memberActions(deps), project, personId))?.role,
+    archiveTakesEffect: (companyId) => deps.developer.projectArchiveTakesEffect?.(companyId) === true,
     linkedSlackChannels: async (companyId, project) => (await bindingsOf(deps, undefined, companyId)).filter((binding) => binding.projectName === project).length,
   }, { personId: person.developerId, project: rawProject, action, body: request.body });
 }

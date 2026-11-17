@@ -6,7 +6,7 @@ import { AgentXError, IMPLICIT_COMPANY_ID, ReviewedProjectArchiveOutcomeSchema, 
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { LIFECYCLE_BODY, LIFECYCLE_NOT_ALLOWED, LIFECYCLE_STALE, LIFECYCLE_UNREADABLE, lifecycleAccess, lifecycleAuditPrefix, lifecycleRequestKey, routeProjectLifecycle } from "../../packages/broker/src/aws/project-lifecycle-routes.js";
+import { ARCHIVE_NOT_ON_ENGINE, LIFECYCLE_BODY, LIFECYCLE_NOT_ALLOWED, LIFECYCLE_STALE, LIFECYCLE_UNREADABLE, lifecycleAccess, lifecycleAuditPrefix, lifecycleRequestKey, routeProjectLifecycle } from "../../packages/broker/src/aws/project-lifecycle-routes.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { definition } from "../support/task-flow-harness.js";
@@ -25,7 +25,7 @@ const P = (action: string, project = "alpha") => `/v1/dev/client/projects/${proj
 const archiveBody = (over: Record<string, unknown> = {}) => ({ requestId: REQUEST, expectedRevision: 0, expectedProjectRevision: 1, acknowledgeNewWorkStops: true, ...over });
 const restoreBody = (over: Record<string, unknown> = {}) => ({ requestId: OTHER_REQUEST, expectedRevision: 1, expectedProjectRevision: 1, acknowledgeNewWorkAllowed: true, ...over });
 
-function harness(options: { companies?: boolean; fullAccess?: boolean } = {}) {
+function harness(options: { companies?: boolean; fullAccess?: boolean; engine?: boolean } = {}) {
   const db = new FakeDynamoDb({ seed: 5 });
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: ADA, sid: "s-ada", amr: "slack" };
   db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), ...(options.fullAccess === false ? {} : { fullAccess: true }), createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
@@ -43,6 +43,7 @@ function harness(options: { companies?: boolean; fullAccess?: boolean } = {}) {
     developer: {
       issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true,
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
+      ...(options.engine === false ? {} : { projectArchiveTakesEffect: (companyId: string) => companyId === A || companyId === B || companyId === IMPLICIT_COMPANY_ID }),
     },
   };
   const jwt = () => { const part = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url"); return `Bearer ${part({ alg: "none" })}.${part(claims)}.sig`; };
@@ -54,7 +55,7 @@ function harness(options: { companies?: boolean; fullAccess?: boolean } = {}) {
     }
   };
   const as = (id: string, sid: string) => { claims.sub = id; claims.sid = sid; };
-  const meta = (companyId: string, name = "alpha") => db.get(projectMetaKey(companyId as never, name).pk, "META");
+  const meta = (companyId: string, name = "alpha") => db.get(projectMetaKey(companyId, name).pk, "META");
   return { db, claims, deps, call, as, join, project, grant, meta };
 }
 const error = (code: string, message: string) => ({ error: { code, message } });
@@ -118,7 +119,7 @@ describe("who may archive and restore", () => {
     const h = harness(); h.join(ADA, A, "member"); h.project("alpha", A); h.grant(ADA, "alpha", "developer");
     const refused = { status: 403, body: error("FORBIDDEN", LIFECYCLE_NOT_ALLOWED) };
     expect(await h.call("POST", P("archive"), archiveBody())).toEqual(refused);
-    h.db.set({ ...projectMetaKey(A as never, "alpha"), entityType: "PROJECT_META", status: "archived", lifecycleRevision: 1 });
+    h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", status: "archived", lifecycleRevision: 1 });
     expect(await h.call("POST", P("restore"), restoreBody())).toEqual(refused);
     expect(h.meta(A)).toMatchObject({ status: "archived", lifecycleRevision: 1 });
   });
@@ -193,11 +194,44 @@ describe("who may archive and restore", () => {
 });
 
 describe("archiving and restoring", () => {
+  it("refuses an archive where the company's tasks don't run on the engine that honours it; a restore still works", async () => {
+    for (const engine of [false, "other-company"] as const) {
+      const h = harness(engine === false ? { engine: false } : {}); h.join(ADA, A, "owner"); h.project("alpha", A);
+      if (engine === "other-company") h.deps.developer.projectArchiveTakesEffect = (companyId) => companyId === B;
+      expect((await h.call("GET", P("archive-preview"))).body).toMatchObject({ status: "active", access: { actions: [] } });
+      expect(await h.call("POST", P("archive"), archiveBody())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", ARCHIVE_NOT_ON_ENGINE) });
+      expect(h.meta(A)).toBeUndefined();
+      h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", status: "archived", lifecycleRevision: 1 });
+      expect((await h.call("GET", P("restore-preview"))).body).toMatchObject({ access: { actions: ["restore"] } });
+      expect((await h.call("POST", P("restore"), restoreBody())).status).toBe(200);
+      expect(h.meta(A)).toMatchObject({ status: "active", lifecycleRevision: 2 });
+    }
+  });
+
+  it("the write's own fences: a change that landed after the read (another archive and restore, or a new project revision) makes this one stale", async () => {
+    for (const between of ["lifecycle", "revision"] as const) {
+      const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
+      const send = h.db.send;
+      let fired = false;
+      h.db.send = async (command) => {
+        if (!fired && command.constructor.name === "TransactWriteCommand") {
+          fired = true;
+          if (between === "lifecycle") h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", status: "active", lifecycleRevision: 2 });
+          else h.project("alpha", A, 2);
+        }
+        return send(command);
+      };
+      expect(await h.call("POST", P("archive"), archiveBody()), between).toEqual({ status: 409, body: error("CHANGE_STALE", LIFECYCLE_STALE) });
+      expect(h.meta(A), between).toEqual(between === "lifecycle" ? expect.objectContaining({ status: "active", lifecycleRevision: 2 }) : undefined);
+      expect(h.db.find((item) => String(item.pk).includes("PROJECT_LIFECYCLE#")), between).toEqual([]);
+    }
+  });
+
   it("archives: new work is refused by the engine, a receipt and an audit row naming the person are kept", async () => {
     const h = harness(); h.join(ADA, A, "admin"); h.project("alpha", A);
-    h.db.set({ ...projectRevisionKey(A as never, "alpha", 1), entityType: "PROJECT", companyId: A, definition: { ...definition, name: "alpha" } });
-    h.db.set({ ...orgProjectCatalogKey(A as never, "alpha"), entityType: "PROJECT_CATALOG", companyId: A, name: "alpha", latestRevision: 1 });
-    const engine = createStoreProjectSource({ get: async (key) => h.db.get(key.pk, key.sk) as never, query: async () => ({ items: [] }) as never }, A as never);
+    h.db.set({ ...projectRevisionKey(A, "alpha", 1), entityType: "PROJECT", companyId: A, definition: { ...definition, name: "alpha" } });
+    h.db.set({ ...orgProjectCatalogKey(A, "alpha"), entityType: "PROJECT_CATALOG", companyId: A, name: "alpha", latestRevision: 1 });
+    const engine = createStoreProjectSource({ get: async (key) => h.db.get(key.pk, key.sk) as never, query: async () => ({ items: [] }) }, A);
     expect(await engine.latest("alpha")).toMatchObject({ definition: { name: "alpha" } });
     expect(await engine.latest("alpha")).not.toHaveProperty("archived");
     const answer = await h.call("POST", P("archive"), archiveBody());
@@ -265,7 +299,7 @@ describe("archiving and restoring", () => {
     const db = new FakeDynamoDb({ seed: 9 });
     db.set({ pk: "PROJECT#alpha", sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "alpha", revision: 1 } });
     for (const membership of [undefined, { companyId: "not-a-company", role: "owner" as const }]) {
-      const ctx = { documentClient: db, tableName: "State", now: () => NOW, membershipOf: async () => membership, grantRole: async () => "administrator" as const, linkedSlackChannels: async () => 0 };
+      const ctx = { documentClient: db, tableName: "State", now: () => NOW, membershipOf: async () => membership, grantRole: async () => "administrator" as const, archiveTakesEffect: () => true, linkedSlackChannels: async () => 0 };
       for (const action of ["archive-preview", "archive"] as const) {
         await expect(routeProjectLifecycle(ctx, { personId: ADA, project: "alpha", action, body: JSON.stringify(archiveBody()) })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
       }
@@ -310,7 +344,7 @@ describe("archiving and restoring", () => {
 
   it("a project state row that does not read is refused whole, never guessed", async () => {
     const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
-    h.db.set({ ...projectMetaKey(A as never, "alpha"), entityType: "PROJECT_META", status: CANARY });
+    h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", status: CANARY });
     for (const answer of [await h.call("GET", P("archive-preview")), await h.call("POST", P("archive"), archiveBody())]) {
       expect(answer).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", LIFECYCLE_UNREADABLE) });
       expect(JSON.stringify(answer)).not.toContain(CANARY);
@@ -319,7 +353,7 @@ describe("archiving and restoring", () => {
 
   it("keeps an earlier row's other fields (a laptop's setup check) when it archives", async () => {
     const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
-    h.db.set({ ...projectMetaKey(A as never, "alpha"), entityType: "PROJECT_META", status: "active", setupCheck: { status: "ready" } });
+    h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", status: "active", setupCheck: { status: "ready" } });
     expect((await h.call("POST", P("archive"), archiveBody())).status).toBe(200);
     expect(h.meta(A)).toMatchObject({ status: "archived", lifecycleRevision: 1, setupCheck: { status: "ready" } });
   });

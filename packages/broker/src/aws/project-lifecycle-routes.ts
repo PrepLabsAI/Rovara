@@ -13,9 +13,10 @@
 //     one all answer the same "project not found".
 //   - What archiving is: the project's engine state row (`projectMetaKey`, the row the core engine already reads) says `archived`. The engine then refuses new work on it
 //     (task start, a task's next round, a setup run, the saved environments). Running tasks stop at their next step; linked Slack channels stay linked and start nothing;
-//     nothing is deleted. Restore sets it back to `active`.
+//     nothing is deleted. Restore sets it back to `active`. Only the core engine reads that row, so an archive is refused for a company whose new tasks the engine switch does not
+//     send to the core (`archiveTakesEffect`): Code never promises a stop it would not enforce. Restore is always allowed.
 //   - One change at a time: each change names the lifecycle revision and the project revision it was previewed at, and is written only while both still hold
-//     (a conditional write). Two changes at once: one wins, the other is stale. A repeat of the same request id by the same person answers its first receipt.
+//     (the state row's condition, and a check that no newer project revision row exists, in the same transaction). Two changes at once: one wins, the other is stale. A repeat of the same request id by the same person answers its first receipt.
 //   - Every change keeps a receipt (by request id) and an audit row naming the person and why they were allowed, in the same transaction, under the company's own keys.
 //   - Bodies are validated at runtime and strictly; every refusal is a fixed sentence that never echoes what was sent.
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
@@ -25,12 +26,14 @@ import {
   type OrgId, type OrgRole, type ReviewedProjectArchiveOutcome, type ReviewedProjectArchivePreview, type ReviewedProjectRestoreOutcome, type ReviewedProjectRestorePreview,
 } from "@agentx/contracts";
 import { recordInCompany } from "./company-check.js";
+import { projectKey } from "./project-records.js";
 
 export const LIFECYCLE_NOT_FOUND = "project not found";
 export const LIFECYCLE_NOT_ALLOWED = "Only company owners and admins, or this project's admins, can archive or restore it.";
 export const LIFECYCLE_BODY = "the request is not valid";
 export const LIFECYCLE_STALE = "The project changed. Review it again before you archive or restore it.";
 export const LIFECYCLE_UNREADABLE = "the project's state could not be read just now; try again";
+export const ARCHIVE_NOT_ON_ENGINE = "Archiving isn't available for this company yet: its tasks don't run on the engine that stops work on an archived project.";
 
 export type LifecycleAction = "archive-preview" | "archive" | "restore-preview" | "restore";
 type Basis = "company-owner" | "company-admin" | "project-admin";
@@ -45,6 +48,8 @@ export interface ProjectLifecycleContext {
   membershipOf(personId: string): Promise<{ companyId: string; role: OrgRole } | undefined>;
   /** The person's grant on the project (by name), whatever company: the project's own company is checked separately. */
   grantRole(personId: string, project: string): Promise<"developer" | "administrator" | undefined>;
+  /** Whether an archive takes effect for the company: its new tasks start on the core engine, the only one that reads the archived state. False: archive is refused (restore stays open). */
+  archiveTakesEffect(companyId: string): boolean;
   /** How many Slack channels of the company are linked to the project. Throws when it cannot be read. */
   linkedSlackChannels(companyId: string, project: string): Promise<number>;
 }
@@ -119,7 +124,7 @@ async function channelsOf(ctx: ProjectLifecycleContext, current: Current): Promi
 async function archivePreview(ctx: ProjectLifecycleContext, current: Current): Promise<ReviewedProjectArchivePreview> {
   return {
     orgId: current.companyId, project: current.project, status: current.status, expectedRevision: current.lifecycleRevision, expectedProjectRevision: current.projectRevision,
-    checkedAt: new Date(ctx.now()).toISOString(), access: { actions: current.access === "manage" && current.status === "active" ? ["archive"] : [] },
+    checkedAt: new Date(ctx.now()).toISOString(), access: { actions: current.access === "manage" && current.status === "active" && ctx.archiveTakesEffect(current.companyId) ? ["archive"] : [] },
     impact: { stopsNewWork: true, stopsRunningTasksAtNextStep: true, linkedSlackChannels: await channelsOf(ctx, current), slackChannelsStayLinked: true, deletesNothing: true },
   };
 }
@@ -146,6 +151,8 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
   };
   const earlier = await readReceipt();
   if (earlier !== undefined) return { receipt: earlier, replayed: true };
+  // An archive the company's engine would not honour is refused rather than promised (restore is always allowed: it only lifts a refusal).
+  if (action === "archive" && !ctx.archiveTakesEffect(current.companyId)) throw agentXError("RUNTIME_UNAVAILABLE", ARCHIVE_NOT_ON_ENGINE);
   const from = action === "archive" ? "active" : "archived";
   const to = action === "archive" ? "archived" : "active";
   if ((body.expectedOrgId !== undefined && body.expectedOrgId !== current.companyId) || body.expectedRevision !== current.lifecycleRevision
@@ -162,6 +169,8 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
     : "lifecycleRevision = :expected AND #status = :from";
   try {
     await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      // The project revision the preview named is still the latest: no newer revision row landed in between.
+      { ConditionCheck: { TableName: ctx.tableName, Key: projectKey(current.project, current.projectRevision + 1), ConditionExpression: "attribute_not_exists(pk)" } },
       { Update: {
         TableName: ctx.tableName, Key: metaKey,
         UpdateExpression: "SET entityType = :entity, companyId = :company, #project = :project, #status = :to, lifecycleRevision = :next, lifecycleChangedAt = :at, lifecycleChangedBy = :person",
