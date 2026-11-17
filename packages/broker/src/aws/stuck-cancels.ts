@@ -416,14 +416,14 @@ export function createCancelRetrier(dependencies: { client: Client; tableName: s
 
 /**
  * The production retryCancel, where the reconciler holds the callback signing key the retried
- * cancel's callbacks are signed with. It holds it in named environments only (#173), so only there
- * is a stuck cancel on a live worker queued again; the legacy reconciler has none, and only logs and
- * counts it.
+ * cancel's callbacks are signed with (read from Secrets Manager by the reconciler before the sweep
+ * starts, so a failed read costs no retry). It holds it in named environments only (#173), so only
+ * there is a stuck cancel on a live worker queued again; the legacy reconciler has none, and only
+ * logs and counts it.
  */
 export function stuckCancelRetrier(
-  environment: Record<string, string | undefined>,
+  callbackSigningKey: string | undefined,
   state: { client: Client; tableName: string },
 ): StuckCancelDependencies["retryCancel"] {
-  const key = environment.CALLBACK_SIGNING_KEY;
-  return key === undefined || key.length === 0 ? undefined : createCancelRetrier({ ...state, callbackSigningKey: key });
+  return callbackSigningKey === undefined || callbackSigningKey.length === 0 ? undefined : createCancelRetrier({ ...state, callbackSigningKey });
 }

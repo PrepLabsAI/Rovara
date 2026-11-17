@@ -223,6 +223,7 @@ describe("the named TEST proof-only installation gate", () => {
     // core-gateway-settings.test.ts and verified: with the variable passed as before, the old pins hold); legacy unchanged.
     // Guided onboarding PR 4 (#836, DEC 254r item 2): named and foreign re-pinned for the sign-in Lambda's one Slack workspace token statement (secretsmanager CreateSecret,
     // PutSecretValue, GetSecretValue on agentx/<env>/slack-workspaces/*; developer-signin-infrastructure.test.ts pins it exactly). Verified: with only that statement removed, the old pins hold; legacy unchanged.
+    // DEC 254za: all six re-pinned for the callback signing key's secret (legacy included): the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables and the dispatcher's conditional read.
     const digestCases = [
       {
         label: "named",
@@ -239,8 +240,8 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "legacy",
         template: legacy,
-        withRoute: "c9cd4a7890c9d0502fa0df7e5e06a28f87c0dba8de4fa439db39c7099874c201",
-        withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
+        withRoute: "4f2ed4957fd06301c6f9875da12ed59f4a53c3a641be42c8728eaedfc2173e43",
+        withoutRoute: "f7dbb84a614daa78c400aa943fa7dd97ab738ae75da0a5f8013e9be15e7f157b",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();

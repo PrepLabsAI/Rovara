@@ -70,8 +70,10 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
     expect(reconciler(named).environment).toMatchObject({
       SLACK_THREADS_TABLE_NAME: { Ref: threadsTableId(named) },
       SLACK_SECRET_ARN: { Ref: slackSecretId(named) },
-      CALLBACK_SIGNING_KEY: { Ref: "CallbackSigningKey" },
+      CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/staging/callback-key",
     });
+    // The key itself is never an environment value; the reconciler reads it by the secret's own policy (callback-signing-key-infrastructure.test.ts), so its role policy is unchanged.
+    expect(reconciler(named).environment).not.toHaveProperty("CALLBACK_SIGNING_KEY");
   });
 
   it("alarms the operator when cancels or the backstop's reads keep failing on two runs in a row", () => {
@@ -92,7 +94,7 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
 
   it("adds none of it to the legacy deployment", () => {
     const { environment, statements } = reconciler(legacy);
-    for (const name of ["BROKER_FUNCTION_NAME", "SLACK_SECRET_ARN", "SLACK_THREADS_TABLE_NAME", "CALLBACK_SIGNING_KEY"]) expect(environment).not.toHaveProperty(name);
+    for (const name of ["BROKER_FUNCTION_NAME", "SLACK_SECRET_ARN", "SLACK_THREADS_TABLE_NAME", "CALLBACK_SIGNING_KEY", "CALLBACK_SIGNING_KEY_SECRET_ID"]) expect(environment).not.toHaveProperty(name);
     expect(JSON.stringify(statements)).not.toContain("SlackThreads");
     expect(actionsOf(statements).filter((action) => action.startsWith("lambda:") || action.startsWith("secretsmanager:"))).toEqual([]);
     expect(backstopAlarms(legacy)).toEqual([]);

@@ -334,10 +334,10 @@ export class SessionLifecycle extends Construct {
    * callbacks with the callback signing key, as the broker does. It reads the thread's activeTurn by
    * key (THREAD# items only) and posts the thread's note with the bot token (the Slack secret alone).
    */
-  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKey: string): void {
+  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKeySecretName: string): void {
     this.reconciler.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
     this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
-    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY", callbackSigningKey);
+    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY_SECRET_ID", callbackSigningKeySecretName);
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({
       sid: "ReadThreadWaiters",
       actions: ["dynamodb:GetItem"],

@@ -66,7 +66,7 @@ function withoutUnwaitedTaskBackstop(template: unknown): unknown {
   expect(threadsId).toBeDefined();
   expect(slackSecretId).toBeDefined();
   expect(topicId).toBeDefined();
-  const added = { SLACK_THREADS_TABLE_NAME: { Ref: threadsId }, SLACK_SECRET_ARN: { Ref: slackSecretId }, CALLBACK_SIGNING_KEY: { Ref: "CallbackSigningKey" } };
+  const added = { SLACK_THREADS_TABLE_NAME: { Ref: threadsId }, SLACK_SECRET_ARN: { Ref: slackSecretId }, CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/staging/callback-key" };
   expect(Object.fromEntries(Object.keys(added).map((name) => [name, variables[name]]))).toStrictEqual(added);
   for (const name of Object.keys(added)) delete variables[name];
   const roleId = (reconciler.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"][0];

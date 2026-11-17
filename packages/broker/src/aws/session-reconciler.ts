@@ -20,6 +20,7 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
+import { callbackSigningKeyWired, loadCallbackSigningKey } from "./callback-signing-key.js";
 import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult, type StuckCancelWorker } from "./stuck-cancels.js";
 import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type SlackThreadPlace, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
@@ -474,15 +475,29 @@ const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined 
  * cancel route's own code, and its callbacks are signed with the callback signing key. Only a named
  * environment's reconciler holds that key (#173), so the legacy one logs and counts it instead.
  */
+/**
+ * The stuck-cancel retry for one sweep. The key is read before the sweep claims any retry, so a retry is never burned on a cancel that could not be signed. A failed read leaves the retry
+ * unavailable (the sweep still ends cancels whose compute is gone, counts the rest as unretried, and logs the error name only): nothing is signed without the key. Where the deployment gives
+ * the reconciler no secret (the legacy template) there is no retry, as before.
+ */
+export async function stuckCancelRetryFor(env: Record<string, string | undefined>, state: { client: typeof documentClient; tableName: string }, log: (entry: Record<string, unknown>) => void): Promise<ReturnType<typeof stuckCancelRetrier>> {
+  if (!callbackSigningKeyWired(env)) return undefined;
+  let callbackSigningKey: string | undefined;
+  try { callbackSigningKey = await loadCallbackSigningKey(env); } catch (error) { log({ event: "reconciler.callback_signing_key_unavailable", errorName: error instanceof Error ? error.name : "unknown" }); }
+  return stuckCancelRetrier(callbackSigningKey, state);
+}
+
 function stuckCancelSweep(workspaces?: SlackCallerWorkspaces, slackLegacyTeamId?: string): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
-  const retryCancel = stuckCancelRetrier(process.env, { client: documentClient, tableName });
   // Issue 202: a Slack thread whose workspace a failed cancel held is told it is free again, where
   // the reconciler holds the Slack secret (#173's backstop, named environments).
   const postNote = backstop.state === "on" ? slackThreadPoster(workspaces, slackLegacyTeamId) : undefined;
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
-  return (candidates, now) => sweepStuckCancels({
-    client: documentClient, tableName, ...(workspaces === undefined ? {} : { workspaces, ...(slackLegacyTeamId === undefined ? {} : { slackLegacyTeamId }) }), ...(retryCancel === undefined ? {} : { retryCancel }), ...(postNote === undefined ? {} : { postNote }), log,
-  }, candidates, now);
+  return async (candidates, now) => {
+    const retryCancel = await stuckCancelRetryFor(process.env, { client: documentClient, tableName }, log);
+    return sweepStuckCancels({
+      client: documentClient, tableName, ...(workspaces === undefined ? {} : { workspaces, ...(slackLegacyTeamId === undefined ? {} : { slackLegacyTeamId }) }), ...(retryCancel === undefined ? {} : { retryCancel }), ...(postNote === undefined ? {} : { postNote }), log,
+    }, candidates, now);
+  };
 }
 
 /**
@@ -493,15 +508,15 @@ function stuckCancelSweep(workspaces?: SlackCallerWorkspaces, slackLegacyTeamId?
  */
 function unwaitedTaskSweep(workspaces?: SlackCallerWorkspaces, slackLegacyTeamId?: string): NonNullable<ReconcilerDependencies["sweepUnwaitedTasks"]> {
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
-  const callbackSigningKey = requiredEnvironment("CALLBACK_SIGNING_KEY");
   const postNote = slackThreadPoster(workspaces, slackLegacyTeamId);
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
-  return (workspaceIds, now) => sweepUnwaitedTasks({
+  // The key is read from Secrets Manager when the sweep runs (cached for the container); a failed read fails the sweep, which the reconciler counts for the UnwaitedTaskFailures alarm.
+  return async (workspaceIds, now) => sweepUnwaitedTasks({
     client: documentClient,
     tableName,
     threadsTableName,
     ...(workspaces === undefined ? {} : { workspaces, ...(slackLegacyTeamId === undefined ? {} : { slackLegacyTeamId }) }),
-    callbackSigningKey,
+    callbackSigningKey: await loadCallbackSigningKey(process.env),
     postNote,
     log,
   }, workspaceIds, now);

@@ -22,7 +22,7 @@ import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
-import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, NO_PEOPLE_HERE, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
+import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, NO_PEOPLE_HERE, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
@@ -745,11 +745,11 @@ export const handler = withCoreDispatch(workflowHandler, {
   coreQueueArn: coreDispatchQueueArn(process.env),
   serves: () => coreEngineServes(readCoreEngineFlags(process.env)),
   host: () => {
-    coreDispatch ??= Promise.resolve().then(() => {
+    coreDispatch ??= loadCallbackSigningKey(process.env).then((callbackSigningKey) => {
       const sqs = new SQSClient(awsClientConfiguration);
       const queueUrl = process.env[CORE_DISPATCH_QUEUE_URL_VARIABLE] ?? "";
       return createDispatcherCoreHost({
-        env: process.env,
+        env: process.env, callbackSigningKey,
         documentClient,
         clients: { dynamo: new DynamoDBClient(awsClientConfiguration), sqs, s3: new S3Client(awsClientConfiguration) },
         machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker },
