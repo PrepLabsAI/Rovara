@@ -224,6 +224,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/stop", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
+  // Wiki W0: a project's free file map (code host listings only: no model call, nothing spent or stored): full access only, then a live company owner or admin, or the project's administrator, to make one;
+  // any person with a role on the project reads a kept one.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

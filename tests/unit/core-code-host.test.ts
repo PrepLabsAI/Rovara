@@ -153,6 +153,9 @@ function scopedCalls(provider: GitHubCodeHostProvider, url: string, scope: unkno
     ["findLessonsPullRequest", () => provider.findLessonsPullRequest!(url, "rovara/lessons/x", s)],
     ["deleteLessonsBranch", () => provider.deleteLessonsBranch!(url, "rovara/lessons/x", s)],
     ["listTreeAtCommit", () => provider.listTreeAtCommit!(url, sha, s)],
+    // Wiki W0: the file map's two other listings.
+    ["listDirectoryAtCommit", () => provider.listDirectoryAtCommit!(url, "", sha, s)],
+    ["listCommitActivity", () => provider.listCommitActivity!(url, sha, s, { since: "2026-08-01T00:00:00Z", cap: 5 })],
     ["getPullRequestFileRevisions", () => provider.getPullRequestFileRevisions!(url, 1, s)],
     ["getCommitChanges", () => provider.getCommitChanges!(url, sha, s)],
     ["getCompareChanges", () => provider.getCompareChanges!(url, sha, "b".repeat(40), s)],

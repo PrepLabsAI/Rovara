@@ -56,6 +56,7 @@ import type { CoreRuntime } from "./core-runtime.js";
 import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
 import type { AgentModelChoice } from "./gateway-model-selection.js";
 import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
+import { isWikiMapPath, routeHostedWikiMap, type HostedWikiMapWiring } from "./wiki-map-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -146,6 +147,8 @@ export interface CoreDevWiring {
   auditFor?: (caller: DeployedCaller, sink: AuditSink) => AuditSink;
   /** Guided onboarding L2-3: the hosted setup run (`/v1/app/projects/<p>/setup-agent...`, setup-run-routes.ts). Absent: those paths say "not on the core yet". */
   setupRun?: HostedSetupRunWiring;
+  /** Wiki W0: the free file map (`/v1/app/projects/<p>/wiki-map`, wiki-map-routes.ts). Absent: that path says "not on the core yet". */
+  wikiMap?: HostedWikiMapWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -171,7 +174,7 @@ function owns(path: string, method: string): boolean {
   if (TASK_READ.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path)) return method === "GET";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
-  if (isSetupRunPath(path, method)) return true;
+  if (isSetupRunPath(path, method) || isWikiMapPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -384,6 +387,11 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
           });
+        }
+        if (isWikiMapPath(path, request.method)) {
+          // Wiki W0: the company's own runtime, the caller's live standing on the project (read inside), the company's code host.
+          if (target.wiring.wikiMap === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedWikiMap({ request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.wikiMap, now: () => nowOf(target), log: options.log });
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {
