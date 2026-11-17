@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   SlackTeamIdSchema,
-  agentXError, type StoredDocument,
+  agentXError,
   type TaskPersonProofRequest,
   type TaskPersonProofResponse,
 } from "@agentx/contracts";
@@ -14,12 +14,12 @@ import {
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../developer/task-person-identity.js";
-import { readProjectAuthority, type ProjectAuthorityReader, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
+import { evaluateProjectAuthority, readProjectAuthority, type ProjectAuthorityReader, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import { META, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
-import { companyMembershipFromStore, membershipKey } from "./company-check.js";
+import { membershipKey, strictLiveMembership } from "./company-check.js";
 
 export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
   "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
@@ -171,29 +171,29 @@ function identityDependencies(input: {
     ...(ports.readCompanyMembership === undefined ? {} : { companyMembership: async (targetDeveloperId: string) => {
       if (targetDeveloperId !== developerId || ports.readCompanyMembership === undefined) throw unavailable();
       const key = membershipKey(targetDeveloperId);
-      const reader = companyMembershipFromStore({
-        get: async (requested) => {
-          if (requested.pk !== key.pk || requested.sk !== key.sk) throw unavailable();
-          admission.assertOpen();
-          const item = await ports.readCompanyMembership!({
-            developerId: targetDeveloperId,
-            consistentRead: true,
-            projection: TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES,
-            abortSignal: admission.admitStateRead(),
-          });
-          admission.assertOpen();
-          if (item === undefined) return undefined;
-          if (item.pk !== key.pk || item.sk !== key.sk) throw unavailable();
-          return item as unknown as StoredDocument;
-        },
+      admission.assertOpen();
+      const item = await ports.readCompanyMembership({
+        developerId: targetDeveloperId,
+        consistentRead: true,
+        projection: TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES,
+        abortSignal: admission.admitStateRead(),
       });
-      const membership = await reader.membershipOf!(targetDeveloperId);
-      return membership === undefined ? undefined : { companyId: membership.companyId };
+      admission.assertOpen();
+      if (item !== undefined && (item.pk !== key.pk || item.sk !== key.sk)) throw unavailable();
+      return strictLiveMembership(item, targetDeveloperId);
     } }),
     projectGrant: async (targetDeveloperId, project) => {
       if (targetDeveloperId !== developerId) throw unavailable();
-      // No Slack user id and no channel list: `readProjectAuthority` can then answer only `access: "granted"` (a developer or administrator grant).
-      const result = await readProjectAuthority(ports.projectAuthorityReader, { project, developerId: targetDeveloperId, teamId: slackTeamId, admission });
+      // The project's latest revision and the person's own grants only: no channel bindings and no Slack user id, so the answer can only be
+      // `access: "granted"` (a developer or administrator grant). The company is bound by rule 3 (membership in the task's company).
+      admission.assertOpen();
+      const latest = await ports.projectAuthorityReader.latestRevision(project, admission, admission.admitStateRead());
+      admission.assertOpen();
+      if (!latest.complete || latest.revision === undefined) throw unavailable();
+      const grants = await ports.projectAuthorityReader.memberships(targetDeveloperId, admission, admission.admitStateRead());
+      admission.assertOpen();
+      if (!grants.complete) throw unavailable();
+      const result = evaluateProjectAuthority({ project, developerId: targetDeveloperId, teamId: slackTeamId, revision: latest.revision, memberships: grants.items, bindings: [] });
       if (result.kind === "allowed") {
         if (result.access !== "granted" || result.witness === undefined) throw unavailable();
         input.onProjectAuthority(result.witness);

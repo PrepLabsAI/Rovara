@@ -97,6 +97,11 @@ export interface TaskPersonWebProofReaders {
    * channel-only access never counts). False: a proven absence. A throw: unreadable, unknown project, or tasks turned off. Absent: every `web` identity is unavailable.
    */
   projectGrant?(developerId: string, project: string, companyId: string): Promise<boolean>;
+  /**
+   * Set only when the caller could not build the Slack parts (no Slack on the install, or no Slack workspace for the task): a `slack` identity's
+   * check then throws exactly this error, as it did before C2, and only a `web` identity can still be proven (D2).
+   */
+  slackUnavailable?: Error;
 }
 
 async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string): Promise<DeveloperTaskRecord> {
@@ -451,6 +456,7 @@ export async function checkTaskPersonIdentity(
     const web = await qualifyWeb(deps, stored, identity);
     return { subject: { developerId }, identity, eligible: web.eligible, channelMember: web.present };
   }
+  if (deps.slackUnavailable !== undefined) throw deps.slackUnavailable;
   const status = await storedIdentityStatus(deps, identity);
   const subject = { developerId, slackUserId: identity.slackUserId };
   if (status === "ineligible") return { subject, identity, eligible: false, channelMember: false };

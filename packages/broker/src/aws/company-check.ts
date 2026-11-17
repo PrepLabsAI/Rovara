@@ -124,3 +124,15 @@ export function companyReadActions(actions: DeveloperTaskActions, scope: ReturnT
     channelActivity: memo((...args: Parameters<DeveloperTaskActions["channelActivity"]>) => actions.channelActivity(...args)),
   };
 }
+
+/**
+ * Web task channel C2 (plan 4.1 rule 3): the web proof's strict reading of one stored `COMPANY_MEMBER#<personId>` row. No row, or a revoked one,
+ * is a proven absence (undefined). A row that is present but does not parse, or names another person, is unreadable: it throws, so the proof
+ * answers unavailable and nothing is reconciled from data nobody could read.
+ */
+export function strictLiveMembership(item: unknown, personId: string): { companyId: string } | undefined {
+  if (item === undefined) return undefined;
+  const parsed = Membership.safeParse(item);
+  if (!parsed.success || parsed.data.personId !== personId) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+  return parsed.data.revokedAt === undefined ? { companyId: parsed.data.companyId } : undefined;
+}

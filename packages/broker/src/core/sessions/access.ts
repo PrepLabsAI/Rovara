@@ -138,7 +138,7 @@ export function peopleOfItem(item: Item | undefined): Map<string, PeopleEntryOfI
     const person = entry as { developerId?: unknown; role?: unknown } | null;
     if (typeof person !== "object" || person === null || typeof person.developerId !== "string" || typeof person.role !== "string" || !PEOPLE_ROLES.has(person.role)) return "unreadable";
     const web = Object.hasOwn(person, "method");
-    if (web && taskPeopleEntryKind(person as Record<string, unknown>) !== "web") return "unreadable";
+    if (web && taskPeopleEntryKind(person) !== "web") return "unreadable";
     roles.set(person.developerId, { role: person.role as PeopleRole, web });
   }
   return roles;

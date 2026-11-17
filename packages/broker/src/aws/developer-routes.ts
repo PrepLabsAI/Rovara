@@ -3,7 +3,7 @@ import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBin
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, type CompanyInviteList, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
-import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
 import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
@@ -1633,10 +1633,12 @@ export function developerTaskRouteDependencies(
   };
   const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant"> = {
     companyMembership: async (targetDeveloperId) => {
-      const reader = deps.companies ?? deps.developer.companies;
-      if (reader?.membershipOf === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
-      const membership = await reader.membershipOf(targetDeveloperId);
-      return membership === undefined ? undefined : { companyId: membership.companyId };
+      // Only an install with the company layer has live memberships; without it there is no web proof (unavailable, a refusal).
+      if ((deps.companies ?? deps.developer.companies) === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+      const key = membershipKey(targetDeveloperId);
+      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+      if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+      return strictLiveMembership(response.Item, targetDeveloperId);
     },
     projectGrant: async (targetDeveloperId, project, companyId) => {
       const revision = await latestDefinition(deps, project, companyId);
@@ -1648,11 +1650,15 @@ export function developerTaskRouteDependencies(
       throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
     },
   };
-  /** When the Slack parts cannot be built (no Slack on this install, or no workspace for the task), only a `web` identity can still be proven: every Slack port refuses. */
-  const webOnlyIdentityDependencies = (): TaskPersonIdentityDependencies => {
-    const noSlack = async (): Promise<never> => { throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable"); };
+  /**
+   * When the Slack parts cannot be built (no Slack on this install, or no workspace for the task), only a `web` identity can still be proven:
+   * a `slack` identity's check throws the very error the build threw (as before C2), and every Slack port refuses.
+   */
+  const webOnlyIdentityDependencies = (cause: unknown): TaskPersonIdentityDependencies => {
+    const slackUnavailable = cause instanceof Error ? cause : agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+    const noSlack = async (): Promise<never> => { throw slackUnavailable; };
     return {
-      documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId: "", now: deps.now, uuid: randomUUID,
+      documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId: "", now: deps.now, uuid: randomUUID, slackUnavailable,
       taskPersonProof: noSlack, developerRecord, projectChannelIds: noSlack, targetProjectAccess: noSlack, ...webProof,
       ...(trustedCaller === null ? {} : { trustedCaller }),
     };
@@ -1717,9 +1723,9 @@ export function developerTaskRouteDependencies(
       let dependencies: TaskPersonIdentityDependencies;
       try {
         dependencies = await identityDependencies(task, admission);
-      } catch {
-        // A `slack` identity still refuses (its Slack ports throw); a `web` identity needs no Slack (C2).
-        dependencies = webOnlyIdentityDependencies();
+      } catch (error) {
+        // A `slack` identity still refuses with this same error; a `web` identity needs no Slack (C2).
+        dependencies = webOnlyIdentityDependencies(error);
       }
       return checkTaskPersonIdentity(dependencies, task, developerId);
     },

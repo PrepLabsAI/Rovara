@@ -165,7 +165,7 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
   ] as const)("makes a %s person eligible and present with live reads only", async (_label, row, record) => {
     const developerId = (row as { developerId?: string }).developerId ?? GALE_ID;
     const h = harness({
-      records: { [developerId]: galeRecord(record as Partial<DeveloperRecord>) },
+      records: { [developerId]: galeRecord(record) },
       memberships: { [developerId]: { companyId: COMPANY_A } }, grants: { [developerId]: true },
     });
     h.seed(webRow(row), subjectRow(P_GALE, developerId));
@@ -247,10 +247,10 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     ["a null company id on the stored task", { companyId: null }, {}],
     ["a caller's copy naming another company", {}, { companyId: COMPANY_B }],
   ])("rule 3: refuses %s", async (_label, storedOverride, givenOverride) => {
-    const stored = task(storedOverride as Record<string, unknown>);
+    const stored = task(storedOverride);
     const h = harness({ tasks: [stored] });
     h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
-    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, { ...stored, ...givenOverride } as DeveloperTaskRecord, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
+    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, { ...stored, ...givenOverride }, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
     expect(h.slackCalls()).toBe(0);
   });
 
@@ -286,7 +286,7 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
   });
 
   it("proves a GitHub task creator (a task started with GitHub sign-in) as a web identity", async () => {
-    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub", slackUserId: undefined });
+    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub" });
     delete (meta as { slackUserId?: string }).slackUserId;
     const h = harness({ tasks: [meta] });
     expect(await checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID)).toStrictEqual(ELIGIBLE);
@@ -301,7 +301,7 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
   });
 
   it("refuses a creator whose sign-in record is of another method than the task's", async () => {
-    const meta = task({ developerId: GALE_ID, provider: "cloud", developerName: "Gale GitHub", slackUserId: undefined });
+    const meta = task({ developerId: GALE_ID, provider: "cloud", developerName: "Gale GitHub" });
     delete (meta as { slackUserId?: string }).slackUserId;
     const h = harness({ tasks: [meta] });
     expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
@@ -349,7 +349,7 @@ describe("resolveTaskPersonId for a web person", () => {
     ["a revoked sign-in", { records: { [GALE_ID]: galeRecord({ revoked: true }) } }],
     ["an unreadable membership", { memberships: { [GALE_ID]: "throw" as const } }],
   ])("refuses a web person with %s", async (_label, world) => {
-    const h = mixed("commenter", world as WebWorld);
+    const h = mixed("commenter", world);
     expect((await errorOf(resolveTaskPersonId(h.identityDeps, TASK_A, P_GALE))).code).toBe("PROJECT_ACCESS_DENIED");
     expect(h.slackCalls()).toBe(0);
   });
@@ -377,7 +377,7 @@ describe("People lifecycle with web identities (real proof wired in)", () => {
     ["loses the project grant", { grants: { [GALE_ID]: false } }],
     ["has the sign-in revoked", { records: { [GALE_ID]: galeRecord({ revoked: true }) } }],
   ])("a sole web owner who %s leaves the task ownerless, and reconcile denies them", async (_label, world) => {
-    const h = mixed("owner", world as WebWorld, { samRole: "commenter" });
+    const h = mixed("owner", world, { samRole: "commenter" });
     await expect(resolveTaskDispatchPeople(h.peopleDeps, task())).resolves.toStrictEqual({ peopleRevision: 3, ownerActorIds: [], status: "OWNERLESS" });
     // Sam reads the task: reconcile writes the departure exactly like a Slack departure.
     await expect(resolveTaskPeopleAccess(h.peopleDeps, task(), SAM_ID)).resolves.toMatchObject({ role: "commenter", orphaned: true, peopleRevision: 4 });
@@ -427,20 +427,21 @@ describe("People lifecycle with web identities (real proof wired in)", () => {
 
 describe("the route wiring (developerTaskRouteDependencies)", () => {
   const SIGNIN = "signin";
-  function routeWorld(options: { slackTeamId?: string; membershipCompany?: string; grantRole?: string; channelPolicy?: boolean; projectCompany?: string } = {}) {
+  function routeWorld(options: { slackTeamId?: string; membershipCompany?: string; grantRole?: string; channelPolicy?: boolean; projectCompany?: string; membership?: Record<string, unknown> | null; noCompanies?: true } = {}) {
     const db = new FakeDynamoDb();
     const meta = task();
     db.set(meta as unknown as Record<string, unknown>);
     db.set(webRow());
     db.set(subjectRow(P_GALE, GALE_ID));
     db.set({ pk: `DEVELOPER#${GALE_ID}`, sk: "META", ...galeRecord() });
-    db.set({ pk: `COMPANY_MEMBER#${GALE_ID}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: GALE_ID, companyId: options.membershipCompany ?? COMPANY_A, role: "member", joinedAt: CREATED });
+    const membershipRow = { pk: `COMPANY_MEMBER#${GALE_ID}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: GALE_ID, companyId: options.membershipCompany ?? COMPANY_A, role: "member", joinedAt: CREATED };
+    if (options.membership !== null) db.set({ ...membershipRow, ...(options.membership ?? {}) });
     db.set({ pk: "PROJECT#payments", sk: "REV#000000000007", companyId: options.projectCompany ?? COMPANY_A,
       definition: { revision: 7, ...(options.channelPolicy === true ? { developerTasks: { enabled: true, channelMembersMayUse: true } } : {}) } });
     if (options.grantRole !== "none") db.set({ pk: `MEMBER#${GALE_ID}`, sk: "PROJECT#payments", projectName: "payments", role: options.grantRole ?? "developer" });
     if (options.channelPolicy === true) db.set({ pk: `SLACK_BINDING#${TEAM}`, sk: `CHANNEL#${CHANNEL}`, teamId: TEAM, channelId: CHANNEL, projectName: "payments", updatedAt: CREATED });
     const developer = {
-      signInTableName: SIGNIN, issuer: "https://code.example.test", companies: companyMembershipFromDynamo(db, SIGNIN),
+      signInTableName: SIGNIN, issuer: "https://code.example.test", ...(options.noCompanies === true ? {} : { companies: companyMembershipFromDynamo(db, SIGNIN) }),
       ...(options.slackTeamId === undefined ? {} : { slackTeamId: options.slackTeamId, taskPersonProof: vi.fn() }),
     };
     const deps = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer, now: () => T0, tasks: {} } as never, GALE_CALLER);
@@ -467,15 +468,44 @@ describe("the route wiring (developerTaskRouteDependencies)", () => {
     await expect(deps.checkTaskPerson!(meta, GALE_ID)).resolves.toMatchObject({ eligible: false, channelMember: false });
   });
 
+  it.each([
+    ["no membership row", { membership: null }],
+    ["a revoked membership", { membership: { revokedAt: CREATED, revokedBy: "admin" } }],
+  ])("finds a proven loss with %s", async (_label, options) => {
+    const { deps, meta } = routeWorld(options);
+    await expect(deps.checkTaskPerson!(meta, GALE_ID)).resolves.toMatchObject({ eligible: false, channelMember: false });
+  });
+
+  it.each([
+    ["a membership row with no join time", { membership: { joinedAt: undefined } }],
+    ["a membership row naming another person", { membership: { personId: OLA_ID } }],
+    ["a membership row with an unknown role", { membership: { role: "boss" } }],
+    ["a membership row of another entity type", { membership: { entityType: "COMPANY_MEMBER_VIEW" } }],
+    ["an install without the company layer", { noCompanies: true as const }],
+  ])("refuses (unavailable, never a departure) with %s", async (_label, options) => {
+    const { deps, meta } = routeWorld(options);
+    await expect(deps.checkTaskPerson!(meta, GALE_ID)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+
+  it("D2: a Slack-linked OIDC creator with a revoked sign-in still refuses with the Slack build's error on an install with no Slack (never eligible:false)", async () => {
+    const { db, deps } = routeWorld();
+    const meta = task({ developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc", slackUserId: SAM });
+    db.set(meta as unknown as Record<string, unknown>);
+    db.set({ pk: `DEVELOPER#${OLA_ID}`, sk: "META", developerId: OLA_ID, provider: "oidc", issuer: OIDC_ISSUER, subject: "ola-employee", displayName: "Ola Oidc",
+      slackUserId: SAM, firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: true });
+    // The company layer is on and the task has no workspace for this caller: the same refusal the Slack parts' build gave before C2.
+    await expect(deps.checkTaskPerson!(meta, OLA_ID)).rejects.toMatchObject({ name: "SlackWorkspaceRefused" });
+  });
+
   it("refuses (unavailable) when the task's project belongs to another company", async () => {
     const { deps, meta } = routeWorld({ projectCompany: COMPANY_B });
     await expect(deps.checkTaskPerson!(meta, GALE_ID)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 
-  it("still refuses a Slack person when the install has no Slack (its Slack ports throw)", async () => {
+  it("still refuses a Slack person when the Slack parts cannot be built, with the build's own error and no Slack call", async () => {
     const { db, deps, meta } = routeWorld();
     db.set(slackRow(P_SAM, SAM, "Sam Slack"));
     db.set(subjectRow(P_SAM, SAM_ID));
-    await expect(deps.checkTaskPerson!(meta, SAM_ID)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+    await expect(deps.checkTaskPerson!(meta, SAM_ID)).rejects.toMatchObject({ name: "SlackWorkspaceRefused" });
   });
 });

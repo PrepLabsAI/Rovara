@@ -147,8 +147,10 @@ describe("the session levels", () => {
     expect(await levelOf(w.store, { oro: { role: "admin" } }, person("oro"))).toMatchObject({ level: "view", orgAdmin: true });
     // Not a member of this company: nothing, whatever the entry says.
     expect(await levelOf(w.store, { oro: { grants: { web: "maintainer" } } }, person("oro"))).toBe("NOT_FOUND");
-    // A web denial applies with or without a grant.
+    // A web denial applies with or without a grant, and overrides a share.
     expect(await levelOf(w.store, { dee: { role: "member", grants: { web: "maintainer" } } }, person("dee"))).toBe("NOT_FOUND");
+    const shared = await world({ people, shares: [{ principal: { kind: "org" }, level: "edit" }] });
+    expect(await levelOf(shared.store, { dee: { role: "member" } }, person("dee"))).toBe("NOT_FOUND");
   });
 
   it("the task's People list: a malformed web entry makes the whole list unreadable; a Slack entry reads exactly as before", async () => {

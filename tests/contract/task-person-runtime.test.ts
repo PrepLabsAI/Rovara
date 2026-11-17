@@ -337,12 +337,12 @@ describe("task person runtime: the web proof", () => {
     const membership = "membership" in options ? options.membership : {
       pk: `COMPANY_MEMBER#${webDeveloperId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: webDeveloperId, companyId: companyA, role: "member", joinedAt: createdAt,
     };
-    const readCompanyMembership = vi.fn<TaskPersonRuntimePorts["readCompanyMembership"]>(async () => {
+    const readCompanyMembership = vi.fn<NonNullable<TaskPersonRuntimePorts["readCompanyMembership"]>>(async () => {
       if (membership === "throw") throw new Error("down");
       return membership;
     });
     injected.projectAuthorityReader.memberships.mockImplementation(async (_developerId, _admission, signal) => ({
-      items: options.grantRole === "none" ? [] : [{ pk: `MEMBER#${webDeveloperId}`, sk: "PROJECT#payments-api", projectName: "payments-api", role: options.grantRole ?? "developer" }],
+      items: (options.grantRole === "none" ? [] : [{ pk: `MEMBER#${webDeveloperId}`, sk: "PROJECT#payments-api", projectName: "payments-api", role: options.grantRole ?? "developer" }]) as never[],
       complete: !signal.aborted,
     }));
     if (options.channelPolicy === true) {
@@ -362,11 +362,13 @@ describe("task person runtime: the web proof", () => {
     await expect(checker.checkTaskPerson(webTask(), webDeveloperId)).resolves.toMatchObject({
       subject: { developerId: webDeveloperId }, eligible: true, channelMember: true, identity: { developerId: webDeveloperId, method: "github" },
     });
-    expect(injected.taskPersonProof).not.toHaveBeenCalled();
-    expect(injected.projectAuthorityReader.bindings.mock.calls.every(([team]) => team === slackTeamId)).toBe(true);
-    expect(injected.readCompanyMembership.mock.calls).toEqual([[{ developerId: webDeveloperId, consistentRead: true, projection: TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES, abortSignal: expect.any(AbortSignal) }]]);
-    // META, PERSON_SUBJECT, PERSON, PERSON_SUBJECT, the sign-in record, the membership, and the three project authority reads.
-    expect(before - admission.remainingStateReads()).toBe(9);
+    expect(injected.taskPersonProof.mock.calls).toHaveLength(0);
+    expect(injected.projectAuthorityReader.bindings.mock.calls).toHaveLength(0);
+    expect(injected.readCompanyMembership.mock.calls).toHaveLength(1);
+    expect(injected.readCompanyMembership.mock.calls[0]?.[0]).toMatchObject({ developerId: webDeveloperId, consistentRead: true, projection: TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES });
+    expect(injected.readCompanyMembership.mock.calls[0]?.[0].abortSignal).toBeInstanceOf(AbortSignal);
+    // META, PERSON_SUBJECT, PERSON, PERSON_SUBJECT, the sign-in record, the membership, the project revision and the grants (no channel bindings).
+    expect(before - admission.remainingStateReads()).toBe(8);
     // The owner witness is the grant's, so a present web owner can authorize a system-started step.
     await expect(checker.stateAuthorityWitnessForOwnerActor(webTask(), taskOwnerKey(webDeveloperId, taskId))).resolves.toMatchObject({
       developerId: webDeveloperId, access: "granted", membership: { pk: `MEMBER#${webDeveloperId}`, sk: "PROJECT#payments-api", role: "developer" },
@@ -382,9 +384,9 @@ describe("task person runtime: the web proof", () => {
     ["channel-only access (no grant, channel members may use the project, and a bound channel)", { grantRole: "none", channelPolicy: true }],
   ])("finds a proven loss with %s", async (_label, options) => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = webPorts(options as never);
+    const injected = webPorts(options);
     await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).resolves.toMatchObject({ eligible: false, channelMember: false });
-    expect(injected.taskPersonProof).not.toHaveBeenCalled();
+    expect(injected.taskPersonProof.mock.calls).toHaveLength(0);
   });
 
   it("never makes a company B member eligible on company A's task", async () => {
@@ -397,10 +399,12 @@ describe("task person runtime: the web proof", () => {
 
   it.each([
     ["the membership read fails", { membership: "throw" as const }],
-    ["the membership row is under another key", { membership: { pk: "COMPANY_MEMBER#someone-else", sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP" } }],
+    ["the membership row is under another key", { membership: { pk: "COMPANY_MEMBER#someone-else", sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: webDeveloperId, companyId: companyA, role: "member", joinedAt: createdAt } }],
+    ["the membership row does not parse", { membership: { pk: `COMPANY_MEMBER#${webDeveloperId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: webDeveloperId, companyId: companyA, role: "member" } }],
+    ["the membership row names another person", { membership: { pk: `COMPANY_MEMBER#${webDeveloperId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: "d".repeat(64), companyId: companyA, role: "member", joinedAt: createdAt } }],
   ])("refuses (unavailable) when %s", async (_label, options) => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = webPorts(options as never);
+    const injected = webPorts(options);
     await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 
@@ -409,8 +413,8 @@ describe("task person runtime: the web proof", () => {
     const injected = webPorts();
     delete (injected as Partial<TaskPersonRuntimePorts>).readCompanyMembership;
     await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-    expect(injected.taskPersonProof).not.toHaveBeenCalled();
-    expect(injected.readDeveloperRecord).not.toHaveBeenCalled();
+    expect(injected.taskPersonProof.mock.calls).toHaveLength(0);
+    expect(injected.readDeveloperRecord.mock.calls).toHaveLength(0);
   });
 
   it("reads COMPANY_MEMBER only for the checked person", async () => {
@@ -424,6 +428,6 @@ describe("task person runtime: the web proof", () => {
       },
     });
     await expect(checker.checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-    expect(injected.readCompanyMembership).not.toHaveBeenCalled();
+    expect(injected.readCompanyMembership.mock.calls).toHaveLength(0);
   });
 });
