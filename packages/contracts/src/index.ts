@@ -379,6 +379,7 @@ export * from "./spec-target.js";
 
 // Wiki W0: the free file map and forecast.
 export * from "./wiki-file-map.js";
+export * from "./wiki-build.js";
 
 // Setup and test health: saved environments (SH3).
 export * from "./saved-env.js";
