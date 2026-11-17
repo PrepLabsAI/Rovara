@@ -136,6 +136,10 @@ describe("the coding agent never writes its own mock", () => {
     const source = readFileSync("packages/broker/src/core/build-step/changed-files.ts", "utf8");
     expect(source).toContain("flagUnplannedMocks(all, mockFactsOf(project?.definition, plan?.setupChanges))");
     expect(source.indexOf("flagUnplannedMocks(")).toBeLessThan(source.indexOf("riskFromFiles(workflow, read)"));
+    // ... and the step that starts a task's checks and coding run sends the plan's mocks with the project's own fakes (also a pin: starting a run needs a whole task).
+    const start = readFileSync("packages/broker/src/core/build-step/start.ts", "utf8");
+    expect(start).toContain("return fakesFor(setting, approved?.setupChanges);");
+    expect(start).toContain("await generalFakesOf(deps, task, workflow)");
   });
 
   it("raises the risk to high with a fixed sentence, in an ordinary change and in a fix, and a file the plan named does not", () => {
