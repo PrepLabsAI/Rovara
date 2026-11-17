@@ -616,6 +616,18 @@ describe("the tasks I was added to on the deployed API (web task channel C5)", (
     expect(answer!.body).not.toContain("down");
   });
 
+  it("refuses a company id that is not a company id even when the principal carries the same one (the format is checked, not only the match)", async () => {
+    const { app, remember } = await world2();
+    const base = remember(FAKE_COMPANY, "member", "alice");
+    for (const bad of ["not-an-org", "org_SHORT", "org_" + "A".repeat(20), "org_" + "a".repeat(21), "org_aaaa#aaaaaaaaaaaaaaaa"]) {
+      const caller: DeployedCaller = { ...base, principal: { ...base.principal, companyId: bad } };
+      const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: bad, role: "owner" }), wiring: () => WIRED });
+      const answer = await routes.route(get(LIST), caller);
+      expect(answer?.statusCode, bad).toBe(401);
+      expect(JSON.parse(answer!.body), bad).toEqual({ error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
+    }
+  });
+
   it("refuses a caller who is no member (the sign-in words), a script token (it reaches a task's read only), and a bad limit or cursor (fixed words)", async () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });

@@ -122,12 +122,12 @@ export function involvedListOptions(params: URLSearchParams): InvolvedListOption
 export const wantsInvolved = (params: URLSearchParams): boolean => params.get("involved") === "1";
 
 /** A row of the caller's partition, if it is what a writer makes: of this company, for this person, naming the task its own key names. */
-function rowOf(item: StoredDocument, pk: string, companyId: string, personId: string): { taskId: string; createdAt: string; sk: string } | undefined {
+function rowOf(item: StoredDocument, pk: string, companyId: string, personId: string): { taskId: string; createdAt: string } | undefined {
   const sk = item["sk"];
   const match = typeof sk === "string" ? ROW_SK.exec(sk) : null;
   if (match === null || item["pk"] !== pk || item["entityType"] !== INVOLVED_ENTITY) return undefined;
   if (item["companyId"] !== companyId || item["personId"] !== personId || item["taskId"] !== match[2] || item["createdAt"] !== match[1]) return undefined;
-  return { taskId: match[2]!, createdAt: match[1]!, sk: sk as string };
+  return { taskId: match[2]!, createdAt: match[1]! };
 }
 
 /**
