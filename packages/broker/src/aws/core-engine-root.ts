@@ -22,6 +22,7 @@
 // What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices)
 // refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use. The admission's hold sweep is the root's own (lane L8),
 // and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
+import { profileDisplayName } from "../developer/github-profile.js";
 import { projectTaskCapReader, type ProjectSettingsHook } from "./project-settings.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -433,6 +434,19 @@ export function enginePolicyHook(settings: HostedPolicyHookSettings | undefined,
   return { settings, install: signer };
 }
 
+/**
+ * The deployed identity's display name for a person: read live from their sign-in record, never for a revoked or unknown person. The name goes through the one display helper
+ * (`profileDisplayName`, DEC 254p (a)): a GitHub person's is clean, cut text with no markup, address or placeholder shape; any other person's is exactly as stored.
+ */
+export function hostedDisplayNameOf(documentClient: DynamoSender, signInTableName: string | undefined): (personId: string) => Promise<string | undefined> {
+  return async (personId) => {
+    if (signInTableName === undefined || signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
+    const response = await documentClient.send(new GetCommand({ TableName: signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    const row = response?.Item;
+    return row === undefined || row["revoked"] === true ? undefined : profileDisplayName(row);
+  };
+}
+
 // ---- the root
 
 export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRoot {
@@ -461,12 +475,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
-  const displayNameOf = async (personId: string): Promise<string | undefined> => {
-    if (inputs.signInTableName === undefined || inputs.signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
-    const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
-    const row = response?.Item;
-    return row === undefined || row["revoked"] === true || typeof row["displayName"] !== "string" ? undefined : row["displayName"];
-  };
+  const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
   const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true;
