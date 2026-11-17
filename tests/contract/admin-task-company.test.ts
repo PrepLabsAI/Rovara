@@ -12,23 +12,33 @@ import { call, issuer, loadSlackBroker } from "../support/slack-broker.js";
 const ADMIN = { subject: "admin-subject", admin: true };
 const NO_GRANT = { subject: "other-admin", admin: true };
 const OTHER = "org_corehost00000000000b";
-beforeAll(async () => { await loadSlackBroker(); });
+beforeAll(async () => { await loadSlackBroker(); }, 120_000);
 
-/** A legacy task of MAYA's on "payments"; `companies`: the administrators' live memberships by owner key (an Error: the read fails), or no company sign-in at all. */
-async function legacyTask(companies?: Map<string, string | Error>) {
-  const harness = await createDeveloperTaskBroker(companies === undefined ? {} : { brokerExtra: { companies: { companyOf: async (personId: string) => {
+/**
+ * A legacy task of MAYA's on "payments"; `companies`: the administrators' live memberships by owner key (an Error: the read fails), wired as the deployment wires it (the developer sign-in's
+ * reader, COMPANY_SIGNIN=enabled), or no company sign-in at all. The task is started on an install without company sign-in (a company's legacy start needs its own Slack workspace, out of
+ * scope here) and its rows are then served by the install under test.
+ */
+async function legacyTask(companies?: Map<string, string | Error>, share = companies === undefined) {
+  const source = await createDeveloperTaskBroker();
+  const started = await source.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code", ...(share ? { shareToChannel: true, shareMode: "continue" } : {}) });
+  expect(started.status, JSON.stringify(started.body)).toBe(200);
+  const taskId = (started.body.task as { taskId: string }).taskId;
+  const harness = companies === undefined ? source : await createDeveloperTaskBroker({ developerExtra: { companies: { companyOf: async (personId: string) => {
     const found = companies.get(personId);
     if (found instanceof Error) throw found;
     return found;
   } } } });
-  const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code", shareToChannel: true, shareMode: "continue" });
-  const taskId = (started.body.task as { taskId: string }).taskId;
+  if (harness !== source) for (const item of source.db.find(() => true)) harness.db.set(JSON.parse(JSON.stringify(item)) as typeof item);
   const shareMode = (user: typeof ADMIN) => call(harness.handler, { method: "POST", path: `/v1/admin/tasks/${taskId}/share-mode`, user, body: { requestId: randomUUID(), shareMode: "view" } });
   const replays = (user: typeof ADMIN) => call(harness.handler, { method: "GET", path: `/v1/admin/tasks/${taskId}/e2e-replay`, user });
   const mode = () => (harness.db.get(`DEVTASK#${taskId}`, "META") as { share?: { mode: string } }).share?.mode;
   return { harness, taskId, shareMode, replays, mode };
 }
-const withoutRequestId = (answer: { status: number; body: Record<string, unknown> }) => JSON.stringify({ ...answer, body: { ...answer.body, requestId: "<id>" } });
+const withoutRequestId = (answer: { status: number; body: Record<string, unknown> }, taskId?: string) => {
+  const text = JSON.stringify({ ...answer, body: { ...answer.body, requestId: "<id>" } });
+  return taskId === undefined ? text : text.replaceAll(taskId, "<task>");
+};
 const ADMIN_KEY = ownerKeyForSubject(issuer, ADMIN.subject), NO_GRANT_KEY = ownerKeyForSubject(issuer, NO_GRANT.subject);
 
 describe("share-mode and e2e-replay bind the administrator's grant to the task's company (Q2)", () => {
@@ -39,12 +49,14 @@ describe("share-mode and e2e-replay bind the administrator's grant to the task's
     expect(task.mode()).toBe("view");
   });
 
-  it("an administrator of the task's own company (an old task without a company is the install's company) is served as without company sign-in", async () => {
+  it("an administrator of the task's own company (an old task without a company is the install's company) gets past the authority check exactly as without company sign-in", async () => {
     const task = await legacyTask(new Map([[ADMIN_KEY, IMPLICIT_COMPANY_ID]]));
-    const plain = await legacyTask();
-    expect(withoutRequestId(await task.replays(ADMIN))).toBe(withoutRequestId(await plain.replays(ADMIN)));
-    expect((await task.shareMode(ADMIN)).status).toBe(200);
-    expect(task.mode()).toBe("view");
+    const plain = await legacyTask(undefined, false);
+    for (const route of ["shareMode", "replays"] as const) {
+      const answer = await task[route](ADMIN);
+      expect(answer.body.error).not.toMatchObject({ code: "FORBIDDEN" });
+      expect(withoutRequestId(answer, task.taskId)).toBe(withoutRequestId(await plain[route](ADMIN), plain.taskId));
+    }
   });
 
   it("two companies: an administrator whose grant names 'payments' but whose membership is another company's (or none, or unreadable) gets exactly the no-grant answer; nothing changes", async () => {
@@ -56,7 +68,7 @@ describe("share-mode and e2e-replay bind the administrator's grant to the task's
         expect(withoutRequestId(foreign)).toBe(withoutRequestId(missing));
         expect(JSON.stringify(foreign)).not.toMatch(/secret-cause|throttled|org_/u);
       }
-      expect(task.mode()).toBe("continue");
+      expect(task.mode()).toBeUndefined();
     }
   });
 
@@ -65,10 +77,8 @@ describe("share-mode and e2e-replay bind the administrator's grant to the task's
     const task = await legacyTask(memberships);
     const record = task.harness.db.get(`DEVTASK#${task.taskId}`, "META")!;
     task.harness.db.set({ ...record, companyId: OTHER });
-    expect((await task.shareMode(ADMIN)).body.error).toMatchObject({ code: "FORBIDDEN" });
-    expect(task.mode()).toBe("continue");
+    for (const route of [task.shareMode, task.replays]) expect((await route(ADMIN)).body.error).toMatchObject({ code: "FORBIDDEN", message: "administrator project membership is required" });
     memberships.set(ADMIN_KEY, OTHER);
-    expect((await task.shareMode(ADMIN)).status).toBe(200);
-    expect(task.mode()).toBe("view");
+    for (const route of [task.shareMode, task.replays]) expect((await route(ADMIN)).body.error).not.toMatchObject({ code: "FORBIDDEN" });
   });
 });

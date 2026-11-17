@@ -15532,8 +15532,10 @@ function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.
  * No membership, or one that can't be read, counts as another company's: the caller then gets the missing grant's answer. Without company sign-in there is one company and nothing changes.
  */
 async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, task: DeveloperTaskRecord): Promise<boolean> {
-  if (dependencies.companies === undefined) return true;
+  // The deployment wires the reader on the developer sign-in (COMPANY_SIGNIN=enabled), as the other admin routes read it; the top-level reader is the same reader where a host sets it.
+  const companies = dependencies.developer?.companies ?? dependencies.companies;
+  if (companies === undefined) return true;
   let companyId: string | undefined;
-  try { companyId = await dependencies.companies.companyOf(identity.ownerKey); } catch { return false; }
+  try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
   return companyId !== undefined && recordInCompany(task, companyId);
 }
