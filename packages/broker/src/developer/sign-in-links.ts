@@ -73,13 +73,13 @@ const ProvedIdentity = z.object({
 }).strict();
 type Proved = z.infer<typeof ProvedIdentity>;
 const LinkRow = z.object({
-  pk: z.string(), sk: z.literal("META"), entityType: z.literal("SIGNIN_LINK"), id: z.string().regex(LINK_ID), developerId: z.string().regex(/^[a-f0-9]{64}$/),
+  entityType: z.literal("SIGNIN_LINK"), id: z.string().regex(LINK_ID), developerId: z.string().regex(/^[a-f0-9]{64}$/),
   sessionId: z.string().min(1), companyId: OrgIdSchema, method: z.enum(["slack", "github"]), nonce: z.string().min(1), challenge: z.string().min(43),
   returnTo: z.string().url(), clientState: z.string().min(1), expiresAt: z.number().int(), consumedAt: z.string().optional(), verifiedAt: z.string().optional(),
   identity: ProvedIdentity.optional(), codeHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), attemptAt: z.string().optional(), finishedAt: z.string().optional(),
 }).strict();
 type Link = z.infer<typeof LinkRow>;
-const ConnectedRow = z.object({ pk: z.string(), sk: z.string(), entityType: z.literal("SIGNIN_LINK_ROW"), personId: z.string(), method: z.enum(["slack", "github"]),
+const ConnectedRow = z.object({ entityType: z.literal("SIGNIN_LINK_ROW"), personId: z.string(), method: z.enum(["slack", "github"]),
   linkedId: z.string().regex(/^[a-f0-9]{64}$/), linkedAt: z.iso.datetime(), linkedBy: z.string() }).strict();
 
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -106,12 +106,14 @@ export function createSignInLinks(options: SignInLinkOptions) {
   const { documentClient, tableName } = store.table();
   const seconds = () => Math.floor(options.now() / 1000);
   const iso = () => new Date(options.now()).toISOString();
-  const read = async (pk: string, sk: string): Promise<Record<string, unknown> | undefined> =>
-    ((await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk, sk }, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item;
+  const read = async (key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined> =>
+    ((await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item;
   const linkOf = async (id: string): Promise<Link | undefined> => {
     if (!LINK_ID.test(id)) return undefined;
-    const parsed = LinkRow.safeParse(await read(`SIGNIN_LINK#${id}`, "META"));
-    return parsed.success && parsed.data.pk === `SIGNIN_LINK#${id}` && parsed.data.id === id ? parsed.data : undefined;
+    const { pk: storedPk, sk: storedSk, ...fields } = await read({ pk: `SIGNIN_LINK#${id}`, sk: "META" }) ?? {};
+    if (storedPk !== `SIGNIN_LINK#${id}` || storedSk !== "META") return undefined;
+    const parsed = LinkRow.safeParse(fields);
+    return parsed.success && parsed.data.id === id ? parsed.data : undefined;
   };
 
   /** The caller's live session, read from this table (as factor-admin.ts): theirs, not revoked, not ended, their record on, its method still on. */
@@ -154,7 +156,12 @@ export function createSignInLinks(options: SignInLinkOptions) {
    * workspace bound to this very company. A Slack user of any other workspace proves nothing here (their email never links: DEC 254h).
    */
   async function slackAllowed(identity: Proved, companyId: string): Promise<boolean> {
-    if (identity.method !== "slack" || identity.slackUserId !== undefined) return true;
+    if (identity.method !== "slack") return true;
+    if (identity.slackUserId !== undefined) {
+      // The install's own workspace, unless it is bound to another company.
+      const bound = await options.installSlackCompany();
+      return bound === undefined || bound === IMPLICIT_COMPANY_ID || bound === companyId;
+    }
     if (identity.slackTeamId === undefined) return false;
     return await options.slackTeamCompany(identity.slackTeamId) === companyId;
   }
@@ -196,7 +203,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const member = await liveMember(company, developerId);
       if (member === undefined || member.companyId !== (live.session.companyId ?? IMPLICIT_COMPANY_ID)) return refuse("signin.link_refused", developerId, "not_member");
       if (!await methodAllowed(company, member.companyId, method)) return refuse("signin.link_refused", developerId, "method_refused");
-      if (await read(`SIGNIN_LINKS#${developerId}`, `METHOD#${method}`) !== undefined) return refuse("signin.link_refused", developerId, "already_has_method");
+      if (await read({ pk: `SIGNIN_LINKS#${developerId}`, sk: `METHOD#${method}` }) !== undefined) return refuse("signin.link_refused", developerId, "already_has_method");
       const id = `lnk_${randomBytes(32).toString("base64url")}`;
       const nonce = randomBytes(32).toString("base64url");
       const authorizeUrl = await options.provider(method).authorizeUrl({ state: id, nonce, redirectUri: options.endpoint(`/callback/${method}`) });
@@ -241,7 +248,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
       if (!await methodAllowed(company, member.companyId, link.method, identity)) return refuse("signin.link_refused", developerId, "method_refused");
       if (!await slackAllowed(identity, member.companyId)) return refuse("signin.link_refused", developerId, "workspace_refused");
       // The identity is nobody's yet: no record of its own (a person, a merged or revoked sign-in) and no membership. Checked again in the transaction.
-      if (await read(`DEVELOPER#${linkedId}`, "META") !== undefined) return refuse("signin.link_refused", developerId, "identity_taken");
+      if (await read({ pk: `DEVELOPER#${linkedId}`, sk: "META" }) !== undefined) return refuse("signin.link_refused", developerId, "identity_taken");
       const slackUserId = identity.method === "slack" ? identity.slackUserId : undefined;
       if (slackUserId !== undefined && ((person.slackUserId !== undefined && person.slackUserId !== slackUserId) || person.linkedSlackUserId !== undefined)) {
         return refuse("signin.link_refused", developerId, "other_slack");
@@ -314,8 +321,9 @@ export function createSignInLinks(options: SignInLinkOptions) {
       if (person === undefined || person.mergedInto !== undefined) return refusal("not_found", SIGN_IN_LINK_TEXT.notFound);
       // The first method is never removed, so at least one always remains.
       if (person.provider === method) return refusal("last_method", SIGN_IN_LINK_TEXT.lastMethod);
-      const row = ConnectedRow.safeParse(await read(`SIGNIN_LINKS#${personDeveloperId}`, `METHOD#${method}`));
-      if (!row.success || row.data.personId !== personDeveloperId || row.data.method !== method) return refusal("not_found", SIGN_IN_LINK_TEXT.notFound);
+      const { pk: rowPk, sk: rowSk, ...rowFields } = await read({ pk: `SIGNIN_LINKS#${personDeveloperId}`, sk: `METHOD#${method}` }) ?? {};
+      const row = ConnectedRow.safeParse(rowFields);
+      if (rowPk !== `SIGNIN_LINKS#${personDeveloperId}` || rowSk !== `METHOD#${method}` || !row.success || row.data.personId !== personDeveloperId || row.data.method !== method) return refusal("not_found", SIGN_IN_LINK_TEXT.notFound);
       const linkedId = row.data.linkedId;
       const linked = await store.getDeveloper(linkedId);
       if (linked?.mergedInto !== personDeveloperId) return refusal("not_found", SIGN_IN_LINK_TEXT.notFound);
@@ -327,7 +335,13 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const clearsSlack = slack !== undefined && person.slackUserId === slack;
       const writes: Write[] = [
         { Delete: { TableName: tableName, Key: { pk: `SIGNIN_LINKS#${personDeveloperId}`, sk: `METHOD#${method}` }, ConditionExpression: "linkedId = :linked", ExpressionAttributeValues: { ":linked": linkedId } } },
-        { Delete: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" }, ConditionExpression: "mergedInto = :person", ExpressionAttributeValues: { ":person": personDeveloperId } } },
+        // A linked identity an admin turned off stays turned off (its record is kept, no longer pointing at the person); any other is deleted.
+        linked.revoked === true
+          ? { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" }, UpdateExpression: "REMOVE mergedInto", ConditionExpression: "mergedInto = :person AND revoked = :true", ExpressionAttributeValues: { ":person": personDeveloperId, ":true": true } } }
+          : { Delete: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" }, ConditionExpression: "mergedInto = :person AND revoked = :false", ExpressionAttributeValues: { ":person": personDeveloperId, ":false": false } } },
+        // An admin's own membership still stands as checked (live, the person's company, owner or admin).
+        ...(self ? [] : [{ ConditionCheck: { TableName: tableName, Key: membershipKey(developerId), ConditionExpression: "companyId = :company AND attribute_not_exists(revokedAt) AND (#role = :owner OR #role = :admin)",
+          ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":company": membership.companyId, ":owner": "owner", ":admin": "admin" } } } satisfies Write]),
         // Every session of the person ends: one signed in with the removed method must not live on.
         { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${personDeveloperId}`, sk: "META" },
           UpdateExpression: `SET sessionsEndedAt = :at${slack === undefined ? "" : ` REMOVE linkedSlackUserId${clearsSlack ? ", slackUserId" : ""}`}`,
@@ -354,19 +368,22 @@ export function createSignInLinks(options: SignInLinkOptions) {
     const items = answer.Items ?? [];
     if (items.length > LINK_ROWS_MAX) throw new Error("too many connected sign-ins");
     return items.map((item) => {
-      const row = ConnectedRow.safeParse(item);
-      if (!row.success || row.data.personId !== personId || row.data.sk !== `METHOD#${row.data.method}`) throw new Error("unreadable connected sign-in");
+      const { pk: rowPk, sk: rowSk, ...fields } = (item ?? {}) as Record<string, unknown>;
+      const row = ConnectedRow.safeParse(fields);
+      if (!row.success || rowPk !== `SIGNIN_LINKS#${personId}` || row.data.personId !== personId || rowSk !== `METHOD#${row.data.method}`) throw new Error("unreadable connected sign-in");
       return row.data;
     });
   }
 
   /**
-   * The provider's callback for a link (`state` is a link id). The row is consumed first (once); every later failure goes back to the web app with a
+   * The provider's callback for a link (`state` is a link id; undefined when no link row has it). The row is consumed first (once); every later failure goes back to the web app with a
    * fixed `link_error`, never the provider's words. On success the browser alone gets the one-time code.
    */
-  async function callback(method: DeveloperSignInMethod, query: URLSearchParams): Promise<HttpResult> {
+  async function callback(method: DeveloperSignInMethod, query: URLSearchParams): Promise<HttpResult | undefined> {
     const expired = () => page("This connect link has expired", "Start connecting the sign-in again from your profile.");
     const id = query.get("state") ?? "";
+    // No link row at all: an ordinary sign-in whose random state happens to start like a link id (the sign-in path answers it).
+    if (!LINK_ID.test(id) || await read({ pk: `SIGNIN_LINK#${id}`, sk: "META" }) === undefined) return undefined;
     const link = await linkOf(id);
     if (link === undefined || link.method !== method || link.expiresAt <= seconds() || link.consumedAt !== undefined) return expired();
     const consumedAt = iso();

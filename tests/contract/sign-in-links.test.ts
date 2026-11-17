@@ -93,9 +93,17 @@ function world() {
     stepUp(signed.access!);
     return signed.access!;
   };
+  /** A Slack sign-in through the web app up to its code (not redeemed yet). */
+  const slackCode = async (user: string): Promise<string> => {
+    let response = await w.http(httpEvent("GET", authorizeQuery({ client_id: "web-app", redirect_uri: WEB })));
+    if (response.statusCode === 200) response = await w.http(httpEvent("GET", /href="([^"]*method=slack)"/.exec(response.body)![1]!.replaceAll("&amp;", "&")));
+    const back = await w.http(httpEvent("GET", w.slack.approve(response.headers.location!, user, { teamId: TEAM })));
+    return new URL(back.headers.location!).searchParams.get("code")!;
+  };
+  const redeem = (code: string) => w.exchange(code, { client_id: "web-app", client_secret: SECRET, redirect_uri: WEB });
   const linkRows = () => w.db.find((row) => row.entityType === "SIGNIN_LINK_ROW");
   const companyLog = (event: string) => w.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === event);
-  return Object.assign(w, { gh, api, githubSignIn, stepUp, start, atProvider, finish, link, githubMember, linkRows, companyLog });
+  return Object.assign(w, { slackCode, redeem, gh, api, githubSignIn, stepUp, start, atProvider, finish, link, githubMember, linkRows, companyLog });
 }
 const REFUSED = { status: 403, body: { error: { code: "FORBIDDEN", message: SIGN_IN_LINK_TEXT.refused } } };
 
@@ -301,12 +309,112 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     expect(w.db.find((row) => row.entityType === "SIGNIN_LINK")).toEqual([]);
   });
 
+  it("a second identity for a method the person already connected is refused, at start and at finish", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    const pending = await w.start(p, "slack");
+    const { location } = await w.atProvider(pending.body.authorizeUrl as string, { slack: "U0SOLO001", team: TEAM });
+    expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    expect(await w.start(p, "slack")).toEqual(REFUSED);
+    // A link started before the first one finished cannot add a second Slack.
+    expect(await w.finish(p, location!)).toEqual(REFUSED);
+    expect(w.linkRows()).toHaveLength(1);
+    expect(w.db.get(`DEVELOPER#${sid("U0SOLO001")}`, "META")).toBeUndefined();
+  });
+
+  it("a Slack identity when the person already holds another Slack user is refused; a callback on another method's path is refused", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    w.db.set({ ...w.db.get(`DEVELOPER#${P}`, "META")!, slackUserId: "U0SOLO001" });
+    expect(await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual(REFUSED);
+    const started = await w.start(p, "slack");
+    const callback = new URL(w.slack.approve(started.body.authorizeUrl as string, "U0LINKME1", { teamId: TEAM }));
+    callback.pathname = callback.pathname.replace("/callback/slack", "/callback/github");
+    const answer = await w.http(httpEvent("GET", callback.toString()));
+    expect(answer.statusCode).toBe(400);
+    expect(answer.headers.location).toBeUndefined();
+  });
+
+  it("an install-workspace Slack identity is refused when that workspace is bound to another company", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    w.deps.slackTeamCompany = (team) => (team === TEAM ? B : undefined);
+    expect(await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual(REFUSED);
+  });
+
+  it("only the web app's own sign-in client starts a link (never the CLI's session)", async () => {
+    const w = world();
+    await w.githubMember();
+    const cli = await w.signIn("owner", { cli: true });
+    expect(cli.refused).toBeUndefined();
+    w.stepUp(cli.access!);
+    expect(await w.start(cli.access!, "slack")).toEqual(REFUSED);
+  });
+
   it("a session that is not live is told to sign in again", async () => {
     const w = world();
     const p = await w.githubMember();
     const row = w.db.get(`SESSION#${decodeJwt(p).sid as string}`, "META")!;
     w.db.set({ ...row, revokedAt: new Date(w.now()).toISOString() });
     expect((await w.start(p, "slack")).status).toBe(401);
+  });
+});
+
+describe("DeveloperIdentity checks every link request itself (not only the broker)", () => {
+  const ids = (token: string) => { const claims = decodeJwt(token); return { developerId: claims.sub as string, sessionId: claims.sid as string }; };
+
+  it("a session that is someone else's, revoked, expired or ended by an admin is signed out", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    const owner = (await w.signIn("owner")).access!;
+    const list = (developerId: string, sessionId: string) => w.handler({ kind: "sign-in-links-list", developerId, sessionId, personDeveloperId: developerId } as never);
+    expect(await list(ids(p).developerId, ids(p).sessionId)).toMatchObject({ ok: true });
+    expect(await list(ids(p).developerId, ids(owner).sessionId)).toMatchObject({ ok: false, error: "signed_out" });
+    const key = `SESSION#${ids(p).sessionId}`;
+    const row = w.db.get(key, "META")!;
+    w.db.set({ ...row, endsAt: Math.floor(w.now() / 1000) - 1 });
+    expect(await list(ids(p).developerId, ids(p).sessionId)).toMatchObject({ ok: false, error: "signed_out" });
+    w.db.set({ ...row, revokedAt: new Date(w.now()).toISOString() });
+    expect(await list(ids(p).developerId, ids(p).sessionId)).toMatchObject({ ok: false, error: "signed_out" });
+    w.db.set(row);
+    w.db.set({ ...w.db.get(`DEVELOPER#${P}`, "META")!, sessionsEndedAt: new Date(w.now() + 1_000).toISOString() });
+    expect(await list(ids(p).developerId, ids(p).sessionId)).toMatchObject({ ok: false, error: "signed_out" });
+  });
+
+  it("a full-access client that is not the web app cannot start a link", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    const row = w.db.get(`SESSION#${ids(p).sessionId}`, "META")!;
+    const client = w.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!;
+    w.db.set({ ...client, sk: "CLIENT#tool-app", clientId: "tool-app", audience: "tool-app", name: "Tool", webApp: undefined });
+    w.db.set({ ...row, clientId: "tool-app" });
+    const answer = await w.handler({ kind: "sign-in-link-start", ...ids(p), method: "slack", challenge: CHALLENGE, returnTo: WEB, state: STATE } as never);
+    expect(answer).toEqual({ ok: false, error: "refused", message: SIGN_IN_LINK_TEXT.refused });
+  });
+
+  it("a link whose person moved company before finishing is refused", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    const started = await w.start(p, "slack");
+    const { location } = await w.atProvider(started.body.authorizeUrl as string, { slack: "U0LINKME1", team: TEAM });
+    // A third company with no sign-in of its own (so only the company binding refuses).
+    const C = "org_cccccccccccccccccccc";
+    await w.operator({ kind: "company-create", name: "Charlie", firstAdminEmail: "dana@example.test", expiresInHours: 24 }, C);
+    const key = membershipKey(P);
+    w.db.set({ ...w.db.get(key.pk, key.sk)!, companyId: C });
+    const answer = await w.handler({ kind: "sign-in-link-finish", ...ids(p), linkId: location!.searchParams.get("link_id"), linkCode: location!.searchParams.get("link_code"), verifier: VERIFIER } as never);
+    expect(answer).toEqual({ ok: false, error: "refused", message: SIGN_IN_LINK_TEXT.refused });
+    expect(w.linkRows()).toEqual([]);
+  });
+
+  it("a company with its own sign-in: GitHub is refused even when its Slack workspace is bound to it; that Slack may be linked", async () => {
+    const w = world();
+    await w.setup();
+    w.deps.slackTeamCompany = (team) => (team === TEAM ? B : undefined);
+    const bob = (await w.signIn("bob", { company: B })).access!;
+    w.stepUp(bob);
+    expect(await w.start(bob, "github")).toEqual(REFUSED);
+    expect(await w.link(bob, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual({ status: 200, body: { method: "slack" } });
   });
 });
 
@@ -338,6 +446,53 @@ describe("unlinking (DEC 254w)", () => {
     // Slack is a stranger again: it signs in as nobody's person (no company), never as P.
     const slack = await w.signIn("U0LINKME1", { slackTeam: TEAM });
     expect(decodeJwt(slack.access!).sub).toBe(sid("U0LINKME1"));
+  });
+
+  it("a code (or a session) made by the removed method before the unlink never becomes or stays a session", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    const pending = await w.slackCode("U0LINKME1");
+    const slackSession = await w.signIn("U0LINKME1", { slackTeam: TEAM });
+    expect(w.db.find((row) => row.entityType === "SESSION" && row.signedInId === sid("U0LINKME1"))).not.toEqual([]);
+    w.stepUp(p);
+    expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(200);
+    expect((await w.redeem(pending)).status).toBe(400);
+    expect((await w.refresh(slackSession.refresh!)).status).toBe(400);
+    // The same walk refuses even without the session end (a merge undone by other means).
+    const w2 = world();
+    const p2 = await w2.githubMember();
+    expect((await w2.link(p2, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    const code2 = await w2.slackCode("U0LINKME1");
+    const second = await w2.signIn("U0LINKME1", { slackTeam: TEAM });
+    w2.db.set({ ...w2.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")!, mergedInto: person("owner") });
+    expect((await w2.redeem(code2)).status).toBe(400);
+    expect((await w2.refresh(second.refresh!)).status).toBe(400);
+  });
+
+  it("unlinking an identity an admin turned off keeps it turned off", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    w.db.set({ ...w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")!, revoked: true });
+    w.stepUp(p);
+    expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(200);
+    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ revoked: true });
+    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).not.toHaveProperty("mergedInto");
+    expect((await w.signIn("U0LINKME1", { slackTeam: TEAM })).refused).toBeDefined();
+  });
+
+  it("an admin cannot remove an owner's connected method; only an owner can", async () => {
+    const w = world();
+    await w.setup();
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "carol@example.test", role: "admin", expiresInHours: 24 });
+    const carol = (await w.signIn("carol", { company: X })).access!;
+    const owner = (await w.signIn("owner")).access!;
+    w.stepUp(owner);
+    expect((await w.link(owner, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    w.stepUp(carol);
+    expect((await w.api("DELETE", `/v1/dev/company/members/${person("owner")}/sign-ins/slack`, carol)).body).toEqual({ error: { code: "FORBIDDEN", message: SIGN_IN_LINK_TEXT.forbidden } });
+    expect(w.linkRows()).toHaveLength(1);
   });
 
   it("a company owner removes a member's connected method; a plain member cannot", async () => {

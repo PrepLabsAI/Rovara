@@ -29,11 +29,6 @@ const PersonId = z.string().regex(/^[a-f0-9]{64}$/);
 const NoBody = z.object({}).strict();
 const NOT_SET_UP = "connecting sign-ins is not set up in this deployment";
 
-/** Whether this module answers the path. */
-export function isSignInLinkPath(path: string): boolean {
-  return SIGN_INS.test(path);
-}
-
 function body(request: AdaptedHttpRequest): unknown {
   if (request.body === undefined || request.body === "") return {};
   try { return JSON.parse(request.body) as unknown; } catch { return undefined; }
@@ -94,7 +89,7 @@ export async function routeSignInLinks(forward: SignInLinkForward | undefined, c
     const method = LinkableSignInMethodSchema.safeParse(tail);
     if (!method.success) throw agentXError("NOT_FOUND", SIGN_IN_LINK_TEXT.notFound);
     if (!NoBody.safeParse(parsedBody).success) throw agentXError("CONFIG_INVALID", SIGN_IN_LINK_TEXT.invalid);
-    okOrRefused(await forward({ kind: "sign-in-unlink", developerId, sessionId, personDeveloperId, method: method.data }) as SignInUnlinkResponse);
+    okOrRefused(await forward({ kind: "sign-in-unlink", developerId, sessionId, personDeveloperId, method: method.data }));
     return { removed: true };
   }
   throw agentXError("NOT_FOUND", "route not found");

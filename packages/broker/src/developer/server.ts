@@ -546,7 +546,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   async function callback(method: DeveloperSignInMethod, query: URLSearchParams, headers: Record<string, string | undefined>): Promise<HttpResult> {
     // DEC 254w: a connect link's callback (its state is a link id, never a sign-in request's).
-    if (deps.company !== undefined && signInLinks.isLinkState(query.get("state"))) return signInLinks.callback(method, query);
+    if (deps.company !== undefined && signInLinks.isLinkState(query.get("state"))) {
+      const answered = await signInLinks.callback(method, query);
+      if (answered !== undefined) return answered;
+    }
     const state = query.get("state") ?? "";
     const pending = state === "" ? undefined : await store.getAuthRequest(state);
     if (pending === undefined || pending.method !== method) return expired();
@@ -706,12 +709,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(identity.email === undefined ? {} : { email: identity.email }),
       ...(slackUserId === undefined ? {} : { slackUserId }),
       ...(identity.slackTeam === undefined ? {} : { slackTeamId: identity.slackTeam.id, ...(identity.slackTeam.name === undefined ? {} : { slackTeamName: identity.slackTeam.name }) }),
-    }, companyId, companyless ? { companyless: true } : {});
+    }, companyId, { ...(companyless ? { companyless: true as const } : {}), ...(deps.company === undefined ? {} : { unmerged: true as const }) });
     if (request.browserReturnTo !== undefined) {
       if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined)) return browserReturn(request.browserReturnTo, false);
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
       const endsAt = Math.floor(deps.now() / 1000) + SESSION_MAX_AGE_SECONDS;
-      const { session } = await store.createSession({ developerId, amr: method,
+      const { session } = await store.createSession({ developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}),
         ...(slackUserId === undefined ? {} : { slackUserId }),
         reviewExpiresAt: endsAt, endsAt,
         ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
@@ -721,7 +724,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return browserReturn(request.browserReturnTo, true, session.sessionId);
     }
     const grant: CodeGrant & { codeChallenge: string; redirectUri: string } = {
-      developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
+      developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}), ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
       ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
       ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
@@ -759,11 +762,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return { ...back, statusCode: status };
   }
 
+  /**
+   * DEC 254w: a merged or connected sign-in still stands for its person: its identity's walk ends at that person now. Once a connected method is
+   * removed (or a merge undone), a code, step-up grant or session it made before that is refused, whenever it is used.
+   */
+  async function stillSeated(signedInId: string | undefined, developerId: string): Promise<boolean> {
+    if (signedInId === undefined) return true;
+    try { return (await mergeSurvivor((id) => store.getDeveloper(id), signedInId)).survivorId === developerId; } catch { return false; }
+  }
+
   async function authorizationCodeGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {
     const redeemed = await store.redeemCode({ code: form.get("code") ?? "", verifier: form.get("code_verifier") ?? "", redirectUri: form.get("redirect_uri") ?? "" });
     if (redeemed === undefined) return oauthError(400, ...INVALID_CODE);
     // A code is redeemed only by the client it was issued to (it is burned either way).
     if (redeemed.clientId !== client?.clientId) return oauthError(400, ...INVALID_CODE);
+    if (!await stillSeated(redeemed.signedInId, redeemed.developerId)) return oauthError(400, ...SIGN_IN_ENDED);
     if (!await companyMayMint(redeemed.developerId, redeemed.amr, redeemed.companyId, client, false, redeemed.installMethod)) return oauthError(400, ...SIGN_IN_ENDED);
     if (deps.company !== undefined && redeemed.companyId !== undefined && redeemed.companyId !== IMPLICIT_COMPANY_ID && redeemed.amr === "oidc") {
       try { methods = await methodsFor(redeemed.companyId) ?? []; } catch { return oauthError(400, ...SIGN_IN_ENDED); }
@@ -818,6 +831,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const developer = await store.getDeveloper(session.developerId);
     if (developer === undefined || developer.revoked) {
       await revoke(session.sessionId, "developer_revoked");
+      return ended;
+    }
+    if (!await stillSeated(session.signedInId, session.developerId)) {
+      await revoke(session.sessionId, "sign_in_unlinked");
       return ended;
     }
     if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {

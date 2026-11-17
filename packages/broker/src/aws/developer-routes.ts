@@ -118,7 +118,7 @@ import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 import type { CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
-import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { isSignInLinkPath, routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
+import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
 
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
@@ -1953,7 +1953,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   }
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
-  if (isSignInLinkPath(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
+  if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
   // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
   if (LESSONS_API_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
