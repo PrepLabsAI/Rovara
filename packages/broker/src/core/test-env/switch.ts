@@ -2,7 +2,7 @@
 // Code reads them from the environment (`rovara up` and a plug-in install set them; Cloud sets the same variables from its own settings). Each takes the environment as a parameter, so a test never
 // touches the process's own.
 //
-//   ROVARA_TEST_ENVIRONMENT   the project test environment (propose, prove, approve, the task's checks, the nightly run, the evidence line). ON unless exactly "0": nothing happens until
+//   ROVARA_TEST_ENVIRONMENT   the project test environment (propose, prove, approve, the task's checks, the nightly run, the evidence line). ON unless "0", "false", "off" or "no" (any case): nothing happens until
 //                             an environment is approved, so on is the safe default for a laptop.
 //   ROVARA_TEST_SERVICES      dependencies get a backing (real software, local AWS, fakes) on a sealed per-run network. OFF unless exactly "1": it needs Docker and the signed service catalog.
 //   ROVARA_TEST_ACCOUNTS      a project may use the customer's own test accounts. OFF unless exactly "1". Needs the services switch too.
@@ -24,8 +24,13 @@ export const BASELINE_CACHE_VARIABLE = "ROVARA_BASELINE_CACHE";
 /** On only when exactly "1" (unset, empty, "true" and " 1" are off). */
 export const optIn = (env: NodeJS.ProcessEnv, variable: string): boolean => env[variable] === "1";
 
-/** Whether the project test environment exists in this install. Only exactly "0" turns it off. */
-export const testEnvironmentEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => env[TEST_ENVIRONMENT_VARIABLE] !== "0";
+/** The natural words that switch an ON-by-default switch off (any case, spaces ignored). Anything else, including unset or empty, leaves it on. */
+const OFF_WORDS: ReadonlySet<string> = new Set(["0", "false", "off", "no"]);
+/** On unless the variable is one of the off words: "0", "false", "off" or "no". */
+export const optOut = (env: NodeJS.ProcessEnv, variable: string): boolean => !OFF_WORDS.has((env[variable] ?? "").trim().toLowerCase());
+
+/** Whether the project test environment exists in this install. "0", "false", "off" or "no" (any case) turn it off. */
+export const testEnvironmentEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => optOut(env, TEST_ENVIRONMENT_VARIABLE);
 
 /** TE-C6: whether a task round reruns a failing test once to tell a flaky one. Off unless exactly "1". */
 export const flakyRerunEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => optIn(env, FLAKY_RERUN_VARIABLE);

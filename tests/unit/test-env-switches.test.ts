@@ -14,8 +14,8 @@ import { loaderTrusting, pinnedCatalog, testSigner } from "../support/catalog-pi
 describe("the switches", () => {
   it("the test environment is on unless exactly 0: nothing happens until an environment is approved", () => {
     expect(testEnvironmentEnabled({})).toBe(true);
-    for (const value of ["1", "true", "", " 0", "false"]) expect(testEnvironmentEnabled({ ROVARA_TEST_ENVIRONMENT: value }), value).toBe(true);
-    expect(testEnvironmentEnabled({ ROVARA_TEST_ENVIRONMENT: "0" })).toBe(false);
+    for (const value of ["1", "true", "", "on", "yes", "offline", "nope", "00"]) expect(testEnvironmentEnabled({ ROVARA_TEST_ENVIRONMENT: value }), value).toBe(true);
+    for (const value of ["0", " 0", "false", "FALSE", "off", " Off ", "no", "No"]) expect(testEnvironmentEnabled({ ROVARA_TEST_ENVIRONMENT: value }), value).toBe(false);
   });
 
   it("test services, test accounts, project images, saved environments and nightly health are off unless exactly 1", () => {
