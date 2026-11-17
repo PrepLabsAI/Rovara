@@ -625,5 +625,6 @@ describe("what did not change", () => {
 // The sha256 of every route row (method, path, requirement) except the two this PR adds, joined by newlines, as the table stood on code/next before this change.
 // Batch 10: re-pinned with the batch's 13 new rows (all added, none changed; code/next's 81 rows in the same order still give 622d8b9d...): #830/#832 GitHub connect (5),
 // #835 engine model (2), #839 archive/restore (4), #837 bulk create and available repositories (2).
-// DEC 254y (2): re-pinned for #838's 7 new /v1/dev/company/linear* rows (all added, none changed; removing exactly those rows still gives 9c594d20...).
-const EXISTING_ROUTES_DIGEST = "d55d9e43a11c000659557c0137fc59477a752c6e73687187589bee72cd8e75c7";
+// DEC 254y (2): re-pinned for #838's 7 new /v1/dev/company/linear* rows (all added, none changed; removing exactly those rows still gives 9c594d20...),
+// and for L2-4's 3 new /v1/dev/projects/{p}/intake* rows (removing exactly the 7 Linear and 3 intake rows still gives 9c594d20...).
+const EXISTING_ROUTES_DIGEST = "e616631ef3f46f1914e336fd49cf1537f75be55f5d56fb1e00768b575f5b533f";
