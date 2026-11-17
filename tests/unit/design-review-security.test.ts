@@ -309,7 +309,7 @@ describe("a design that went through no review", () => {
       schemaVersion: 1, title: "Retry", why: [{ text: "Timed-out payments are dropped.", author: "Priya" }], claims: [{ id: "1", text: "A timed-out payment is retried once." }], notChanging: ["Refunds stay as they are."], risks: ["A retry could charge twice."], decisions: [],
     };
     const body = workflowPullRequestBody(task, waiting, undefined, undefined, { lessonsUsed: NO_LESSONS_USED, proof: { plan, design: proofDesignOf(context) } });
-    expect(body).toContain("### Proof");
+    expect(body).toContain("<summary>Requirements and proof: ");
     expect(body).toContain("Design review did not run: no price is known");
   });
 });

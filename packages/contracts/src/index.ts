@@ -365,6 +365,7 @@ export * from "./eval-files.js";
 export * from "./system-owner.js";
 export * from "./test-id.js";
 export * from "./verification-result.js";
+export * from "./pr-verdict.js";
 export * from "./e2e-model-spend.js";
 
 // Learning v2: the Team record and lessons (R1).

@@ -346,7 +346,7 @@ export interface TaskFlowDeps {
    * Second review by another AI company: asked when the REVIEW step starts (does this review carry a second reviewer?) and when it ends (what is the opinion of this code?). Absent: no second review, the
    * review is exactly what it was. It only ADDS an opinion beside the reviews; it never changes what the first reviews decide, except that an `on` opinion that blocks holds the step.
    */
-  secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold">;
+  secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold"> & Partial<Pick<SecondReview, "prStatus">>;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
   /**

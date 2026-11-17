@@ -3,9 +3,7 @@
 //   green:      a typical task, every check passed, a real and a recorded service, two lessons, a Linear issue, people known
 //   exceptions: a failed check, a Rovara-made mock, an out-of-date recorded fake, a changed snapshot and instruction file, a sensitive path, an accepted finding, a blocking second review, same-model review
 //   largest:    far more files, checks, requirements, lessons and findings than the description holds, so every shrink step runs
-import { EvidencePackSchema, type ActingAttribution, type AutoFixBudget, type EvidencePack, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
-import { wholeTaskSpendUsd } from "../../packages/contracts/src/index.js";
-import { readEvidencePack } from "../../packages/contracts/src/index.js";
+import { EvidencePackSchema, readEvidencePack, wholeTaskSpendUsd, type ActingAttribution, type AutoFixBudget, type EvidencePack, type PlanDocument, type TestProof } from "@agentx/contracts";
 import { workflowFindingFingerprint } from "../../packages/contracts/src/task-workflow.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import type { PullRequestBodyContext } from "../../packages/broker/src/core/proof/pull-request-body.js";
@@ -26,6 +24,9 @@ const checkOf = (id: string, label: string, executable: string, args: string[]) 
 
 type Over = Record<string, unknown>;
 
+/** Text a repository, a person or a model could write, used by `exceptionsScenario(hostile)` for the plan, a requirement, a finding, a service, a lesson and a second-review line. */
+let HOSTILE: string | undefined;
+
 /** The task's checks, in the order the worker numbers them (`readiness:0` is the first). */
 function policyOf(count: number) {
   const base = [checkOf("unit", "Unit tests", "npm", ["test"]), checkOf("int", "Integration tests", "npm", ["run", "test:integration"]), checkOf("lint", "Lint", "npm", ["run", "lint"]), checkOf("types", "Type check", "npm", ["run", "typecheck"])];
@@ -39,15 +40,15 @@ function planOf(claims: number): PlanDocument {
   ];
   return {
     schemaVersion: 1, title: "Show tax on the invoice page and the invoice PDF", why: [{ text: "Customers ask where the tax went.", author: "Priya N." }],
-    claims: Array.from({ length: claims }, (_, index) => ({ id: String(index + 1), text: claimTexts[index] ?? `Requirement number ${index + 1} of the large change holds for every package.` })),
+    claims: Array.from({ length: claims }, (_, index) => ({ id: String(index + 1), text: index === 0 && HOSTILE !== undefined ? HOSTILE : claimTexts[index] ?? `Requirement number ${index + 1} of the large change holds for every package.` })),
     notChanging: ["The refund flow stays as it is."], risks: [],
     decisions: [],
     checks: { proposed: [checkOf("unit", "Unit tests", "npm", ["test"])], proves: { unit: ["1"], int: ["2"], lint: ["3"], types: ["4"] } },
   };
 }
 
-const PLAN_TEXT = [
-  "# Show tax on the invoice page and the invoice PDF", "", "1. Add a tax line to the invoice view model.", "2. Render it on the invoice page and in the PDF template.", "3. Cover zero-tax orders.", "",
+const planText = (): string => [
+  "# Show tax on the invoice page and the invoice PDF", "", `1. ${HOSTILE ?? "Add a tax line to the invoice view model."}`, "2. Render it on the invoice page and in the PDF template.", "3. Cover zero-tax orders.", "",
 ].join("\n");
 
 const checkEntry = (index: number, over: Over = {}) => ({ checkId: `readiness:${index}`, kind: "test", label: "npm test", before: "passed", after: "passed", class: "passing", durationMs: 700, exitCode: 0, ...over });
@@ -65,9 +66,11 @@ void buildEvidencePack;
 
 const WRITER: EvidenceV2Writer = { version: 2, producer: { edition: "code", isolation: "sandbox" } };
 
-function testProofOf(checkCount: number, provenAt: readonly number[]): TestProof {
+function testProofOf(checkCount: number, provenAt: readonly number[], compared = false): TestProof {
   return {
     schemaVersion: 1, candidateDigest: CODE.digest, status: "checked", note: "completed", changedTests: { added: 3, changed: 0, deleted: 0 }, durationMs: 1200,
+    // A check that was compared and shows nothing has zeros: only then is "no test weakened" a thing the description may say.
+    ...(compared ? { weakening: [{ checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 }] } : {}),
     items: Array.from({ length: checkCount }, (_, index) => (provenAt.includes(index)
       ? { checkId: `readiness:${index}`, label: index === 0 ? "Unit tests" : "Integration tests", granularity: "check" as const, verdict: "proves_change" as const, reason: "assertion_failed_on_old" as const }
       : { checkId: `readiness:${index}`, label: "check", granularity: "check" as const, verdict: "not_applicable" as const, reason: "not_a_test_check" as const })),
@@ -90,11 +93,11 @@ const file = (path: string, added: number, removed: number, over: Partial<Change
 
 export interface Scenario { name: string; title: string; body: string }
 
-function render(name: string, input: { workflow: WorkflowSnapshot; evidence: EvidencePack; claims: number; files: ChangedFileEntry[]; context: PullRequestBodyContext; dependencies?: Map<string, readonly { dependencyId: string; trust: "real" | "recorded" | "made_by_rovara" }[]>; checkCount: number; provenAt: readonly number[]; proofLines?: string[] }): Scenario {
+function render(name: string, input: { workflow: WorkflowSnapshot; evidence: EvidencePack; claims: number; files: ChangedFileEntry[]; context: PullRequestBodyContext; dependencies?: Map<string, readonly { dependencyId: string; trust: "real" | "recorded" | "made_by_rovara" }[]>; checkCount: number; provenAt: readonly number[]; compared?: boolean; proofLines?: string[] }): Scenario {
   const read = readEvidencePack(JSON.parse(JSON.stringify(evidencePackV2Of(input.evidence, { ...WRITER, changedFiles: input.files }))));
   const outcome = testingViewOf({ workflow: input.workflow, facts: {}, budget: BUDGET, evidence: input.evidence, alreadyFailing: [] });
   const proof = {
-    plan: planOf(input.claims), testProof: testProofOf(input.checkCount, input.provenAt),
+    plan: planOf(input.claims), testProof: testProofOf(input.checkCount, input.provenAt, input.compared === true),
     evidence: { pack: input.evidence, read, mode: "link" as const, origin: ORIGIN, taskUrl: SESSION },
     ...(input.dependencies === undefined ? {} : { checkDependencies: input.dependencies }),
   };
@@ -107,7 +110,7 @@ function render(name: string, input: { workflow: WorkflowSnapshot; evidence: Evi
 }
 
 function workflowPullRequestBodyOf(workflow: WorkflowSnapshot, context: PullRequestBodyContext, proofLines: readonly string[]): string {
-  return workflowPullRequestBody({ title: "Show tax on the invoice page and the invoice PDF" }, workflow, PLAN_TEXT, SESSION, context, proofLines);
+  return workflowPullRequestBody({ title: "Show tax on the invoice page and the invoice PDF" }, workflow, planText(), SESSION, context, proofLines);
 }
 
 const LESSONS = { count: 2, taskUrl: SESSION, entries: [
@@ -115,7 +118,10 @@ const LESSONS = { count: 2, taskUrl: SESSION, entries: [
   { title: "PDF templates live in templates/pdf, not in the route", notHelpfulUrl: `${SESSION}?lesson=2`, number: 2 },
 ] };
 
-export function greenScenario(): Scenario {
+/** The typical task of design example 1, but with every requirement proven and the tests before and after compared. `agreed`: a second review in mode on agreed. */
+export function greenScenario(variant: "today" | "clean" = "today"): Scenario {
+  const provenAt = variant === "clean" ? [0, 1, 2] : [0];
+  const compared = variant === "clean";
   const evidence = packOf({
     checks: [checkEntry(0, { tests: testsOf(176), label: "npm test" }), checkEntry(1, { label: "integration", tests: testsOf(38) }), checkEntry(2, { kind: "lint", label: "lint" }), checkEntry(3, { kind: "typecheck", label: "tsc" })],
     dependencies: [{ name: "Postgres", backing: "project_image", label: "real_project_image" }, { name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", fixtureRevision: 3 }],
@@ -125,23 +131,32 @@ export function greenScenario(): Scenario {
     verification: { candidateDigest: CODE.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: NOW, results: ["unit", "int", "lint", "types"].map((checkId) => ({ checkId, status: "PASS" })) },
     reviews: [review("CRITIC", { risk: "low" }), review("SECURITY")],
   });
-  return render("green", {
-    workflow, evidence, claims: 3, checkCount: 4, provenAt: [0], files: [file("src/invoice/view.ts", 40, 6), file("src/invoice/pdf.ts", 30, 4), file("tests/invoice/tax.test.ts", 9, 1), file("tests/invoice/pdf.test.ts", 7, 1)],
+  return render(variant === "clean" ? "green-clean" : "green", {
+    workflow, evidence, claims: 3, checkCount: 4, provenAt: provenAt, compared: compared, files: [file("src/invoice/view.ts", 40, 6), file("src/invoice/pdf.ts", 30, 4), file("tests/invoice/tax.test.ts", 9, 1), file("tests/invoice/pdf.test.ts", 7, 1)],
     dependencies: new Map([["unit", [{ dependencyId: "Postgres", trust: "real" as const }, { dependencyId: "Stripe", trust: "recorded" as const }]]]),
-    context: { lessonsUsed: LESSONS, linearIssueKey: "ENG-482", reviewSameModel: false, ciBasis: "required", baseBranch: "main" },
+    context: { lessonsUsed: LESSONS, linearIssueKey: "ENG-482", reviewSameModel: false, ciBasis: "required", baseBranch: "main", secondReview: { state: "agreed" } },
   });
 }
 
-export function exceptionsScenario(): Scenario {
+export function exceptionsScenario(hostile?: string): Scenario {
+  HOSTILE = hostile;
+  try {
+    return exceptionsScenarioOf();
+  } finally {
+    HOSTILE = undefined;
+  }
+}
+
+function exceptionsScenarioOf(): Scenario {
   const evidence = packOf({
     checks: [
       checkEntry(0, { after: "failed", class: "regression", tests: { ...testsOf(37, 1), names: [{ name: "refund.test::refund more than captured is refused", status: "failed" }] }, label: "npm test" }),
       checkEntry(1, { label: "integration", tests: testsOf(181) }), checkEntry(2, { kind: "lint", label: "lint" }), checkEntry(3, { kind: "typecheck", label: "tsc" }),
     ],
-    dependencies: [{ name: "Postgres", backing: "project_image", label: "real_project_image" }, { name: "Stripe", backing: "fake", label: "rovara_made_fake", madeUpAnswers: 2, fixtureRevision: 1 }],
+    dependencies: [{ name: "Postgres", backing: "project_image", label: "real_project_image" }, { name: HOSTILE === undefined ? "Stripe" : HOSTILE.slice(0, 80), backing: "fake", label: "rovara_made_fake", madeUpAnswers: 2, fixtureRevision: 1 }],
     notTested: [{ kind: "mocked_service", id: "stripe", text: "Stripe is mocked", reason: "answered from made-up responses" }],
   });
-  const finding = { text: "The refund amount is not checked against the amount already refunded", origin: "INTRODUCED", severity: "HIGH", file: "src/payments/refund.ts", line: 88 };
+  const finding = { text: HOSTILE ?? "The refund amount is not checked against the amount already refunded", origin: "INTRODUCED", severity: "HIGH", file: "src/payments/refund.ts", line: 88 };
   const workflow = workflowOf({
     stage: "REVIEW", state: "WAITING", checkPolicy: policyOf(4),
     verification: { candidateDigest: CODE.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: NOW, results: [{ checkId: "unit", status: "FAILED" }, { checkId: "int", status: "PASS" }, { checkId: "lint", status: "PASS" }, { checkId: "types", status: "PASS" }] },
@@ -153,9 +168,10 @@ export function exceptionsScenario(): Scenario {
     files: [file("src/payments/refund.ts", 120, 30), file("src/orders/page.tsx", 60, 8), file("tests/orders/__snapshots__/order-page.snap", 10, 2, { snapshotChanged: true }), file("CLAUDE.md", 2, 0), file("tests/payments/refund.test.ts", 30, 0), file("tests/orders/refund.test.ts", 9, 0), file("src/orders/model.ts", 4, 0)],
     dependencies: new Map([["int", [{ dependencyId: "Stripe", trust: "made_by_rovara" as const }]]]),
     context: {
-      lessonsUsed: { count: 1, taskUrl: SESSION, entries: [LESSONS.entries[0]!] }, reviewSameModel: true, linearIssueKey: "ENG-517", ciBasis: "all_checks", baseBranch: "main",
+      lessonsUsed: { count: 1, taskUrl: SESSION, entries: [{ ...LESSONS.entries[0]!, title: HOSTILE ?? LESSONS.entries[0]!.title }] }, reviewSameModel: true, linearIssueKey: "ENG-517", ciBasis: "all_checks", baseBranch: "main",
       acceptedBy: { [workflowFindingFingerprint("SECURITY", finding)]: "Dana K. via the task page" },
       secondReviewLines: ["Second review (openai/model-b): 1 blocking finding", "- The refund amount is not checked against the amount already refunded (src/payments/refund.ts:88)"],
+      secondReview: { state: "blocking", count: 1, model: "openai/model-b", findings: [{ text: HOSTILE ?? "The refund amount is not checked against the amount already refunded", file: "src/payments/refund.ts", line: 88 }] },
       mergeOrderLines: ["Merge the app pull request first, then the docs pull request."],
     },
     proofLines: ["Tests that fail on the original code: refund.test::partial refund amount"],
@@ -190,5 +206,5 @@ export function largestScenario(): Scenario {
 }
 
 export const SCENARIOS: ReadonlyArray<{ name: string; build: () => Scenario }> = [
-  { name: "green", build: greenScenario }, { name: "exceptions", build: exceptionsScenario }, { name: "largest", build: largestScenario },
+  { name: "green", build: () => greenScenario() }, { name: "green-clean", build: () => greenScenario("clean") }, { name: "exceptions", build: exceptionsScenario }, { name: "largest", build: largestScenario },
 ];

@@ -155,3 +155,67 @@ export function proofSection(workflow: WorkflowSnapshot, proof: ProofContext | u
     return lines;
   };
 }
+
+/**
+ * L4-C: the Proof section's parts for the redesigned description (design pr-redesign.md 2.2): the requirement table and the not-tested bullets for the "Requirements and proof" drawer, and the evidence lines split for
+ * the "Checks" and "Test setup" drawers. The table is computed once; `render(level)` shrinks with the same levels as `proofSection` (0..PROOF_LEVEL_LAST), never dropping a failed row, a partly tested row or a not-tested
+ * item. `claimTexts` has each requirement's own words (raw: the verdict object makes them inert), `table` the rows the verdict counts. Undefined when there is no approved plan with claims; `stale` when the section's reads
+ * could not be made in time (the drawer then says it is being updated).
+ */
+export interface ProofParts {
+  table: ReturnType<typeof buildProofTable>;
+  claimTexts: ReadonlyMap<string, string>;
+  stale: boolean;
+  render(level: number): { requirements: string[]; notTested: string[]; checksEvidence: string[]; setupEvidence: string[] };
+}
+
+const flatClaims = (claims: readonly PlanClaim[]): PlanClaim[] => claims.flatMap((claim) => [claim, ...flatClaims(claim.children ?? [])]);
+
+export function proofParts(workflow: WorkflowSnapshot, proof: ProofContext | undefined): ProofParts | undefined {
+  const plan = proof?.plan;
+  const planned = plan !== undefined && Array.isArray(plan.claims) && plan.claims.length > 0;
+  const evidenceFor = (level: number, alreadyListed?: ReadonlySet<string>) => evidenceLines(proof?.evidence, workflow.candidate?.digest, level, {
+    proven: provenTestNames(proof?.testProof, workflow.candidate?.digest),
+    testProofQualifier: testProofQualifier(proof?.testProof, workflow.candidate?.digest, { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: proof?.checkDependencies, realModelRun: proof?.realModelRun }),
+    ...(alreadyListed === undefined ? {} : { alreadyListed }),
+  });
+  if (proof?.stale === true) return { table: { rows: [], notTested: [] }, claimTexts: new Map(), stale: true, render: (level) => ({ requirements: [PROOF_STALE_LINE], notTested: [], checksEvidence: evidenceFor(level).checks, setupEvidence: evidenceFor(level).setup }) };
+  if (!planned) {
+    // No requirements to speak of: the evidence still has lines for the Checks and Test setup drawers.
+    if (proof?.evidence === undefined) return undefined;
+    return { table: { rows: [], notTested: [] }, claimTexts: new Map(), stale: false, render: (level) => { const evidence = evidenceFor(level); return { requirements: [], notTested: evidence.notTested, checksEvidence: evidence.checks, setupEvidence: evidence.setup }; } };
+  }
+  const design = proof?.design;
+  const designLinks = design === undefined ? undefined : design.linksFor(flatClaimIds(plan.claims));
+  const table = buildProofTable({
+    plan, checkResults: proofCheckResults(workflow), scenarioRows: proof?.scenarioRows ?? [], testProof: proof?.testProof, candidateDigest: workflow.candidate?.digest, recordedCheckIds: recordedCheckIdsOf(workflow),
+    checkDependencies: proof?.checkDependencies, realModelRun: proof?.realModelRun,
+    ...(designLinks === undefined ? {} : { designLinks }),
+  });
+  const claimTexts = new Map(flatClaims(plan.claims).map((claim) => [claim.id, claim.text]));
+  return {
+    table, claimTexts, stale: false,
+    render(level) {
+      const requirementMax = level >= 4 ? 60 : level >= 3 ? 120 : level >= 2 ? 160 : level === 1 ? 200 : 300;
+      const folded = level >= 3 ? table.rows.filter((row) => row.result === "proven" || row.result === "passed") : [];
+      const shown = table.rows.filter((row) => !folded.includes(row));
+      const lines: string[] = [...(design === undefined ? [] : [design.line, ""])];
+      for (const reason of proofReasonLines(table)) lines.push(reason, "");
+      if (shown.length > 0) {
+        lines.push("| Requirement | Evidence | Result |", "| --- | --- | --- |",
+          ...shown.map((row) => `| ${cell(`${row.claimId}: ${cut(row.requirement, requirementMax)}`)} | ${cell(evidenceCell(row, level))} | ${RESULT_WORDS[row.result]} |`));
+      }
+      if (folded.length > 0) {
+        const proven = folded.filter((row) => row.result === "proven").length;
+        lines.push("", `${plural(folded.length, "more requirement")} proven or passed${proven > 0 ? ` (${proven} also fail${proven === 1 ? "s" : ""} on the original code)` : ""}; their rows are left out to keep this description short.`);
+      }
+      const evidence = evidenceFor(level, new Set(table.notTested.map((item) => `${item.kind}:${item.id}`)));
+      const notTested = [...evidence.notTested, ...table.notTested.map((item) => {
+        const noun = item.kind === "claim" ? "Requirement" : item.kind === "scenario" ? "Scenario" : "Check";
+        const name = level >= 4 ? item.id : item.kind === "claim" ? `${item.id}: ${cut(item.text, level >= 2 ? 80 : 120)}` : cut(item.text, 80);
+        return `- ${noun} ${name} (${item.reason})`;
+      })];
+      return { requirements: lines, notTested, checksEvidence: evidence.checks, setupEvidence: evidence.setup };
+    },
+  };
+}

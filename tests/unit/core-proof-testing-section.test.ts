@@ -5,7 +5,7 @@ import {
   EvidencePackSchema, TESTING_REASON_TEXT, TestingViewSchema, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, wholeTaskSpendUsd,
   type AutoFixBudget, type TestingView, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { testingSectionLines, testingViewOf, type TestingViewInput } from "../../packages/broker/src/core/proof/testing-section.js";
+import { testingSectionLines, testingTableLines, testingViewOf, type TestingViewInput } from "../../packages/broker/src/core/proof/testing-section.js";
 import { rovaraStatusLines, type PullRequestBodyContext } from "../../packages/broker/src/core/proof/pull-request-body.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -166,18 +166,16 @@ describe("the whole description with the view", () => {
   const reviews = () => ["Reviews: code review passed; security review passed"];
   const body = (context: PullRequestBodyContext) => rovaraStatusLines(workflow(), context, reviews);
 
-  // The block as the builder at the base of this lane (f759be005) wrote it for this workflow and these reviews, taken from that commit and pinned here: with `vx` off no view is built, and the block must be these lines.
-  const TODAYS_BLOCK = [
-    "## What changed", "Rovara couldn't list the changed files.", "",
-    "## Tests", "- Tested on head commit 11111111", "- Passed: Unit tests; Lint", "- Tests added: Rovara couldn't list the changed files, so it can't say.", "",
-    "## Reviews", "Reviews: code review passed; security review passed", "",
-    "## Risk: Medium", "- Rovara couldn't list every changed file.",
-  ];
-
-  it("is exactly what the builder wrote before this lane while the view is absent (vx off): the same lines, and the same with the field set to undefined", () => {
-    expect(body({})).toEqual(TODAYS_BLOCK);
-    expect(body({ testing: undefined })).toEqual(TODAYS_BLOCK);
-    expect(body({}).join("\n")).not.toContain("Testing");
+  // L4-C: the block no longer has the old `## Tests` lists (the pins of the layout before the redesign are replaced by tests/fixtures/pr-body/*.md, which the golden test reads). With no Testing view (`vx` off) the Checks drawer is built from the
+  // recorded results, and the heading says it in the fixed words of a task with no classified result: never "Verified".
+  it("with the view absent (vx off) says what the recorded results say, in words that are never Verified, and the same with the field set to undefined", () => {
+    expect(body({})).toEqual(body({ testing: undefined }));
+    const text = body({}).join("\n");
+    expect(text.split("\n")[0]).toBe("## Checks passed · Risk not judged yet (treated as high) · 1 thing to check");
+    expect(text).toContain("<summary>Checks: 2 of 2 passed</summary>");
+    expect(text).not.toContain("Verified");
+    expect(text).not.toContain("Result: ");
+    expect(text).toContain("| Unit tests | `pytest -q` | ✅ passed |");
   });
 
   // L1 (Opus re-check): 64 blocked rows with multibyte labels and commands must still fit, with the result line, however the budget is set.
@@ -186,46 +184,52 @@ describe("the whole description with the view", () => {
     rows: Array.from({ length: 64 }, (_, n) => ({ label: `\u691C\u67FB${String(n)} `.repeat(14).trim(), command: `\u5B9F\u884C ${String(n)} `.repeat(14).trim().slice(0, 118), status: "blocked", reason: "check_runner_failed" })),
   });
 
-  it("64 blocked multibyte rows fit the default budget and a tight one, with the heading and the result line, down to counts at the last resort", () => {
+  it("64 blocked multibyte rows fit the default budget and a tight one, with the result in the heading and every blocked row counted, down to pointers at the last resort", () => {
     const v = multibyte();
-    expect(Buffer.byteLength(testingSectionLines(v, 0).join("\n"))).toBeGreaterThan(15_000);
+    expect(Buffer.byteLength(testingTableLines(v.rows, 0).join("\n"))).toBeGreaterThan(15_000);
     for (const budget of [22_000, 12_000, 9_000, 4_000]) {
       const lines = rovaraStatusLines(workflow(), { testing: v }, reviews, budget);
       expect(Buffer.byteLength(lines.join("\n")), `budget ${String(budget)}`).toBeLessThanOrEqual(budget);
       const text = lines.join("\n");
-      expect(text).toContain("## Testing \u2014 Blocked by environment");
-      expect(text).toContain("Result: 64 checks could not give a result because of the test environment.");
+      // Above the fold at every size: the result, and that 64 checks were blocked, with the first ten named and the rest counted.
+      expect(text.split("\n")[0]).toContain("Blocked by environment");
+      expect(text).toContain("**64 checks were blocked.**");
+      expect(text).toContain("and 54 more");
+      expect(text).toContain(TESTING_REASON_TEXT.check_runner_failed);
     }
     const tight = rovaraStatusLines(workflow(), { testing: v }, reviews, 4_000).join("\n");
-    expect(tight).toContain("- 64 checks blocked: the check runner failed");
-    expect(tight).toContain("Every check, with its command, is listed on the task page.");
+    expect(tight).toContain("Listed in the Rovara Check and on the task page.");
+    expect(tight).toContain("<summary>Checks: 0 of 64 passed, 64 blocked</summary>");
     // At level 4 the labels are cut to about 40 characters.
-    const level4 = testingSectionLines(v, 4).filter((line) => line.startsWith("| "))[2]!;
+    const level4 = testingTableLines(v.rows, 4).filter((line) => line.startsWith("| "))[2]!;
     expect(Array.from(level4.split("|")[1]!.trim()).length).toBeLessThanOrEqual(40);
   });
 
-  it("with the view, replaces ## Tests by ## Testing and keeps the tested commit and tests-added lines", () => {
+  it("with the view, the Checks drawer holds the table, the tested commit and the tests added, and the heading carries the result", () => {
     const lines = body({ testing: view() });
+    const text = lines.join("\n");
     expect(lines).not.toContain("## Tests");
-    expect(lines).toContain("## Testing — Verified");
-    expect(lines.join("\n")).toContain("- Tested on head commit 11111111");
-    expect(lines.join("\n")).toContain("- Tests added:");
-    expect(lines.join("\n")).not.toContain("- Passed:");
+    expect(lines[0]).toBe("## Verified · Risk not judged yet (treated as high) · 1 thing to check");
+    expect(text).toContain("Result: Verified.");
+    expect(text).toContain("- Tested on head commit 11111111");
+    expect(text).not.toContain("- Passed:");
   });
 
-  it("fits a tiny budget by shrinking the table and never drops a blocked row or the result", () => {
+  it("fits a tiny budget by shrinking the table and never drops the blocked check or the result from above the fold", () => {
     const checks = Array.from({ length: 40 }, (_, n) => ({ id: `c${String(n)}`, label: `Check number ${String(n)}`, command: command("run-all-the-things", ["--flag", "x".repeat(100)]) }));
     const rows = checks.map((entry, n) => (n === 39 ? check(entry.id, "FAILED", { neverStarted: true }) : check(entry.id, "PASS")));
     const flow = workflow({ stage: "VERIFY", checkPolicy: { required: checks, optional: [], selectedOptionalIds: [], proposed: [] }, ...results(...rows) }, "BLOCKED");
     const v = view({ workflow: flow, evidence: pack([{ checkId: "c0" }]) });
     const text = rovaraStatusLines(flow, { testing: v }, reviews, 3_000).join("\n");
-    expect(text).toContain("## Testing — Blocked by environment");
+    expect(text.split("\n")[0]).toContain("Blocked by environment");
     expect(text).toContain("Check number 39");
-    expect(text).toContain("more checks passed");
+    expect(text.indexOf("Check number 39")).toBeLessThan(text.indexOf("<details>"));
+    // The passed rows fold into a count before the blocked row is touched (at a roomier budget).
+    expect([20_000, 12_000, 8_000, 6_000, 4_500].some((budget) => rovaraStatusLines(flow, { testing: v }, reviews, budget).join("\n").includes("more checks passed"))).toBe(true);
   });
 
-  it("the Proof section's first line is the same result when there is one", () => {
-    // No plan with claims here, so the Proof section is absent: only the Testing section carries the result.
+  it("the result is said in the heading and once as the Checks drawer's first line", () => {
+    // No plan with claims here, so there is no requirements drawer: the heading and the Checks drawer carry the result.
     expect(body({ testing: view() }).filter((line) => line.startsWith("Result: ")).length).toBe(1);
   });
 });
