@@ -18,7 +18,7 @@ export function forwardingCoverage(markdown: string): ForwardingSite[] {
 }
 function fail(reason: string, name?: string): never { throw new Error(`Company inventory ${reason}${name === undefined ? "." : `: ${/^[A-Za-z0-9_#*/{}:+. -]{1,256}$/.test(name) ? name : "unclassifiable"}`}`); }
 const loadedBudgets = new WeakMap<readonly InventorySource[], ReturnType<typeof budget>>();
-const dispatch = /\/(?:broker|company-member-routes|developer-routes|developer-tasks|admin-reads|admin-changes|task-web|task-web-api|slack-[^/]+|swebench|connector-metrics|web-session|task-plan-document|feedback-review-web|channel-link-web|lambda)\.ts$/;
+const dispatch = /\/(?:broker|company-member-routes|linear-connect-routes|linear-app-webhook|developer-routes|developer-tasks|admin-reads|admin-changes|task-web|task-web-api|slack-[^/]+|swebench|connector-metrics|web-session|task-plan-document|feedback-review-web|channel-link-web|lambda)\.ts$/;
 
 function budget(overrides: Partial<Limits> = {}) {
   const limits = { ...INVENTORY_LIMITS, ...overrides };
