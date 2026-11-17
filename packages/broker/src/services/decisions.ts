@@ -31,7 +31,7 @@ export interface DecisionServiceOptions {
   /** Other kinds of decision this host has (a test environment, a setup run, a design choice). */
   subjects?: readonly DecisionSubject[];
   /** Who decides as the task's owner. Default: one owner who decides everything, and a verified collaborator as a project approver. */
-  workflowSubject?: Pick<WorkflowSubjectOptions, "ownerProvider" | "collaboratorsMayDecide" | "actorFor">;
+  workflowSubject?: Pick<WorkflowSubjectOptions, "ownerProvider" | "collaboratorsMayDecide" | "actorFor" | "ownerActing">;
   /** Optional host policy for the approval gate; omitted keeps the gate defaults. */
   policy?: DecisionGatePolicy;
   identity?: Pick<IdentityProvider, "capabilities">;

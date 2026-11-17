@@ -1,6 +1,6 @@
 import { locateWorkspace, type WorkspaceLocation } from "./workspace-location.js";
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
@@ -31,6 +31,25 @@ export async function readTask(deps: Pick<TaskFlowDeps, "store">, taskId: string
 export async function loadOwnedTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskRecord> {
   const task = await readTask(deps, taskId);
   if (caller.principal.companyId !== deps.companyId || task === undefined || task.companyId !== deps.companyId || !(await deps.access.canAct(caller.principal, task))) throw taskNotFound();
+  return task;
+}
+
+/**
+ * The task, if the caller may READ it: whoever may act on it, and (on a host that says so, `TaskAccess.canRead`) the commenters and viewers of its People list. Otherwise TASK_NOT_FOUND, the same as
+ * for a task that does not exist. For reads only: nothing that changes a task goes through here.
+ */
+export async function loadReadableTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskRecord> {
+  const task = await readTask(deps, taskId);
+  if (caller.principal.companyId !== deps.companyId || task === undefined || task.companyId !== deps.companyId) throw taskNotFound();
+  let allowed: boolean;
+  try {
+    allowed = deps.access.canRead === undefined ? await deps.access.canAct(caller.principal, task) : await deps.access.canRead(caller.principal, task);
+  } catch (error) {
+    // A person the task's People list refuses reads exactly as for a task that does not exist (the People proof's own denial says the task has a list). Any other failure stays a failure.
+    if (error instanceof AgentXError && error.code === "TASK_ACCESS_DENIED") throw taskNotFound();
+    throw error;
+  }
+  if (!allowed) throw taskNotFound();
   return task;
 }
 

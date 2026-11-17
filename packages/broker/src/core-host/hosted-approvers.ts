@@ -24,7 +24,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import {
   APPROVAL_SIGN_IN_SKEW_SECONDS, FRESH_SIGN_IN_SECONDS, INDEX_EXPIRY_ATTRIBUTE, NEEDS_SETTLING_CALLER, OrgIdSchema, companyScoped, isValidApprovalCardRef, when,
   type ApprovalAnswer, type ApprovalCardRef, type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type DocumentKey, type DocumentStore,
-  type IdentityProvider, type Principal,
+  type IdentityProvider, type OrgId, type Principal,
 } from "@agentx/contracts";
 import { decisionRequestIdOf } from "../core/decisions/approval-gate.js";
 import { readApprovalSignInRule } from "../core/decisions/sign-in-setting.js";
@@ -151,6 +151,11 @@ export interface HostedApproversOptions {
   store: Pick<DocumentStore, "get" | "put" | "update" | "delete">;
   /** The deployed identity point (membership): names a live member of a company, or nobody. Its capabilities decide whether a stored `any-active` setting counts (it never does without the company's own sign-in). */
   identity: Pick<IdentityProvider, "getPrincipal" | "capabilities">;
+  /**
+   * Who may decide as the task's owner besides what the stored record says (web task channel C6, D5): the deployment's live owner rule (the task's own person, or a People co-owner who is a live member
+   * with the project grant and present under the live proof). Given: it decides, for every person (the record's `developerId` alone is then not enough); a throw refuses. Absent: only the task's own person.
+   */
+  taskOwner?: ((input: { companyId: OrgId; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => Promise<boolean>) | undefined;
   /** The proof key (`stepUpApprovalKeyOf`). Absent (a host that decides nothing for a person, the dispatcher): every proof is refused. */
   key?: Buffer | undefined;
   /** The install's step-up window in seconds. Default FRESH_SIGN_IN_SECONDS. Only ever shortened: by the company's own "fresh sign-in" setting (a shorter window), and by the policy hook in front of this adapter. */
@@ -242,8 +247,16 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
         return refuse("people_unreadable");
       }
       if (person === undefined || person.companyId !== companyId || person.personId !== claims.p) return refuse("not_a_member");
-      if (task === undefined || task["companyId"] !== companyId || task["taskId"] !== subject.id || typeof task["developerId"] !== "string" || task["developerId"] !== claims.p) return refuse("not_the_task_owner");
+      if (task === undefined || task["companyId"] !== companyId || task["taskId"] !== subject.id || typeof task["developerId"] !== "string" || typeof task["project"] !== "string") return refuse("not_the_task_owner");
       if (request.projectName !== undefined && task["project"] !== request.projectName) return refuse("not_the_task_owner");
+      if (options.taskOwner === undefined) {
+        if (task["developerId"] !== claims.p) return refuse("not_the_task_owner");
+      } else {
+        // The live owner rule, read now (People, membership, grant, proof): only an answer of exactly `true` is a yes; a read that fails refuses.
+        let owner: unknown;
+        try { owner = await options.taskOwner({ companyId, principal: person, task: { taskId: subject.id, developerId: task["developerId"], project: task["project"] } }); } catch { return refuse("people_unreadable"); }
+        if (owner !== true) return refuse("not_the_task_owner");
+      }
 
       // The one-time part, claimed last: nothing above burns it.
       const partHash = createHash("sha256").update(claims.n).digest("hex");

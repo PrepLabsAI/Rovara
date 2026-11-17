@@ -304,7 +304,8 @@ export function hostedTaskAccess(inputs: {
     const membership = await inputs.membershipOf(personId);
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
   };
-  const owner = async (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => {
+  /** The caller's live access to the task, for the roles asked (owners only for every act; owners, commenters and viewers for a read). Undefined: none. Every check re-reads the live proof. */
+  const resolve = async (principal: Principal, task: { developerId: string; project: string; taskId?: string }, roles: readonly string[]) => {
     if (principal.companyId !== inputs.companyId || await liveMember(principal.personId) === undefined) return undefined;
     if (task.taskId === undefined || inputs.storage === undefined) return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
     const store = await inputs.storage();
@@ -316,9 +317,10 @@ export function hostedTaskAccess(inputs: {
       if (await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }) !== undefined) return undefined;
       return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
     }
-    if (people.orphaned || people.role !== "owner" || !await inputs.projectGrant(principal.personId, task.project)) return undefined;
+    if (people.orphaned || !roles.includes(people.role) || !await inputs.projectGrant(principal.personId, task.project)) return undefined;
     return { revision: people.peopleRevision, ownerIds: people.ownerActorIds };
   };
+  const owner = (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => resolve(principal, task, ["owner"]);
   return {
     async checkStart(principal, project) {
       if (principal.companyId !== inputs.companyId || (await liveMember(principal.personId)) === undefined) return { allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE };
@@ -326,6 +328,9 @@ export function hostedTaskAccess(inputs: {
     },
     async canAct(principal, task) {
       return await owner(principal, task) !== undefined;
+    },
+    async canRead(principal, task) {
+      return await resolve(principal, task, ["owner", "commenter", "viewer"]) !== undefined;
     },
     async ownerActing(principal, task) {
       const allowed = await owner(principal, task);
@@ -350,6 +355,14 @@ export function hostedTaskAccess(inputs: {
       return (await inputs.projectGrant(task.developerId, task.project)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };
     },
   };
+}
+
+/**
+ * Who may decide a core task's document as its owner, for the approvers point's own re-check (web task channel C6, D5): the same live rule as the owner moves (`hostedTaskAccess.canAct`: live membership, the
+ * task's own person or a People owner under the live proof, the project grant), over the company's own store. A read that fails throws (the point refuses).
+ */
+export function hostedTaskOwner(inputs: { membershipOf: Parameters<typeof hostedTaskAccess>[0]["membershipOf"]; projectGrant: Parameters<typeof hostedTaskAccess>[0]["projectGrant"]; people: TaskPeopleDependencies }): NonNullable<Parameters<typeof hostedSecurityModules>[0]["taskOwner"]> {
+  return ({ companyId, store, principal, task }) => hostedTaskAccess({ membershipOf: inputs.membershipOf, projectGrant: inputs.projectGrant, companyId, storage: async () => store, people: inputs.people }).canAct(principal, task);
 }
 
 /**
@@ -451,10 +464,17 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
+  // One People rule for every core act on a task: the owner moves, the reads and the decision cards (the approvers point's own re-check uses it too, through `taskOwner`).
+  const taskPeople: TaskPeopleDependencies = {
+    documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
+    ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
+  };
+  const taskOwner = hostedTaskOwner({ membershipOf, projectGrant, people: taskPeople });
+
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), taskOwner }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -472,10 +492,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, people: {
-        documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
-        ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
-      } }),
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, people: taskPeople }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
