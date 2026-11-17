@@ -36,6 +36,9 @@ export function withEvalPinnedCandidate<T>(repositories: readonly CandidateRepos
   return pins.run(Object.freeze({ repositories: [...repositories], candidates: candidates.map(candidate => Object.freeze({ ...candidate })), signal, ...(round === undefined ? {} : { round: Object.freeze({ ...round }) }) }), run);
 }
 
+/** True while a pinned candidate is in force (inside `withEvalPinnedCandidate`). The worker-verification test uses it to pin WHERE the shared plan read happens. */
+export function evalPinnedCandidateActive(): boolean { return pins.getStore() !== undefined; }
+
 /** The plan as the broker delivers it: the stored body, its company and project, its digest, and the key with the run's base. */
 const DeliveredPlanSchema = EvalPlanBodyShape.omit({ key: true }).extend({
   company: z.string().min(1).max(100), project: z.string().min(1).max(200), planDigest: hash,
