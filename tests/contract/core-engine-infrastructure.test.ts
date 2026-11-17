@@ -459,7 +459,10 @@ describe("L1a broker environment derivation", () => {
   });
 
   it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
-    expect(digest(legacy.toJSON())).toBe("9a7942afbd5561cef0077003fe43e470ef6b83993bef9ca72068f9e475247b06");
+    // Machine size stack (#877 + #887 + DEC 254zr): re-pinned. Measured against code/next a38f1ab0d, the legacy template differs in exactly three places: (1) the provisioner's RunInstances
+    // condition gains StringEquals ec2:InstanceType (ten types); (2) ResolveWorkerAmi's Resource becomes the arm64 parameter plus the public x86_64 AL2023 parameter; (3) the provisioner state
+    // machine's definition (new states SizeChosen, the *Sized and X86 launches, SizedLaunchFailed, SizeUnavailable; Start, LaunchConfiguration, RunInstance*, RecordInstance carry the size).
+    expect(digest(legacy.toJSON())).toBe("6ca8e0a3db783758eb3b85a73f1a4408f3e02ea0edbec9ce05a6717a54272432");
   });
 });
 import { createHash } from "node:crypto";

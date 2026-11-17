@@ -639,7 +639,9 @@ describe("task-token key and membership IAM", () => {
     // Switch-over incident 2026-11-16: re-pinned for the CoreAppRoute -> AppRoute construct rename (logical ID DeveloperSignInAppRouteBAD38FAA, as staging holds it);
     // the remainder is otherwise identical (only the resource and DependsOn order move with the new ID).
     // Core gateway settings (2026-11-17): re-pinned because the broker derives CHANNEL_ADAPTER_SECRET_PREFIX (that one variable leaves the broker's Variables; no IAM change).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("0e2ae750ca2c9deb83b4dc7be4a5ca828ac89269e02538dc053e4a2c6c70fe90");
+    // Machine size stack (#877 + #887 + DEC 254zr): re-pinned for the same three template changes as core-engine-infrastructure.test.ts's legacy pin (ec2:InstanceType list, the x86_64 AMI
+    // parameter in ResolveWorkerAmi, the provisioner state machine definition); the IAM tuples they cause are pinned exactly in beforeTuples below.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("4b3ecf8a898db19b9c131a516e5334a1a588751cf1ad04f7f23cf8e0669dc129");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
