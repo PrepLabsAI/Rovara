@@ -241,10 +241,6 @@ async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs:
 
 const nowOf = (target: Mounted): number => (target.runtime.flow.deps.now?.() ?? new Date()).getTime();
 
-/**
- * The state answer of a project's test environment on the deployed API: the laptop's view (the same core reader, over the company's own records: every row is under the company's project key) plus the catalog
- * the install would pin from, while test services are switched on. The company is the membership's (the runtime's), never the request's.
- */
 /** Whether the project has a catalog row in THIS company (the company is the membership's, never the request's). A read that fails is "no". */
 async function projectExistsIn(target: Mounted, companyId: string, project: string): Promise<boolean> {
   try {
@@ -254,6 +250,10 @@ async function projectExistsIn(target: Mounted, companyId: string, project: stri
   }
 }
 
+/**
+ * The state answer of a project's test environment on the deployed API: the laptop's view (the same core reader, over the company's own records: every row is under the company's project key) plus the catalog
+ * the install would pin from, while test services are switched on. The company is the membership's (the runtime's), never the request's.
+ */
 async function testEnvironmentAnswer(target: Mounted, wired: NonNullable<CoreDevWiring["testEnvironment"]>, project: string): Promise<Record<string, unknown>> {
   const deps: TestEnvDeps = {
     store: target.runtime.flow.deps.store, now: () => nowOf(target), env: wired.env, audit: target.runtime.flow.deps.audit,

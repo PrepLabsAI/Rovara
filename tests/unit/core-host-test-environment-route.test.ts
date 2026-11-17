@@ -250,6 +250,22 @@ describe("the state read by company role (owner or admin without a project grant
     expect((await h.routes.route(get(PATH), caller))?.statusCode).toBe(401);
   });
 
+  it("only a real catalog row counts: a row of another kind, or a catalog read that fails, is no project for an owner; a granted owner still reads a project with no catalog row", async () => {
+    const h = await setup({});
+    h.allowed.clear();
+    const owner = h.callerOf(FAKE_COMPANY, "owner", "o5");
+    const missing = await NOT_FOUND(h);
+    await h.world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "wrongkind"), entityType: "SOMETHING_ELSE", latestRevision: 1 } });
+    expect(await h.routes.route(get("/v1/app/projects/wrongkind/test-environment"), owner)).toEqual(missing);
+    const realGet = h.world.store.get.bind(h.world.store);
+    vi.spyOn(h.world.store, "get").mockImplementation(async (key) => { if (JSON.stringify(key) === JSON.stringify(orgProjectCatalogKey(FAKE_COMPANY, "payments"))) throw new Error("store down"); return realGet(key); });
+    expect(await h.routes.route(get(PATH), owner)).toEqual(missing);
+    vi.restoreAllMocks();
+    // No change for a grant holder: the grant alone still reads a project that has no catalog row.
+    h.allowed.add("unlisted");
+    expect((await h.routes.route(get("/v1/app/projects/unlisted/test-environment"), owner))?.statusCode).toBe(200);
+  });
+
   it("a script token is still refused for an owner (the shortcut is for a signed-in person only)", async () => {
     const h = await setup({});
     const owner = h.callerOf(FAKE_COMPANY, "owner", "o4");
