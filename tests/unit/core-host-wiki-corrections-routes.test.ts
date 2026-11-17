@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- answers are parsed JSON read field by field */
 // The project wiki's correction routes (lead 4, C1): add a note (pending), approve it (maintainer only), delete it (author or maintainer), Mark wrong, resolve marks (maintainer), suggest a note as a
 // lesson (never approves), the disputed list. The role is read live from membership on every request; two projects and two companies never meet; refusals are fixed words with no echo.
 import { describe, expect, it } from "vitest";
@@ -485,7 +486,7 @@ describe("the role is read live, from membership, on every request", () => {
   it("an unknown or malformed role is no role; a role that cannot be read is a fixed 503 and no write", async () => {
     const w = await seeded();
     for (const weird of ["admin", "owner", "MAINTAINER", null, undefined, { role: "maintainer" }]) {
-      expect((await w.call(A, "ada", "POST", `${PAGE}/notes`, note("hello"), { projectRole: async () => weird as never })).status, String(weird)).toBe(404);
+      expect((await w.call(A, "ada", "POST", `${PAGE}/notes`, note("hello"), { projectRole: async () => weird as never })).status, JSON.stringify(weird) ?? "undefined").toBe(404);
     }
     const fault = await w.call(A, "ada", "POST", `${PAGE}/notes`, note("hello"), { projectRole: async () => { throw new Error("db down LEAK"); } });
     expect(fault).toMatchObject({ status: 503, body: { error: { message: WIKI_UNAVAILABLE } } });
