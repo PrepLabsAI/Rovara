@@ -30,7 +30,7 @@ export function withoutCoreEngine(template: unknown): unknown {
   const dispatchers = Object.entries(synthesized.Resources).filter(([id, resource]) => /^Dispatcher[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function");
   expect(dispatchers).toHaveLength(1);
   const dispatcherVariables = (dispatchers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  for (const name of ["CORE_DISPATCH_QUEUE_ARN", "CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "ROVARA_CORE_ENGINE", "CALLBACK_SIGNING_KEY", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
+  for (const name of ["CORE_DISPATCH_QUEUE_ARN", "CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "ROVARA_CORE_ENGINE", "CALLBACK_SIGNING_KEY_SECRET_ID", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
     expect(dispatcherVariables, name).toHaveProperty(name);
     delete dispatcherVariables[name];
   }

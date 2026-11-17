@@ -63,7 +63,7 @@ describe("planTestDeploy", () => {
       Extract<DeployStep, { kind: "execute-change-set" }>,
       Extract<DeployStep, { kind: "verify-lambda-code" }>,
     ];
-    expect(build).toMatchObject({ logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker.ts" });
+    expect(build).toMatchObject({ logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker-handler.ts" });
     // Code goes to the access stack's versioned artifact bucket, not the control-plane stack's unversioned one.
     expect(upload).toMatchObject({ bucketFromStack: "access", logicalId: "BrokerE1355FD6", from: build.id });
     expect(changeSet).toMatchObject({

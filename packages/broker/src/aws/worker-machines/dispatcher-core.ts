@@ -189,6 +189,8 @@ export interface DispatcherMachineOps {
 
 export interface DispatcherCoreInputs {
   env: NodeJS.ProcessEnv;
+  /** The callback signing key, read from Secrets Manager by the dispatcher (aws/callback-signing-key.ts); never part of `env`. Blank: the host is not configured. */
+  callbackSigningKey: string;
   /** The State table, as the dispatcher's document client reads it (whose a workspace is, its binding). */
   documentClient: Parameters<typeof workspaceCompanyReader>[0];
   /** The AWS clients the core's adapters speak (made by the dispatcher only when the core is first needed). */
@@ -219,7 +221,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
   const queueUrl = required(env[CORE_DISPATCH_QUEUE_URL_VARIABLE]);
   const deadLetterUrl = required(env[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE]);
   const tableName = required(env.STATE_TABLE_NAME);
-  const callbackSigningKey = required(env.CALLBACK_SIGNING_KEY);
+  const callbackSigningKey = required(inputs.callbackSigningKey);
   const bucket = required(env.ARTIFACT_BUCKET_NAME);
   const subnets = required(env.EC2_WORKER_SUBNETS);
   const launchTemplateId = required(env.EC2_WORKER_LAUNCH_TEMPLATE_ID);
