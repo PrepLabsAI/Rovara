@@ -54,7 +54,7 @@ const errorOf = async (promise: Promise<unknown>) => {
   throw new Error("expected refusal");
 };
 
-interface World { memberships?: Record<string, string | undefined | "throw">; grants?: Record<string, boolean>; members?: string[]; complete?: boolean; records?: Record<string, DeveloperRecord> }
+interface World { memberships?: Record<string, string | undefined>; grants?: Record<string, boolean>; members?: string[]; complete?: boolean; records?: Record<string, DeveloperRecord> }
 
 function harness(world: World = {}) {
   const db = new FakeDynamoDb();
@@ -70,7 +70,7 @@ function harness(world: World = {}) {
     [SAM_ID]: record(SAM_ID, "slack", SLACK_OIDC_ISSUER, SAM, "Sam Slack", { slackUserId: SAM }),
     ...(world.records ?? {}),
   };
-  const memberships: Record<string, string | undefined | "throw"> = { [GALE_ID]: COMPANY_A, [WREN_ID]: COMPANY_A, [BRYN_ID]: COMPANY_B, [NOOR_ID]: COMPANY_A, [SAM_ID]: COMPANY_A, ...(world.memberships ?? {}) };
+  const memberships: Record<string, string | undefined> = { [GALE_ID]: COMPANY_A, [WREN_ID]: COMPANY_A, [BRYN_ID]: COMPANY_B, [NOOR_ID]: COMPANY_A, [SAM_ID]: COMPANY_A, ...(world.memberships ?? {}) };
   const grants: Record<string, boolean> = { [GALE_ID]: true, [WREN_ID]: true, [BRYN_ID]: true, [NOOR_ID]: true, [SAM_ID]: true, ...(world.grants ?? {}) };
   const proof = vi.fn(async (request: TaskPersonProofRequest): Promise<TaskPersonProofResponse> => ({ ok: true, user: { id: request.slackUserId, teamId: TEAM, name: "Sam" }, memberOf: [] }));
   const projectMemberIds = vi.fn(async (project: string, limit: number) => {
@@ -248,7 +248,7 @@ describe("the task page API (people/candidates, people/add)", () => {
     };
   };
   const call = async (deps: never, request: { method: string; path: string; body?: string; headers: Record<string, string> }) => {
-    const response = await createTaskWebApi(deps)({ requestId: "r", ...request } as never, new URL(`${ORIGIN}${request.path}`));
+    const response = await createTaskWebApi(deps)({ requestId: "r", ...request }, new URL(`${ORIGIN}${request.path}`));
     return { status: response.statusCode, json: JSON.parse(response.body) as Record<string, unknown> };
   };
 
@@ -265,7 +265,7 @@ describe("the task page API (people/candidates, people/add)", () => {
     const body = JSON.stringify({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "commenter" });
     const headers = { cookie, origin: ORIGIN, "x-agentx-csrf": CSRF, "content-type": "application/json" };
     await expect(call(h.deps, { method: "POST", path: api("people/add"), body, headers })).resolves.toMatchObject({ status: 202, json: { status: "PENDING", requestId: REQUEST } });
-    expect(h.calls).toEqual([{ name: "add", caller: GALE_CALLER, input: JSON.parse(body) }]);
+    expect(h.calls).toEqual([{ name: "add", caller: GALE_CALLER, input: JSON.parse(body) as unknown }]);
     expect((await call(h.deps, { method: "POST", path: api("people/add"), body, headers: { ...headers, origin: "https://evil.example" } })).status).toBe(403);
     expect((await call(h.deps, { method: "POST", path: api("people/add"), body, headers: { ...headers, "x-agentx-csrf": "d".repeat(43) } })).status).toBe(403);
     expect((await call(h.deps, { method: "POST", path: api("people/add"), body: JSON.stringify({ ...JSON.parse(body), companyId: COMPANY_B }), headers })).status).toBe(400);
