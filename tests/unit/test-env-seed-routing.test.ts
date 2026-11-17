@@ -55,7 +55,7 @@ describe("seed commands in a draft", () => {
     expect(bad.notes).toContain(SEED_REFUSED_NOTE);
   });
   it("are dropped with the candidates when test services are off (the draft is what it was)", () => {
-    const off = sanitizeTestEnvDraft(draftOf([postgres], [seed("npm", ["run", "seed"])]), { env: { ROVARA_TEST_ENVIRONMENT: "1" } })!;
+    const off = sanitizeTestEnvDraft(draftOf([postgres], [seed("npm", ["run", "seed"])]), { env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" } })!;
     expect("seedCommands" in off).toBe(false);
     expect(off.environment.dependencies).toBeUndefined();
   });
@@ -184,7 +184,7 @@ describe("seed files in a draft", () => {
     expect(sanitizeTestEnvDraft(withFiles([postgres], undefined, [file("/etc/passwd")]), options)).toBeUndefined();
   });
   it("are dropped with the candidates while test services are off", () => {
-    const off = sanitizeTestEnvDraft(withFiles([postgres], undefined, [file("service/db/seeds/users.sql")]), { env: { ROVARA_TEST_ENVIRONMENT: "1" } })!;
+    const off = sanitizeTestEnvDraft(withFiles([postgres], undefined, [file("service/db/seeds/users.sql")]), { env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" } })!;
     expect(off.seedFiles).toBeUndefined();
   });
 });

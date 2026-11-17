@@ -39,7 +39,7 @@ const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
   coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off",
-  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6",
+  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", testServices: "1",
 } as const satisfies Record<BrokerSettingKey, string>;
 
 const names = (entries: Partial<Record<BrokerNameKey, string>> = NAMES): string => Object.entries(entries).map(([key, value]) => `${BROKER_NAMES[key as BrokerNameKey].code}=${value}`).join(",");
@@ -77,6 +77,13 @@ describe("awsPartitionOf", () => {
 });
 
 describe("hydrateBrokerEnvironment: nothing packed", () => {
+  it("DEC 254z-amend3: the test services setting `td` is unpacked as ROVARA_TEST_SERVICES (on by default with \"1\", the opt-out \"0\"), never under Cloud's `tx`", () => {
+    expect(BROKER_SETTINGS.testServices).toEqual({ code: "td", variable: "ROVARA_TEST_SERVICES" });
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=0" })["ROVARA_TEST_SERVICES"]).toBe("0");
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=1" })["ROVARA_TEST_SERVICES"]).toBe("1");
+    expect(Object.values(BROKER_SETTINGS).some((spec) => (spec.code as string) === "tx")).toBe(false);
+  });
+
   it("leaves the legacy install's environment exactly as it is (no AGENTX_NAMES, no AGENTX_SETTINGS), even with AGENTX_ENV set", () => {
     const legacy: MutableEnvironment = { AWS_REGION: "us-east-1", AGENTX_ENV: "production", STATE_TABLE_NAME: "State", PROVISIONER_ARN: "arn:aws:states:us-east-1:1:stateMachine:P", SLACK_TEAM_ID: "" };
     const copy = { ...legacy };

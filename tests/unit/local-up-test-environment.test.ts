@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
-import { RANGE_IN_USE_SENTENCE, hostUsesRunRange, prepareLocalTestServices } from "../../packages/broker/src/local/test-services-install.js";
+import { RANGE_IN_USE_SENTENCE, applyTestServicesMarker, hostUsesRunRange, prepareLocalTestServices } from "../../packages/broker/src/local/test-services-install.js";
+import { createOwnerImageService, createOwnerImageStore } from "../../packages/broker/src/local/test-services-owner-list.js";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { registerTestEnvCommand } from "../../packages/cli/src/up/test-env-command.js";
 import { IMPLICIT_COMPANY_ID, TestEnvironmentBodySchema, testEnvDigest, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
@@ -181,12 +183,25 @@ describe("rovara up: what the switches start", () => {
     expect(docker.calls.some((call) => call[0] === "pull")).toBe(false);
   });
 
-  it("test services on and no catalog key in this build (Code): only the starter images are pulled, by digest, and no registry is needed", async () => {
-    const docker = new FakeDocker();
-    await launch({ ROVARA_TEST_SERVICES: "1" }, docker);
-    const pulls = docker.calls.filter((call) => call[0] === "pull").map((call) => call.at(-1)!);
-    expect(pulls).toHaveLength(5);
-    for (const reference of pulls) expect(reference).toMatch(/^docker\.io\/library\/(postgres|mysql|redis|mongo)@sha256:[a-f0-9]{64}$/u);
+  it("test services on and no catalog key in this build (Code): the starter images are in effect by digest, no registry is needed, and NOTHING is pulled at start-up (DEC 254z-amend3: lazy)", async () => {
+    for (const environment of [{ ROVARA_TEST_SERVICES: "1" }, {}]) {
+      const docker = new FakeDocker();
+      const install = await prepareLocalTestServices({ environment, stateDirectory: tmpdir(), docker, interfaces: {}, ownerImages: createOwnerImageService({ store: createOwnerImageStore({ store: new MemoryDocumentStore({ indexes: [] }), companyId: IMPLICIT_COMPANY_ID }), docker, now: () => 0 }) });
+      expect(install.services!.images).toHaveLength(5);
+      for (const reference of install.services!.images) expect(reference).toMatch(/^docker\.io\/library\/(postgres|mysql|redis|mongo)@sha256:[a-f0-9]{64}$/u);
+      expect(docker.calls.filter((call) => call[0] === "pull")).toEqual([]);
+      const launched = new FakeDocker();
+      await launch(environment, launched);
+      expect(launched.calls.filter((call) => call[0] === "pull")).toEqual([]);
+    }
+  });
+
+  it("the host's marker: set to the fixed reason when test services cannot run here, cleared when they can or are switched off, and the owner's switch is never touched", () => {
+    const environment: NodeJS.ProcessEnv = { ROVARA_TEST_SERVICES: "1" };
+    applyTestServicesMarker(environment, "network");
+    expect(environment).toEqual({ ROVARA_TEST_SERVICES: "1", ROVARA_TEST_SERVICES_UNAVAILABLE: "network" });
+    applyTestServicesMarker(environment, undefined);
+    expect(environment).toEqual({ ROVARA_TEST_SERVICES: "1" });
   });
 
   it("test services on in a build with a catalog key but no registry or no catalog this release trusts: the worker is told nothing, and nothing is pulled", async () => {
@@ -212,7 +227,11 @@ describe("rovara up: what the switches start", () => {
     expect(hostUsesRunRange(other)).toBe(false);
     const docker = new FakeDocker();
     const install = await prepareLocalTestServices({ environment: { ROVARA_TEST_SERVICES: "1", ROVARA_TEST_SERVICES_REGISTRY: "registry.examplehost:5000" }, stateDirectory: tmpdir(), docker, interfaces: used });
-    expect(install).toMatchObject({ services: undefined, catalog: undefined, unavailable: RANGE_IN_USE_SENTENCE });
+    expect(install).toMatchObject({ services: undefined, catalog: undefined, unavailable: RANGE_IN_USE_SENTENCE, unavailableReason: "network" });
+    expect(docker.calls).toHaveLength(0);
+    // The same with nothing set (on by default), and a signed build without a registry says "images".
+    expect(await prepareLocalTestServices({ environment: {}, stateDirectory: tmpdir(), docker, interfaces: used })).toMatchObject({ unavailableReason: "network" });
+    expect(await prepareLocalTestServices({ environment: {}, stateDirectory: tmpdir(), docker, interfaces: {}, signedKeysPresent: () => true })).toMatchObject({ services: undefined, unavailableReason: "images" });
     expect(docker.calls).toHaveLength(0);
   });
 });

@@ -10,7 +10,7 @@ import { ec2WorkerBootScript } from "../../packages/contracts/src/session.js";
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const workspaceId = randomUUID();
 
-function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}) {
+function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}, more: Pick<SessionStepsDependencies, "testServices"> = {}) {
   const sessions = {
     markVolume: vi.fn(async () => undefined),
     markInstance: vi.fn(async () => undefined),
@@ -38,6 +38,7 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
     controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com",
     logGroupName: "/agentx/production/worker",
     ping: pingSpy,
+    ...more,
   });
   return { handler, sessions, ping: pingSpy };
 }
@@ -88,6 +89,21 @@ describe("session steps", () => {
     };
     expect(await launch({ executorImage })).toContain(`export EXECUTOR_IMAGE='${executorImage}'`);
     expect(await launch({})).not.toContain("export EXECUTOR_IMAGE=");
+  });
+
+  it("DEC 254z-amend3: with test services on the boot configuration carries `testServices`, which renders nothing for Code's (legacy, not named) launch: the user data is byte-identical on, off and unset", async () => {
+    const launch = async (testServices: boolean | undefined) => {
+      const { handler } = setup(undefined, {}, testServices === undefined ? {} : { testServices });
+      const result = await handler({ action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as { userData: string };
+      return gunzipSync(Buffer.from(result.userData, "base64")).toString("utf8");
+    };
+    const on = await launch(true);
+    expect(on).toBe(await launch(false));
+    expect(on).toBe(await launch(undefined));
+    expect(on).not.toContain("AGENTX_TEST_SERVICES");
+    // The flag is what the contract renders for a named launch (and only for one): the same config with environmentKind named carries it.
+    const named = { workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false, workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`, invokePublicKey: "QUJD", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com", modelProvider: "amazon-bedrock", modelId: "m", promptCacheRetention: "long" as const, logGroupName: "/agentx/x/worker", environmentKind: "named" as const, bootStage2Sha256: "b".repeat(64), testServices: true as const };
+    expect(ec2WorkerBootScript(named, bootScript)).toContain("export AGENTX_TEST_SERVICES='1'");
   });
 
   it("records the volume and instance, and marks the session ready, failed or deleted", async () => {

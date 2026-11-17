@@ -83,6 +83,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons",
     // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
     "CoreModelGatewayHost", "CoreAgentModel",
+    // DEC 254z-amend3: the test services switch (default on); an operator's opt-out survives every upgrade.
+    "TestServices",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
     "StepUpEmailSender"],
   slack: ["SlowTurnMinutes", "ModelFallback"],
