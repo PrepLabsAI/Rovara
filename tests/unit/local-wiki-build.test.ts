@@ -26,7 +26,7 @@ const id = () => randomUUID();
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
 const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
 const WB = (name: string, tail = "") => `/v1/app/projects/${name}/wiki-build${tail}`;
-type Body = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- a JSON answer read field by field
+interface Body { status: string; error: { code: string; message: string }; wiki: { pages: number; refreshPages: number }; agents: { on: boolean }; [key: string]: unknown }
 
 function setup(options: { model?: boolean; starter?: boolean } = {}) {
   const store = new MemoryDocumentStore();
@@ -34,7 +34,7 @@ function setup(options: { model?: boolean; starter?: boolean } = {}) {
   const flow = { store, projects: { latest: async (name: string) => PROJECTS[name] } } as never;
   const now = () => Date.parse("2026-11-17T12:00:00Z");
   const wikiMap = createLocalWikiMap({ flow, registry: registryOf, now });
-  const routes = createLocalWikiBuild({ flow, wikiMap, owner: owner.principal, now, modelAccessConfigured: async () => options.model ?? true, ...(options.starter === false ? {} : { starter: () => starter }) });
+  const routes = createLocalWikiBuild({ flow, wikiMap, owner: owner.principal, now, modelAccessConfigured: async () => options.model ?? true, ...(options.starter === false ? {} : { starter: (): FakeStarter => starter }) });
   const call = async (request: ReturnType<typeof get>, caller = owner) => {
     const answer = await routes.routes(request, caller);
     if (answer === undefined) return undefined;
@@ -57,7 +57,7 @@ describe("local wiki build controls", () => {
     expect(started!.status, JSON.stringify(started!.body)).toBe(202);
     expect(started!.body).toMatchObject({ status: "running", payer: "project" });
     expect(starter.started[0]).toMatchObject({ project: "app", payer: { kind: "project", project: "app" } });
-    expect(starter.started[0]!.pins).toEqual([{ repo: "app", commit: expect.stringMatching(/^[a-f0-9]{40}$/u) }]);
+    expect(starter.started[0]!.pins).toEqual([{ repo: "app", commit: expect.stringMatching(/^[a-f0-9]{40}$/u) as string }]);
     expect((await readWikiBuildPointer(store, COMPANY, "app"))?.requestedBy).toBe("owner-1");
     expect((await call(post(WB("app", "/stop"), { requestId: id() })))!.body).toMatchObject({ status: "stopped", canContinue: true });
     expect((await call(post(WB("app", "/continue"), { requestId: id() })))!.status).toBe(202);

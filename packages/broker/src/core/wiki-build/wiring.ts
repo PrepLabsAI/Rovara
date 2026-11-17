@@ -41,7 +41,7 @@ export function wikiBuildCallbackWiring(options: WikiWiringBase & {
   return {
     standing: options.standing, read: undefined, readFor: options.readFor,
     sinkFor: (project) => wiki.pageSink(project),
-    recordBuild: (project, record) => wiki.writeBuild(project, record),
+    recordBuild: async (project, record) => { await wiki.writeBuild(project, record); },
   };
 }
 

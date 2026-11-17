@@ -52,7 +52,7 @@ const WB = (name: string, tail = "") => `/v1/app/projects/${name}/wiki-build${ta
 const id = () => randomUUID();
 
 interface Person { caller: DeployedCaller; membership: CompanyMembership; grants: Map<string, "developer" | "administrator"> }
-type Body = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- a JSON answer read field by field
+interface Body { status: string; error: { code: string; message: string }; wiki: { pages: number; refreshPages: number }; agents: { on: boolean }; [key: string]: unknown }
 
 async function buildWorld(options: { wired?: boolean; gateway?: boolean; withStarter?: boolean; aiKey?: HostedWikiBuildWiring["aiKey"]; audit?: (sink: AuditSink) => AuditSink } = {}) {
   const world = createFakeWorld();
@@ -110,7 +110,6 @@ async function buildWorld(options: { wired?: boolean; gateway?: boolean; withSta
   };
   return { world, app, person, standing, call, routes, starter, inputs, listings };
 }
-type World = Awaited<ReturnType<typeof buildWorld>>;
 
 const wikiEvents = (world: FakeWorld): AuditEvent[] => world.audit.filter((event) => event.action.startsWith("wiki_build."));
 const rows = async (world: FakeWorld, pk: string) => (await queryAll(world.store, { pk })).length;
@@ -135,7 +134,7 @@ describe("hosted wiki build controls: who may do what", () => {
       expect(started.body).toMatchObject({ status: "running", canManage: true, payer: "project", aiKey: "unknown", agents: { on: false } });
       const pointer = await readWikiBuildPointer(world.store, FAKE_COMPANY, "payments");
       expect(pointer).toMatchObject({ orgId: FAKE_COMPANY, project: "payments", requestId, requestedBy: `p-${role}`, payer: { kind: "project", project: "payments" } });
-      expect(pointer!.pins).toEqual([{ repo: "payments", commit: expect.stringMatching(/^[a-f0-9]{40}$/u) }]);
+      expect(pointer!.pins).toEqual([{ repo: "payments", commit: expect.stringMatching(/^[a-f0-9]{40}$/u) as string }]);
       expect(starter.started).toHaveLength(1);
       // The starter is made for THIS caller and a flow whose start rule is the wiki build's own.
       expect(inputs[0]!.caller.principal.personId).toBe(`p-${role}`);
