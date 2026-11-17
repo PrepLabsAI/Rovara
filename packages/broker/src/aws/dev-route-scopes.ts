@@ -241,6 +241,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
   // Lead 4 W2: the project wiki's reads (core-host/wiki-routes.ts): full access only, then any live role on the project (a company owner or admin, or a project grant). No writes here.
   { method: "GET", path: "/v1/app/projects/{project}/wiki", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/search", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
   // L4-D (DEC 254z b): "Use this setup" (a candidate and its check), dropping it, and deciding it (a fresh step-up, then the risk-based approver rule: a project maintainer for low and
