@@ -2,7 +2,7 @@
 // (GITHUB_APP_CREDENTIAL_REF, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN) and the same secret.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, type ClientRepositoriesResponse } from "@agentx/contracts";
-import { GetCommand, PutCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { boundedCompanyReads } from "./company-check.js";
 import { isConditional } from "./broker-shared.js";
@@ -110,9 +110,21 @@ const bindingSchema = installationSchema.extend({
   boundAt: z.iso.datetime(), boundBy: bindingText,
 });
 const markerSchema = z.object({ pk: z.literal("GITHUB_INSTALLATION_BINDING"), sk: z.literal("BACKFILL") }).strict();
+/** Guided onboarding PR 1: the company's own list of the installations bound to it (written in the binding's transaction), for its Connections read. */
+export const companyInstallationKey = (companyId: string, installationId: number) => ({ pk: `ORG#${companyId}#GITHUB_INSTALLATIONS`, sk: `INSTALLATION#${installationId}` });
+const companyInstallationRow = (companyId: string, row: { installationId: number; accountLogin: string; boundAt: string; boundBy: string }) => ({
+  ...companyInstallationKey(companyId, row.installationId), entityType: "GITHUB_COMPANY_INSTALLATION", companyId,
+  installationId: row.installationId, accountLogin: row.accountLogin, boundAt: row.boundAt, boundBy: row.boundBy,
+});
+const companyInstallationSchema = z.object({ entityType: z.literal("GITHUB_COMPANY_INSTALLATION"), companyId: OrgIdSchema, installationId: installationIdSchema,
+  accountLogin: bindingText, boundAt: z.iso.datetime(), boundBy: bindingText });
+/** At most this many installations are listed for one company; more refuses the whole read. */
+export const COMPANY_INSTALLATIONS_MAX = 100;
+const PersonIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export type PersonClaimOutcome = "bound" | "already_bound" | "taken";
 export function githubBindingRefusal() { return agentXError("GITHUB_NOT_CONNECTED", "the GitHub installation is not connected"); }
 
-/** Operator-only writer. No HTTP or company-admin path calls claim. The host owns
+/** Operator writers, plus claimPerson (guided onboarding PR 1: the GitHub connect routes, after the person proved control on GitHub). No HTTP path calls claim. The host owns
  * I/O cancellation; one joined budget checks every await, without detached writes. */
 export class GithubInstallationBindings {
   constructor(private readonly client: { send(command: unknown): Promise<unknown> }, private readonly tableName: string, private readonly clock: () => number = Date.now) {}
@@ -194,7 +206,73 @@ export class GithubInstallationBindings {
           entityType: "GITHUB_INSTALLATION_BINDING", companyId, boundAt: at, boundBy: "operator-lambda" }, ConditionExpression: "attribute_not_exists(pk)" } },
         { Put: { TableName: this.tableName, Item: { pk: `GITHUB_INSTALLATION#${installation.installationId}`, sk: "AUDIT#CLAIM",
           entityType: "GITHUB_INSTALLATION_CLAIM_AUDIT", ...installation, companyId, at, actor: "operator-lambda" }, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Put: { TableName: this.tableName, Item: companyInstallationRow(companyId, { ...installation, boundAt: at, boundBy: "operator-lambda" }) } },
       ] }));
+    });
+  }
+
+  /**
+   * Guided onboarding PR 1: a company owner or admin binds an installation they proved they control (the route checked that against GitHub first).
+   * First binder wins with one conditional transaction: the binding (absent), its audit row naming the person, the company's list row, and the
+   * backfill marker (present: before backfill every unbound installation is the implicit company's, so the person path never binds then).
+   * Already this company's: nothing is overwritten (the company's list row is put back if it is missing). Another company's: "taken", nothing written.
+   */
+  async claimPerson(companyId: string, installation: { installationId: number; accountLogin: string }, personId: string): Promise<PersonClaimOutcome> {
+    return this.run(async send => {
+      OrgIdSchema.parse(companyId); installationSchema.parse(installation); PersonIdSchema.parse(personId);
+      const decide = async (): Promise<PersonClaimOutcome | undefined> => {
+        const row = await this.binding(send, installation.installationId);
+        if (row !== undefined) {
+          if (row.companyId !== companyId) return "taken";
+          await send(new PutCommand({ TableName: this.tableName, Item: companyInstallationRow(companyId, row) }));
+          return "already_bound";
+        }
+        if (!await this.marker(send)) return companyId === IMPLICIT_COMPANY_ID ? "already_bound" : "taken";
+        return undefined;
+      };
+      const before = await decide();
+      if (before !== undefined) return before;
+      const at = new Date(this.clock()).toISOString();
+      try {
+        await send(new TransactWriteCommand({ TransactItems: [
+          { ConditionCheck: { TableName: this.tableName, Key: backfillKey, ConditionExpression: "attribute_exists(pk)" } },
+          { Put: { TableName: this.tableName, Item: { ...bindingKey(installation.installationId), ...installation,
+            entityType: "GITHUB_INSTALLATION_BINDING", companyId, boundAt: at, boundBy: personId }, ConditionExpression: "attribute_not_exists(pk)" } },
+          { Put: { TableName: this.tableName, Item: { pk: `GITHUB_INSTALLATION#${installation.installationId}`, sk: `AUDIT#CLAIM#${at}#${personId}`,
+            entityType: "GITHUB_INSTALLATION_CLAIM_AUDIT", ...installation, companyId, at, actor: personId }, ConditionExpression: "attribute_not_exists(pk)" } },
+          { Put: { TableName: this.tableName, Item: companyInstallationRow(companyId, { ...installation, boundAt: at, boundBy: personId }) } },
+        ] }));
+        return "bound";
+      } catch (error) {
+        // Lost a race (or the marker vanished): the stored binding decides; nothing is overwritten.
+        const after = await decide();
+        if (after === undefined) throw error;
+        return after;
+      }
+    });
+  }
+
+  /** Guided onboarding PR 1: the installations bound to `companyId`, from its list, each re-checked against its binding row (a row the binding no longer backs is left out). */
+  async companyInstallations(companyId: string): Promise<Array<z.infer<typeof companyInstallationSchema>>> {
+    return this.run(async send => {
+      OrgIdSchema.parse(companyId);
+      const pk = companyInstallationKey(companyId, 1).pk;
+      const response = await send(new QueryCommand({ TableName: this.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+        ExpressionAttributeValues: { ":pk": pk, ":prefix": "INSTALLATION#" }, Limit: COMPANY_INSTALLATIONS_MAX + 1, ConsistentRead: true })) as { Items?: unknown[]; LastEvaluatedKey?: unknown };
+      const items = z.array(z.unknown()).max(COMPANY_INSTALLATIONS_MAX).parse(response.Items ?? []);
+      if (response.LastEvaluatedKey !== undefined && items.length >= COMPANY_INSTALLATIONS_MAX) throw githubBindingRefusal();
+      const rows = items.map(item => {
+        const row = companyInstallationSchema.parse(item);
+        const raw = item as { pk?: unknown; sk?: unknown };
+        if (row.companyId !== companyId || raw.pk !== pk || raw.sk !== `INSTALLATION#${row.installationId}`) throw githubBindingRefusal();
+        return row;
+      });
+      const listed = [];
+      for (const row of rows) {
+        const binding = await this.binding(send, row.installationId);
+        if (binding?.companyId === companyId) listed.push({ ...row, accountLogin: binding.accountLogin, boundAt: binding.boundAt, boundBy: binding.boundBy });
+      }
+      return listed;
     });
   }
 

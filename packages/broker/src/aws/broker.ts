@@ -284,7 +284,7 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -15278,7 +15278,9 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     setDisplayName: setDisplayNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     ...(process.env.COMPANY_SIGNIN === "enabled" ? { companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
-      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }) } : {}),
+      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
+      // Guided onboarding PR 1: GitHub connect (github-connect-routes.ts), through the same App secret's client (slug, OAuth client) and the State table's bindings.
+      githubConnect: { bindings: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")), github: new GitHubAppClient(github.clientOptions), log: brokerLogLine } } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),

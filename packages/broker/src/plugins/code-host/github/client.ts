@@ -1,4 +1,5 @@
 import { createHash, createSign } from "node:crypto";
+import { userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
 import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
 import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
@@ -2622,6 +2623,21 @@ export class GitHubAppCredentialProvider {
       return clientId === undefined || clientSecret === undefined ? undefined : { clientId, clientSecret };
     };
     return read(await getAppSecret()) ?? read(await getAppSecret({ refresh: true }));
+  }
+
+  /**
+   * Guided onboarding PR 1: the installations of this App that the person behind a user authorization `code` controls, and their GitHub identity
+   * (user-authorization.ts). The user token lives only inside that call: never returned, stored or logged. No OAuth client: refused.
+   */
+  async userControlledInstallations(code: string): Promise<{ user: { id: number; login: string }; installations: ControlledInstallation[] }> {
+    let client: { clientId: string; clientSecret: string } | undefined;
+    let appId: string;
+    try {
+      client = await this.oauthClient();
+      appId = typeof this.options.appId === "string" ? this.options.appId : await this.options.appId();
+    } catch { throw new UserAuthorizationRefused(); }
+    if (client === undefined) throw new UserAuthorizationRefused();
+    return userControlledInstallations({ fetch: this.fetchImplementation, clientId: client.clientId, clientSecret: client.clientSecret, appId, code, now: this.now });
   }
 
   /** One installation of the App, by id (the App's JWT; GitHub tells it nothing of an installation of another App). */
