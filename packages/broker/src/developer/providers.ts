@@ -144,7 +144,9 @@ function slackAnyWorkspaceIdentity(payload: JWTPayload, installTeam: string): Pr
     identity: {
       method: "slack", issuer: SLACK_OIDC_ISSUER, subject: own ? userId.data : `${team.data}:${userId.data}`,
       displayName: (typeof payload.name === "string" ? cleanDisplayName(payload.name) : undefined) ?? userId.data,
-      ...(email === undefined ? {} : { email }),
+      // Another workspace's admins control its members' emails (they can edit them, or assert any address through their own SSO), so an email
+      // from there proves nothing to Rovara: it spends no invite, enters no email index and never becomes a factor email.
+      ...(own && email !== undefined ? { email } : {}),
       ...(own ? { slackUserId: userId.data } : {}),
       slackTeam: { id: team.data, ...(teamName === undefined || teamName === "" ? {} : { name: teamName }) },
     },

@@ -63,15 +63,28 @@ describe("Slack from any workspace (DEC 254e)", () => {
     expect((await w.signIn("U0INSTALL", { slackTeam: TEAM, cli: true })).refused).toBe("not invited");
   });
 
-  it("an invite link (company=X) admits a person from any workspace into X through Slack, and only X", async () => {
+  it("an email from another workspace spends no invite: only the install workspace's (or an invite code) admits", async () => {
     const w = world();
     await w.setup();
     await w.operator({ kind: "company-preapprove", companyId: X, email: "invited@other.test", role: "member", expiresInHours: 24 });
-    const signed = await w.signIn("U0INVITE1", { slackTeam: OTHER, company: X });
-    expect((await w.access(signed.access)).body).toMatchObject({ companyId: X, companyRole: "member", joinedByInvite: true });
-    // Naming another company is refused (B has its own sign-in, so that refusal comes first), and they stay in X.
-    expect((await w.signIn("U0INVITE1", { slackTeam: OTHER, company: B })).refused).toBe(OWN_SIGNIN);
-    expect(w.db.get(membershipKey(slackId(`${OTHER}:U0INVITE1`)).pk, "COMPANY")).toMatchObject({ companyId: X });
+    await w.operator({ kind: "company-preapprove", companyId: IMPLICIT_COMPANY_ID, email: "invited@other.test", role: "member", expiresInHours: 24 });
+    // The invite link (company=X) and a plain sign-in: neither spends the invite for the foreign workspace's asserted email.
+    expect((await w.signIn("U0INVITE1", { slackTeam: OTHER, company: X })).refused).toBe("not invited");
+    const plain = await w.signIn("U0INVITE1", { slackTeam: OTHER });
+    expect((await w.access(plain.access)).body).not.toHaveProperty("companyId");
+    expect(w.db.find((row) => row.entityType === "COMPANY_PREAPPROVAL" && row.status === "live" && !String(row.pk).includes(B))).toHaveLength(2);
+    expect(w.db.get(membershipKey(slackId(`${OTHER}:U0INVITE1`)).pk, "COMPANY")).toBeUndefined();
+    // No email is kept for them: no email index row, no factor email.
+    const record = w.db.get(`DEVELOPER#${slackId(`${OTHER}:U0INVITE1`)}`, "META")!;
+    expect(record).not.toHaveProperty("email");
+    expect(record).not.toHaveProperty("factorEmail");
+    expect(w.db.find((row) => row.entityType === "DEVELOPER_EMAIL" && row.developerId === slackId(`${OTHER}:U0INVITE1`))).toEqual([]);
+    // The install workspace's own people still join by invite link, through Slack, and only that company.
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "install@example.test", role: "member", expiresInHours: 24 });
+    const own = await w.signIn("U0INSTALL", { slackTeam: TEAM, company: X });
+    expect((await w.access(own.access)).body).toMatchObject({ companyId: X, companyRole: "member", joinedByInvite: true });
+    expect(w.sessionOf(slackId("U0INSTALL"))).toEqual([expect.objectContaining({ companyId: X, installMethod: true, amr: "slack" })]);
+    expect((await w.signIn("U0INSTALL", { slackTeam: TEAM, company: B })).refused).toBe(OWN_SIGNIN);
   });
 
   it("a company with its own issuer keeps it: Slack from another workspace is refused before the invite is spent", async () => {
@@ -93,12 +106,24 @@ describe("Slack from any workspace (DEC 254e)", () => {
     expect((await w.refresh(own.refresh!)).status).toBe(400);
   });
 
+  it("the bound-workspace exception is for the install workspace only: a member of B from another workspace is refused through Slack", async () => {
+    const w = world();
+    await w.setup();
+    w.deps.slackTeamCompany = () => B;
+    const id = slackId(`${OTHER}:U0NEW0001`);
+    // A membership in B written by an operator (an import), for a person from another workspace.
+    w.db.set({ ...membershipKey(id), entityType: "COMPANY_MEMBERSHIP", personId: id, companyId: B, role: "member", joinedAt: new Date(w.now()).toISOString() });
+    expect((await w.signIn("U0NEW0001", { slackTeam: OTHER })).refused).toBe(OWN_SIGNIN);
+    expect((await w.signIn("U0NEW0001", { slackTeam: OTHER, company: B })).refused).toBe(OWN_SIGNIN);
+    expect(w.db.find((row) => row.entityType === "SESSION" && row.developerId === id)).toEqual([]);
+  });
+
   it("a shared Slack session ends once its company gets an issuer: at once at the broker, and at refresh", async () => {
     const w = world();
     await w.setup();
-    await w.operator({ kind: "company-preapprove", companyId: X, email: "invited@other.test", role: "member", expiresInHours: 24 });
-    const signed = await w.signIn("U0INVITE1", { slackTeam: OTHER, company: X });
-    const cli = await w.signIn("U0INVITE1", { slackTeam: OTHER, cli: true });
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "install@example.test", role: "member", expiresInHours: 24 });
+    const signed = await w.signIn("U0INSTALL", { slackTeam: TEAM, company: X });
+    const cli = await w.signIn("U0INSTALL", { slackTeam: TEAM, cli: true });
     expect(await w.cliCheck(cli.access!)).toBe(200);
     w.db.set({ ...w.issuerRow, pk: companyScoped(X, "SIGNIN_ISSUER") });
     expect((await w.access(signed.access)).status).toBe(401);
@@ -106,15 +131,18 @@ describe("Slack from any workspace (DEC 254e)", () => {
     expect((await w.refresh(signed.refresh!)).status).toBe(400);
   });
 
-  it("a removed member from another workspace is refused at once and at refresh", async () => {
+  it("a removed member from another workspace (self-serve owner) is refused at once and at refresh", async () => {
     const w = world();
-    await w.setup();
-    await w.operator({ kind: "company-preapprove", companyId: X, email: "invited@other.test", role: "member", expiresInHours: 24 });
-    const signed = await w.signIn("U0INVITE1", { slackTeam: OTHER, company: X });
-    await w.company.setRevoked(X, slackId(`${OTHER}:U0INVITE1`), true);
+    const first = await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    const made = newCompanyInviteCode();
+    await w.operator({ kind: "company-invite-create", codeHash: made.codeHash, expiresInHours: 24 });
+    expect((await w.call("POST", "/v1/dev/company", first.access, { name: "Other Co", inviteCode: made.code })).status).toBe(200);
+    const signed = await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    expect((await w.access(signed.access)).body).toMatchObject({ companyId: X });
+    w.db.set({ ...w.db.get(membershipKey(slackId(`${OTHER}:U0NEW0001`)).pk, "COMPANY")!, revokedAt: new Date(w.now()).toISOString(), revokedBy: "operator" });
     expect((await w.access(signed.access)).status).toBe(401);
     expect((await w.refresh(signed.refresh!)).status).toBe(400);
-    expect((await w.signIn("U0INVITE1", { slackTeam: OTHER })).refused).toBe("access ended by a company admin");
+    expect((await w.signIn("U0NEW0001", { slackTeam: OTHER })).refused).toBe("access ended by a company admin");
   });
 
   it("the provider takes any workspace only when asked: off, the link names the install team and another workspace is refused", async () => {
