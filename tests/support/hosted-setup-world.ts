@@ -76,7 +76,16 @@ export interface SetupWorldOptions {
   legacy?: ReadonlyArray<readonly [string, string | undefined]>;
 }
 
-export async function setupWorld(options: SetupWorldOptions = {}) {
+export interface SetupWorld {
+  world: FakeWorld;
+  person: (personId: string, companyId: OrgId, role: OrgRole, grants?: Person["grants"], stepUpAgoMs?: number | null) => DeployedCaller;
+  call: (request: { method: string; path: string; headers: Record<string, string>; body: string }, caller: DeployedCaller) => Promise<{ status: number; body: Record<string, unknown>; raw: string }>;
+  routes: ReturnType<typeof createCoreDevRoutes>;
+  audit: AuditEvent[];
+  wirings: Map<string, HostedSetupRunWiring>;
+}
+
+export async function setupWorld(options: SetupWorldOptions = {}): Promise<SetupWorld> {
   const world = createFakeWorld();
   for (const [company, name] of [[FAKE_COMPANY, "payments"], [FAKE_COMPANY, "ledger"], [OTHER, "payments"]] as const) await register(world, company, name);
   for (const [name, company] of options.legacy ?? []) await registerLegacy(world, name, company);

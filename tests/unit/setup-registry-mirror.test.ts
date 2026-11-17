@@ -13,6 +13,7 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import type { FakeWorld } from "../support/core-host-fakes.js";
 import { FAKE_COMPANY, LEDGER, OTHER, RUN, applyRow, command, decideBody, get, latestOf, post, projectDefinition, registerLegacy, seedCandidate, setupWorld } from "../support/hosted-setup-world.js";
 
+const asJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 const LOW = { setup: [command("npm", ["ci", "--cache", ".npm-cache"])] };
 const legacyRow = (world: FakeWorld, name: string, revision: number) => world.store.get(projectKey(name, revision));
 const legacyCatalog = async (world: FakeWorld, name: string) => (await world.store.get(projectCatalogKey(name)))?.["latestRevision"];
@@ -47,7 +48,7 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
       const keys = [projectKey("payments", 1), projectKey("payments", 2), projectCatalogKey("payments"), projectRevisionKey(FAKE_COMPANY, "payments", 1), projectRevisionKey(FAKE_COMPANY, "payments", 2), orgProjectCatalogKey(FAKE_COMPANY, "payments")];
       for (const key of keys) { const row = await world.store.get(key); if (row !== undefined) db.set(row); }
       const deps = { tableName: "state", documentClient: { send: (c: unknown) => db.send(c as never) } };
-      const record = { ...projectKey("payments", 3), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: projectDefinition("payments", 3), runtimeBinding: { deploymentMode: "ec2-ebs" }, registeredBy: "owner-key-1", registeredAt: "2026-11-17T00:00:00.000Z" };
+      const record = { ...projectKey("payments", 3), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: asJson(projectDefinition("payments", 3)), runtimeBinding: { deploymentMode: "ec2-ebs" }, registeredBy: "owner-key-1", registeredAt: "2026-11-17T00:00:00.000Z" };
       if (mirror) {
         const plan = await planCoreProjectWrites(deps, record);
         expect(plan.status).toBe("ready");
@@ -141,9 +142,9 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
 
   it.each([
     ["the old catalog has moved on (ahead of the base)", async (world: FakeWorld) => { await world.store.put({ item: { ...projectCatalogKey("payments"), entityType: "PROJECT_CATALOG", name: "payments", latestRevision: 2 } }); }],
-    ["an old row already holds the candidate's revision", async (world: FakeWorld) => { await world.store.put({ item: { ...projectKey("payments", 2), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: projectDefinition("payments", 2), runtimeBinding: {}, registeredBy: "x", registeredAt: "2026-11-02T00:00:00.000Z" } }); }],
-    ["the old base row has no runtime binding", async (world: FakeWorld) => { await world.store.put({ item: { ...projectKey("payments", 1), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: projectDefinition("payments"), registeredBy: "owner-key-1", registeredAt: "2026-11-01T00:00:00.000Z" } }); }],
-    ["the old base row names another project", async (world: FakeWorld) => { await world.store.put({ item: { ...projectKey("payments", 1), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: projectDefinition("ledger"), runtimeBinding: {}, registeredBy: "owner-key-1", registeredAt: "2026-11-01T00:00:00.000Z" } }); }],
+    ["an old row already holds the candidate's revision", async (world: FakeWorld) => { await world.store.put({ item: { ...projectKey("payments", 2), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: asJson(projectDefinition("payments", 2)), runtimeBinding: {}, registeredBy: "x", registeredAt: "2026-11-02T00:00:00.000Z" } }); }],
+    ["the old base row has no runtime binding", async (world: FakeWorld) => { await world.store.put({ item: { ...projectKey("payments", 1), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: asJson(projectDefinition("payments")), registeredBy: "owner-key-1", registeredAt: "2026-11-01T00:00:00.000Z" } }); }],
+    ["the old base row names another project", async (world: FakeWorld) => { await world.store.put({ item: { ...projectKey("payments", 1), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: asJson(projectDefinition("ledger")), runtimeBinding: {}, registeredBy: "owner-key-1", registeredAt: "2026-11-01T00:00:00.000Z" } }); }],
     ["the old catalog row is damaged", async (world: FakeWorld) => { await world.store.put({ item: { ...projectCatalogKey("payments"), entityType: "SOMETHING_ELSE", name: "payments", latestRevision: 1 } }); }],
   ])("refuses the approval, writing nothing, when %s", async (_label, damage) => {
     const { world, person, call } = await setupWorld({ legacy: [["payments", FAKE_COMPANY]] });
@@ -171,7 +172,7 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
     // A rival registers revision 2 in the old registry after the read: the put is refused.
     await world.store.put({ item: { ...projectCatalogKey("payments"), entityType: "PROJECT_CATALOG", name: "payments", latestRevision: 1 } });
     const again = await mirror.itemsFor(row, "2026-11-17T00:00:00.000Z");
-    await world.store.put({ item: { ...projectKey("payments", 2), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: projectDefinition("payments", 2), runtimeBinding: {}, registeredBy: "rival", registeredAt: "2026-11-17T00:00:00.000Z" } });
+    await world.store.put({ item: { ...projectKey("payments", 2), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: asJson(projectDefinition("payments", 2)), runtimeBinding: {}, registeredBy: "rival", registeredAt: "2026-11-17T00:00:00.000Z" } });
     expect((await world.store.transact(again)).applied).toBe(false);
     expect(await legacyRow(world, "payments", 2)).toMatchObject({ registeredBy: "rival" });
     // The base row changes owner after the read: the check fails.
