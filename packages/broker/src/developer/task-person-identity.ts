@@ -97,7 +97,8 @@ const parsedIdentity = parseTaskPersonIdentity;
 
 /**
  * C1: the web proof (plan 4.1 rule, decision D1) is not built yet, so a `web` identity is always unavailable, which every caller
- * turns into a refusal. It makes no read and no Slack call. C2 replaces this with the web proof.
+ * turns into a refusal. It makes no Slack call (a registry person makes no further read; an unlinked OIDC creator costs the one
+ * sign-in record read that builds its identity). C2 replaces this with the web proof.
  */
 const webIdentityUnavailable = (): never => unavailable();
 

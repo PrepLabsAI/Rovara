@@ -351,13 +351,13 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
   }
   // D4 (no account linking): two identities of one Slack user, or (once a `web` identity is on the task) of one name, are told apart by method.
   const sameSlack = new Map<string, number>();
-  const sameName = new Map<string, number>();
-  const anyWeb = [...candidates.values()].some((candidate) => taskPersonKindOf(candidate.identity) === "web");
+  const sameName = new Map<string, { count: number; web: boolean }>();
   for (const candidate of candidates.values()) {
     const slackUserId = candidate.identity.slackUserId;
     if (slackUserId !== undefined) sameSlack.set(slackUserId, (sameSlack.get(slackUserId) ?? 0) + 1);
     const baseName = candidate.explicit?.name ?? candidate.identity.name;
-    if (anyWeb) sameName.set(baseName, (sameName.get(baseName) ?? 0) + 1);
+    const group = sameName.get(baseName) ?? { count: 0, web: false };
+    sameName.set(baseName, { count: group.count + 1, web: group.web || taskPersonKindOf(candidate.identity) === "web" });
   }
   const rendered: TaskPeopleView["people"] = [];
   const displayByDeveloper = new Map(displayChecks.map((proof) => [proof.identity.developerId, proof]));
@@ -370,7 +370,7 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
     if (candidate.explicit === undefined && effective !== "commenter") continue;
     const baseName = candidate.explicit?.name ?? candidate.identity.name;
     const slackUserId = candidate.identity.slackUserId;
-    const twin = (slackUserId !== undefined && (sameSlack.get(slackUserId) ?? 0) > 1) || (sameName.get(baseName) ?? 0) > 1;
+    const twin = (slackUserId !== undefined && (sameSlack.get(slackUserId) ?? 0) > 1) || ((sameName.get(baseName)?.count ?? 0) > 1 && sameName.get(baseName)?.web === true);
     const suffix = twin ? taskPersonIdentitySuffix(candidate.identity.method) : "";
     const labeledName = suffix === "" ? baseName : `${redactAndCap(baseName, 80 - suffix.length).text}${suffix}`;
     rendered.push({

@@ -148,6 +148,7 @@ describe("Task Person invite handler with identity kinds (web task channel C1)",
     ["both a Slack id and a method", { developerId: webId, slackUserId: "U0GALE0001", name: "Gale", role: "commenter", method: "github" }],
     ["neither a Slack id nor a method", { developerId: webId, name: "Gale", role: "commenter" }],
     ["an invalid Slack id", { developerId: webId, slackUserId: "not-slack", name: "Gale", role: "commenter" }],
+    ["a duplicate developer", { developerId: actorId, name: "Owner again", role: "commenter", method: "github" }],
   ])("refuses a PEOPLE list with %s before any Slack call", async (_label, entry) => {
     const f = fixture();
     const people = f.rows.get("PEOPLE")!;

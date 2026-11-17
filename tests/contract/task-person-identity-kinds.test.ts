@@ -320,6 +320,17 @@ describe("the proof: a web identity is always unavailable until C2", () => {
     expect(h.proof).not.toHaveBeenCalled();
   });
 
+  it("refuses an OIDC creator whose stored Slack id is malformed, even with a linked sign-in record", async () => {
+    const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc", slackUserId: "not-slack" });
+    const h = harness({
+      tasks: [meta],
+      developer: { developerId: OLA_ID, provider: "oidc", issuer: OIDC_ISSUER, subject: "ola-employee", displayName: "Ola Oidc",
+        slackUserId: SAM, firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: false },
+    });
+    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, OLA_ID))).code).toBe("PROJECT_ACCESS_DENIED");
+    expect(h.proof).not.toHaveBeenCalled();
+  });
+
   it("keeps the linked OIDC creator on the Slack proof, exactly as before", async () => {
     const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc", slackUserId: SAM });
     const h = harness({
@@ -520,6 +531,19 @@ describe("D4 labels: one person's two identities are told apart by method", () =
       { subject: { developerId: GALE_ID }, identity: { ...ID_FIELDS, name: "Maya Chen", method: "github" }, eligible: true, channelMember: true },
     ]);
     expect(result.people.map((person) => person.name).sort()).toEqual(["Maya Chen (GitHub identity)", "Maya Chen (Slack identity)"]);
+  });
+
+  it("labels only a same-name group that holds a web identity", async () => {
+    const result = await view([
+      slackRow(TASK_A, P_SAM, SAM, "Maya Chen"), subjectRow(TASK_A, P_SAM, SAM_ID),
+      slackRow(TASK_A, P_BAY, BAY, "Maya Chen"), subjectRow(TASK_A, P_BAY, BAY_ID),
+      webRow(TASK_A, { name: "Gale GitHub" }), subjectRow(TASK_A, P_GALE, GALE_ID),
+      peopleRow(TASK_A, [{ ...SAM_ENTRY, name: "Maya Chen" }, { ...BAY_ENTRY, name: "Maya Chen" }]),
+    ], [
+      slackCheck(SAM_ID, SAM, "Maya Chen"), slackCheck(BAY_ID, BAY, "Maya Chen"),
+      { subject: { developerId: GALE_ID }, identity: { ...ID_FIELDS, method: "github" }, eligible: true, channelMember: true },
+    ]);
+    expect(result.people.map((person) => person.name)).toEqual(["Gale GitHub", "Maya Chen", "Maya Chen"]);
   });
 
   it("keeps two different Slack people of one name unlabelled, as before (golden)", async () => {
