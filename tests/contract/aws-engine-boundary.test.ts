@@ -44,7 +44,7 @@ const WORKFLOW = STAMP({ merge: "workflow", build: "workflow", flow: "workflow" 
 beforeAll(async () => { await loadSlackBroker(); });
 
 // Every suffix routeDeveloperTaskRequest serves after `/v1/dev/tasks/<id>`, written out by hand.
-const ROUTE_SUFFIXES = ["", "/events", "/plan", "/messages", "/diff", "/comments", "/people", "/people/role", "/people/take-ownership", "/people/requests/abc", "/readers", "/readers/abc",
+const ROUTE_SUFFIXES = ["", "/events", "/plan", "/messages", "/diff", "/comments", "/people", "/people/role", "/people/take-ownership", "/people/candidates", "/people/add", "/people/requests/abc", "/readers", "/readers/abc",
   "/continue", "/cancel", "/close", "/pull-requests", "/share", "/workflow/decision", "/workflow/retry", "/workflow/review", "/workflow/publish-retry", "/workflow/keep-pull-requests",
   "/workflow/send-back", "/workflow/review-findings", "/workflow/feedback", "/workflow/feedback-decision", "/workflow/feedback-retry", "/canvas-closeout/retry", "/e2e-publication-context", "/answers"];
 

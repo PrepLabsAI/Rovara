@@ -537,6 +537,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/dev/tasks/{taskId}/e2e-publication-context | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId}/events | company-scoped | State table | yes | GET | Membership-resolved task check for owner and viewer, under the total company-read budget; absent dependency keeps legacy bytes. |
 | route | /v1/dev/tasks/{taskId}/people | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
+| route | /v1/dev/tasks/{taskId}/people/add | needs-company | State table | no | POST | Web task channel C4: owner-only through the People proof; the added person must pass the web proof (live member of the task's company with a grant) before any write. Not an R4 membership check. |
+| route | /v1/dev/tasks/{taskId}/people/candidates | needs-company | State table | no | GET | Web task channel C4: owner-only through the People proof; every listed person is proved a live member of the task's company with a grant. Not an R4 membership check. |
 | route | /v1/dev/tasks/{taskId}/people/requests/{id} | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId}/people/role | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId}/people/take-ownership | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |

@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
+import { grantProjectAccess, listProjectMembers, projectGrant, projectMemberKey, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } from "./github-connect-routes.js";
 import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
@@ -106,7 +106,7 @@ import { stepUpOf } from "../developer/verify-token.js";
 import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
-import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
+import { checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
@@ -127,7 +127,7 @@ import { DynamoDocumentStore } from "@rovara/aws-adapters";
 import {
   createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
   confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
-  proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage,
+  proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage, getTaskPeopleCandidatesForPage, addTaskWebPersonForPage,
   getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { createFeedbackReviewWeb } from "./feedback-review-web.js";
@@ -785,8 +785,11 @@ export async function authenticateDeveloperSessionId(deps: DeveloperRouteDepende
   }
 }
 
+/** C4: the most grant rows one person's web proof reads (one row per project they hold). More than this is unreadable, so a refusal. */
+export const WEB_PROOF_GRANT_ROWS_MAX = 500;
+
 /** Every item under `pk` with the sort key prefix, following LastEvaluatedKey through each page. */
-async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string): Promise<T[]> {
+async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string, maxItems?: number): Promise<T[]> {
   const items: T[] = [];
   let start: Record<string, unknown> | undefined;
   do {
@@ -798,6 +801,7 @@ async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix:
       ConsistentRead: true,
     })) as { Items?: T[]; LastEvaluatedKey?: Record<string, unknown> };
     items.push(...(response.Items ?? []));
+    if (maxItems !== undefined && items.length > maxItems) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
     start = response.LastEvaluatedKey;
   } while (start !== undefined);
   return items;
@@ -1835,7 +1839,17 @@ export function developerTaskRouteDependencies(
     const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
     return response.Item;
   };
-  const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant"> = {
+  const definitionReads = new Map<string, ReturnType<typeof latestDefinition>>();
+  const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant" | "projectMemberIds"> = {
+    // C4: one bounded page of the project's side of its grants (admin-actions.ts projectMemberKey rows); each id is proved live before use.
+    projectMemberIds: async (project, limit) => {
+      const response = await deps.documentClient.send(new QueryCommand({
+        TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :developer)",
+        ExpressionAttributeValues: { ":pk": projectMemberKey(project, "").pk, ":developer": "DEVELOPER#" }, ConsistentRead: true, Limit: limit,
+      })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      const ids = (response.Items ?? []).map((item) => typeof item.sk === "string" && item.sk.startsWith("DEVELOPER#") ? item.sk.slice("DEVELOPER#".length) : "");
+      return { ids, complete: response.LastEvaluatedKey === undefined };
+    },
     companyMembership: async (targetDeveloperId) => {
       // Only an install with the company layer has live memberships; without it there is no web proof (unavailable, a refusal).
       if ((deps.companies ?? deps.developer.companies) === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
@@ -1845,9 +1859,18 @@ export function developerTaskRouteDependencies(
       return strictLiveMembership(response.Item, targetDeveloperId);
     },
     projectGrant: async (targetDeveloperId, project, companyId) => {
-      const revision = await latestDefinition(deps, project, companyId);
+      // C4 read budget: one project definition read per request however many people are proved (the candidates list proves up to 200), and one
+      // person's own grant rows are read up to a cap; a person with more is unreadable (a refusal), never read without bound.
+      const definitionKey = `${companyId}\u0000${project}`;
+      let pending = definitionReads.get(definitionKey);
+      if (pending === undefined) {
+        pending = latestDefinition(deps, project, companyId);
+        definitionReads.set(definitionKey, pending);
+        pending.catch(() => definitionReads.delete(definitionKey));
+      }
+      const revision = await pending;
       if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
-      const memberships = await queryAll<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, `MEMBER#${targetDeveloperId}`, "PROJECT#");
+      const memberships = await queryAll<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, `MEMBER#${targetDeveloperId}`, "PROJECT#", WEB_PROOF_GRANT_ROWS_MAX);
       const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
       if (result.kind === "allowed") return result.access === "granted";
       if (result.kind === "denied" && result.reason === "project-access") return false;
@@ -1866,6 +1889,14 @@ export function developerTaskRouteDependencies(
       taskPersonProof: noSlack, developerRecord, projectChannelIds: noSlack, targetProjectAccess: noSlack, ...webProof,
       ...(trustedCaller === null ? {} : { trustedCaller }),
     };
+  };
+  /** A `slack` identity still refuses with the Slack build's own error; a `web` identity needs no Slack (C2). */
+  const identityDependenciesOrWebOnly = async (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonIdentityDependencies> => {
+    try {
+      return await identityDependencies(task, admission);
+    } catch (error) {
+      return webOnlyIdentityDependencies(error);
+    }
   };
   const identityDependencies = async (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonIdentityDependencies> => {
     const workspace = await taskWorkspace(task);
@@ -1923,16 +1954,10 @@ export function developerTaskRouteDependencies(
     ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
     ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
-    checkTaskPerson: async (task, developerId, admission) => {
-      let dependencies: TaskPersonIdentityDependencies;
-      try {
-        dependencies = await identityDependencies(task, admission);
-      } catch (error) {
-        // A `slack` identity still refuses with this same error; a `web` identity needs no Slack (C2).
-        dependencies = webOnlyIdentityDependencies(error);
-      }
-      return checkTaskPersonIdentity(dependencies, task, developerId);
-    },
+    checkTaskPerson: async (task, developerId, admission) => checkTaskPersonIdentity(await identityDependenciesOrWebOnly(task, admission), task, developerId),
+    // C4 (plan 4.2 "Add a person from the web"): the web proof's own reads, which need no Slack.
+    registerTaskWebPerson: async (task, developerId) => registerTaskWebPerson(await identityDependenciesOrWebOnly(task), task, developerId),
+    listTaskWebCandidates: async (task, limit) => listTaskWebCandidates(await identityDependenciesOrWebOnly(task), task, caller.developerId, limit),
     resolveTaskPickerPerson: async (taskId, slackUserId) => {
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
       if (response.Item === undefined) throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
@@ -2304,6 +2329,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
           proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),
           getPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
           confirmPeopleRequest: (caller, taskId, requestId) => confirmTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+          getPeopleCandidates: (caller, taskId) => getTaskPeopleCandidatesForPage(routeDeps(caller), caller, taskId),
+          addPeople: (caller, taskId, input) => addTaskWebPersonForPage(routeDeps(caller), caller, taskId, input),
         }),
       })(request, url);
     }

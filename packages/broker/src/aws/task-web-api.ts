@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
   CommentDocumentSchema, CommentTargetSchema, DECISION_COMMENTS_MAX, PAGE_API_BODY_MAX_BYTES, PAGE_NOTE_MAX_CHARS,
-  TaskPeopleRoleRequestSchema, TaskPeopleTakeOwnershipRequestSchema,
+  TaskPeopleAddRequestSchema, TaskPeopleRoleRequestSchema, TaskPeopleTakeOwnershipRequestSchema, type TaskPeopleAddRequest, type TaskPeopleCandidates,
   type TaskPeopleChangeResult, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPeopleView,
 } from "@agentx/contracts";
 import type { DeveloperTaskView } from "@agentx/contracts";
@@ -18,7 +18,7 @@ import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { CSRF_COOKIE, PRIVATE_HEADERS, SESSION_COOKIE, csrfCookie, isCsrfToken, parseCookie, safeResponse, type WebResponse } from "./web-session.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?|e2e/artifacts/([0-9a-f]{64}))$`, "i");
+export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|people|people/role|people/take-ownership|people/candidates|people/add|people/requests/(${UUID})(/confirm)?|e2e/artifacts/([0-9a-f]{64}))$`, "i");
 /** Any path under the task page's API, known or not: it is the API's to answer, never the PR feedback page's. */
 export const TASK_PAGE_API_PREFIX = new RegExp(`^/review/(${UUID})/task/api(/|$)`, "i");
 
@@ -109,6 +109,9 @@ export interface TaskWebApiDependencies {
   proposePeopleRole?(caller: DeveloperCaller, taskId: string, input: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
   proposeOwnership?(caller: DeveloperCaller, taskId: string, input: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
   getPeopleRequest?(caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
+  /** C4: the people the task owner may add from the web, and an addition (propose; the confirm page commits it). */
+  getPeopleCandidates?(caller: DeveloperCaller, taskId: string): Promise<TaskPeopleCandidates>;
+  addPeople?(caller: DeveloperCaller, taskId: string, input: TaskPeopleAddRequest): Promise<TaskPeopleChangeResult>;
   confirmPeopleRequest?(caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
 }
 
@@ -192,7 +195,7 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     const peopleConfirm = route[6] !== undefined;
     const method = request.method.toUpperCase();
     // `state` is read, `comments` is read (GET) and written (POST), everything else is written.
-    const allowed = endpoint === "state" || endpoint === "people" || endpoint === "e2e/artifacts" || (peopleRequestId !== undefined && !peopleConfirm)
+    const allowed = endpoint === "state" || endpoint === "people" || endpoint === "people/candidates" || endpoint === "e2e/artifacts" || (peopleRequestId !== undefined && !peopleConfirm)
       ? ["GET"] : endpoint === "comments" && commentId === undefined ? ["GET", "POST"] : ["POST"];
     if (!allowed.includes(method)) {
       const refused = json(405, { error: "method_not_allowed" });
@@ -205,6 +208,11 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         if (endpoint === "people") {
           if (deps.getPeople === undefined) return json(404, { error: "not_found" });
           return json(200, await deps.getPeople(caller, taskId));
+        }
+        // C4: the people the owner may add (names and opaque ids only); the route checks the owner.
+        if (endpoint === "people/candidates") {
+          if (deps.getPeopleCandidates === undefined) return json(404, { error: "not_found" });
+          return json(200, await deps.getPeopleCandidates(caller, taskId));
         }
         if (peopleRequestId !== undefined) {
           if (deps.getPeopleRequest === undefined) return json(404, { error: "not_found" });
@@ -243,6 +251,13 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         const parsed = TaskPeopleRoleRequestSchema.safeParse(value);
         if (!parsed.success) return invalid();
         const result = await deps.proposePeopleRole(caller, taskId, parsed.data);
+        return json(result.status === "PENDING" ? 202 : 200, result);
+      }
+      if (endpoint === "people/add") {
+        if (deps.addPeople === undefined) return json(404, { error: "not_found" });
+        const parsed = TaskPeopleAddRequestSchema.safeParse(value);
+        if (!parsed.success) return invalid();
+        const result = await deps.addPeople(caller, taskId, parsed.data);
         return json(result.status === "PENDING" ? 202 : 200, result);
       }
       if (endpoint === "people/take-ownership") {
