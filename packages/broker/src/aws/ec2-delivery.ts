@@ -20,6 +20,7 @@ import {
   type E2EWorkflowAdmissionRef,
   type Ec2RuntimeBinding,
   type WorkerInvocation,
+  type MachineFallback,
 } from "@agentx/contracts";
 import { asksForApplicationPlan, asksForCodeAnchors, asksForPlanQuality, withoutApplicationPlanText, withoutCodeAnchorText, withoutPlanQualityText } from "./broker-shared.js";
 import type { Ec2OutboxRecord } from "./lambda.js";
@@ -30,6 +31,11 @@ const WORKER_PORT = 8080;
 /** A token outlives one delivery attempt and nothing more (design in #76). */
 const TOKEN_LIFETIME_SECONDS = 60;
 export const STARTING_COMPUTE_MESSAGE = "Starting workspace compute";
+/** DEC 254zb: what a task is told when its worker runs on the default size instead of the project's chosen one. Fixed words per reason. */
+export const MACHINE_FALLBACK_MESSAGES = {
+  "size-unavailable": "The chosen machine size wasn't available, so this task runs on the standard size (ARM, 2 vCPU, 8 GB).",
+  "x86-unavailable": "x86 machines aren't available on this install yet, so this task runs on the standard size (ARM, 2 vCPU, 8 GB).",
+} as const satisfies Record<MachineFallback, string>;
 
 export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS" | { readinessGeneration: number };
 
@@ -50,6 +56,8 @@ export interface Ec2DeliveryDependencies {
   post: (url: string, init: { authorization: string; body: string }) => Promise<{ status: number; body: string }>;
   /** Records a progress event on the operation, once per outbox record. */
   progress: (record: Ec2OutboxRecord, message: string) => Promise<void>;
+  /** DEC 254zb: records the machine size note on the operation, once per outbox record. Absent: no note (today). */
+  machineNote?: (record: Ec2OutboxRecord, message: string) => Promise<void>;
   /**
    * GET on the worker's /ping; resolves to the invocation features it reports (spec 053), none for a
    * worker built before them. Without it, no optional field is sent.
@@ -130,7 +138,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     await checkAdmissionAgentSteps(invocation, dependencies.workflowE2EAdmissionUsesAgentSteps);
     const needsModelFreeLimits = await admissionNeedsModelFreeLimits(invocation, dependencies.workflowE2EAdmissionNeedsModelFreeLimits);
     let binding: Ec2RuntimeBinding | undefined;
-    let session: { ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string };
+    let session: { ready: true; generation: number; privateIp: string; machineFallback?: MachineFallback } | { ready: false; generation: number; state: string };
     if (invocation.kind === "project-setup-smoke") {
       if (dependencies.projectSetupSessions === undefined || dependencies.projectSetupBinding === undefined) {
         throw agentXError("RUNTIME_UNAVAILABLE", "project setup session transport is not configured");
@@ -150,6 +158,10 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     if (!session.ready) {
       if (invocation.kind !== "project-setup-smoke") await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
       return "WAITING_FOR_SESSION";
+    }
+    // DEC 254zb: a task step whose worker runs on the default size instead of its project's choice says so (fixed words; a note that cannot be written never stops the step).
+    if (invocation.kind === "task" && session.machineFallback !== undefined && dependencies.machineNote !== undefined) {
+      await dependencies.machineNote(record, MACHINE_FALLBACK_MESSAGES[session.machineFallback]).catch(() => undefined);
     }
     // The broker uses this existing dispatcher/session path to warm compute before it admits an
     // immutable feature-E2E deadline. A resume invocation is an internal readiness signal only;

@@ -374,7 +374,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const testEnvironment = createLocalTestEnvironment({
     store, companyId, now: () => clock().getTime(), audit: registry.require("audit-sink"), log,
     gate: () => gate,
-    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser", ...(options.testServiceImages !== undefined && path.startsWith("/test-environment/") ? { fresh: true } : {}) })); },
+    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser", ...(path.startsWith("/test-environment/") ? { fresh: true } : {}) })); },
     // Where the owner approves service images, the page opens in a NEW page session: an approval needs one opened in the last ten minutes (the same rule as making a script token).
     // What this computer does not do yet, said on the page instead of left for the owner to find out.
     extraLines: async () => [
@@ -661,6 +661,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       ...(browserEvidence === undefined ? {} : { browserEvidence: (input: Parameters<LocalBrowserEvidence["action"]>[0], context: { fresh: boolean }) => browserEvidence.action(input, context) }),
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
       approveServiceImage: (input) => testEnvironment.approveServiceImage(input), removeServiceImage: (input) => testEnvironment.removeServiceImage(input),
+      setTestEnvironmentMachine: (input) => testEnvironment.setMachineSize(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, modelSelection, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,

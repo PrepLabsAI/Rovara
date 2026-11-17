@@ -646,6 +646,8 @@ describe("task-token key and membership IAM", () => {
     // Batch 13 (rule D; #886 and #906, DEC 254z-amend3 / 254zm): re-pinned for test services' control plane additions only: the TestServices and TestServiceImages parameters,
     // td/ti packed into the broker's AGENTX_SETTINGS, the dispatcher's new AGENTX_SETTINGS (td, ti) and the session steps' ROVARA_TEST_SERVICES / ROVARA_TEST_SERVICES_HOSTED_IMAGES.
     // Verified on this tree: with exactly those taken out, the old pin 94b3524b... holds (and #891 alone leaves it unchanged).
+    // Machine size stack (#877 + #887 + DEC 254zr): re-pinned for the same three template changes as core-engine-infrastructure.test.ts's legacy pin (ec2:InstanceType list, the x86_64 AMI
+    // parameter in ResolveWorkerAmi, the provisioner state machine definition); the IAM tuples they cause are pinned exactly in beforeTuples below.
     expect(createHash("sha256").update(text).digest("hex")).toBe("37199a4de27b3e49c8023d381a6adb411fdf6bc722f4619a97a60dcc27898b9c");
   });
 
@@ -1256,7 +1258,7 @@ const beforeTuples: AccessTuple[] = [
   ["role:SessionsProvisionerRole","Allow","ec2:DescribeInstances","*","{}"],
   ["role:SessionsProvisionerRole","Allow","ec2:DescribeVolumes","*","{}"],
   ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region::image/*","{}"],
-  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"ArnEquals\":{\"ec2:LaunchTemplate\":[\"arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:launch-template/parameter:Ec2WorkerLaunchTemplateId\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"ArnEquals\":{\"ec2:LaunchTemplate\":[\"arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:launch-template/parameter:Ec2WorkerLaunchTemplateId\"]},\"StringEquals\":{\"ec2:InstanceType\":[\"m6g.2xlarge\",\"m6g.4xlarge\",\"m6g.8xlarge\",\"m6g.large\",\"m6g.xlarge\",\"m6i.2xlarge\",\"m6i.4xlarge\",\"m6i.8xlarge\",\"m6i.large\",\"m6i.xlarge\"]}}"],
   ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:launch-template/parameter:Ec2WorkerLaunchTemplateId","{}"],
   ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:network-interface/*","{}"],
   ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:security-group/*","{}"],
@@ -1281,8 +1283,10 @@ const beforeTuples: AccessTuple[] = [
   ["role:SessionsProvisionerRole","Allow","logs:PutResourcePolicy","*","{}"],
   ["role:SessionsProvisionerRole","Allow","logs:UpdateLogDelivery","*","{}"],
   ["role:SessionsProvisionerRole","Allow","ssm:GetParameter","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64","{}"],
+  ["role:SessionsProvisionerRole","Allow","ssm:GetParameter","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64","{}"],
   ["role:SessionsProvisionerRole","Allow","ssm:GetParameter","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-qualified-ami","{}"],
   ["role:SessionsProvisionerRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64","{}"],
+  ["role:SessionsProvisionerRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64","{}"],
   ["role:SessionsReaperServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
   ["role:SessionsReaperServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
   ["role:SessionsReaperServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],

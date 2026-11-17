@@ -119,6 +119,11 @@ import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperR
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js"; import type { ClientProjectNaming } from "./company-project-names.js";
+import { MACHINE_SIZE_ROWS, MACHINE_STORED_ONLY_LINE } from "@agentx/contracts";
+import { freshStepUp } from "../core-host/step-up.js";
+import { machineSizeEnabled, machineCard, setMachineChoice } from "../core/test-env/machine-size.js";
+import { testEnvironmentView } from "../core/test-env/local-view.js";
+import { DynamoDocumentStore } from "@rovara/aws-adapters";
 import {
   createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
   confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
@@ -1301,6 +1306,7 @@ function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord
   if (route.requires === "full" ? caller.client.fullAccess === true : caller.scopes.includes(route.requires)) return;
   // No company in scope here (the caller is a sign-in client acting as a person), so this uses the file's one company-less logger, already in the log-site inventory, rather than a new console call.
   logDeveloperEvent({ event: "client.scope_refused", clientId: caller.client.clientId, method: route.method, route: route.path, requires: route.requires });
+  if (route.method === "POST" && route.path.endsWith("/machine-size")) throw agentXError("FORBIDDEN", MACHINE_SIZE_ON_THE_PAGE);
   throw agentXError("FORBIDDEN", route.requires === "full"
     ? `${caller.client.name} needs full access for ${route.method} ${route.path}, which is off for it; an administrator can turn it on`
     : `${caller.client.name} needs the ${route.requires} scope for ${route.method} ${route.path}; an administrator can allow it with that scope`);
@@ -2142,6 +2148,58 @@ async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request
   return routeCompanyEngineModel({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request);
 }
 
+const MACHINE_SIZE_ON_THE_PAGE = "Changing the machine size needs the Rovara web page with a fresh sign-in";
+const MACHINE_SIZE_ROLE_REQUIRED = "Only a company owner or admin, or this project's administrator, may choose a machine size";
+export async function requireMachineSizePage(caller: DeveloperCaller, nowMs: number, windowSeconds?: () => Promise<unknown>): Promise<void> {
+  if (caller.webApp !== true) throw agentXError("FORBIDDEN", MACHINE_SIZE_ON_THE_PAGE);
+  await freshStepUp(caller, windowSeconds, nowMs, MACHINE_SIZE_ON_THE_PAGE);
+}
+export function requireMachineSizeRole(companyAdmin: boolean, projectAdmin: boolean): void {
+  if (!companyAdmin && !projectAdmin) throw agentXError("FORBIDDEN", MACHINE_SIZE_ROLE_REQUIRED);
+}
+
+/** Hosted TE-C5 read and page-only stored choice. A selection is a project setting; it never changes a worker launch or task estimate. */
+async function checkedMachineSize(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, rawProject: string): Promise<unknown> {
+  if (!machineSizeEnabled()) throw agentXError("NOT_AVAILABLE_HERE", "Machine size suggestions are not set up here.");
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (request.method === "POST") {
+    const window = deps.developer.stepUpWindowSeconds;
+    await requireMachineSizePage(caller, deps.now(), window === undefined || companyId === undefined ? undefined : () => window(companyId));
+  }
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const projects = await listProjects(deps, caller, companyId);
+  if (!projects.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
+  const orgId = companyId ?? IMPLICIT_COMPANY_ID;
+  const store = new DynamoDocumentStore({ client: deps.documentClient, tableName: deps.tableName });
+  const testEnvDeps = { store, now: deps.now };
+  if (request.method === "POST") {
+    const membership = await deps.companies?.membershipOf?.(caller.developerId);
+    const companyAdmin = membership !== undefined && membership.companyId === companyId && (membership.role === "owner" || membership.role === "admin");
+    const own = await projectGrant(memberActions(deps), project, caller.developerId, companyId);
+    requireMachineSizeRole(companyAdmin, own?.role === "administrator");
+    const body = jsonBody(request);
+    const rowId = body !== null && typeof body === "object" ? (body as Record<string, unknown>)["rowId"] : undefined;
+    if (typeof rowId !== "string" || !MACHINE_SIZE_ROWS.some((row) => row.id === rowId)) throw agentXError("CONFIG_INVALID", "Choose one of the listed machine sizes");
+    await setMachineChoice(testEnvDeps, { orgId, project, rowId });
+    logDeveloperEvent({ event: "project.machine_size_chosen", companyId: orgId, by: caller.developerId, project, rowId });
+  }
+  const view = await testEnvironmentView(testEnvDeps, orgId, project);
+  const card = await machineCard(testEnvDeps, orgId, project, view.proposal?.digest ?? view.approved?.digest);
+  return { measuredPeakMemoryMiB: card?.measuredPeakMemoryMiB ?? null, testTimeMs: card?.testTimeMs ?? null,
+    suggestedSize: card?.suggestedRowId ?? null, currentSize: card?.chosenRowId ?? null, storedOnlyLine: MACHINE_STORED_ONLY_LINE, choices: card?.choices ?? [] };
+}
+
+/** No SDK or parser causes leave the hosted route. */
+async function routeMachineSize(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, rawProject: string): Promise<unknown> {
+  try { return await checkedMachineSize(deps, caller, request, rawProject); }
+  catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("RUNTIME_UNAVAILABLE", "Machine size settings are unavailable. Try again in a moment.");
+  }
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
@@ -2224,6 +2282,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
+  if (machineSize !== null && (request.method === "GET" || request.method === "POST")) return routeMachineSize(deps, caller, request, machineSize[1]!);
   const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
   if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
   if (url.pathname === "/v1/dev/company/settings-compliance") return projectSettingsComplianceRoute(deps, caller, url);

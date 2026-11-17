@@ -231,6 +231,10 @@ describe("the named TEST proof-only installation gate", () => {
     // removed those are exactly #872's approved pins (named fd809c0e/98b1dae8, foreign ca40bea2/694d8393). Batch 13 (rule D; #886/#906, DEC 254z-amend3 / 254zm): and re-pinned for
     // test services' additions only (TestServices and TestServiceImages parameters, td/ti in the broker's and the dispatcher's AGENTX_SETTINGS, the session steps' two variables).
     // Verified on this tree: with exactly those taken out, the code/next + #891 values above hold. Legacy unchanged.
+    // Machine size stack (#877 infra + #887 + DEC 254zr, 2026-11-17): named, foreign AND legacy re-pinned. The session provisioner's RunInstances grant carries the ec2:InstanceType allow-list
+    // (infra/lib/session-lifecycle.ts, session-lifecycle-infrastructure.test.ts pins it exactly): six types in #877/#887, ten with DEC 254zr. Verified: removing only the four types m6g.4xlarge,
+    // m6g.8xlarge, m6i.4xlarge and m6i.8xlarge from every ec2:InstanceType list gives the #887 head's digests (named 69aa57be..., foreign 3c33651d..., legacy f9e67a89...; the same without the route),
+    // so DEC 254zr moves these pins by exactly those four strings. The older pins below this note did not hold at the #887 head either (its six types moved them first).
     const digestCases = [
       {
         label: "named",

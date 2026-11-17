@@ -66,9 +66,11 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     // Check the actual lifecycle wiring, not just the standalone definition helper.
     const definitions = ofType(controlPlane, "AWS::StepFunctions::StateMachine").map(([, r]) => JSON.stringify(r.Properties.DefinitionString).replaceAll("\\", ""));
     const provisioner = definitions.find((definition) => definition.includes("createVolume"))!;
-    // The workspace volume, and the instance launch in both its forms (launch template AMI, pinned AMI).
-    expect(provisioner.match(/"Key":"agentx:env","Value":"staging"/g)).toHaveLength(3);
-    expect(provisioner.match(/"ResourceType":"instance"/g)).toHaveLength(2);
+    // The workspace volume, and the instance launch in all its forms: launch template AMI and pinned AMI, each also with a chosen arm64 size (DEC 254zb),
+    // and the x86 size. Every one of them is tagged.
+    expect(provisioner.match(/"Key":"agentx:env","Value":"staging"/g)).toHaveLength(6);
+    expect(provisioner.match(/"ResourceType":"instance"/g)).toHaveLength(5);
+    expect(provisioner.match(/"Resource":"arn:aws:states:::aws-sdk:ec2:runInstances"/g)).toHaveLength(5);
   });
 
   it("gives production the same resources under its own names", () => {
