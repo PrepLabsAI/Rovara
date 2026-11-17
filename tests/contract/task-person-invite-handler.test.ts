@@ -145,7 +145,7 @@ describe("Task Person invite handler", () => {
       const f = fixture();
       const target = f.rows.get(`PERSON#${personId}`)!;
       f.rows.set(`PERSON#${personId}`, { ...target, method, issuer, subject: "subject-1001" });
-      const checker = f.ports.createPersonChecker;
+      const checker = f.ports.createPersonChecker.bind(f.ports);
       f.ports.createPersonChecker = (admission) => {
         const runtime = checker(admission);
         return { ...runtime, checkTaskPerson: async (task, developerId) => {

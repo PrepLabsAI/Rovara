@@ -65,7 +65,7 @@ describe("GitHub task people (DEC 254n)", () => {
   it("a linked GitHub creator is checked exactly as a linked OIDC creator, and so is a revoked one, a lost one and an unlinked one", async () => {
     const cases: Array<[string, boolean, Partial<DeveloperRecord>, ((request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>)?]> = [
       ["linked", true, {}], ["revoked", true, { revoked: true }], ["lost", true, {}, async () => ({ ok: false, error: "ineligible" })],
-      ["unavailable", true, {}, async () => ({ ok: false, error: "slack_unavailable" })], ["unlinked", false, { slackUserId: undefined }],
+      ["unavailable", true, {}, async () => ({ ok: false, error: "slack_unavailable" })], ["unlinked", false, { slackUserId: undefined } as unknown as Partial<DeveloperRecord>],
     ];
     for (const [, linked, overrides, proof] of cases) {
       const run = async (method: Method) => {

@@ -9,6 +9,7 @@ import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../pa
 import { MEMBER_NOT_FOUND, NOT_FOUND, OWNER_ONLY } from "../../packages/broker/src/aws/company-member-routes.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
+import { companyIssuerKey } from "../../packages/broker/src/developer/company-issuer.js";
 import { MEMBER_STEP_UP } from "../../packages/broker/src/developer/company-member-contract.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -24,7 +25,7 @@ const COMPANY_OF: Record<string, string> = { [OWNER]: A, [ADMIN]: A, [MEMBER]: A
 const MEMBERS = "/v1/dev/company/members";
 const member = (id: string, action: "removal-preview" | "removal" | "role") => `${MEMBERS}/${id}/${action}`;
 
-function world(amr: "github" | "slack" = "github") {
+function world(amr: "github" | "slack" = "github", options: { githubOn?: boolean } = {}) {
   const db = new FakeDynamoDb({ seed: 11 });
   // Cloud's web app: a full-access, install-level sign-in client (as company-member-routes.test.ts).
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: ADMIN, sid: SESSIONS[ADMIN], amr };
@@ -52,7 +53,7 @@ function world(amr: "github" | "slack" = "github") {
   const deps: DeveloperRouteDependencies = {
     documentClient: db, tableName: "State", now: () => NOW, companies: companyMembershipFromDynamo(db, "SignIn"),
     developer: {
-      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true, github: true }, signInTableName: "SignIn",
+      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true, github: options.githubOn ?? true }, signInTableName: "SignIn",
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
       companyMembers: companyMemberActionsThroughLambda({ documentClient: db, tableName: "SignIn", invoke }),
     },
@@ -69,7 +70,7 @@ function world(amr: "github" | "slack" = "github") {
   const stepUp = () => { claims.step_up_at = Math.floor((NOW - 30_000) / 1000); claims.step_up_amr = "passkey"; };
   const role = (id: string) => (db.get(membershipKey(id).pk, "COMPANY") as { role?: string } | undefined)?.role;
   const revoked = (id: string) => (db.get(membershipKey(id).pk, "COMPANY") as { revokedAt?: string } | undefined)?.revokedAt !== undefined;
-  return { db, claims, call, as, stepUp, forwarded, role, revoked };
+  return { db, claims, call, as, stepUp, forwarded, role, revoked, session: (id: string) => `SESSION#${SESSIONS[id]}` };
 }
 const refusal = (status: number, code: string, message: string) => ({ status, body: { error: { code, message } } });
 
@@ -141,6 +142,33 @@ describe("GitHub-signed-in company admins (DEC 254n)", () => {
   });
 });
 
+describe("GitHub sessions not bound to the company reach no member route (review Low 2)", () => {
+  it.each([
+    ["no shared-method mark", (h: ReturnType<typeof world>) => { const row = { ...(h.db.get(h.session(OWNER), "META") as Record<string, unknown>) }; delete row.installMethod; h.db.set(row); }],
+    ["bound to another company", (h: ReturnType<typeof world>) => { h.db.set({ ...(h.db.get(h.session(OWNER), "META") as Record<string, unknown>), companyId: B }); }],
+    ["a company with its own issuer", (h: ReturnType<typeof world>) => { h.db.set({ ...companyIssuerKey(A), entityType: "COMPANY_SIGNIN_ISSUER", enabled: true }); }],
+  ] as const)("%s: refused, nothing forwarded, nobody changed", async (_name, damage) => {
+    const h = world(); h.as(OWNER); h.stepUp(); damage(h);
+    for (const [method, path, body] of [["GET", MEMBERS], ["PUT", member(TARGET, "role"), { role: "member" }], ["POST", member(TARGET, "removal"), {}]] as const) {
+      expect((await h.call(method, path, body)).status).toBe(401);
+    }
+    expect(h.forwarded).toEqual([]); expect(h.revoked(TARGET)).toBe(false);
+  });
+
+  it("GitHub sign-in switched off: refused", async () => {
+    const h = world("github", { githubOn: false }); h.as(OWNER); h.stepUp();
+    expect((await h.call("GET", MEMBERS)).status).toBe(401);
+    expect(h.forwarded).toEqual([]);
+  });
+
+  it("a GitHub round trip is no step-up: removal and role change need Code's own factor", async () => {
+    const h = world(); h.as(OWNER); h.stepUp(); h.claims.step_up_amr = "github";
+    expect(await h.call("POST", member(TARGET, "removal"), {})).toEqual(refusal(403, "REAUTH_REQUIRED", "this removal needs a fresh sign-in check; sign in again and retry"));
+    expect((await h.call("PUT", member(TARGET, "role"), { role: "member" })).status).toBe(403);
+    expect(h.forwarded).toEqual([]); expect(h.revoked(TARGET)).toBe(false);
+  });
+});
+
 describe("the member helper's caller methods", () => {
   const helperWorld = () => {
     const db = new FakeDynamoDb(); const forwarded: unknown[] = [];
@@ -157,7 +185,7 @@ describe("the member helper's caller methods", () => {
 
   it.each(["slack", "oidc", "github"])("a live admin signed in with %s forwards the same request", async (amr) => {
     const h = helperWorld();
-    expect(await h.forward({ developerId: ADMIN, sessionId: "s", amr, name: "Ada" }, request)).toEqual({ ok: true });
+    expect(await h.forward({ developerId: ADMIN, sessionId: "s", amr: amr as never, name: "Ada" }, request)).toEqual({ ok: true });
     expect(h.forwarded).toEqual([{ ...request, createdBy: ADMIN }]);
   });
 
@@ -167,7 +195,7 @@ describe("the member helper's caller methods", () => {
       if (mode === "missing") h.db.delete(membershipKey(ADMIN).pk, "COMPANY");
       else h.db.set({ ...membershipKey(ADMIN), entityType: "COMPANY_MEMBERSHIP", personId: ADMIN, role: mode === "owner" ? "owner" : mode === "member" ? "member" : "admin",
         companyId: mode === "foreign" ? B : A, joinedAt: TIME, ...(mode === "revoked" ? { revokedAt: TIME } : {}) });
-      return { answer: await h.forward({ developerId: ADMIN, sessionId: "s", amr, name: "Ada" }, request), forwarded: h.forwarded };
+      return { answer: await h.forward({ developerId: ADMIN, sessionId: "s", amr: amr as never, name: "Ada" }, request), forwarded: h.forwarded };
     };
     const github = await run("github");
     expect(github).toEqual(await run("slack"));
@@ -185,7 +213,7 @@ describe("the member helper's caller methods", () => {
 
   it.each(["cloud", "saml", "local", "GitHub", "", undefined])("any other method (%s) is refused before any read", async (amr) => {
     const h = helperWorld();
-    expect(await h.forward({ developerId: ADMIN, sessionId: "s", amr, name: "Ada" }, request)).toEqual({ ok: false, error: "not_found" });
+    expect(await h.forward({ developerId: ADMIN, sessionId: "s", amr: amr as never, name: "Ada" }, request)).toEqual({ ok: false, error: "not_found" });
     expect(h.forwarded).toEqual([]); expect(h.db.commandNames()).toEqual([]);
   });
 });

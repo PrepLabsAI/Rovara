@@ -79,13 +79,14 @@ const personSk = (personId: string) => `PERSON#${personId}`;
 const subjectSk = (developerId: string) => `PERSON_SUBJECT#${developerId}`;
 
 const safeName = (name: string, fallback: string): string => cleanDisplayName(redactAndCap(name, 80).text) ?? fallback;
-/** DEC 254n (2): the record-backed methods. A GitHub person is checked exactly as an OIDC person is: their own sign-in record, its Slack link and the same Slack proof. */
-const recordMethod = (method: unknown): method is "oidc" | "github" => method === "oidc" || method === "github";
 
 async function getItem(deps: TaskPersonIdentityDependencies, pk: string, sk: string): Promise<Record<string, unknown> | undefined> {
   const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk, sk }, ConsistentRead: true })) as { Item?: unknown };
   return isRecord(result.Item) ? result.Item : undefined;
 }
+
+/** DEC 254n (2): the record-backed methods. A GitHub person is checked exactly as an OIDC person is: their own sign-in record, its Slack link and the same Slack proof. */
+const recordMethod = (method: unknown): method is "oidc" | "github" => method === "oidc" || method === "github";
 
 async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string): Promise<DeveloperTaskRecord> {
   if (!UUID.test(taskId)) return refuse();

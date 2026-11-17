@@ -644,8 +644,8 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
 async function companyOidcSession(deps: DeveloperRouteDependencies, session: SessionRecord, resolvedCompany?: string): Promise<DeveloperRecord | undefined> {
   // DEC 254e: a Slack session is checked here when it carries the shared-method mark (the sign-in server rechecks every Slack session at refresh,
   // as before); an OIDC session always.
-  // DEC 254h: a GitHub session too (GitHub is only ever the install's shared method), exactly as a marked Slack session.
-  if (deps.companies === undefined || !(session.amr === "oidc" || ((session.amr === "slack" || session.amr === "github") && session.installMethod !== undefined))) return undefined;
+  // DEC 254h/254n: a GitHub session always, marked or not, as OIDC (an unmarked one is held to the built-in company; GitHub is only the shared method).
+  if (deps.companies === undefined || !(session.amr === "oidc" || session.amr === "github" || (session.amr === "slack" && session.installMethod !== undefined))) return undefined;
   try {
     const scope = boundedCompanyReads(deps.documentClient, deps.now);
     const companyId = resolvedCompany ?? await scope.read(() => resolveCompany(deps.companies, session.developerId));
