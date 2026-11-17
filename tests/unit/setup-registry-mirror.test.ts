@@ -2,7 +2,7 @@
 // refused"). The mirror writes the exact revision, only for the company that owns the old rows, only while the old registry is where the setup was made from, and nothing on a rejection. While a proposal waits, the
 // refusal says so.
 import { describe, expect, it } from "vitest";
-import { canonicalJson, orgProjectCatalogKey, projectCatalogKey, projectRevisionKey } from "@agentx/contracts";
+import { canonicalJson, orgProjectCatalogKey, projectCatalogKey, projectRevisionKey, type JsonValue } from "@agentx/contracts";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { planCoreProjectWrites, coreCopyRefusalWords, CORE_COPY_REFUSED } from "../../packages/broker/src/aws/core-project-backfill.js";
 import { SETUP_REGISTRY_MOVED, createSetupRegistryMirror } from "../../packages/broker/src/aws/setup-registry-mirror.js";
@@ -44,7 +44,7 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
       // The same rows, in the old broker's own table fake, and the registration the old broker would now plan: revision 3 of the project.
       const db = new FakeDynamoDb();
       const keys = [projectKey("payments", 1), projectKey("payments", 2), projectCatalogKey("payments"), projectRevisionKey(FAKE_COMPANY, "payments", 1), projectRevisionKey(FAKE_COMPANY, "payments", 2), orgProjectCatalogKey(FAKE_COMPANY, "payments")];
-      for (const key of keys) { const row = await world.store.get(key); if (row !== undefined) db.set(row as never); }
+      for (const key of keys) { const row = await world.store.get(key); if (row !== undefined) db.set(row); }
       const deps = { tableName: "state", documentClient: { send: (c: unknown) => db.send(c as never) } };
       const record = { ...projectKey("payments", 3), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: projectDefinition("payments", 3), runtimeBinding: { deploymentMode: "ec2-ebs" }, registeredBy: "owner-key-1", registeredAt: "2026-11-17T00:00:00.000Z" };
       if (mirror) {
@@ -89,6 +89,25 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
       // The other company's own candidate row is not the one that was written to either.
       expect((await world.store.get(projectRevisionKey(OTHER, "payments", 2)))).toBeUndefined();
     }
+  });
+
+  it("another company's old rows never block this company: the old project of the same name is theirs at revision 1 while this company's core is at revision 2 (candidate 3), for another company and for the implicit one", async () => {
+    for (const owner of [OTHER, undefined]) {
+      const { world } = await setupWorld({ legacy: [["payments", owner]] });
+      // This company's core is already at revision 2 (an earlier approval that had nothing to mirror) and waits on revision 3.
+      await world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 2), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(projectDefinition("payments", 2))) as JsonValue } });
+      await world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 2 } });
+      const before = [await legacyRow(world, "payments", 1), await world.store.get(projectCatalogKey("payments"))];
+      const definition = { ...projectDefinition("payments", 3), ...LOW };
+      await world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 3), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
+      const mirror = createSetupRegistryMirror({ store: world.store, companyId: FAKE_COMPANY });
+      expect(await mirror.itemsFor({ project: "payments", baseRevision: 2, candidateRevision: 3 }, "2026-11-17T00:00:00.000Z"), String(owner)).toEqual([]);
+      expect([await legacyRow(world, "payments", 1), await world.store.get(projectCatalogKey("payments"))]).toEqual(before);
+    }
+    // Positive control: the same shape with THIS company's old rows is refused (the old registry is not where the setup was made from).
+    const { world } = await setupWorld({ legacy: [["payments", FAKE_COMPANY]] });
+    const mirror = createSetupRegistryMirror({ store: world.store, companyId: FAKE_COMPANY });
+    await expect(mirror.itemsFor({ project: "payments", baseRevision: 2, candidateRevision: 3 }, "2026-11-17T00:00:00.000Z")).rejects.toMatchObject({ message: SETUP_REGISTRY_MOVED });
   });
 
   it("two projects: approving one project leaves the other's old rows alone", async () => {
@@ -170,13 +189,13 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
 
 describe("L4-SF (c): the refusal says a setup change is waiting", () => {
   const A = FAKE_COMPANY;
-  const row = (companyId: string, state: string) => ({ ...setupApplyKey(companyId as never, "payments"), entityType: "SETUP_APPLY", state });
+  const row = (companyId: string, state: string) => ({ ...setupApplyKey(companyId, "payments"), entityType: "SETUP_APPLY", state });
   const depsOf = (db: FakeDynamoDb) => ({ tableName: "state", documentClient: { send: (c: unknown) => db.send(c as never) } });
 
   it("names the waiting setup when the company has one in `checking`, and keeps the plain words otherwise (another state, another company, another project, no row, an unreadable store)", async () => {
     const db = new FakeDynamoDb();
     expect(await coreCopyRefusalWords(depsOf(db), A, "payments")).toBe(CORE_COPY_REFUSED);
-    db.set(row(A, "checking") as never);
+    db.set(row(A, "checking"));
     const words = await coreCopyRefusalWords(depsOf(db), A, "payments");
     expect(words).toContain(CORE_COPY_REFUSED);
     expect(words).toContain("waiting for approval");
@@ -184,15 +203,15 @@ describe("L4-SF (c): the refusal says a setup change is waiting", () => {
     // Positive control above; now every other case is the plain words.
     expect(await coreCopyRefusalWords(depsOf(db), OTHER, "payments")).toBe(CORE_COPY_REFUSED);
     expect(await coreCopyRefusalWords(depsOf(db), A, "ledger")).toBe(CORE_COPY_REFUSED);
-    for (const state of ["approved", "rejected", "discarded"]) { db.set(row(A, state) as never); expect(await coreCopyRefusalWords(depsOf(db), A, "payments"), state).toBe(CORE_COPY_REFUSED); }
-    db.set(row(A, "checking") as never);
+    for (const state of ["approved", "rejected", "discarded"]) { db.set(row(A, state)); expect(await coreCopyRefusalWords(depsOf(db), A, "payments"), state).toBe(CORE_COPY_REFUSED); }
+    db.set(row(A, "checking"));
     expect(await coreCopyRefusalWords({ tableName: "state", documentClient: { send: async () => { throw new Error("private detail"); } } }, A, "payments")).toBe(CORE_COPY_REFUSED);
     expect(await coreCopyRefusalWords(depsOf(db), A, "../bad")).toBe(CORE_COPY_REFUSED);
   });
 
   it("carries no stored text: the words are fixed whatever the row holds", async () => {
     const db = new FakeDynamoDb();
-    db.set({ ...row(A, "checking"), project: "private-canary", by: "private-canary" } as never);
+    db.set({ ...row(A, "checking"), project: "private-canary", by: "private-canary" });
     expect(await coreCopyRefusalWords(depsOf(db), A, "payments")).not.toContain("private-canary");
   });
 });

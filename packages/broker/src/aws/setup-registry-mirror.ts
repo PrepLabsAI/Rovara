@@ -46,8 +46,19 @@ export function createSetupRegistryMirror(options: { store: Pick<DocumentStore, 
       } catch { throw moved(); }
       // No old registry row for the base revision: a project the core made on its own, nothing to mirror.
       if (base === undefined) {
-        if (legacyCandidate !== undefined || catalog !== undefined) throw moved();
-        return [];
+        // Old names are global: rows that are there may be ANOTHER company's (the catalog row names no company, so the newest revision it names tells whose it is). Theirs never block this company.
+        const foreign = async (row: Record<string, unknown> | undefined): Promise<boolean> => {
+          const parsed = OrgIdSchema.safeParse(row?.["companyId"] === undefined ? IMPLICIT_COMPANY_ID : row["companyId"]);
+          return row !== undefined && parsed.success && parsed.data !== companyId;
+        };
+        if (legacyCandidate !== undefined) { if (await foreign(legacyCandidate)) return []; throw moved(); }
+        if (catalog === undefined) return [];
+        const named = catalog["latestRevision"];
+        if (typeof named !== "number" || !Number.isSafeInteger(named) || named < 1) throw moved();
+        let newest: Record<string, unknown> | undefined;
+        try { newest = await store.get(projectKey(project, named)); } catch { throw moved(); }
+        if (await foreign(newest)) return [];
+        throw moved();
       }
       // Whose old row is it? One that names no company is the implicit company's. Another company's is never touched, and never blocks this one.
       const owner = OrgIdSchema.safeParse(base["companyId"] === undefined ? IMPLICIT_COMPANY_ID : base["companyId"]);

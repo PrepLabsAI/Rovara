@@ -3,7 +3,7 @@
 // tunnel name is refused, and the refusal list is read again when the ask is approved.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { orgScoped, type JsonValue, type OrgId } from "@agentx/contracts";
+import { orgScoped, type JsonValue } from "@agentx/contracts";
 import { SETUP_HOST_KIND, SETUP_HOST_OPEN_MAX, approvedHostsOf, hostAskDigest, hostAskSubjectId, hostDecisionRequestId, listHostAsks, readOpenHostAsk, requestHostAsk, type SetupHostAsk } from "../../packages/broker/src/core/setup-agent/host-ask.js";
 import { hostAskKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { hostRequestId } from "../../packages/broker/src/local/app/setup-agent.js";
@@ -28,20 +28,20 @@ async function seedRun(world: FakeWorld, companyId: string, project: string): Pr
 /** An open ask for `host`, made the way a run's callback makes it (the real ask code). */
 async function seedAsk(world: FakeWorld, companyId: string, project: string, host = HOST): Promise<SetupHostAsk> {
   const taskId = await seedRun(world, companyId, project);
-  const outcome = await requestHostAsk({ store: world.store, now: () => world.clock.now }, { orgId: companyId as OrgId, project, host, taskId, projectDomains: [] });
+  const outcome = await requestHostAsk({ store: world.store, now: () => world.clock.now }, { orgId: companyId, project, host, taskId, projectDomains: [] });
   if (outcome.outcome !== "created") throw new Error(`the ask was not made: ${outcome.outcome}`);
   return outcome.ask;
 }
 /** An open ask the request-time checks would never make (a planted row), to prove the decision's own check. */
 async function plantAsk(world: FakeWorld, companyId: string, project: string, host: string): Promise<SetupHostAsk> {
   const made = await seedAsk(world, companyId, project);
-  const planted = { ...made, host, ...hostAskKey(companyId as OrgId, project, host) } as unknown as Record<string, JsonValue>;
+  const planted = { ...made, host, ...hostAskKey(companyId, project, host) } as unknown as Record<string, JsonValue>;
   await world.store.put({ item: planted as never });
-  await world.store.put({ item: { pk: orgScoped(companyId as OrgId, "SETUP_HOST_OPEN"), sk: `${project}#${host}`, entityType: "SETUP_HOST_OPEN", orgId: companyId, project, host, ask: planted } as never });
+  await world.store.put({ item: { pk: orgScoped(companyId, "SETUP_HOST_OPEN"), sk: `${project}#${host}`, entityType: "SETUP_HOST_OPEN", orgId: companyId, project, host, ask: planted } });
   return planted as unknown as SetupHostAsk;
 }
 const bodyFor = (ask: SetupHostAsk, outcome: "approve" | "reject" = "approve") => ({ requestId: hostDecisionRequestId(ask), host: ask.host, outcome, seen: { revision: 1, artifactDigest: hostAskDigest(ask) } });
-const askOf = async (world: FakeWorld, companyId: string, project: string, host = HOST) => world.store.get(hostAskKey(companyId as OrgId, project, host));
+const askOf = async (world: FakeWorld, companyId: string, project: string, host = HOST) => world.store.get(hostAskKey(companyId, project, host));
 const table = (world: FakeWorld) => ({ store: world.store, now: () => world.clock.now });
 
 describe("L4-SF (d): who may allow or refuse a website for a hosted setup run", () => {
@@ -66,7 +66,7 @@ describe("L4-SF (d): who may allow or refuse a website for a hosted setup run", 
     expect(answer.status, answer.raw).toBe(200);
     expect(answer.body).toMatchObject({ host: HOST, decision: "refused" });
     expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "refused", decidedBy: "p-owner", refusalWords: "A person refused it." });
-    expect(Date.parse(String((await askOf(world, FAKE_COMPANY, "payments"))?.["expiresAt"]))).toBe(world.clock.now + 7 * 86_400_000);
+    expect(Date.parse((await askOf(world, FAKE_COMPANY, "payments"))?.["expiresAt"] as string)).toBe(world.clock.now + 7 * 86_400_000);
     expect(await approvedHostsOf(table(world), FAKE_COMPANY, "payments")).toEqual([]);
   });
 
@@ -186,7 +186,7 @@ describe("L4-SF (d): the decision is bound to the exact ask", () => {
   it("keeps the proofs apart: a setup-candidate proof never decides a website ask, and a website proof is not a setup-candidate proof or a task's", async () => {
     const { world } = await setupWorld();
     const ask = await seedAsk(world, FAKE_COMPANY, "payments");
-    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY as OrgId, role: "admin" as const }), displayNameOf: async (id) => id });
+    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY, role: "admin" as const }), displayNameOf: async (id) => id });
     const approvers = createHostedApprovers({ store: world.store, identity, key: KEY, now: () => new Date(world.clock.now) });
     const subjectId = hostAskSubjectId(FAKE_COMPANY, "payments", HOST);
     const digest = hostAskDigest(ask);
@@ -213,7 +213,7 @@ describe("L4-SF (d): the decision is bound to the exact ask", () => {
 describe("L4-SF (d): the approvers point keeps the three kinds of proof apart even when their ids coincide", () => {
   it("a project named like an ask's id: a setup-candidate proof does not decide the ask, and the ask's proof does not decide the candidate (the subject type is signed in)", async () => {
     const { world } = await setupWorld();
-    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY as OrgId, role: "admin" as const }), displayNameOf: async (id) => id });
+    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY, role: "admin" as const }), displayNameOf: async (id) => id });
     const approvers = createHostedApprovers({ store: world.store, identity, key: KEY, now: () => new Date(world.clock.now) });
     // The project's name is the same 32 hex characters as an ask's subject id, so only the signed subject type tells the two apart.
     const same = hostAskSubjectId(FAKE_COMPANY, "payments", HOST);
@@ -238,7 +238,7 @@ describe("L4-SF (d): the approvers point keeps the three kinds of proof apart ev
 
   it("has no rule for an ask whose subject id is not an ask's id, or whose project name is missing or not a project name", async () => {
     const { world } = await setupWorld();
-    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY as OrgId, role: "admin" as const }), displayNameOf: async (id) => id });
+    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY, role: "admin" as const }), displayNameOf: async (id) => id });
     const approvers = createHostedApprovers({ store: world.store, identity, key: KEY, now: () => new Date(world.clock.now) });
     const digest = "a".repeat(64);
     const subjectId = hostAskSubjectId(FAKE_COMPANY, "payments", HOST);
