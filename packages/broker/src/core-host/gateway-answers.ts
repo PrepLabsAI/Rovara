@@ -35,6 +35,8 @@ const REPLY_MAX_BYTES = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** Open reservations at most, and for at most this long (an answer's own wall clock is far shorter): a reservation nobody settled is forgotten, never kept. */
 const MAX_OPEN_RESERVATIONS = 256;
+/** One company may hold at most this many of them, so one busy company cannot fill the pool for the others. */
+const MAX_OPEN_PER_COMPANY = 32;
 const RESERVATION_MAX_AGE_MS = 10 * 60_000;
 const OUTPUT_TOKENS_MAX = 8_192;
 const CEILING_CENTS_MAX = 10_000;
@@ -112,8 +114,14 @@ export function createHttpAnswersGateway(options: HttpAnswersGatewayOptions): An
         || !Number.isSafeInteger(input.ceilingCents) || input.ceilingCents < 1 || input.ceilingCents > CEILING_CENTS_MAX) throw refused("unavailable");
       forget();
       if (open.size >= MAX_OPEN_RESERVATIONS) throw refused("unavailable");
-      // One answer, one reservation.
-      for (const reservation of open.values()) if (reservation.key === input.idempotencyKey && reservation.companyId === company.data) throw refused("unavailable");
+      let ofCompany = 0;
+      for (const reservation of open.values()) {
+        if (reservation.companyId !== company.data) continue;
+        // One answer, one reservation.
+        if (reservation.key === input.idempotencyKey) throw refused("unavailable");
+        ofCompany += 1;
+      }
+      if (ofCompany >= MAX_OPEN_PER_COMPANY) throw refused("unavailable");
       const reservationId = randomUUID();
       open.set(reservationId, { companyId: company.data, project: input.project, key: input.idempotencyKey, expiresAt: now() + RESERVATION_MAX_AGE_MS });
       return { reservationId };

@@ -76,7 +76,7 @@ describe("the request (golden)", () => {
     expect(Object.keys(init.headers as object).sort()).toEqual(["anthropic-version", "content-type", "x-api-key"]);
     expect(JSON.parse(init.body as string)).toEqual({ model: MODEL, max_tokens: 1_500, system: "fixed rules", messages: [{ role: "user", content: "the question, framed as data" }] });
     // No tools, no streaming, no key of the company or of Rovara anywhere in the request.
-    expect(String(init.body)).not.toMatch(/tools|stream|api_key/u);
+    expect(init.body as string).not.toMatch(/tools|stream|api_key/u);
   });
 
   it("uses the gateway's own cost figure when it gives a readable one, in whole cents rounded up, and none otherwise", async () => {
@@ -237,16 +237,24 @@ describe("the company is the reservation's, never a call's", () => {
     expect(await reasonOf(reserveFor(g))).toBe("unavailable");
     await g.settle({ reservationId: first.reservationId });
     await g.settle({ reservationId: first.reservationId });
-    await expect(reserveFor(g)).resolves.toMatchObject({ reservationId: expect.any(String) });
+    await expect(reserveFor(g)).resolves.toHaveProperty("reservationId");
+  });
+
+  it("one company cannot fill the pool for the others: it holds at most 32 open reservations and another company still reserves", async () => {
+    const g = gatewayWith(recording().fetchImpl);
+    for (let n = 0; n < 32; n += 1) await reserveFor(g, ORG_A, `a${String(n).padStart(31, "0")}`);
+    expect(await reasonOf(reserveFor(g, ORG_A, ANSWER_ID_A))).toBe("unavailable");
+    await expect(reserveFor(g, ORG_B, ANSWER_ID_B)).resolves.toBeDefined();
   });
 
   it("holds at most a bounded number of open reservations and forgets one that was never settled", async () => {
     let now = NOW;
     const g = gatewayWith(recording().fetchImpl, { now: () => now });
-    for (let n = 0; n < 256; n += 1) await reserveFor(g, ORG_A, `a${String(n).padStart(31, "0")}`);
-    expect(await reasonOf(reserveFor(g, ORG_A, ANSWER_ID_A))).toBe("unavailable");
+    const company = (n: number) => `org_pool${String(n).padStart(16, "0")}`;
+    for (let n = 0; n < 256; n += 1) await reserveFor(g, company(Math.floor(n / 16)), `a${String(n).padStart(31, "0")}`);
+    expect(await reasonOf(reserveFor(g, company(99), ANSWER_ID_A))).toBe("unavailable");
     now += 11 * 60_000;
-    await expect(reserveFor(g, ORG_A, ANSWER_ID_A)).resolves.toBeDefined();
+    await expect(reserveFor(g, company(99), ANSWER_ID_A)).resolves.toBeDefined();
   });
 });
 
@@ -277,6 +285,8 @@ describe("what the gateway says", () => {
 
   it("a gateway without the answers purpose yet (404) is 'not set up'; the fixed 401 for a wrong step or an unknown token, a busy 429 and any fault are 'unavailable'", async () => {
     expect(await run(refusal(404, "not_found"))).toBe("not_set_up");
+    // A provider's own 404 (an unknown model) is a fault, never "not set up".
+    expect(await run(refusal(404, "not_found_error"))).toBe("unavailable");
     expect(await run(refusal(401, "authentication_error"))).toBe("unavailable");
     expect(await run(refusal(403, "task_ended"))).toBe("unavailable");
     expect(await run(refusal(429, "budget_held"))).toBe("unavailable");
@@ -290,6 +300,8 @@ describe("what the gateway says", () => {
     expect(await run(reply({ content: undefined }))).toBe("unavailable");
     expect(await run(reply({ content: ["text"] }))).toBe("unavailable");
     expect(await run(new Response("not json", { status: 200 }))).toBe("unavailable");
+    // Only a 200 is an answer, whatever the body says.
+    expect(await run(new Response(JSON.stringify({ content: [{ type: "text", text: "x" }] }), { status: 201 }))).toBe("unavailable");
     expect(await run(new Response("x".repeat(1_100_000), { status: 200 }))).toBe("unavailable");
   });
 
@@ -309,7 +321,7 @@ describe("what the gateway says", () => {
   it("a call stops at the turn's own signal and at its own time limit, and a spent ceiling is refused before a token is made", async () => {
     const aborted = new AbortController();
     aborted.abort();
-    const hung = recording((_n) => new Promise<Response>(() => undefined));
+    const hung = recording(() => new Promise<Response>(() => undefined));
     const g = gatewayWith(hung.fetchImpl, { timeoutMs: 20 });
     expect(await reasonOf(callOf(g, (await reserveFor(g)).reservationId))).toBe("unavailable");
     const r = recording();
@@ -363,7 +375,7 @@ describe("the deployment's wiring (hostedAnswersModel)", () => {
     await session.complete(turn());
     expect(claimsOf(tokenOf(r.seen[0]!))).toMatchObject({ cid: ORG_A, stp: "rovara-answers-call", mdl: [MODEL], iss: ISSUER });
     await session.finish({ tokens: 0 });
-    expect(factory("not-a-company" as OrgId)).toBeUndefined();
+    expect(factory("not-a-company")).toBeUndefined();
     expect(hostedAnswersModel({}, tokens, r.fetchImpl)).toBeUndefined();
     expect(hostedAnswersModel(ENV, undefined, r.fetchImpl)).toBeUndefined();
     expect(hostedAnswersModel(ENV, () => undefined, r.fetchImpl)).toBeUndefined();
@@ -400,7 +412,7 @@ describe("the key never reaches Code", () => {
     const { init } = r.seen[0]!;
     expect(Object.keys(init.headers as object).filter((name) => /key|authorization/iu.test(name))).toEqual(["x-api-key"]);
     expect(tokenOf(r.seen[0]!)).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u);
-    expect(String(init.body)).not.toContain(tokenOf(r.seen[0]!));
+    expect(init.body as string).not.toContain(tokenOf(r.seen[0]!));
     expect(TASK_KEY_PURPOSE).toBe("task");
   });
 });

@@ -144,6 +144,10 @@ describe("outcomes", () => {
     // The same ask again still reaches the model: the place was given back, so the hourly limit of 1 never filled.
     const again = await w.service({ model: scriptedModel([new AnswerModelRefused("not_set_up")]), over: { perPersonPerHour: 1 } }).ask({ personId: ADA, project: "alpha", body: body() });
     expect(again.outcome).toBe("not_set_up");
+    // The place is given back once, not twice: after refused asks, exactly one real answer fits an hourly limit of 1.
+    const real = w.service({ model: scriptedModel([answer([goodSentence])]), over: { perPersonPerHour: 1 } });
+    expect((await real.ask({ personId: ADA, project: "alpha", body: body() })).outcome).toBe("answered");
+    expect((await refusal(real.ask({ personId: ADA, project: "alpha", body: body() }))).message).toBe(ANSWER_WORDS.rate);
   });
 
   it("a pause after the first turn ends the answer like the answer's own ceiling: what was found so far is checked and returned", async () => {
