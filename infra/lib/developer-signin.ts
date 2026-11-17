@@ -4,7 +4,7 @@ import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws
 import { Construct } from "constructs";
 import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
-import { addBrokerName, addBrokerSetting } from "./broker-names.js";
+import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import { packagedFunction } from "./control-plane.js";
 
 /** One plain address, or empty. The function checks it again (packages/broker/src/aws/step-up-email.ts) and builds no sender for anything else. */
@@ -345,7 +345,7 @@ export class DeveloperSignIn extends Construct {
       addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
       // Hosted wiring (d), named environments only: the company audit and event reads (still behind SIGN_IN_CLIENT_ROUTES, which nothing in infra sets). Membership is read from
       // COMPANY_MEMBER# (granted below, also named only).
-      if (named) broker.addEnvironment("COMPANY_READS", "enabled");
+      if (named) addDerivedBrokerVariable(broker, props.naming, "COMPANY_READS", "enabled");
     } else {
       broker.addEnvironment("DEVELOPER_API_SCOPE", "linking");
     }

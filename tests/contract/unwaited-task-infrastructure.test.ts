@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -31,7 +32,7 @@ const backstopAlarms = (template: Template) => (Object.values(template.findResou
   .filter((alarm) => alarm.Properties.AlarmName === "agentx-staging-UnwaitedTaskFailures" || JSON.stringify(alarm.Properties).includes("ReconcilerUnwaitedTask"));
 
 describe("the unwaited task backstop's infrastructure (#173)", () => {
-  const named = Template.fromStack(new ControlPlaneStack(new App(), "UnwaitedControlPlane", { naming: environmentNaming("staging") }));
+  const named = Template.fromJSON(withoutSlackCompanyMode(Template.fromStack(new ControlPlaneStack(new App(), "UnwaitedControlPlane", { naming: environmentNaming("staging") })).toJSON()) as Record<string, unknown>);
   const legacy = Template.fromStack(new ControlPlaneStack(new App(), "UnwaitedLegacyControlPlane"));
 
   it("never lets the reconciler invoke the broker: the backstop cancels inside the reconciler", () => {

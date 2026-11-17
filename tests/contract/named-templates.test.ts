@@ -6,6 +6,7 @@ import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-e
 import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -244,7 +245,7 @@ describe("named environment templates", () => {
       const template = normalizedTemplate(stack);
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutDnsFirewall(template)
         : stack.stackName === "agentx-staging-access" ? withoutDnsFirewallAccess(template)
-        : stack.stackName === "agentx-staging-control-plane" ? withoutSwitchoverControlPlaneParity(template) : template;
+        : stack.stackName === "agentx-staging-control-plane" ? withoutSwitchoverControlPlaneParity(withoutSlackCompanyMode(template)) : template;
       expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
     }, 120_000);
   }

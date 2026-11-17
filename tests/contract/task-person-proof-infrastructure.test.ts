@@ -10,6 +10,7 @@ import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -23,7 +24,7 @@ function namedTemplate(env: string, account = "944937319445", region = "us-east-
   const rendered: unknown = Template.fromStack(new ControlPlaneStack(new App(), `Proof-${env}-${account}-${region}`, {
     env: { account, region }, naming: environmentNaming(env),
   })).toJSON();
-  return rendered as TemplateJson;
+  return withoutSlackCompanyMode(rendered, { proof: env === "agentxlivetest123" }) as TemplateJson;
 }
 
 function proofEntries(template: TemplateJson) {
@@ -59,7 +60,7 @@ function appControlPlane(env: string): TemplateJson {
   const stacks = buildAgentXApp({ agentxEnv: env }).node.children.filter((child): child is Stack => Stack.isStack(child));
   const stack = stacks.find((candidate) => candidate.stackName === `agentx-${env}-control-plane`);
   if (stack === undefined) throw new Error(`expected the real ${env} control-plane stack`);
-  return Template.fromStack(stack).toJSON();
+  return withoutSlackCompanyMode(Template.fromStack(stack).toJSON(), { proof: env === "agentxlivetest123" }) as TemplateJson;
 }
 
 function parentRemainderDigest(template: TemplateJson): string {
@@ -116,7 +117,8 @@ function realAppControlPlane(env?: string): TemplateJson {
   const stackName = env === undefined ? "AgentXControlPlane" : `agentx-${env}-control-plane`;
   const stack = stacks.find((candidate) => candidate.stackName === stackName);
   if (stack === undefined) throw new Error(`expected actual app control-plane stack ${stackName}`);
-  return Template.fromStack(stack).toJSON();
+  const template = Template.fromStack(stack).toJSON();
+  return env === undefined ? template : withoutSlackCompanyMode(template, { proof: env === "agentxlivetest123" }) as TemplateJson;
 }
 
 function normalizeSingleton(value: unknown): unknown {

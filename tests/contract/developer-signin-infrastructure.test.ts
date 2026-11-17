@@ -10,6 +10,7 @@ import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -112,14 +113,14 @@ const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-s
 
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
-  named = controlPlane(app, "agentx-staging-control-plane");
+  named = withoutSlackCompanyMode(controlPlane(app, "agentx-staging-control-plane")) as TemplateJson;
   foundation = controlPlane(app, "agentx-staging-foundation");
   const policy = app.node.findAll().find((node) => node instanceof iam.Policy && node.node.path.endsWith("/Broker/ServiceRole/DefaultPolicy")) as iam.Policy;
   // CDK's splitter uses these estimates on unresolved tokens, not serialized template length.
   const document = policy.document as unknown as { statements: Array<{ _estimateSize(options: { actionEstimate: number; arnEstimate: number }): number }> };
   brokerArnEstimate = (policy.node.tryGetContext(ARN_ESTIMATE_CONTEXT) as number | undefined) ?? 150;
   brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: brokerArnEstimate }), 0);
-  longestNamed = controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`);
+  longestNamed = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`)) as TemplateJson;
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 

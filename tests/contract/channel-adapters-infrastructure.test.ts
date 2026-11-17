@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { CONVERSATION_STATE_WORKSPACE_ATTRIBUTES } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -29,7 +30,7 @@ function statementsOf(template: TemplateJson, roleId: string): Statement[] {
 const actions = (statement: Statement) => [statement.Action].flat();
 
 beforeAll(() => {
-  named = controlPlane(buildAgentXApp({ agentxEnv: "staging" }), "agentx-staging-control-plane");
+  named = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: "staging" }), "agentx-staging-control-plane")) as TemplateJson;
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
