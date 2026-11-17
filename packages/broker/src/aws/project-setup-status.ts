@@ -36,6 +36,7 @@ import { journalKey, setupAgentKey, setupPartition } from "../core/setup-agent/k
 import { taskKey, taskPointerKey } from "../core/task-flow/keys.js";
 import { taskPointerKey as legacyTaskPointerKey } from "../developer/task-records.js";
 import { recordInCompany } from "./company-check.js";
+import { readRepositoryMoves, repositoryFullName } from "./github-credentials.js";
 import { projectSettingsKey } from "./project-settings.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
@@ -243,14 +244,19 @@ export async function putEvalNone(input: {
 
 // ---- the rows
 
-function reposRow(definition: SetupStatusInput["definition"]): ProjectSetupChecklist["repos"] {
+/** The repos row. DEC 254zc(1): a repository this company's signed GitHub webhooks marked (moved to another owner, or off the App's list) carries `access`; the row's state and count are as before. */
+async function reposRow(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<ProjectSetupChecklist["repos"]> {
+  const definition = input.definition;
   const items = (Array.isArray(definition.repositories) ? definition.repositories : []).flatMap((entry: unknown) => {
     const repository = asRecord(entry);
     if (typeof repository?.["name"] !== "string" || typeof repository["defaultBranch"] !== "string") return [];
     const full = typeof repository["url"] === "string" ? /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(repository["url"])?.[1] : undefined;
     return [{ name: repository["name"], defaultBranch: repository["defaultBranch"], ...(full === undefined ? {} : { fullName: full }) }];
   }).slice(0, 32);
-  return { state: items.length > 0 ? "done" : "needs_you", count: items.length, items };
+  // A mark that cannot be read, or does not read back as this company's own, refuses the whole read (the fixed unreadable answer), never a guess.
+  const moves = await readRepositoryMoves(client, input.tableName, companyId, items.flatMap((item) => (item.fullName === undefined || !repositoryFullName.safeParse(item.fullName).success ? [] : [item.fullName]))).catch(() => { throw unreadable(); });
+  const marked = items.map((item) => { const access = item.fullName === undefined ? undefined : moves.get(item.fullName.toLowerCase()); return access === undefined ? item : { ...item, access }; });
+  return { state: marked.length > 0 ? "done" : "needs_you", count: marked.length, items: marked };
 }
 
 const commandCount = (items: SetupProposal["setup"] | undefined): number => (items ?? []).reduce((sum, item) => sum + item.value.commands.length, 0);
@@ -386,7 +392,7 @@ export async function readProjectSetupStatus(input: SetupStatusInput): Promise<P
     const [channels, linearTeam, aiAndSpend, hasTask] = await Promise.all([
       input.readers.channels(), input.readers.linearTeam?.(), aiAndSpendRow(input, client, companyId), hasRealTask(input, client, companyId),
     ]);
-    const repos = reposRow(input.definition);
+    const repos = await reposRow(input, client, companyId);
     const setupRun = await setupRunRow(input, client, companyId);
     const evalConfirm = await evalConfirmRow(input, client, companyId, setupRun.state === "done");
     const skipped = (row: SetupSkippableRow) => skips.skipped.includes(row);

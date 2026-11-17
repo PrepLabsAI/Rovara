@@ -23,6 +23,13 @@ export const SETUP_ROW_STATES = ["done", "needs_you", "running", "optional", "sk
 export type SetupRowState = (typeof SETUP_ROW_STATES)[number];
 const State = z.enum(SETUP_ROW_STATES);
 
+/**
+ * DEC 254zc(1): what GitHub's signed webhooks said about a repository since the project was set up. transferred: it moved to another owner (`repository` transferred). removed: it left the
+ * GitHub App's repository list (`installation_repositories` removed; a transfer out looks the same, so the word stays "removed" unless GitHub said "transferred"). Absent: GitHub said nothing.
+ */
+export const REPOSITORY_ACCESS_STATES = ["transferred", "removed"] as const;
+export type RepositoryAccessState = (typeof REPOSITORY_ACCESS_STATES)[number];
+
 const Channel = z.object({ channelId: z.string().min(1).max(64), name: z.string().min(1).max(200).optional(), isPrivate: z.boolean().optional() }).passthrough();
 
 /**
@@ -37,7 +44,7 @@ export const ProjectSetupChecklistSchema = z.object({
   progress: z.object({ done: z.number().int().min(0), total: z.number().int().min(1), percent: z.number().int().min(0).max(100), nextRequired: z.enum(SETUP_STATUS_ROWS).nullable() }).passthrough(),
   repos: z.object({
     state: State, count: z.number().int().min(0),
-    items: z.array(z.object({ name: z.string().min(1).max(128), fullName: z.string().min(1).max(256).optional(), defaultBranch: z.string().min(1).max(256) }).passthrough()).max(32),
+    items: z.array(z.object({ name: z.string().min(1).max(128), fullName: z.string().min(1).max(256).optional(), defaultBranch: z.string().min(1).max(256), access: z.enum(REPOSITORY_ACCESS_STATES).optional() }).passthrough()).max(32),
   }).passthrough(),
   setupRun: z.object({
     state: State,
