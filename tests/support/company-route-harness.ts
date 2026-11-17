@@ -13,6 +13,7 @@ export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/de
   "GET /v1/dev/projects/{id}/settings", "PUT /v1/dev/projects/{id}/settings", "GET /v1/dev/company/settings-compliance",
   "GET /v1/dev/company/members", "GET /v1/dev/company/members/{id}/removal-preview", "POST /v1/dev/company/members/{id}/removal", "PUT /v1/dev/company/members/{id}/role",
   "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
+  "GET /v1/dev/client/projects/{id}/setup-status", "PUT /v1/dev/client/projects/{id}/setup-status/skips",
 ] as const;
 export const PERSON = "d".repeat(64);
 export const TASK = "11111111-1111-4111-8111-111111111111";

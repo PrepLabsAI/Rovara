@@ -4,7 +4,7 @@ import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/con
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, type CompanyInviteList, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
-import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
+import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putSkip, readProjectSetupStatus } from "./project-setup-status.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -1351,6 +1351,70 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
   });
 }
+const CLIENT_SETUP_STATUS = /^\/v1\/dev\/client\/projects\/([^/]+)\/setup-status(\/skips)?$/;
+
+/** The project's Slack channel links from the existing binding rows (ids; names only where the company's workspace can be asked, as the access check does). */
+async function projectChannelLinks(deps: DeveloperRouteDependencies, project: string, companyId: string | undefined): Promise<Array<{ channelId: string; name?: string; isPrivate?: boolean }>> {
+  const bindings = (await bindingsOf(deps, undefined, companyId)).filter((binding) => binding.projectName === project);
+  const ids = [...new Set(bindings.map((binding) => binding.channelId))].sort();
+  if (ids.length === 0) return [];
+  const teams = [...new Set(bindings.map((binding) => binding.teamId))];
+  let names = new Map<string, { name: string; isPrivate: boolean }>();
+  if (deps.workspaces !== undefined && companyId !== undefined && teams.length === 1) {
+    try { names = await channelNames(deps, ids, { companyId, teamId: teams[0]! }); } catch { names = new Map(); }
+  }
+  return ids.map((channelId) => describeChannel(channelId, names));
+}
+
+/**
+ * Guided onboarding PR 8: `GET /v1/dev/client/projects/{project}/setup-status` (any member of the project's company) and `PUT .../setup-status/skips` (a company owner or admin, or the project's
+ * administrator). The company is the caller's live membership; another company's project, an unknown one and an unreadable name all answer "project not found". See project-setup-status.ts.
+ */
+async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, skips: boolean, route: DevRoute): Promise<unknown> {
+  const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, person);
+  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
+  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const scope = boundedCompanyReads(deps.documentClient, deps.now);
+  const companyId = await resolveCompany(deps.companies, person.developerId);
+  const latest = await scope.client.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
+  const row = latest.Items?.[0];
+  const definition = row?.definition;
+  if (!recordInCompany(row, companyId) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
+  // With no company layer there is no company to belong to: the person must be one who may use the project.
+  if (companyId === undefined) {
+    const access = await projectsAPersonUses({ ...deps, documentClient: scope.client }, person.developerId, undefined);
+    if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+    if (!access.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
+  }
+  const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
+  const role = membership !== undefined && membership.companyId === companyId ? membership.role : undefined;
+  const own = await projectGrant({ ...memberActions(deps), documentClient: scope.client }, project, person.developerId);
+  const projectAdmin = own?.role === "administrator";
+  const companyAdmin = companyId === undefined ? person.administrator : role === "admin" || role === "owner";
+  const effectiveCompany = companyId ?? IMPLICIT_COMPANY_ID;
+  if (skips) {
+    if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
+    const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: jsonBody(request) });
+    scope.check();
+    logDeveloperEvent({ event: "client.project_setup_skip_changed", clientId: person.client.clientId, by: person.developerId, project, row: changed.row, skipped: changed.skipped ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
+    return changed;
+  }
+  if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+  const status = await readProjectSetupStatus({
+    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, definition: { revision: definition.revision, repositories: definition.repositories },
+    viewer: { companyRole: role ?? null, projectAdmin },
+    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId) },
+  });
+  scope.check();
+  return status;
+}
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
 /**
@@ -1397,6 +1461,9 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   // Lane W: a project's merge rules (contract v0 client.projects.codeSettings), in Code's own CodeSettings shape.
   const settings = CLIENT_CODE_SETTINGS.exec(url.pathname);
   if (settings !== null && (request.method === "GET" || request.method === "PUT")) return routeClientCodeSettings(deps, request, settings[1]!, route);
+  // Guided onboarding PR 8: a project's setup status, and the skipped optional rows.
+  const setupStatus = CLIENT_SETUP_STATUS.exec(url.pathname);
+  if (setupStatus !== null && (request.method === "GET" || request.method === "PUT")) return routeClientSetupStatus(deps, request, setupStatus[1]!, setupStatus[2] !== undefined, route);
   const read = CLIENT_PROJECT.exec(url.pathname);
   if (read !== null && request.method === "GET") {
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));

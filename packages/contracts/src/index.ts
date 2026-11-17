@@ -94,6 +94,7 @@ export * from "./channel-adapter.js";
 export * from "./channel-command-client.js";
 export * from "./channel-forms.js";
 export * from "./sign-in-clients.js";
+export * from "./project-setup-status.js";
 export * from "./company-invites.js";
 export * from "./company-import.js";
 export * from "./thread-service.js";
