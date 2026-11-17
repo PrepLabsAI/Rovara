@@ -39,6 +39,6 @@ describe("machine size price", () => {
     ["an unpriced region", "arm64-2-8", "eu-west-1", 60], ["no region", "arm64-2-8", undefined, 60],
     ["zero minutes", "arm64-2-8", "us-east-1", 0], ["a fraction", "arm64-2-8", "us-east-1", 1.5], ["over a week", "arm64-2-8", "us-east-1", 10_081], ["NaN", "arm64-2-8", "us-east-1", Number.NaN],
   ])("has no estimate (never $0) for %s", (_name, rowId, region, minutes) => {
-    expect(machineCost(rowId, region, minutes as number)).toBeUndefined();
+    expect(machineCost(rowId, region, minutes)).toBeUndefined();
   });
 });
