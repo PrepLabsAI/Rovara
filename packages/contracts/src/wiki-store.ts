@@ -13,8 +13,7 @@
 //  - A removed repository (or one Rovara lost access to) has its pages and every cross-repo page that names it deleted at once (`deleteRepository`).
 //  - Answer records (J1) expire 30 days after they are written, like Ask's.
 import { z } from "zod";
-import { OrgIdSchema, type OrgId } from "./browser-ids.js";
-import { orgScoped } from "./company-scope.js";
+import { type OrgId } from "./browser-ids.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 // ---- Limits -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -275,25 +274,8 @@ export const WikiAnswerRecordWriteSchema = z.object({
 export type WikiAnswerRecordWrite = z.infer<typeof WikiAnswerRecordWriteSchema>;
 export type WikiAnswerRecord = WikiAnswerRecordWrite & { createdAt: string; expiresAt: number };
 
-// ---- Keys -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-export interface WikiKey { pk: string; sk: string }
-
-/** The one partition of a project's wiki in a company: `ORG#<company>#WIKI#<project>`. The company purge removes it by its `ORG#<company>#` prefix. */
-export function wikiPartition(orgId: OrgId, project: string): string {
-  return orgScoped(OrgIdSchema.parse(orgId), `WIKI#${WikiProjectSchema.parse(project)}`);
-}
-/** Sort-key families inside a project's wiki partition. */
-export const WIKI_SK = { page: "PAGE#", body: "BODY#", note: "NOTE#", flag: "FLAG#", build: "BUILD#", answer: "ANSWER#" } as const;
-const pageId = (value: string): string => WikiPageIdSchema.parse(value);
-const id = (value: string): string => WikiIdSchema.parse(value);
-/** A page's index row (small: title, summary, repos, counts) and its body row (blocks and claims), written together. */
-export const wikiPageKey = (orgId: OrgId, project: string, page: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.page}${pageId(page)}` });
-export const wikiBodyKey = (orgId: OrgId, project: string, page: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.body}${pageId(page)}` });
-export const wikiNoteKey = (orgId: OrgId, project: string, page: string, noteId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.note}${pageId(page)}#${id(noteId)}` });
-export const wikiFlagKey = (orgId: OrgId, project: string, page: string, flagId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.flag}${pageId(page)}#${id(flagId)}` });
-export const wikiBuildKey = (orgId: OrgId, project: string, buildId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.build}${id(buildId)}` });
-export const wikiAnswerKey = (orgId: OrgId, project: string, answerId: string): WikiKey => ({ pk: wikiPartition(orgId, project), sk: `${WIKI_SK.answer}${id(answerId)}` });
+// ---- Keys: in wiki-keys.ts (the key builders the company inventory reads), re-exported here --------------------------------------------------------------------------------------
+export * from "./wiki-keys.js";
 
 // ---- Read routes (W2; Cloud's Wiki tab calls them as the signed-in person) ------------------------------------------------------------------------------------------------------------
 //
@@ -429,6 +411,11 @@ export interface WikiStore {
   deletePage(project: string, pageId: string): Promise<boolean>;
   /** Deletes every page naming the repository (single-repo and cross-repo pages), with their notes and flags. */
   deleteRepository(project: string, repo: string): Promise<WikiRepositoryDeletion>;
+  /**
+   * Deletes every page naming a repository that is not in `current` (the project's repositories now). Every reader that knows the project's current repositories calls it before reading
+   * (the read routes do), so a repository removed from the project leaves nothing behind on the next read, whichever path removed it.
+   */
+  pruneRepositories(project: string, current: readonly string[]): Promise<WikiRepositoryDeletion>;
   /** Deletes the whole project wiki: pages, notes, flags, build records and answer records. */
   deleteWiki(project: string): Promise<number>;
   addNote(project: string, note: WikiNoteAdd): Promise<WikiNote>;
