@@ -94,8 +94,11 @@ export const commitsOf = (repositories: readonly CurrentSetupRepository[]): Reco
  */
 export async function takeSetupSnapshot(deps: SnapshotReadDeps, input: { definition: Definition; setupRevision: number; at: string; commits?: Readonly<Record<string, string>> }): Promise<SetupSnapshot | undefined> {
   const read = await readCurrentSetupFiles(deps, input.definition, input.commits);
-  if (read.status !== "read" || read.repositories.some((repository) => "unreadable" in repository)) return undefined;
-  const repositories = read.repositories.map((repository) => repository as Extract<CurrentSetupRepository, { commit: string }>).map((repository) => ({ name: repository.name, commit: repository.commit, files: [...repository.files] }));
+  if (read.status !== "read") return undefined;
+  const whole = read.repositories.filter((repository): repository is Extract<CurrentSetupRepository, { files: unknown }> => !("unreadable" in repository));
+  // One repository that could not be read whole makes the whole baseline unusable: it is never saved without it.
+  if (whole.length !== read.repositories.length) return undefined;
+  const repositories = whole.map((repository) => ({ name: repository.name, commit: repository.commit, files: [...repository.files] }));
   if (repositories.reduce((total, repository) => total + repository.files.length, 0) > SETUP_WATCH_MAX_TOTAL) return undefined;
   const parsed = SetupSnapshotSchema.safeParse({ setupRevision: input.setupRevision, takenAt: input.at, repositories, hosts: allowedHostsOf(input.definition) });
   return parsed.success ? parsed.data : undefined;

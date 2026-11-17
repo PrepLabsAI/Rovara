@@ -126,6 +126,18 @@ describe("the approval saves the setup snapshot", () => {
     expect(failed.extra?.some((item) => item.kind === "update")).toBe(true);
   });
 
+  it("a store fault while reading the candidate saves no snapshot and does not fail the approval", async () => {
+    const w = await waiting();
+    const subject = createSetupProposalSubject({ flow: w.h.deps });
+    const loaded = await subject.load(w.h.deps.companyId, "payments");
+    const real = w.h.deps.store;
+    w.h.deps.store = { ...real, get: async (key: { pk: string; sk: string }) => { if (key.sk.startsWith("REVISION") || key.sk.includes("REV")) throw new Error("store fault"); return real.get(key); } } as never;
+    const applied = await subject.apply(loaded!, attempt(w.digest, "approve") as never, [owner()], "2026-11-09T10:05:00.000Z");
+    w.h.deps.store = real;
+    expect(snapshotPut(applied.extra, w)).toBeUndefined();
+    expect(applied.extra?.some((item) => item.kind === "update")).toBe(true);
+  });
+
   it("a listing the host cut short saves none: a partial baseline would report changes that did not happen", async () => {
     const w = await waiting();
     w.model.incompleteTrees.add(w.model.headOf("main"));

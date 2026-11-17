@@ -17,7 +17,7 @@ import { claimAutomaticRun, readAutomaticRunsUse, setAutomaticRunsCap } from "..
 import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
 import { SETUP_CHECK_STUCK_MS, setupFailedMessage, setupStateOf } from "../../packages/broker/src/core/setup-agent/check.js";
 import {
-  RECHECK_WAIT_MAX_MS, SETUP_CHECKING_WORDS, advanceCurrentRecheck, classifySetupRecheck, driftTaskKey, readSetupRepairCard, recheckCurrentKey, recheckRowKey, setupGateBeforeBuild, setupRecheckLineOf,
+  RECHECK_WAIT_MAX_MS, SETUP_CHECKING_WORDS, advanceCurrentRecheck, classifySetupRecheck, driftTaskKey, readSetupRepairCard, recheckCurrentKey, recheckRowKey, repairNoticeKey, setupGateBeforeBuild, setupRecheckLineOf,
   setupBrokenTaskWords, setupDriftAtStart, setupStillWorksWords, type RecheckRow,
 } from "../../packages/broker/src/core/setup-agent/recheck.js";
 import { readSetupSnapshot, setupSnapshotKey, snapshotItem, takeSetupSnapshot } from "../../packages/broker/src/core/setup-agent/snapshot.js";
@@ -84,6 +84,17 @@ async function saveSnapshot(w: World, definitionOf: ProjectDefinition = w.projec
 const startTask = async (w: World, project = w.project.name) => (await w.h.flow.start(w.h.owner, { requestId: newRequestId(), project, instructions: "Change a thing", workflow: true, workflowPath: "QUICK" })).task;
 const rechecksOf = async (store: DocumentStore, orgId: OrgId, project: string): Promise<RecheckRow[]> =>
   (await queryAll(store, { pk: setupPartition(orgId, project), sk: { op: "beginsWith", prefix: "RECHECK#" } })).map((item) => item as unknown as RecheckRow);
+/** The preparation messages staged for dispatch: one per workspace made (a task's own, and each check). */
+const stagedPreparations = async (h: Harness): Promise<number> => {
+  const queue = await h.queues.queue("task-dispatch");
+  let total = 0;
+  for (let round = 0; round < 20; round += 1) {
+    const batch = await queue.receive();
+    if (batch.length === 0) break;
+    total += batch.length;
+  }
+  return total;
+};
 const linkOf = async (w: World, taskId: string, project = w.project.name) => w.h.store.get(driftTaskKey(w.h.deps.companyId, project, taskId));
 
 /** Answers the check's preparation as a worker would, delivering it first. */
@@ -250,6 +261,7 @@ describe("once per commit, and the monthly cap", () => {
     const second = await startTask(w);
     const rows = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
     expect(rows).toHaveLength(1);
+    expect(await stagedPreparations(w.h)).toBe(3);
     expect((await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.h.deps.companyId, "payments")).used).toBe(1);
     expect((await linkOf(w, first.taskId))?.["recheckKey"]).toBe(rows[0]!.key);
     expect((await linkOf(w, second.taskId))?.["recheckKey"]).toBe(rows[0]!.key);
@@ -266,6 +278,8 @@ describe("once per commit, and the monthly cap", () => {
     await Promise.all([startTask(w), startTask(w), startTask(w)]);
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toHaveLength(1);
     expect((await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.h.deps.companyId, "payments")).used).toBe(1);
+    // Three tasks' own preparations and exactly ONE check's: no second machine was made for the same commit.
+    expect(await stagedPreparations(w.h)).toBe(4);
   });
 
   it("a cap that is used up starts no re-check, writes no link, and the task still starts; the pause is recorded once", async () => {
@@ -392,7 +406,9 @@ describe("the wait before Build, and only there", () => {
     // Still within the check's own limit: it is still running.
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "wait" });
     w.h.clock.advance(SETUP_CHECK_STUCK_MS / 1000 + 120);
-    expect((await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).answer).not.toBe("blocked");
+    // The check stalled and its retry is in flight, but the wait limit has passed: the task goes on (never blocked on silence).
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    expect((await linkOf(w, task.taskId))?.["state"]).toBe("released");
   });
 
   it("the first coding run is held and then released (startImplementation): WAITING while it runs, STARTED after a pass", async () => {
@@ -640,11 +656,25 @@ describe("isolation", () => {
     expect(await readSetupRepairCard(b.h.deps, "payments")).toBeUndefined();
     expect((await setupStateOf(b.h.deps, "payments", b.project)).status).not.toBe("failed");
     expect(await advanceCurrentRecheck(b.h.deps, "payments")).toBeUndefined();
-    // A row of one company copied under the other's key reads as nothing: the row names its own company and project.
-    const copied = await shared.get(recheckRowKey(a.h.deps.companyId, "payments", row!.key));
-    await shared.put({ item: { ...copied!, ...recheckRowKey(COMPANY_B, "payments", row!.key) } });
+    // Rows of one company copied under the other's keys read as nothing: each row names its own company and project.
+    const copyAll = async (to: { orgId: OrgId; project: string }): Promise<void> => {
+      const sourceKeys = [recheckRowKey(a.h.deps.companyId, "payments", row!.key), driftTaskKey(a.h.deps.companyId, "payments", task.taskId), repairNoticeKey(a.h.deps.companyId, "payments"), setupSnapshotKey(a.h.deps.companyId, "payments")];
+      const targetKeys = [recheckRowKey(to.orgId, to.project, row!.key), driftTaskKey(to.orgId, to.project, task.taskId), repairNoticeKey(to.orgId, to.project), setupSnapshotKey(to.orgId, to.project)];
+      for (const [index, key] of sourceKeys.entries()) {
+        const original = await shared.get(key);
+        expect(original, key.sk).toBeDefined();
+        await shared.put({ item: { ...original!, ...targetKeys[index]! } as never });
+      }
+    };
+    await copyAll({ orgId: COMPANY_B, project: "payments" });
     expect(await setupRecheckLineOf(b.h.deps, "payments", task.taskId)).toBeUndefined();
     expect(await readSetupRepairCard(b.h.deps, "payments")).toBeUndefined();
+    expect(await setupGateBeforeBuild(b.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    // The same, one project over inside one company: another project's partition holds this project's rows, and they read as nothing there.
+    await a.h.registerProject(projectOf("billing"));
+    await copyAll({ orgId: a.h.deps.companyId, project: "billing" });
+    expect(await setupRecheckLineOf(a.h.deps, "billing", task.taskId)).toBeUndefined();
+    expect(await readSetupRepairCard(a.h.deps, "billing")).toBeUndefined();
   });
 });
 
