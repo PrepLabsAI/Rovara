@@ -3,6 +3,7 @@
 // id here, with the deployment's own identity provider. Only ids come out: the queue keeps pointers and delivery and the inbox check each person's live access, so a stale or odd entry tells nobody
 // anything they may not read. Anything that does not read as expected (not this company's task, a malformed list, a failing read) is "nobody extra": the task's own person is told as before.
 import type { AgentSessionRecord, DocumentStore } from "@agentx/contracts";
+import { taskKey } from "../developer/task-records.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../core-host/hosted-modules.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PeopleOf, PeopleRecipients } from "../core/notify/attention.js";
@@ -17,9 +18,9 @@ export function taskPeopleRecipients(store: Pick<DocumentStore, "get">): PeopleO
     if (session.subject.kind !== "task") return none;
     const taskId = session.subject.taskId;
     // The task is the session's own company's: a session never names another company's list.
-    const task = await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" });
+    const task = await store.get(taskKey(taskId));
     if (task === undefined || task["companyId"] !== session.orgId) return none;
-    const list = await store.get({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE" });
+    const list = await store.get({ ...taskKey(taskId), sk: "PEOPLE" });
     const entries: unknown = list?.["people"];
     if (!Array.isArray(entries) || entries.length > PEOPLE_RECIPIENTS_MAX) return none;
     const owners: string[] = [];
