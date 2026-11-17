@@ -186,7 +186,7 @@ describe("candidates: the read budget on the route wiring", () => {
     const queries: Array<{ pk: unknown; prefix: unknown }> = [];
     const counting = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       if (command.constructor.name === "QueryCommand") queries.push({ pk: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":pk"], prefix: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":prefix"] });
-      return db.send(command as never);
+      return db.send(command);
     } };
     const developer = { signInTableName: SIGNIN, issuer: "https://code.example.test", companies: companyMembershipFromDynamo(db, SIGNIN) };
     const deps = developerTaskRouteDependencies({ documentClient: counting, tableName: "state", developer, now: () => T0, tasks: {} } as never, GALE_CALLER);
