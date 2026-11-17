@@ -144,6 +144,28 @@ describe("the approval saves the setup snapshot", () => {
     expect(snapshotPut((await approve(w)).extra, w)).toBeUndefined();
   });
 
+  it("a project of two repositories saves both, and saves neither when one listing was cut (a partial baseline is never kept)", async () => {
+    const URL2 = "https://examplehost.test/acme/web";
+    const two = candidateOf({ repositories: [base.repositories[0]!, { name: "web", url: URL2, path: "repo/web", defaultBranch: "main", credentialRef: "host-app", host: { kind: "fake2" } }] } as Partial<ProjectDefinition>);
+    const attach = (w: Awaited<ReturnType<typeof waiting>>) => {
+      const model2 = new FakeHostModel({ url: URL2, id: "2", fullName: "acme/web", initialFiles: { "package.json": "{}", "yarn.lock": "lock" } });
+      const registry = createAdapterRegistry();
+      registry.register("code-host", "fake", w.host);
+      registry.register("code-host", "fake2", Object.defineProperties(new FakeCodeHost(model2), { kind: { value: "fake2" } }));
+      w.h.deps.codeHosts = registry;
+      return model2;
+    };
+    const whole = await waiting({ candidate: two });
+    attach(whole);
+    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(whole)).extra, whole) as { item: { snapshot: unknown } }).item.snapshot);
+    expect(saved.repositories.map((repository) => repository.name).sort()).toEqual(["demo", "web"]);
+    expect(saved.repositories.find((repository) => repository.name === "web")!.files.map((file) => file.path)).toEqual(["package.json", "yarn.lock"]);
+    const cut = await waiting({ candidate: two });
+    const model2 = attach(cut);
+    model2.incompleteTrees.add(model2.headOf("main"));
+    expect(snapshotPut((await approve(cut)).extra, cut)).toBeUndefined();
+  });
+
   it("a rejection saves nothing", async () => {
     const w = await waiting();
     const subject = createSetupProposalSubject({ flow: w.h.deps });
