@@ -8,7 +8,7 @@ import { nightlyHealthEnabled } from "../../packages/broker/src/core/test-env/he
 import { savedEnvEnabled } from "../../packages/broker/src/core/test-env/saved-env-switch.js";
 import { SHIPPED_CATALOG_FOLDER, SERVICE_CATALOG_DIRECTORY_VARIABLE, releaseServiceCatalogSource, shippedCatalogDirectory } from "../../packages/broker/src/core/test-env/shipped-catalog.js";
 import { testEnvironmentEnabled } from "../../packages/broker/src/core/test-env/switch.js";
-import { projectImagesEnabled, testAccountsEnabled, testServicesEnabled } from "../../packages/broker/src/core/test-env/test-services-switch.js";
+import { TEST_SERVICES_UNAVAILABLE_REASONS, TEST_SERVICES_UNAVAILABLE_VARIABLE, TEST_SERVICES_UNAVAILABLE_WORDS, projectImagesEnabled, testAccountsEnabled, testServicesEnabled, testServicesSwitchedOn, testServicesUnavailable } from "../../packages/broker/src/core/test-env/test-services-switch.js";
 import { loaderTrusting, pinnedCatalog, testSigner } from "../support/catalog-pinning.js";
 
 describe("the switches", () => {
@@ -18,9 +18,9 @@ describe("the switches", () => {
     expect(testEnvironmentEnabled({ ROVARA_TEST_ENVIRONMENT: "0" })).toBe(false);
   });
 
-  it("test services, test accounts, project images, saved environments and nightly health are off unless exactly 1", () => {
+  it("test accounts, project images, saved environments and nightly health are off unless exactly 1", () => {
     const switches: Array<[string, (env: NodeJS.ProcessEnv) => boolean]> = [
-      ["ROVARA_TEST_SERVICES", testServicesEnabled], ["ROVARA_TEST_ACCOUNTS", testAccountsEnabled], ["ROVARA_PROJECT_IMAGES", projectImagesEnabled],
+      ["ROVARA_TEST_ACCOUNTS", testAccountsEnabled], ["ROVARA_PROJECT_IMAGES", projectImagesEnabled],
       ["ROVARA_SAVED_ENVIRONMENTS", savedEnvEnabled], ["ROVARA_NIGHTLY_HEALTH", nightlyHealthEnabled],
     ];
     for (const [variable, read] of switches) {
@@ -30,10 +30,35 @@ describe("the switches", () => {
     }
   });
 
+  it("DEC 254z-amend3: test services are ON unless exactly 0 (the owner's opt-out)", () => {
+    expect(testServicesEnabled({})).toBe(true);
+    for (const value of ["1", "true", "", " 0", "0 ", "false", "off", "no"]) expect(testServicesEnabled({ ROVARA_TEST_SERVICES: value }), value).toBe(true);
+    expect(testServicesEnabled({ ROVARA_TEST_SERVICES: "0" })).toBe(false);
+    expect(testServicesSwitchedOn({ ROVARA_TEST_SERVICES: "0" })).toBe(false);
+    expect(testServicesSwitchedOn({})).toBe(true);
+  });
+
+  it("the host's marker turns them off with a fixed reason, never echoed; the owner's 0 wins over it; an unknown or empty marker is 'other' (fail closed)", () => {
+    for (const reason of TEST_SERVICES_UNAVAILABLE_REASONS) {
+      expect(testServicesEnabled({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: reason }), reason).toBe(false);
+      expect(testServicesUnavailable({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: reason })).toBe(reason);
+      expect(TEST_SERVICES_UNAVAILABLE_WORDS[reason]).toMatch(/^Test services not available here: /u);
+    }
+    for (const value of ["", "workers ", "WORKERS", "<script>"]) {
+      expect(testServicesEnabled({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: value }), value).toBe(false);
+      expect(testServicesUnavailable({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: value }), value).toBe("other");
+    }
+    expect(testServicesUnavailable({ ROVARA_TEST_SERVICES: "0", [TEST_SERVICES_UNAVAILABLE_VARIABLE]: "workers" })).toBeUndefined();
+    expect(testServicesUnavailable({})).toBeUndefined();
+    expect(Object.values(TEST_SERVICES_UNAVAILABLE_WORDS).join(" ")).not.toContain("<script>");
+  });
+
   it("each switch reads only its own variable, and test services do not imply accounts or images", () => {
     expect(testAccountsEnabled({ ROVARA_TEST_SERVICES: "1" })).toBe(false);
     expect(projectImagesEnabled({ ROVARA_TEST_SERVICES: "1" })).toBe(false);
-    expect(testServicesEnabled({ ROVARA_TEST_ACCOUNTS: "1" })).toBe(false);
+    expect(testAccountsEnabled({})).toBe(false);
+    expect(projectImagesEnabled({})).toBe(false);
+    expect(testServicesEnabled({ ROVARA_TEST_ACCOUNTS: "0" })).toBe(true);
     expect(savedEnvEnabled({ ROVARA_TEST_SERVICES: "1", ROVARA_TEST_ENVIRONMENT: "1" })).toBe(false);
   });
 });
@@ -55,9 +80,9 @@ async function shipped() {
 }
 
 describe("the release's catalog source", () => {
-  it("is nothing while test services are off, and reads nothing", () => {
-    expect(releaseServiceCatalogSource({})).toBeUndefined();
-    expect(releaseServiceCatalogSource({ ROVARA_TEST_SERVICES: "true" })).toBeUndefined();
+  it("is nothing while test services are off (the owner's 0, or the host's marker), and reads nothing", () => {
+    expect(releaseServiceCatalogSource({ ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
+    expect(releaseServiceCatalogSource({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: "images" })).toBeUndefined();
   });
 
   it("loads the shipped, signed catalog with services on and the release's key", async () => {

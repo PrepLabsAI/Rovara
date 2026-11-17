@@ -74,10 +74,19 @@ const postForm = (h: Awaited<ReturnType<typeof launch>>, page: { url: URL }, for
   raw(pageFor(h).origin, { method: "POST", path: form.action, body: formBody(form.fields), headers: { host: page.url.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
 
 describe("rovara up with test services on and no catalog key", () => {
-  it("serves the starter images with no approval: they are pulled by digest and put in the worker machine's guard policy and environment", async () => {
+  it("DEC 254z-amend3: with nothing set, test services are on (the starter images on the page), and nothing is pulled at start-up", async () => {
+    const docker = new PageDocker();
+    const h = await launch({}, docker);
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    expect(docker.registry.pulls()).toEqual([]);
+    const page = await h.browse("/test-environment/payments");
+    expect(page.html).toContain("Service images");
+    for (const image of OWNER_STARTER_IMAGES) expect(page.html).toContain(image.reference);
+  });
+
+  it("serves the starter images with no approval: pinned by digest in the worker machine's guard policy and environment, and pulled lazily (none at start-up, DEC 254z-amend3)", async () => {
     const h = await launch(ON);
-    expect(h.docker.registry.pulls().sort()).toEqual(OWNER_STARTER_IMAGES.map((image) => image.reference).sort());
-    expect(h.docker.registry.pulls().every((name) => name.includes("@sha256:"))).toBe(true);
+    expect(h.docker.registry.pulls()).toEqual([]);
     await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
     const page = await h.browse("/test-environment/payments");
     for (const image of OWNER_STARTER_IMAGES) expect(page.html).toContain(image.reference);
@@ -169,9 +178,9 @@ describe("rovara up with test services on and no catalog key", () => {
     for (const file of walk("packages/mcp/src")) expect(readFileSync(file, "utf8"), file).not.toMatch(/service-images|serviceImages|approveServiceImage/u);
   });
 
-  it("offers nothing and shows no images panel with test services off", async () => {
+  it("offers nothing and shows no images panel with the owner's opt-out (ROVARA_TEST_SERVICES=0)", async () => {
     const docker = new PageDocker();
-    const h = await launch({}, docker);
+    const h = await launch({ ROVARA_TEST_SERVICES: "0" }, docker);
     await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
     expect(docker.registry.calls).toEqual([]);
     const page = await h.browse("/test-environment/payments");
