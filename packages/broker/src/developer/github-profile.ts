@@ -2,7 +2,7 @@
 // Everything GitHub (or a stored record) says about a person is untrusted text: it is cut, stripped of markup and checked here, once, and every
 // display site calls these two functions. A name is the person's GitHub name, or their login when they set none. The picture is never taken from
 // GitHub's answer: it is built from the numeric id GitHub signed the person in with, on GitHub's one avatar host, so it can name no other address.
-import { emailSafeName, isReservedDisplayName } from "@agentx/contracts";
+import { cleanDisplayName, emailSafeName, isReservedDisplayName } from "@agentx/contracts";
 
 export const GITHUB_ISSUER_URL = "https://github.com";
 export const GITHUB_AVATAR_BASE = "https://avatars.githubusercontent.com/u/";
@@ -16,7 +16,12 @@ const MARKUP = /[<>&`[\]*_~|\\]/gu;
 /** A person's GitHub name as others may see it: plain text of at most 80 code points, or `fallback` when nothing usable is left (or the name looks like a placeholder). */
 export function githubDisplayName(name: unknown, fallback: string): string {
   if (typeof name !== "string") return fallback;
-  const clean = emailSafeName(name.slice(0, READ_MAX).replace(MARKUP, " "));
+  let cut = name.slice(0, READ_MAX);
+  // Never leave half of a surrogate pair at the cut.
+  if (/[\uD800-\uDBFF]$/u.test(cut)) cut = cut.slice(0, -1);
+  // Compatibility forms first (a fullwidth bracket or star is markup once folded), then again after the email step, which may fold a name that held an address: the result is always markup-free.
+  const stripped = emailSafeName(cut.normalize("NFKC").replace(MARKUP, " "));
+  const clean = stripped === undefined ? undefined : cleanDisplayName(stripped.normalize("NFKC").replace(MARKUP, " "));
   return clean === undefined || isReservedDisplayName(clean) ? fallback : clean;
 }
 

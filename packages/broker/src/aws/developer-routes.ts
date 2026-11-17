@@ -117,8 +117,7 @@ import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 import type { CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
-import type { BrokerResponse } from "../handler.js";
-import { profileDisplayName } from "../developer/github-profile.js";
+import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
 
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
@@ -722,8 +721,7 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
   }
   return {
     ...token,
-    // DEC 254p (a): a GitHub person's name reaches tasks and admin screens as clean text (github-profile.ts); anyone else's is as stored.
-    name: profileDisplayName(developer) ?? developer.displayName,
+    name: profileDisplayName(developer) ?? developer.displayName, // DEC 254p (a): a GitHub name is clean text (github-profile.ts); anyone else's is as stored
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
   };
@@ -1302,7 +1300,6 @@ async function authenticateCallerWithStepUp(deps: DeveloperRouteDependencies, au
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   requireRouteScope(route, person);
   const caller: DeveloperCaller = {
-    // DEC 254p (a): a GitHub person's name is clean text (github-profile.ts); anyone else's is as stored.
     developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: profileDisplayName(developer) ?? developer.displayName, clientId: person.client.clientId,
     ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }),
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),

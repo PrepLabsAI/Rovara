@@ -16,8 +16,10 @@ const HOSTILE = [
   `Octo ${"x".repeat(5_000)}`,
   `${"é".repeat(200)}`,
   `a@b.example.test Octo`,
+  `［click］(https://evil.example) ＊＊bold＊＊ ＆lt;b＆gt; ａ＠ｂ.ｃｏ Octo`,
+  `＜script＞alert(1)＜/script＞ ｀code｀ ＿it＿ ～～x～～ ｜ ＼ ａ＠ｂ.ｃｏ`,
 ];
-const MARKUP = /[<>&`[\]*_~|\\]/u;
+const MARKUP = /[<>&`[\]*_~|\\\uFF3B\uFF3D\uFF0A\uFF3F\uFF40\uFF06\uFF5C\uFF3C\uFF5E\uFF1C\uFF1E]/u;
 
 describe("the GitHub name (untrusted text)", () => {
   it("keeps an ordinary name as it is and uses the login when there is no name", () => {
@@ -44,6 +46,12 @@ describe("the GitHub name (untrusted text)", () => {
     expect(githubDisplayName("<<<>>>***", "octo")).toBe("octo");
     expect(githubDisplayName("Member 3fa9c1d2", "octo")).toBe("octo");
     expect(githubDisplayName("member   3FA9C1D2", "octo")).toBe("octo");
+  });
+
+  it("never leaves half of an emoji at the 1,000-character cut", () => {
+    const name = githubDisplayName(`Octo${" ".repeat(995)}\u{1F600}tail`, "octo");
+    expect(name).toBe("Octo");
+    expect(Array.from(name).every((c) => c.codePointAt(0)! < 0xd800 || c.codePointAt(0)! > 0xdfff)).toBe(true);
   });
 
   it("reads only the first 1,000 characters of a name", () => {
