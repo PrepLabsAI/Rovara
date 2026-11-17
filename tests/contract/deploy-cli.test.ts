@@ -122,7 +122,7 @@ function answersJson(overrides: Record<string, unknown> = {}): Record<string, un
     // Testing-only override (parameters.ts): lets stackParameters resolve runtime/slack's image
     // parameters without needing a real release image digest, since `emptyReleaseDir` has none.
     images: {
-      worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx/worker@sha256:${"a".repeat(64)}`,
+      worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx-staging/worker@sha256:${"a".repeat(64)}`,
       slack: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx/slack@sha256:${"b".repeat(64)}`,
     },
     ...overrides,
@@ -1118,7 +1118,7 @@ describe("agentx deploy --mode upgrade keeps the deployed budget", () => {
     await writeFile(answersFile, JSON.stringify({
       env: ENV, region: REGION, account: ACCOUNT, models: { orchestrator: "o", classifier: "c", worker: "w" }, identity: { mode: "cognito" },
       github: { appId: "123", privateKeySecretArn: `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:agentx/staging/github-app-AbCdEf` },
-      images: { worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/w@sha256:${"b".repeat(64)}`, slack: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/s@sha256:${"c".repeat(64)}` },
+      images: { worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx-staging/w@sha256:${"b".repeat(64)}`, slack: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/s@sha256:${"c".repeat(64)}` },
     }));
     const reads: string[] = [];
     const signingKey = "k".repeat(43);

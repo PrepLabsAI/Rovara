@@ -275,9 +275,32 @@ describe("deploy parameters", () => {
   });
 
   it("uses image overrides as-is, and only by digest", () => {
-    const withOverrides = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${d("e")}` } };
+    const withOverrides = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/agentx-worker-production@sha256:${d("e")}` } };
     expect(stackParameters("runtime", withOverrides, outputs, { packages: true }).WorkerImageUri).toBe(withOverrides.images.worker);
     expect(() => stackParameters("runtime", { ...answers(), images: { worker: "x/y:latest" } }, outputs, { packages: true })).toThrow("image override for worker must be referenced by digest");
+  });
+
+  // L4-IAM: the worker role reads only agentx-<env>/ (and the test-service copies), so an override anywhere else would deploy and then fail every instance boot.
+  it("refuses a worker image override outside this account's ECR, this region, or the environment's image prefix, with fixed words", () => {
+    const refused = "the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix";
+    const host = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
+    for (const uri of [
+      `${host}/agentx-worker-production@sha256:${d("e")}`, // no prefix
+      `${host}/agentx-staging-2/worker@sha256:${d("e")}`, // another environment's lookalike
+      `${host}/agentx-staging@sha256:${d("e")}`, // the prefix itself is not a repository under it
+      `${host}/agentx-other/worker@sha256:${d("e")}`,
+      `${"9".repeat(12)}.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/worker@sha256:${d("e")}`, // another account
+      `123456789012.dkr.ecr.eu-west-1.amazonaws.com/agentx-staging/worker@sha256:${d("e")}`, // another region
+      `registry.example.test/agentx-staging/worker@sha256:${d("e")}`,
+    ]) {
+      expect(() => stackParameters("runtime", { ...answers(), images: { worker: uri } }, outputs, { packages: true }), uri).toThrow(refused);
+    }
+    try { stackParameters("runtime", { ...answers(), images: { worker: `${host}/agentx-worker-production@sha256:${d("e")}` } }, outputs, { packages: true }); } catch (error) { expect(String(error)).not.toContain("agentx-worker-production"); }
+    // the check follows the answers' own account and region, not a fixed one
+    const other = { ...answers(), account: "7".repeat(12), region: "eu-west-1" };
+    expect(() => stackParameters("runtime", { ...other, images: { worker: `${host}/agentx-staging/worker@sha256:${d("e")}` } }, outputs, { packages: true })).toThrow(refused);
+    const inside = `${host}/agentx-staging/worker@sha256:${d("e")}`;
+    expect(stackParameters("runtime", { ...answers(), images: { worker: inside } }, outputs, { packages: true }).WorkerImageUri).toBe(inside);
   });
 
   it("uses a slack image override as-is, and only by digest", () => {
@@ -299,7 +322,7 @@ describe("deploy parameters", () => {
   it("a worker image override does not require the access stack's PullThroughPrefix output", () => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
     const { PullThroughPrefix: _prefixGone, ...accessNoPrefix } = outputs.access;
-    const withOverride = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${d("e")}` } };
+    const withOverride = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/agentx-worker-production@sha256:${d("e")}` } };
     expect(() => stackParameters("runtime", withOverride, { ...outputs, access: accessNoPrefix }, { packages: true })).not.toThrow();
   });
 

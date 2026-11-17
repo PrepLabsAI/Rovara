@@ -109,6 +109,9 @@ access stack from it with their credentials; you deploy the rest with the operat
 
 Use this to install a commit that has no release yet, such as a change you are testing. You build
 the release yourself and push its two container images to a registry the install can pull from.
+The worker image must be in your account's ECR, in the install's region, under the environment's
+image prefix (a repository named `agentx-<env>/...`): the worker role reads only that prefix, and
+`init` refuses a worker image anywhere else.
 
 ```sh
 npm ci && npm run build
