@@ -69,6 +69,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
     // Lead 4 J3: the start box's path suggestion.
     ["POST", "/v1/app/projects/payments/code/suggest", "full"],
+    // Lead 4 J1: the smart Just answer.
+    ["POST", "/v1/app/projects/payments/answers", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -88,6 +90,8 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
       // The start box's suggestion is a POST on its own path; starting work itself (`/code`) is Cloud's route, and nothing else sits under it.
       ["GET", "/v1/app/projects/payments/code/suggest"], ["PUT", "/v1/app/projects/payments/code/suggest"], ["POST", "/v1/app/projects/payments/code"], ["POST", "/v1/app/projects/payments/code/suggest/x"], ["POST", "/v1/app/projects/payments/code/start"],
+      // The answer route is one POST: no read of answers, no other writes, no deeper paths.
+      ["GET", "/v1/app/projects/payments/answers"], ["PUT", "/v1/app/projects/payments/answers"], ["DELETE", "/v1/app/projects/payments/answers"], ["POST", "/v1/app/projects/payments/answers/a1"], ["POST", "/v1/app/projects/payments/answer"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
