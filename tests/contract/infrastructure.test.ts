@@ -280,7 +280,9 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("ARTIFACT_BUCKET_NAME");
     expect(json).toContain("DISPATCH_QUEUE_URL");
     expect(json).toContain("MAX_DISPATCH_ATTEMPTS");
-    expect(json).toContain("CALLBACK_SIGNING_KEY");
+    // The key reaches a function as the name of its secret, never as a value.
+    expect(json).toContain("CALLBACK_SIGNING_KEY_SECRET_ID");
+    expect(json).not.toContain("\"CALLBACK_SIGNING_KEY\"");
     expect(json).toContain("ADMIN_CLAIM");
     expect(json).toContain("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
     // The broker looks up the GitHub App's installation per repository owner (#123).

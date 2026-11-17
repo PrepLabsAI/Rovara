@@ -34,6 +34,8 @@ import { slackNoticeChannelFromEnvironment } from "./slack-notice-channel.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../e2e-presentation.js";
+import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
+import { noticeServedByCompany, splitNoticesBySlackCompany } from "./slack-company-notices.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -1979,6 +1981,17 @@ let awsHandler: ReturnType<typeof createNotifierHandler> | undefined;
 
 /** The Lambda entry: the state table's stream and the notice queue both invoke it. */
 export const handler = (event: { Records?: unknown[] }, context?: { getRemainingTimeInMillis(): number }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
-  awsHandler ??= createAwsNotifierHandler();
+  awsHandler ??= notifierFromEnvironment(process.env);
   return awsHandler(event, context);
 };
+
+/** L2-2 PR 18d: with Slack company mode on (slack-company-wiring.ts), today's notifier plus a company one, each queued notice routed by its record (slack-company-notices.ts). Off: today's. */
+export function notifierFromEnvironment(env: NodeJS.ProcessEnv, make: (workspaces?: SlackCallerWorkspaces) => ReturnType<typeof createNotifierHandler> = createAwsNotifierHandler): ReturnType<typeof createNotifierHandler> {
+  const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
+  const dynamo = new DynamoDBClient(region);
+  const documentClient = DynamoDBDocumentClient.from(dynamo);
+  const wiring = slackCompanyDependenciesFromEnvironment(env, { documentClient, dynamo, secrets: new SecretsManagerClient(region) });
+  if (wiring === undefined) return make();
+  const tableName = env.STATE_TABLE_NAME!;
+  return splitNoticesBySlackCompany(make(), make(wiring.workspaces), (body) => noticeServedByCompany({ documentClient, tableName, legacyTeamId: wiring.legacyTeamId }, body));
+}

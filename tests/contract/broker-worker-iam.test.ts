@@ -4,12 +4,15 @@ import { expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
 // Captured on the assigned base before L1c implementation. No git-history reads in CI.
 it("keeps the broker IAM statement tuples byte-identical to the base", () => {
-  const template = Template.fromStack(new ControlPlaneStack(new App(), "L1cControlPlane", { naming: environmentNaming("staging") })).toJSON() as {
+  // ENV-ROOM 2's IAM changes (the names parameter's ARN, two merged statements, two inert actions dropped) are checked exactly and taken out first: they are pinned in
+  // broker-names-parameter-infrastructure.test.ts and the broker IAM headroom tests, and these bytes stay the base's.
+  const template = withoutBrokerNamesParameter(Template.fromStack(new ControlPlaneStack(new App(), "L1cControlPlane", { naming: environmentNaming("staging") })).toJSON()) as {
     Resources: Record<string, { Type: string; Properties: Record<string, unknown> }>;
   };
   const broker = Object.entries(template.Resources).find(([id, value]) => id.startsWith("Broker") && value.Type === "AWS::Lambda::Function")![1];

@@ -22,6 +22,7 @@ import {
   withEvalBatches,
   type EvalBatchDependencies,
 } from "./eval-batch.js";
+import { loadCallbackSigningKey } from "./callback-signing-key.js";
 import { requiredEnvironment } from "./lambda.js";
 import { reconcileSwebenchSlots, swebenchSlotsNeedReconcile, type SwebenchSlotCorrection } from "./swebench.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
@@ -90,7 +91,7 @@ function log(event: string, fields: Record<string, unknown>): void {
 let production: EvalBatchDependencies | undefined;
 
 /** The broker's eval dependencies, as broker.ts builds them, from this Lambda's environment. */
-function productionDependencies(): EvalBatchDependencies {
+function productionDependencies(callbackSigningKey: string): EvalBatchDependencies {
   if (production !== undefined) return production;
   const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const ssm = new SSMClient(awsClientConfiguration);
@@ -102,7 +103,7 @@ function productionDependencies(): EvalBatchDependencies {
     s3: new S3Client(awsClientConfiguration),
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
     artifactBucketName: requiredEnvironment("ARTIFACT_BUCKET_NAME"),
-    callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
+    callbackSigningKey,
     deployment: () => swebenchDeploymentFromParameters(settingsPrefix, async (names) => {
       const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
       return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
@@ -132,6 +133,7 @@ function productionDependencies(): EvalBatchDependencies {
   return production;
 }
 
+/** The key is read from Secrets Manager before anything runs: a tick that cannot read it fails (and the Lambda's error metric and alarm see it) instead of signing with nothing. */
 export async function handler(): Promise<EvalBatchTickReport> {
-  return runEvalBatchTick(productionDependencies());
+  return runEvalBatchTick(productionDependencies(await loadCallbackSigningKey(process.env)));
 }

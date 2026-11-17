@@ -24,7 +24,7 @@ beforeAll(async () => {
 });
 
 /** A bound thread whose workspace runs one coding task, last active `idle` milliseconds before `now`. */
-async function runningTask(options: { idle?: number; companyId?: string; teamId?: string } = {}) {
+async function runningTask(options: { idle?: number; companyId?: string; teamId?: string; slackLegacyTeamId?: string; orgId?: string | null } = {}) {
   const broker = createBroker({ slackThreadsTableName: "threads" });
   await registerSlackProject(broker.handler);
   const workspaceId = (await ensureWorkspace(broker.handler, subject, pratik)).body.workspaceId as string;
@@ -51,12 +51,14 @@ async function runningTask(options: { idle?: number; companyId?: string; teamId?
   const logs: Array<Record<string, unknown>> = [];
   const postNote = vi.fn<(thread: SlackThreadPlace, text: string) => Promise<void>>(async () => undefined);
   if (options.companyId !== undefined) {
-    broker.db.get(`WORKSPACE#${workspaceId}`, "META")!.orgId = options.companyId;
+    if (options.orgId === null) delete broker.db.get(`WORKSPACE#${workspaceId}`, "META")!.orgId;
+    else broker.db.get(`WORKSPACE#${workspaceId}`, "META")!.orgId = options.orgId ?? options.companyId;
     const record = broker.db.find((row) => row.entityType === "SLACK_THREAD" && row.workspaceId === workspaceId)[0]!;
     record.thread = `${options.teamId}/${SLACK_CHANNEL}/${threadTs}`;
   }
   const sweep = (when = now) => sweepUnwaitedTasks({
     ...(options.companyId === undefined ? {} : { workspaces: { requireCompany: async () => options.companyId! } }),
+    ...(options.slackLegacyTeamId === undefined ? {} : { slackLegacyTeamId: options.slackLegacyTeamId }),
     client: broker.db, tableName: "state", threadsTableName: "threads", callbackSigningKey: "c".repeat(64),
     postNote, log: (entry) => { logs.push(entry); },
   }, [workspaceId], when);
@@ -311,7 +313,7 @@ describe("the backstop: the bot token (#173)", () => {
 describe("the backstop: where it runs (#173)", () => {
   it("is wired only where the threads table, the Slack secret and the signing key are named (named environments)", async () => {
     const { unwaitedTaskBackstopWanted } = await import("../../packages/broker/src/aws/unwaited-tasks.js");
-    const named = { SLACK_THREADS_TABLE_NAME: "threads", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf", CALLBACK_SIGNING_KEY: "k".repeat(32) };
+    const named = { SLACK_THREADS_TABLE_NAME: "threads", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf", CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/staging/callback-key" };
     expect(unwaitedTaskBackstopWanted(named)).toBe(true);
     for (const missing of Object.keys(named)) {
       expect(unwaitedTaskBackstopWanted({ ...named, [missing]: undefined })).toBe(false);
@@ -378,10 +380,10 @@ describe("the backstop: review hardening (#173)", () => {
 
   it("says when its configuration is only partly present, so a half-wired environment is visible", async () => {
     const { unwaitedTaskBackstopConfiguration } = await import("../../packages/broker/src/aws/unwaited-tasks.js");
-    const named = { SLACK_THREADS_TABLE_NAME: "threads", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf", CALLBACK_SIGNING_KEY: "k".repeat(32) };
+    const named = { SLACK_THREADS_TABLE_NAME: "threads", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf", CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/staging/callback-key" };
     expect(unwaitedTaskBackstopConfiguration(named)).toEqual({ state: "on" });
     expect(unwaitedTaskBackstopConfiguration({})).toEqual({ state: "off" });
-    expect(unwaitedTaskBackstopConfiguration({ ...named, CALLBACK_SIGNING_KEY: undefined })).toEqual({ state: "partial", missing: ["CALLBACK_SIGNING_KEY"] });
+    expect(unwaitedTaskBackstopConfiguration({ ...named, CALLBACK_SIGNING_KEY_SECRET_ID: undefined })).toEqual({ state: "partial", missing: ["CALLBACK_SIGNING_KEY_SECRET_ID"] });
   });
 });
 
@@ -392,4 +394,13 @@ it("carries each authoritative workspace company/team for identical raw channel 
     await h.sweep();
     expect(h.postNote).toHaveBeenCalledExactlyOnceWith({ ...THREAD, workspace: { companyId, teamId } }, UNWAITED_TASK_NOTE);
   }
+});
+
+it("L2-2 18d: in company mode the install's own thread keeps today's unscoped note, another team's is scoped", async () => {
+  const own = await runningTask({ companyId: "org_00000000000000000000", teamId: "T0INSTALL0", slackLegacyTeamId: "T0INSTALL0", orgId: null });
+  await own.sweep();
+  expect(own.postNote).toHaveBeenCalledExactlyOnceWith({ ...THREAD, workspace: { companyId: "org_00000000000000000000", teamId: "T0INSTALL0" } }, UNWAITED_TASK_NOTE);
+  const other = await runningTask({ companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0BBBBBBB", slackLegacyTeamId: "T0INSTALL0" });
+  await other.sweep();
+  expect(other.postNote.mock.calls[0]?.[0]).toMatchObject({ workspace: { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0BBBBBBB" } });
 });

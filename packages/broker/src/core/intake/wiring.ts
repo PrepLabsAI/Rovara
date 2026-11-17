@@ -24,10 +24,13 @@ export interface IntakeWiring {
   flow: Pick<TaskFlow, "start">;
   /** A key only this install holds: the ticket's fence label is made from it (`ticketFenceId`), so a ticket's author cannot guess it. */
   fenceKey: Uint8Array;
-  /** The install's one owner: the person who presses "Start" on a waiting ticket. */
-  owner: Principal;
-  /** The milestone seams, for the ticket's `started` moment. */
-  milestones: MomentTable["milestones"];
+  /**
+   * The person who presses "Start" on a waiting ticket: the install's one owner on a laptop; on a hosted install, the member pressing it on this request (hosted intake builds its ports per
+   * request). Absent (a hosted delivery): nobody is known before a tracker account resolves.
+   */
+  owner?: Principal | undefined;
+  /** The milestone seams, for the ticket's `started` moment. Absent: no `started` moment is written (a hosted company without a milestones host). */
+  milestones?: MomentTable["milestones"] | undefined;
   /** Tells the owner once that waiting tickets are not being stored (optional). */
   notifyWaitingFull?: IntakePorts["notifyWaitingFull"];
 }
@@ -48,7 +51,8 @@ export function intakePortsOf(wiring: IntakeWiring): IntakePorts {
   const table = { store: wiring.store, now: wiring.now };
   const log = wiring.log ?? (() => undefined);
   // The people this process has seen resolve (bounded): the engine names a person by `developerId` (a hash of the person's id), and the flow needs the person.
-  const people = new Map<string, Principal>([[developerIdOf(wiring.owner), wiring.owner]]);
+  const milestones = wiring.milestones;
+  const people = new Map<string, Principal>(wiring.owner === undefined ? [] : [[developerIdOf(wiring.owner), wiring.owner]]);
   const principalOf = async (orgId: OrgId, developerId: string): Promise<Principal | undefined> => {
     const known = people.get(developerId);
     // Read live: a person who is removed, or in another company, is nobody here.
@@ -113,8 +117,8 @@ export function intakePortsOf(wiring: IntakeWiring): IntakePorts {
     },
     ...(wiring.notifyWaitingFull === undefined ? {} : { notifyWaitingFull: wiring.notifyWaitingFull }),
     // The ticket hears that work started (a `started` milestone; the ticket updates handler decides whether to write).
-    started: async (orgId: OrgId, started: { taskId: string; sessionId?: string | undefined }) => {
-      await noteTicketTaskStarted({ store: wiring.store, milestones: wiring.milestones, now: wiring.now, log }, { orgId, taskId: started.taskId, sessionId: started.sessionId });
-    },
+    ...(milestones === undefined ? {} : { started: async (orgId: OrgId, started: { taskId: string; sessionId?: string | undefined }) => {
+      await noteTicketTaskStarted({ store: wiring.store, milestones, now: wiring.now, log }, { orgId, taskId: started.taskId, sessionId: started.sessionId });
+    } }),
   };
 }

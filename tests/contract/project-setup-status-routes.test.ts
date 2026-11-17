@@ -3,14 +3,16 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
+  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, ProjectSetupEvalNoneResponseSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
   type SetupEvalDiscoveryReport,
 } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { DEV_ROUTES } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { NOT_A_SETUP_ADMIN, SETUP_SKIPS_BODY, SETUP_SKIPS_STALE, SETUP_STATUS_UNREADABLE, readProjectSetupStatus, readSkips, setupSkipsKey } from "../../packages/broker/src/aws/project-setup-status.js";
+import {
+  EVAL_ALREADY_CONFIRMED, EVAL_NONE_BODY, EVAL_NONE_NEEDS_SETUP, NOT_AN_EVAL_ADMIN, NOT_A_SETUP_ADMIN, SETUP_SKIPS_BODY, SETUP_SKIPS_STALE, SETUP_STATUS_UNREADABLE, readProjectSetupStatus, readSkips, setupEvalNoneKey, setupSkipsKey,
+} from "../../packages/broker/src/aws/project-setup-status.js";
 import { projectSettingsKey } from "../../packages/broker/src/aws/project-settings.js";
 import { SETUP_AGENT_FAILURES } from "../../packages/broker/src/core/setup-agent/agent.js";
 import { evalDiscoveryDigest, evalDiscoveryKey } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
@@ -29,6 +31,7 @@ const A = COMPANY_A.orgId;
 const B = COMPANY_B.orgId;
 const PATH = (project = "alpha") => `/v1/dev/client/projects/${project}/setup-status`;
 const SKIPS = (project = "alpha") => `${PATH(project)}/skips`;
+const EVAL_NONE = (project = "alpha") => `${PATH(project)}/eval-none`;
 const TEAM = "T0123ABCD";
 const CHANNEL = "C0123ABCD";
 
@@ -590,13 +593,199 @@ describe("setting a skipped optional row", () => {
   });
 });
 
+describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
+  const audits = (h: Harness) => h.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === "project_setup_eval_none_changed");
+  const record = (h: Harness, company = A, project = "alpha") => h.db.get(setupEvalNoneKey(company, project).pk, setupEvalNoneKey(company, project).sk);
+
+  it("an admin confirms no evals for the finished setup run: the row is done and the first task can start; a repeat writes nothing", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    const answer = await h.call("PUT", EVAL_NONE(), { noEvals: true });
+    expect(answer).toEqual({ status: 200, body: { project: "alpha", noEvals: true, taskId: task } });
+    expect(ProjectSetupEvalNoneResponseSchema.safeParse(answer.body).success).toBe(true);
+    const body = await h.ok();
+    expect(body.evalConfirm).toEqual({ state: "done", report: "no_evals", noEvals: { confirmedAt: new Date(NOW).toISOString() } });
+    expect(body.progress.nextRequired).toBe("firstTask");
+    expect(body.firstTask.canStart).toBe(true);
+    expect(record(h)).toMatchObject({ entityType: "PROJECT_SETUP_EVAL_NONE", companyId: A, project: "alpha", taskId: task, revision: 1, confirmedBy: ADA });
+    expect(audits(h)).toEqual([expect.objectContaining({ pk: `ORG#${A}#COMPANY_LOG`, companyId: A, personId: ADA, projectName: "alpha", noEvals: true, taskId: task })]);
+    const before = JSON.stringify(h.db.find(() => true));
+    expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual(answer);
+    expect(JSON.stringify(h.db.find(() => true))).toBe(before);
+  });
+
+  it("the run's evals were found, but the person chooses none: done as no_evals, the suites still shown", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "reported");
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: true })).status).toBe(200);
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "no_evals", suites: [{ selection: "evals/demo", questions: 2 }], noEvals: { confirmedAt: new Date(NOW).toISOString() } });
+  });
+
+  it("refused before the setup run finished with a whole proposal (none, running, failed, partial): 409, nothing written", async () => {
+    for (const result of ["none", undefined, { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used, summary: SUMMARY({ stop: "attempts_used", partial: true }) },
+      READY({ stop: "attempts_used", summary: SUMMARY({ stop: "attempts_used", partial: true }) })] as const) {
+      const h = companyA();
+      if (result !== "none") setupRun(h, A, "alpha", result);
+      expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 409, body: error("CHANGE_STALE", EVAL_NONE_NEEDS_SETUP) });
+      expect(record(h)).toBeUndefined();
+      expect(audits(h)).toEqual([]);
+    }
+  });
+
+  it("refused once the run's eval is confirmed: no edit after confirmation", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "confirmed");
+    expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 409, body: error("CHANGE_STALE", EVAL_ALREADY_CONFIRMED) });
+    expect(record(h)).toBeUndefined();
+    // A "no evals" stored before a later confirmation never hides it: confirmed wins.
+    evalReport(h, A, "alpha", task, "reported");
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: true })).status).toBe(200);
+    evalReport(h, A, "alpha", task, "confirmed");
+    expect((await h.ok()).evalConfirm.report).toBe("confirmed");
+  });
+
+  it("a member is refused with fixed words whatever the body; the project's administrator may, though a plain member", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    h.as(BEN, "s-ben");
+    for (const body of [{ noEvals: true }, { nope: 1 }, "not json"]) expect(await h.call("PUT", EVAL_NONE(), body)).toEqual({ status: 403, body: error("FORBIDDEN", NOT_AN_EVAL_ADMIN) });
+    expect(record(h)).toBeUndefined();
+    expect((await h.ok()).viewer.canSkip).toBe(false);
+    h.grant(BEN, "alpha", "administrator");
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: true })).status).toBe(200);
+    expect(audits(h)[0]).toMatchObject({ personId: BEN });
+    h.grant(BEN, "alpha", "developer");
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: false })).status).toBe(403);
+  });
+
+  it("an owner may; a removed admin may not", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    h.join(CAT, A, "owner"); h.as(CAT, "s-cat");
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: true })).status).toBe(200);
+    h.db.set({ ...(h.db.get(`COMPANY_MEMBER#${ADA}`, "COMPANY") as object), revokedAt: TIME });
+    h.as(ADA, "s-ada");
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: false })).status).toBe(401);
+    expect(record(h)).toBeDefined();
+  });
+
+  it("the answer belongs to one setup run: a newer run needs a new answer", async () => {
+    const h = companyA();
+    const first = setupRun(h, A, "alpha", READY());
+    await h.call("PUT", EVAL_NONE(), { noEvals: true });
+    const second = setupRun(h, A, "alpha", READY(), "77777777-7777-4777-8777-777777777777");
+    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 200, body: { project: "alpha", noEvals: true, taskId: second } });
+    expect(record(h)).toMatchObject({ taskId: second, revision: 2 });
+    expect(audits(h).map((row) => String(row.taskId)).sort()).toEqual([first, second].sort());
+    expect((await h.ok()).evalConfirm.state).toBe("done");
+    // A run that is still going (or failed) after the answer: not done.
+    setupRun(h, A, "alpha", undefined, second);
+    expect((await h.ok()).evalConfirm.state).not.toBe("done");
+  });
+
+  it("taking it back removes the answer with an audit row; taking back nothing writes nothing", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    await h.call("PUT", EVAL_NONE(), { noEvals: true });
+    expect(await h.call("PUT", EVAL_NONE(), { noEvals: false })).toEqual({ status: 200, body: { project: "alpha", noEvals: false, taskId: null } });
+    expect(record(h)).toBeUndefined();
+    expect(audits(h).map((row) => row.noEvals)).toEqual(expect.arrayContaining([true, false]));
+    expect(audits(h).find((row) => row.noEvals === false)).toMatchObject({ taskId: task });
+    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    const before = JSON.stringify(h.db.find(() => true));
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: false })).status).toBe(200);
+    expect(JSON.stringify(h.db.find(() => true))).toBe(before);
+  });
+
+  it("refuses unknown fields, a missing or non-boolean flag, in fixed words that echo nothing", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    for (const body of [{}, { noEvals: "true" }, { noEvals: true, extra: CANARY }, { noEvals: 1 }, [true], `{"noEvals":true,"${CANARY}":1}`]) {
+      const answer = await h.call("PUT", EVAL_NONE(), typeof body === "string" ? JSON.parse(body) : body);
+      expect(answer).toEqual({ status: 400, body: error("CONFIG_INVALID", EVAL_NONE_BODY) });
+      expect(JSON.stringify(answer)).not.toContain(CANARY);
+    }
+    expect(record(h)).toBeUndefined();
+  });
+
+  it("two companies: A cannot answer for B's project, and B's answer is never read or changed", async () => {
+    const h = companyA();
+    h.join(CAT, B, "owner"); h.project("beta", B);
+    const bTask = setupRun(h, B, "beta", READY(), "88888888-8888-4888-8888-888888888888");
+    h.as(CAT, "s-cat");
+    expect((await h.call("PUT", EVAL_NONE("beta"), { noEvals: true })).status).toBe(200);
+    const bRecord = JSON.stringify(record(h, B, "beta"));
+    h.as(ADA, "s-ada");
+    expect(await h.call("PUT", EVAL_NONE("beta"), { noEvals: false })).toEqual(NOT_FOUND);
+    expect(JSON.stringify(record(h, B, "beta"))).toBe(bRecord);
+    // A's own project named like B's run: A's key only; a copy of B's record placed at A's key names B and is refused, never applied.
+    setupRun(h, A, "alpha", READY(), bTask);
+    h.db.set({ ...(record(h, B, "beta") as object), ...setupEvalNoneKey(A, "alpha") });
+    expect(await h.call("GET", PATH())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE) });
+    expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE) });
+    expect(audits(h).filter((row) => row.companyId === A)).toEqual([]);
+  });
+
+  it("a change that loses a race is refused whole (revision condition): no record change and no audit row", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    const original = h.db.send.bind(h.db);
+    let raced = false;
+    vi.spyOn(h.db, "send").mockImplementation(async (command: unknown) => {
+      if (!raced && (command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") {
+        raced = true;
+        h.db.set({ ...setupEvalNoneKey(A, "alpha"), entityType: "PROJECT_SETUP_EVAL_NONE", companyId: A, project: "alpha", taskId: "99999999-9999-4999-8999-999999999999", revision: 1, confirmedAt: TIME, confirmedBy: CAT });
+      }
+      return original(command as never);
+    });
+    expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 409, body: error("CHANGE_STALE", SETUP_SKIPS_STALE) });
+    expect(record(h)).toMatchObject({ confirmedBy: CAT, revision: 1 });
+    expect(audits(h)).toEqual([]);
+  });
+
+  it("a newer setup run or an eval confirm that lands while the answer is written: refused whole, nothing stored", async () => {
+    for (const race of ["run", "confirm"] as const) {
+      const h = companyA();
+      const task = setupRun(h, A, "alpha", READY());
+      evalReport(h, A, "alpha", task, "reported");
+      const original = h.db.send.bind(h.db);
+      let raced = false;
+      vi.spyOn(h.db, "send").mockImplementation(async (command: unknown) => {
+        if (!raced && (command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") {
+          raced = true;
+          if (race === "run") setupRun(h, A, "alpha", READY(), "77777777-7777-4777-8777-777777777777");
+          else evalReport(h, A, "alpha", task, "confirmed");
+        }
+        return original(command as never);
+      });
+      expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 409, body: error("CHANGE_STALE", SETUP_SKIPS_STALE) });
+      expect(record(h)).toBeUndefined();
+      expect(audits(h)).toEqual([]);
+    }
+  });
+
+  it("a stored answer that does not read back (wrong project, bad revision, unknown kind) is a fixed 503 on read and write", async () => {
+    for (const fields of [{ project: "other" }, { companyId: B }, { revision: 0 }, { revision: "1" }, { entityType: "PROJECT_SETUP_SKIPS" }, { taskId: 5 }, { confirmedAt: "Sun Nov 01 2026 09:00:00 GMT+0000 (Coordinated Universal Time)" }, { confirmedAt: "yesterday" }, { confirmedBy: "" }]) {
+      const h = companyA();
+      const task = setupRun(h, A, "alpha", READY());
+      h.db.set({ ...setupEvalNoneKey(A, "alpha"), entityType: "PROJECT_SETUP_EVAL_NONE", companyId: A, project: "alpha", taskId: task, revision: 1, confirmedAt: TIME, confirmedBy: ADA, ...fields });
+      expect(await h.call("GET", PATH())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE) });
+      expect(await h.call("PUT", EVAL_NONE(), { noEvals: false })).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE) });
+    }
+  });
+});
+
 describe("what did not change", () => {
-  it("the route table keeps every existing row exactly; the two new rows are full-access only", () => {
-    const added = ["GET /v1/dev/client/projects/{project}/setup-status", "PUT /v1/dev/client/projects/{project}/setup-status/skips"];
+  it("the route table keeps every existing row exactly; the three new rows are full-access only", () => {
+    const added = ["GET /v1/dev/client/projects/{project}/setup-status", "PUT /v1/dev/client/projects/{project}/setup-status/skips", "PUT /v1/dev/client/projects/{project}/setup-status/eval-none"];
     const rows = DEV_ROUTES.map((route) => `${route.method} ${route.path} ${route.requires}`);
     for (const row of added) expect(rows).toContain(`${row} full`);
-    const existing = rows.filter((row) => !added.some((path) => row.startsWith(path)));
-    expect(existing).toHaveLength(DEV_ROUTES.length - 2);
+    const existing = rows.filter((row) => !added.some((path) => row === `${path} full`));
+    expect(existing).toHaveLength(DEV_ROUTES.length - 3);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
   });
@@ -607,7 +796,7 @@ describe("what did not change", () => {
     expect(await h.call("GET", "/v1/dev/client/projects/alpha")).toEqual({ status: 200, body: { name: "alpha", latestRevision: 1, access: "administrator", repositories: [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main", fullName: "acme/api" }] } });
     expect((await h.call("GET", "/v1/dev/client/projects/alpha/code-settings")).status).toBe(200);
     expect((await h.call("GET", "/v1/dev/client/projects/alpha/members")).status).toBe(200);
-    for (const [method, path] of [["POST", PATH()], ["DELETE", PATH()], ["PUT", PATH()], ["GET", SKIPS()], ["POST", SKIPS()], ["DELETE", SKIPS()]] as const) {
+    for (const [method, path] of [["POST", PATH()], ["DELETE", PATH()], ["PUT", PATH()], ["GET", SKIPS()], ["POST", SKIPS()], ["DELETE", SKIPS()], ["GET", EVAL_NONE()], ["POST", EVAL_NONE()], ["DELETE", EVAL_NONE()]] as const) {
       expect((await h.call(method, path, method === "GET" ? undefined : { row: "linear", skipped: true })).status, `${method} ${path}`).toBe(404);
     }
   });
@@ -622,7 +811,11 @@ describe("what did not change", () => {
   });
 });
 
-// The sha256 of every route row (method, path, requirement) except the two this PR adds, joined by newlines, as the table stood on code/next before this change.
+// The sha256 of every route row (method, path, requirement) except the setup-status rows (PR 8's two and L2-5 c's eval-none), joined by newlines, as the table stood on code/next before this change.
 // Batch 10: re-pinned with the batch's 22 new rows (all added, none changed; code/next's 81 rows in the same order still give 622d8b9d...): #830/#832 GitHub connect (5),
 // #836/#840 Slack install and channel (9), #835 engine model (2), #839 archive/restore (4), #837 bulk create and available repositories (2).
-const EXISTING_ROUTES_DIGEST = "805695cd2db86ae015240da9fada23f58bd1b7e2eba6aa4835b35ca94df3a31a";
+// DEC 254y (2), batch 12: re-pinned for #838's 7 new /v1/dev/company/linear* rows and L2-4's 3 new /v1/dev/projects/{p}/intake* rows on top of batch 10's table (all added, none
+// changed). Removing exactly those 10 rows still gives 805695cd...; removing instead the 9 Slack rows gives #848's approved e616631e...; removing both gives 9c594d20....
+// Batch 12 (rule D): and for #869's 6 new connected sign-in rows (/v1/dev/me/sign-ins*, /v1/dev/company/members/{personId}/sign-ins*; all added, none changed; removing exactly
+// those 6 rows still gives 0a31f2f4...).
+const EXISTING_ROUTES_DIGEST = "ef0ea58f7fbff47dd70a8b9a7ffd52b9e3ef36bc5f581d42fca73f98eb3b1749";

@@ -1,4 +1,6 @@
 import { slackCompanyPerson, slackCompanyProject, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
+import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
+import { splitBySlackIngressTeam } from "./slack-company-split.js";
 import { slackWorkspaceToken } from "./slack-workspace-tokens.js";
 import { slackWorkspaceRemovalOf, type SlackWorkspaceRemovedEvent } from "./slack-workspace-removal.js";
 import { awsRovaraHandOffRunner, isRovaraHandOff, type RovaraHandOff } from "./slack-rovara-front.js";
@@ -1494,23 +1496,25 @@ function cachedSlackSecrets(): () => Promise<SlackSecrets> {
 }
 
 /** Guided onboarding PR 4: a verified removal goes to the broker by a direct invoke (it already lets this Lambda invoke it); none without a broker. */
-function brokerWorkspaceRemoved(): { workspaceRemoved?: SlackWorkspaceRemovedHandOff } {
+/** Exported for tests (L2-2 PR 18c): the cache is dropped only after the broker accepted the removal. */
+export function brokerWorkspaceRemoved(onRemoved?: (teamId: string) => void, lambda: Pick<LambdaClient, "send"> = new LambdaClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION })): { workspaceRemoved?: SlackWorkspaceRemovedHandOff } {
   const functionName = process.env.BROKER_FUNCTION_NAME;
   if (functionName === undefined || functionName === "") return {};
-  const lambda = new LambdaClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION });
   return {
     async workspaceRemoved(removal) {
       const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "RequestResponse", Payload: Buffer.from(JSON.stringify(removal)) }));
       if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("broker removal failed");
       const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as BrokerReply;
       if (reply.statusCode !== 200) throw new Error("broker removal failed");
+      // L2-2 PR 18c: this process's cached token for the removed workspace goes at once (other processes' copies expire within five minutes).
+      onRemoved?.(removal.teamId);
     },
   };
 }
 
 export function createAwsSlackIngressHandler(company: SlackCompanyDependencies = {}) {
   const secrets = cachedSlackSecrets();
-  return createSlackIngressHandler({ secrets, ...awsSlackRouterDependencies(slackDirectTransport(secrets, company), company), ...brokerWorkspaceRemoved() });
+  return createSlackIngressHandler({ secrets, ...awsSlackRouterDependencies(slackDirectTransport(secrets, company), company), ...brokerWorkspaceRemoved(company.onWorkspaceRemoved) });
 }
 
 /** Slack's interactivity request URL path (spec 014): button presses, and 14d's Details view. */
@@ -1532,7 +1536,7 @@ export function createAwsSlackAdapterFront(company: SlackCompanyDependencies = {
   const secrets = cachedSlackSecrets();
   return createSlackAdapterFront({
     ...company,
-    ...brokerWorkspaceRemoved(),
+    ...brokerWorkspaceRemoved(company.onWorkspaceRemoved),
     postEphemeral: async (input) => chatPostEphemeral(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
     secrets,
     ...(company.workspaces === undefined ? {} : { getBinding: awsSlackRouterDependencies(slackDirectTransport(secrets, company), company).getBinding }),
@@ -1632,4 +1636,32 @@ return async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptF
 
 }
 
-export const handler = createAwsSlackHandler();
+/**
+ * L2-2 PR 18c: Slack company mode (slack-company-wiring.ts). Off (either switch, or a half-configured Lambda), this is today's handler itself. On, two handlers: the install's
+ * team, and anything naming no team, keeps today's handler; another team's request goes to the company handler (its binding, token and link checks). The team is read from the
+ * request only to choose; each handler verifies Slack's signature itself. Link notices are written by the broker through the existing invoke (this Lambda has no State write).
+ */
+export function createAwsSlackHandlerFromEnvironment(env: NodeJS.ProcessEnv = process.env, make: (company: SlackCompanyDependencies) => ReturnType<typeof createAwsSlackHandler> = createAwsSlackHandler) {
+  const clientConfiguration = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
+  const dynamo = new DynamoDBClient(clientConfiguration);
+  const functionName = env.BROKER_FUNCTION_NAME ?? "";
+  const lambda = new LambdaClient(clientConfiguration);
+  const wiring = functionName === "" ? undefined : slackCompanyDependenciesFromEnvironment(env, {
+    documentClient: DynamoDBDocumentClient.from(dynamo), dynamo, secrets: new SecretsManagerClient(clientConfiguration),
+    async linkNotice(teamId, userId) {
+      const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "RequestResponse", Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-link-notice", teamId, userId })) }));
+      if (response.FunctionError !== undefined || response.Payload === undefined) return undefined;
+      const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as BrokerReply;
+      if (reply.statusCode !== 200) return undefined;
+      const text = (JSON.parse(reply.body ?? "{}") as { text?: unknown }).text;
+      return typeof text === "string" && text.length <= 2_000 ? text : undefined;
+    },
+  });
+  if (wiring === undefined) return make({});
+  // Defence in depth, as in the broker's legacy view: another team's channel binding is "not bound" in today's handler while company mode is on.
+  const legacy = make({ slackInstallTeamOnly: wiring.legacyTeamId });
+  const company = make({ workspaces: wiring.workspaces, ...(wiring.companies === undefined ? {} : { companies: wiring.companies }), onWorkspaceRemoved: (team) => wiring.forget(team) });
+  return splitBySlackIngressTeam(legacy, company, wiring.legacyTeamId);
+}
+
+export const handler = createAwsSlackHandlerFromEnvironment();

@@ -64,6 +64,13 @@ export class SlackOrchestratorStack extends Stack {
       slackAdapterSecretName: new CfnParameter(this, "SlackAdapterSecretName", { type: "String", default: "", allowedPattern: "^$|^agentx/[a-z0-9-]+/channel-adapter/slack$" }),
     };
     const threadsTableName = new CfnParameter(this, "SlackThreadsTableName", { type: "String", minLength: 3 });
+    // DEC 254o (b), L2-2 PR 18d: Slack company mode's inputs, named environments only; the control plane's SlackCompany* outputs exist only while its switch is on, so these
+    // stay at their off defaults otherwise (and the service also needs COMPANY_SIGNIN=enabled before it acts on them).
+    const slackCompany = naming.env === undefined ? undefined : {
+      state: new CfnParameter(this, "SlackCompanyWorkspacesState", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "SlackCompanyWorkspacesState output of the control plane (Slack company mode)" }),
+      table: new CfnParameter(this, "SlackCompanyStateTableName", { type: "String", default: "", allowedPattern: "^$|^[A-Za-z0-9_.-]{3,255}$", description: "SlackCompanyStateTableName output of the control plane (Slack company mode)" }),
+      team: new CfnParameter(this, "SlackCompanyTeamId", { type: "String", default: "", allowedPattern: "^$|^T[A-Z0-9]{2,31}$", description: "SlackCompanyTeamId output of the control plane (Slack company mode)" }),
+    };
     const sessionBucketName = new CfnParameter(this, "ThreadSessionBucketName", { type: "String", minLength: 3 });
     const turnRecordsTableName = new CfnParameter(this, "TurnRecordsTableName", {
       type: "String",
@@ -387,6 +394,12 @@ export class SlackOrchestratorStack extends Stack {
           { name: "AGENTX_GATE_CLASSIFIER_PROVIDER", value: classifierProvider.valueAsString },
           { name: "AGENTX_GATE_CLASSIFIER_MODEL", value: gateClassifierModelId.valueAsString },
           { name: "AGENTX_MODEL_FALLBACK", value: modelFallback.valueAsString },
+          ...(slackCompany === undefined ? [] : [
+            { name: "SLACK_COMPANY_WORKSPACES", value: slackCompany.state.valueAsString },
+            { name: "STATE_TABLE_NAME", value: slackCompany.table.valueAsString },
+            { name: "SLACK_TEAM_ID", value: slackCompany.team.valueAsString },
+            { name: "AGENTX_ENV", value: naming.env! },
+          ]),
         ],
         logConfiguration: {
           logDriver: "awslogs",
