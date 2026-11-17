@@ -266,6 +266,38 @@ describe("GitHub sign-in (DEC 254h)", () => {
     expect(await w.cliCheck(cli.access!)).toBe(401);
   });
 
+  it("a returning GitHub person with no membership is never a legacy member of the built-in company", async () => {
+    const w = world();
+    // A GitHub sign-in record that is not company-less (as an import or an older write might leave it).
+    w.db.set({ pk: `DEVELOPER#${gid(1004)}`, sk: "META", entityType: "DEVELOPER", developerId: gid(1004), provider: "github", issuer: GITHUB_ISSUER, subject: "1004", displayName: "x",
+      revoked: false, firstSignInAt: new Date(w.now() - 86_400_000).toISOString(), lastSignInAt: new Date(w.now() - 86_400_000).toISOString() });
+    expect((await githubSignIn(w, "octo-second", { cli: true })).refused).toBe("not invited");
+    expect(w.db.get(membershipKey(gid(1004)).pk, membershipKey(gid(1004)).sk)).toBeUndefined();
+  });
+
+  it("is not offered on the browser review page, and a GitHub email never links a Slack user", async () => {
+    const w = world();
+    const start = await w.http(httpEvent("GET", "/v1/auth/browser/authorize?return_to=/review/11111111-1111-4111-8111-111111111111"));
+    expect(start.body).not.toContain("method=github");
+    await w.operator({ kind: "company-preapprove", companyId: IMPLICIT_COMPANY_ID, email: "octo@example.test", role: "member", expiresInHours: 24 });
+    await githubSignIn(w, "octo-verified", { cli: true });
+    expect(w.fetch.calls.filter((call) => call.includes("lookupByEmail"))).toEqual([]);
+    expect(w.db.get(`DEVELOPER#${gid(1001)}`, "META")).not.toHaveProperty("slackUserId");
+  });
+
+  it("a GitHub session outside the built-in company without the shared-method mark is refused at refresh", async () => {
+    const w = world();
+    await w.setup();
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "octo@example.test", role: "member", expiresInHours: 24 });
+    const signed = await githubSignIn(w, "octo-verified", { company: X });
+    const [session] = w.db.find((row) => row.entityType === "SESSION" && row.developerId === gid(1001));
+    const unmarked = { ...session! }; delete unmarked.installMethod;
+    w.db.set(unmarked);
+    // Even where the company now has its own issuer (so the unmarked branch would otherwise just check membership).
+    w.db.set({ ...w.issuerRow, pk: companyScoped(X, "SIGNIN_ISSUER") });
+    expect((await w.refresh(signed.refresh!)).status).toBe(400);
+  });
+
   it("the same GitHub user is the same person after a rename of their login; another user is another person", async () => {
     const w = world();
     await githubSignIn(w, "octo-verified");

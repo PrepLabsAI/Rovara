@@ -8,6 +8,7 @@ import { readSignInSettings, signInStackParameters, writeSignInSettings, writeSl
 import { stagingSettings } from "../support/environment-fixtures.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { HOLDER, T0, fakeSlackApi, memoryInitSecrets, scriptedPrompter, TEST_BOT_TOKEN, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
+import { withDeclaredSignIn } from "../../packages/cli/src/deploy/deploy-environment.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const OIDC_SECRET = "planted-company-client-secret";
@@ -101,5 +102,16 @@ describe("agentx signin enable github (DEC 254h)", () => {
     expect(code).toBe(0);
     expect(stdout.join("")).toBe("Developer sign-in updated.\n");
     expect(h.cloudFormation.parameters.DeveloperSignInGithub).toBe("enabled");
+  });
+
+  it("a deploy to a template without GitHub's parameters drops them, and enabling GitHub on such a stack says to upgrade first", async () => {
+    const declared = new Set(["SlackTeamId", "DeveloperSignInSlack"]);
+    expect(withDeclaredSignIn({ SlackTeamId: "T0TEAM", DeveloperSignInGithub: "enabled", DeveloperGithubClientId: "x", DeveloperGithubSince: "1", Other: "kept" }, declared))
+      .toEqual({ SlackTeamId: "T0TEAM", Other: "kept" });
+    const h = await services([true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await expect(runSigninEnable(h.s, "staging", "github", { githubClientId: "Ov23liAbCdEf0123" }, {}, true)).rejects.toThrow("was deployed from an older AgentX release");
+    expect(await readSignInSettings(h.store, "staging")).not.toHaveProperty("github");
   });
 });

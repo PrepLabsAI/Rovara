@@ -272,6 +272,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (deps.company === undefined) return true;
     try {
       if (installMethod === true && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID)) return false;
+      // DEC 254h: GitHub is only ever the shared method: outside the built-in company its session must carry that mark.
+      if (amr === "github" && installMethod !== true && companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) return false;
       if (companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) {
         if (await deps.company.hasOwnIssuer(companyId)) {
           // A company with its own sign-in: never the shared method; its Slack only while the install workspace is bound to it (as before).
@@ -456,7 +458,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   async function authorizeBrowser(query: URLSearchParams): Promise<HttpResult> {
     const returnTo = query.get("return_to") ?? "";
     if (!REVIEW_RETURN_TO.test(returnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
-    const methods = enabledMethods(deps);
+    // DEC 254h: the browser review page's session check reads Slack and company sign-in only, so GitHub is not offered there.
+    const methods = enabledMethods(deps).filter((method) => method !== "github");
     if (methods.length === 0) return page(503, "Sign-in is unavailable", ["Ask an AgentX administrator to enable a sign-in method."]);
     const verifier = randomBytes(32).toString("base64url");
     const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -674,7 +677,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // email is ever looked up in Slack. A person with no company is looked up in no company's Slack, and so is a person from another Slack
     // workspace (DEC 254e: no install or company directory speaks for their workspace).
     const foreignSlack = method === "slack" && identity.slackTeam !== undefined && identity.slackUserId === undefined;
-    const directory = companyless || foreignSlack ? undefined : companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
+    // DEC 254h: a GitHub email is never used to link a Slack user (GitHub verified it once; the Slack link grants task access by channel).
+    const directory = companyless || foreignSlack || method === "github" ? undefined : companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
     if (slackUserId === undefined && identity.email !== undefined && directory !== undefined) {
       const link = await directory.lookupByEmail(identity.email);
       slackUserId = link === "unavailable" ? (companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? existing?.slackUserId : undefined) : link === "none" ? undefined : link.userId;
