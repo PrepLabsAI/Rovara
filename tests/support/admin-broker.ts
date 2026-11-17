@@ -34,7 +34,6 @@ function loadBroker(): Promise<BrokerModules> {
       STATE_TABLE_NAME: "unused",
       ARTIFACT_BUCKET_NAME: "unused",
       OIDC_ISSUER: adminIssuer,
-      CALLBACK_SIGNING_KEY: "c".repeat(64),
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: `arn:aws:secretsmanager:us-east-1:${account}:secret:test`,
       GITHUB_APP_CREDENTIAL_REF: "github-app",
       GITHUB_APP_ACCOUNT: "example",

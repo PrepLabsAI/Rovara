@@ -339,6 +339,10 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),
         // Spec 062: present once the control plane has the channel API.
         ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"]),
+        // L2-2 PR 18d: Slack company mode's inputs, present only while the control plane's SlackCompanyWorkspaces switch is on.
+        // Always sent, with explicit off values when the outputs are absent, so turning the switch off also reaches the service (cdk keeps previous parameter values otherwise).
+        SlackCompanyWorkspacesState: "disabled", SlackCompanyStateTableName: "", SlackCompanyTeamId: "",
+        ...optionalOutputs(outputs, "control-plane", ["SlackCompanyWorkspacesState", "SlackCompanyStateTableName", "SlackCompanyTeamId"]),
         SlackThreadsTableName: required(outputs, "control-plane", "SlackThreadsTableName", answers.env),
         TurnRecordsTableName: required(outputs, "control-plane", "TurnRecordsTableName", answers.env),
         ThreadSessionBucketName: required(outputs, "control-plane", "SlackThreadSessionBucketName", answers.env),

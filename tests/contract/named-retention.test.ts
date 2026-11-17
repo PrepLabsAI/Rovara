@@ -10,7 +10,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
 
-type Resource = { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string };
+type Resource = { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string; Properties?: { Name?: unknown } };
 type Templates = Record<string, Record<string, Resource>>;
 
 function templates(context: Record<string, string>): Templates {
@@ -35,7 +35,8 @@ describe("retained resources in a named environment", () => {
     const expected: Record<string, string[]> = {
       "agentx-staging-access": ["ArtifactBucket AWS::S3::Bucket"],
       "agentx-staging-control-plane": [
-        "Artifacts AWS::S3::Bucket", "DeveloperSignInTable AWS::DynamoDB::Table", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
+        // DEC 254za (#872): the callback signing key's own secret, kept like the Slack secret (its name is checked below).
+        "Artifacts AWS::S3::Bucket", "CallbackSigningKeySecret AWS::SecretsManager::Secret", "DeveloperSignInTable AWS::DynamoDB::Table", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
         "SlackThreads AWS::DynamoDB::Table", "State AWS::DynamoDB::Table", "TurnRecords AWS::DynamoDB::Table",
       ],
       "agentx-staging-foundation": ["VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key"],
@@ -49,6 +50,9 @@ describe("retained resources in a named environment", () => {
         if (resource.DeletionPolicy === "RetainExceptOnCreate") expect(resource.UpdateReplacePolicy, `${stackName} ${id}`).toBe("Retain");
       }
     }
+    // DEC 254za: the one retained secret #872 adds is exactly agentx/<env>/callback-key.
+    const callbackSecrets = Object.entries(named["agentx-staging-control-plane"]!).filter(([id]) => id.startsWith("CallbackSigningKeySecret") && !id.includes("Policy"));
+    expect(callbackSecrets.map(([, resource]) => resource.Properties?.Name)).toEqual(["agentx/staging/callback-key"]);
   });
 
   it("retains the Cognito user pool and attempt-specific Slack diagnostic records", () => {
@@ -67,11 +71,14 @@ describe("retained resources in a named environment", () => {
     const retained = Object.entries(legacy).flatMap(([stackName, resources]) => kept(resources, "Retain").map((entry) => `${stackName} ${entry}`));
     expect(retained).toEqual([
       // Spec 064: developer records and session history outlive the stack, as in named environments.
-      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
+      // DEC 254za (#872): the callback signing key's own secret (agentx/production/callback-key, checked below), Retain like the Slack secret.
+      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane CallbackSigningKeySecret AWS::SecretsManager::Secret", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
       "AgentXControlPlane SlackThreads AWS::DynamoDB::Table", "AgentXControlPlane State AWS::DynamoDB::Table", "AgentXControlPlane TurnRecords AWS::DynamoDB::Table",
       "AgentXProductionFoundation VpcFlowLogs AWS::Logs::LogGroup", "AgentXProductionFoundation WorkspaceKey AWS::KMS::Key",
       "AgentXReleasePipeline Artifacts AWS::S3::Bucket",
     ]);
     for (const resources of Object.values(legacy)) expect(kept(resources, "RetainExceptOnCreate")).toEqual([]);
+    const callbackSecrets = Object.entries(legacy.AgentXControlPlane!).filter(([id]) => id.startsWith("CallbackSigningKeySecret") && !id.includes("Policy"));
+    expect(callbackSecrets.map(([, resource]) => resource.Properties?.Name)).toEqual(["agentx/production/callback-key"]);
   }, 300_000);
 });

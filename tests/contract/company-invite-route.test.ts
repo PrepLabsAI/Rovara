@@ -1,5 +1,6 @@
 import { CLIENT_SCOPES, companyInviteCodeHash } from "@agentx/contracts";
 import { expect, it, vi } from "vitest";
+import { stubCallbackSigningKeySecret } from "../support/callback-key.js";
 import { PERSON, TIME } from "../support/company-route-harness.js";
 import { inviteCompanyWorld as inviteWorld } from "../support/signin-company-world.js";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
@@ -130,6 +131,8 @@ it("production bootstrap enables company reads only for the exact enabled switch
   const personId = ownerKeyForSubject(issuer, "admin-subject");
   db.set({ ...membershipKey(personId), entityType: "COMPANY_MEMBERSHIP", personId, companyId: A, role: "admin", joinedAt: TIME });
   const reads = vi.spyOn(db, "send");
+  // The broker reads its callback signing key from Secrets Manager on its first request.
+  const secret = stubCallbackSigningKeySecret();
   const from = vi.spyOn(DynamoDBDocumentClient, "from").mockReturnValue(db as unknown as ReturnType<typeof DynamoDBDocumentClient.from>);
   const invoke = vi.spyOn(LambdaClient.prototype, "send").mockResolvedValue({ Payload: Buffer.from('{"ok":true,"clients":[]}') } as never);
   try {
@@ -142,7 +145,7 @@ it("production bootstrap enables company reads only for the exact enabled switch
       const command = invoke.mock.calls[0]?.[0] as { input: { Payload: Uint8Array } };
       expect(JSON.parse(Buffer.from(command.input.Payload).toString()) as unknown).toEqual({ kind: "list-sign-in-clients", ...(flag === "enabled" ? { companyId: A } : {}) });
     }
-  } finally { from.mockRestore(); invoke.mockRestore(); reads.mockRestore(); vi.unstubAllEnvs(); vi.resetModules(); }
+  } finally { from.mockRestore(); invoke.mockRestore(); reads.mockRestore(); secret.restore(); vi.unstubAllEnvs(); vi.resetModules(); }
 });
 
 async function registeredInviteWorld(fullAccess = false) {

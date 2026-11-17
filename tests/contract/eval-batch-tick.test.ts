@@ -3,6 +3,8 @@
 // writes results.csv and summary.json. Offline: FakeDynamoDb, a vi.fn state machine and S3.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { CALLBACK_SIGNING_KEY_UNAVAILABLE, forgetCallbackSigningKey } from "../../packages/broker/src/aws/callback-signing-key.js";
 import { EvalBatchSummarySchema, SWEBENCH_RUN_TIME_LIMIT_SECONDS, summarize } from "@agentx/contracts";
 import {
   EVAL_BATCH_RESULTS_COLUMNS,
@@ -585,13 +587,29 @@ describe("the tick with no batch active", () => {
 
   it("is what the scheduled handler runs, with the Lambda's environment", async () => {
     const { handler } = await import("../../packages/broker/src/aws/eval-batch-tick.js");
-    await expect(handler()).rejects.toThrow(/is required/);
+    forgetCallbackSigningKey();
+    const sent: Array<{ name: string; input: Record<string, unknown> }> = [];
+    vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      sent.push({ name: command.constructor.name, input: command.input });
+      return {};
+    }) as never);
+    // No secret named: the tick fails before it reads or signs anything (the Lambda's error metric and alarm see it), and a plain CALLBACK_SIGNING_KEY is not taken for the key.
+    vi.stubEnv("CALLBACK_SIGNING_KEY", "k".repeat(64));
+    await expect(handler()).rejects.toThrow(CALLBACK_SIGNING_KEY_UNAVAILABLE);
+    expect(sent).toEqual([]);
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
     vi.stubEnv("AWS_REGION", "us-east-1");
     vi.stubEnv("STATE_TABLE_NAME", "agentx-state");
     vi.stubEnv("ARTIFACT_BUCKET_NAME", "agentx-artifacts");
-    vi.stubEnv("CALLBACK_SIGNING_KEY", "k".repeat(64));
+    vi.stubEnv("CALLBACK_SIGNING_KEY_SECRET_ID", "agentx/production/callback-key");
     vi.stubEnv("SWEBENCH_SETTINGS_PREFIX", "/agentx/production/");
-    const sent: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const secretReads: unknown[] = [];
+    vi.spyOn(SecretsManagerClient.prototype, "send").mockImplementation((async (command: { input: unknown }) => {
+      secretReads.push(command.input);
+      return { SecretString: "k".repeat(64) };
+    }) as never);
+    sent.length = 0;
     vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       sent.push({ name: command.constructor.name, input: command.input });
       return command.constructor.name === "GetCommand" ? {} : { Items: [] };
@@ -600,6 +618,11 @@ describe("the tick with no batch active", () => {
     expect(sent.map((command) => command.name)).toEqual(IDLE_READS);
     expect(sent.every((command) => command.input.TableName === "agentx-state")).toBe(true);
     expect(sent[0]!.input.ExpressionAttributeValues).toMatchObject({ ":pk": "EVAL_BATCHES#ACTIVE" });
+    // The key was read from its one secret, by name; the second tick of the same container reads nothing more.
+    expect(secretReads).toEqual([{ SecretId: "agentx/production/callback-key" }]);
+    await handler();
+    expect(secretReads).toHaveLength(1);
+    forgetCallbackSigningKey();
   });
 });
 
