@@ -88,6 +88,7 @@ import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
 import { handleCoreContextTools } from "../core-host/context-tools.js";
+import { createWikiOnEvents } from "../core/wiki/agent-context.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
@@ -634,6 +635,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
         const money = coreMoneyWiring(registry, companyId, now, admissionSettings);
+        const wikiOnEvents = createWikiOnEvents({ store: registry.require("storage"), companyId, now: () => now().getTime() });
         // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
         const wiring = modelGateway();
         const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps));
@@ -643,7 +645,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
           grants: new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential),
-          ...(lessons === undefined ? {} : { onEvents: (operation, events) => lessons.host.onEvents(operation, events) }),
+          // A step's events go to the lessons (when the company has them) and to the wiki's report filing (lead 4 A1: "Wiki pages this task read"); each is information only and never throws.
+          onEvents: async (operation, events) => { await Promise.all([lessons?.host.onEvents(operation, events), wikiOnEvents(operation, events)]); },
           bookUsage: money.bookUsage,
           // DEC 253c/253j(1): the trusted eval plan, approval and baseline cache for this company's CHECKS runs, with the approver's live role from the hosted members reader.
           evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),

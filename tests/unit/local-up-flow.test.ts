@@ -7,10 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@agentx/contracts";
 import {
-  DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
+  DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, wikiUsePartition, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
   ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, flakyOnChangeHoldInput, projectPk, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
+import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
+import { createWikiForStep, setWikiAgentSwitch } from "../../packages/broker/src/core/wiki/agent-context.js";
 import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
 import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
@@ -294,6 +296,45 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(understand).toMatchObject({ kind: "task", payload: { workflowMode: "UNDERSTAND" } });
     expect((understand.payload as Record<string, unknown>)["learnedContext"]).toBeUndefined();
     expect(asked).toBeGreaterThan(0);
+  });
+
+  it("lead 4 A1: a step is given its OWN project's wiki only when the project's switch is on, and only a worker that lists the feature is sent it", async () => {
+    const WIKI_PAGE = (tag: string) => ({
+      pageId: "overview", kind: "overview" as const, title: `Overview ${tag}`, summary: `Summary ${tag}`, order: 0, repos: [{ repo: "demo", commit: BASE_COMMIT }], buildId: "build-0001",
+      blocks: [{ kind: "heading" as const, blockId: "h0001", level: 2 as const, text: "Heading" }, { kind: "paragraph" as const, blockId: "p0001", text: `Paragraph ${tag}`, claimIds: ["c0001"] }],
+      claims: [{ claimId: "c0001", text: `Claim ${tag}`, citations: [{ repo: "demo", path: "src/a.ts", commit: BASE_COMMIT, line: 3, quote: `export const a = "${tag}-quote-text";` }], source: "found" as const, checkedAt: "2026-11-17T09:00:00.000Z" }],
+    });
+    for (const [features, expectedPresent] of [[undefined, true], [[...WORKER_INVOCATION_FEATURES].filter((feature) => feature !== "task.wikiContext.v1"), false]] as const) {
+      const h = await launch(features === undefined ? {} : { features });
+      expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
+      expect((await h.api("/v1/admin/projects", { method: "POST", body: { ...PROJECT, name: "other" } })).status).toBe(201);
+      const store = h.runtime.registry.require("storage");
+      const options = { store, companyId: IMPLICIT_COMPANY_ID, now: () => Date.now() };
+      const wiki = createWikiStore(options);
+      await wiki.writePage("payments", WIKI_PAGE("PAYMENTS-WIKI"));
+      await wiki.writePage("other", WIKI_PAGE("OTHER-WIKI"));
+      await setWikiAgentSwitch(options, "payments", true);
+      const flow = h.runtime.app.flow.deps;
+      flow.wiki = createWikiForStep(options);
+      const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "33333333-3333-4333-8333-333333333333", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+      const workspaceId = (await store.get({ pk: `DEVTASK#${started.body.task.taskId}`, sk: "META" }))!["workspaceId"] as string;
+      const seen = new Set<string>();
+      const prepare = await h.nextJob(workspaceId, seen);
+      expect((await h.callback(prepare, "result", { status: "SUCCEEDED", result: {} })).status).toBe(200);
+      const understand = await h.nextJob(workspaceId, seen);
+      const sent = (understand.payload as Record<string, unknown>)["wikiContext"] as { project: string; pages: Array<{ pageId: string }> } | undefined;
+      expect(sent !== undefined).toBe(expectedPresent);
+      if (expectedPresent) {
+        expect(sent).toMatchObject({ project: "payments", pages: [{ pageId: "overview" }] });
+        expect(JSON.stringify(understand.payload)).toContain("PAYMENTS-WIKI");
+        expect(JSON.stringify(understand.payload)).not.toContain("OTHER-WIKI");
+        // The delivery is noted under this operation, company and project, for the worker's report.
+        expect((await store.query({ pk: wikiUsePartition(IMPLICIT_COMPANY_ID, "payments") } as never)).items.some((item) => String(item.sk).startsWith("OP#"))).toBe(true);
+      }
+      // The switch off: the next step carries none.
+      await setWikiAgentSwitch(options, "payments", false);
+      expect(await createWikiForStep(options)({ companyId: IMPLICIT_COMPANY_ID, project: "payments", taskId: started.body.task.taskId, operationId: "aaaaaaaa-1111-4111-8111-111111111111", workflowMode: "PLAN", repositories: ["demo"] })).toEqual({});
+    }
   });
 
   it("runs a task from the request to an approved plan", async () => {
