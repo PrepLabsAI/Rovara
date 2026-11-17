@@ -16,7 +16,8 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, type SetupAgentLimits, type SetupJournalEntry, type SetupProposal, type SetupRunSummary,
+  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, type SetupAgentLimits, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { scanRepositories, type SetupScan } from "./setup-scan.js";
@@ -32,6 +33,8 @@ import type { PiSessionHandle } from "./pi-session.js";
 import type { RunNetwork } from "./setup-network.js";
 import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import type { TaskSandbox } from "./task-sandbox.js";
+import { EVAL_DRAFT_REFUSAL_WORDS, produceEvalDiscoveryReport } from "./verification/eval-discovery-producer.js";
+import type { EvalDiscovery } from "./verification/eval-discovery.js";
 
 /** What the preparation manifest says about a repository (the broker's own record of the default branch's head). */
 export interface SetupManifestRepository { name: string; path: string; resolvedCommit: string; checkedOut?: unknown }
@@ -74,6 +77,10 @@ export interface SetupRunInput {
   stopFinishMs?: number | undefined;
   metaRepo?: string | undefined;
   ports: SetupRunPorts;
+  /** DEC 253q: the worker's own pinned image (`AGENTX_WORKER_IMAGE`), which an eval the run drafts is measured with. Absent: the run reports no eval. */
+  evalImage?: string | undefined;
+  /** Test seam: F4's discovery of one checkout (`discoverEvals`). */
+  discoverEvals?: ((root: string) => Promise<EvalDiscovery>) | undefined;
 }
 
 export interface SetupRunResult {
@@ -358,6 +365,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     // ---- the end. Order matters: every process in the sandbox is killed (the container is removed) BEFORE the last look at the tracked files.
     // F5: after a person's Stop the run still finishes and reports what it had, but only within a few seconds; past that it reports the stop with no proposal (the cancel has already ended the task, and the
     // sandbox is removed below whatever happened here). An unfinished look at the tracked files is never a clean one.
+    let evalReport: SetupEvalDiscoveryReport | undefined;
     const finishRun = async (): Promise<{ proposal: SetupProposal | undefined; summary: SetupRunSummary }> => {
       governor.dispose();
       await sandbox!.dispose();
@@ -368,7 +376,18 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
           ...(input.metaRepo === undefined ? {} : { metaRepo: input.metaRepo }), scan, tracked,
           records: governor.entries().filter((entry) => entry.source === "agent"),
         });
-        if (finished.ok) return { proposal: finished.proposal, summary: SetupRunSummarySchema.parse({ ...governor.summary(), stop: finished.end, partial: false }) };
+        if (finished.ok) {
+          // DEC 253q(a): the eval the agent drafted, from a run that finished with a proposal (never a stopped or failed one); sent below, after the journal.
+          if (finished.end === "proposed" && !cancelled) {
+            const answer = setupProposalAnswerOf(finalText);
+            const draft = typeof answer === "object" && answer !== null && !Array.isArray(answer) ? (answer as Record<string, unknown>)["eval"] : undefined;
+            const produced = await produceEvalDiscoveryReport({ draft, repositories, tracked, image: input.evalImage, ...(input.discoverEvals === undefined ? {} : { discover: input.discoverEvals }) }).catch(() => ({ refused: "unreadable" as const }));
+            if ("report" in produced) evalReport = produced.report;
+            // A draft that could not be used is said in fixed words on the run's live view (never the draft or a path), so "no eval" on the page is not a silent drop.
+            else if (produced.refused !== "none") await ports.progress(`Rovara did not use the eval the setup drafted (${EVAL_DRAFT_REFUSAL_WORDS[produced.refused]}).`).catch(() => undefined);
+          }
+          return { proposal: finished.proposal, summary: SetupRunSummarySchema.parse({ ...governor.summary(), stop: finished.end, partial: false }) };
+        }
         if (finished.end === "changed_repository_files") governor.onEnded("changed_repository_files"); else governor.stop("infrastructure");
         return { proposal: undefined, summary: governor.summary() };
       }
@@ -383,6 +402,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     const summary = ended?.summary ?? governor.summary();
     // What is left unsent goes now, once; the broker keeps the first entry for a position.
     await flushLast(ports, pendingEntries);
+    // The eval report goes once through the run's own setup callback. A refusal leaves the run's proposal as it is: the setup page then shows no eval to confirm.
+    if (evalReport !== undefined && proposal !== undefined) await ports.callback({ kind: "eval_discovery", report: evalReport }).catch(() => undefined);
     return { workflowMode: "SETUP_AGENT", ...(proposal === undefined ? {} : { setupProposal: proposal }), setupRunSummary: summary };
   } finally {
     if (tick !== undefined) clearInterval(tick);

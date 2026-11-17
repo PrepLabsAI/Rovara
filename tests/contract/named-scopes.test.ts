@@ -112,7 +112,7 @@ function expandRegex(source: string): string[] {
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
   // The company reads' paths are constants of their contract (#649), which the router imports.
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/linear-connect-routes.ts"]) {
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/github-connect-routes.ts", "packages/broker/src/aws/linear-connect-routes.ts", "packages/broker/src/aws/company-engine-model-routes.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
@@ -198,10 +198,14 @@ async function setUp(mode: "linking" | "developer") {
     companies: { companyOf: async () => IMPLICIT_COMPANY_ID },
     // Lane W part 4: the company admin routes need the member helper to exist; this one finds nobody, so only the route table's answer is tested here.
     companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
+    // Guided onboarding PR 1: the GitHub connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
+    githubConnect: { bindings: { claimPerson: async () => "taken", companyInstallations: async () => [], ownersOf: async () => [], disconnect: async () => ({ outcome: "not_found" }) }, github: { appSlug: async () => "app", oauthClient: async () => undefined, userControlledInstallations: async () => { throw new Error("none"); } }, log: () => undefined },
     // Guided onboarding PR 7: the Linear connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
     linearConnect: { connections: {} as never, app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
     // L2-4: the waiting-ticket routes need the core's intake to exist; this one holds no tickets, so only the route table's answer is tested here.
     coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), dismiss: async () => false },
+    // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
+    companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };

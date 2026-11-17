@@ -17,6 +17,12 @@ const BindingInstallationSchema = z.object({
   account: z.object({ login: z.string().min(1).max(256), type: z.enum(["User", "Organization"]) }),
   repository_selection: z.enum(["all", "selected"]),
 });
+// Guided onboarding PR 6: what repositoryInstallation reads of GET /repos/{owner}/{repo}/installation.
+const RepositoryInstallationSchema = z.object({
+  id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  account: z.object({ login: z.string().min(1).max(256) }),
+  suspended_at: z.string().nullable().optional(),
+});
 const InstallationRepositoriesSchema = z.object({
   repositories: z.array(z.object({ id: z.number().int().positive(), full_name: z.string(), private: z.boolean(), default_branch: z.string() })),
 });
@@ -878,6 +884,22 @@ export class GitHubAppCredentialProvider {
   /** Installation lookup for company checks at the AWS seams; shares the existing cache. */
   async installationIdFor(repositoryUrl: string): Promise<number> {
     return (await this.installed(parseGitHubRepository(repositoryUrl))).installationId;
+  }
+
+  /**
+   * Guided onboarding PR 6: which installation serves a repository and whether it is suspended, read from GitHub now (never the cache), for a
+   * company check at project create. A repository GitHub does not know, or that no installation of this App serves, throws.
+   */
+  async repositoryInstallation(repositoryUrl: string): Promise<{ installationId: number; suspended: boolean }> {
+    const repository = parseGitHubRepository(repositoryUrl);
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/installation`,
+      { headers: await this.appHeaders(), signal: AbortSignal.timeout(5_000), redirect: "error" },
+    );
+    if (!response.ok) throw agentXError("GITHUB_NOT_CONNECTED", "the GitHub installation is not connected");
+    const body = RepositoryInstallationSchema.safeParse(await response.json());
+    if (!body.success || body.data.account.login.toLowerCase() !== repository.owner.toLowerCase()) throw agentXError("GITHUB_NOT_CONNECTED", "the GitHub installation is not connected");
+    return { installationId: body.data.id, suspended: body.data.suspended_at !== null && body.data.suspended_at !== undefined };
   }
 
   /** The repository's installation, cached by owner; a failed lookup is not cached. */
