@@ -1,5 +1,5 @@
 import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
-import { MODEL_NOT_ENABLED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
+import { MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_DETAIL, MODEL_NOT_OFFERED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
 import type { WorkerLogSink } from "./worker-log.js";
 
 /**
@@ -139,6 +139,10 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
     }
     if (message.stopReason !== "error") return undefined;
     const facts: { signal?: string; status?: number; requestId?: string; classifyStatus?: number; chatgpt?: true } = failureFacts(message);
+    // DEC 254g: a routed call (provider `rovara-route`) the model gateway refused because it does not offer the model: model-runtime's own fixed sentence, whichever provider the message names.
+    if (typeof message.errorMessage === "string" && TRANSPORT_FAILURE.exec(message.errorMessage.slice(0, 4_000))?.[1] === MODEL_NOT_OFFERED_DETAIL) {
+      return { modelCall: { outcome: "failed", class: "model-not-found", signal: MODEL_NOT_OFFERED_SIGNAL, attempt: at, ...(provider === undefined ? {} : { provider }), status: 400, ...(durationMs === undefined ? {} : { durationMs }) } };
+    }
     // Bedrock's own SDK errors carry diagnostics, which decide. A Bedrock model called through the model proxy has none (the proxy answers like a keyed provider: a status and a JSON body), so it is read like one.
     if (provider !== undefined && (provider !== "amazon-bedrock" || (facts.signal === undefined && facts.status === undefined))) {
       const keyed = keyedFacts(provider, message);
@@ -199,6 +203,7 @@ export function describeModelCallNote(note: ModelCallNote): string {
 /** What a person should do next, from a failed call's class and status: fixed text. Used for the operation's error, beside `describeModelCallNote`. */
 export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "failed" }>, edition: Edition | undefined = editionFromEnvironment()): string {
   if (note.signal === MODEL_NOT_ENABLED_SIGNAL) return modelNotEnabledSentence(note.model, edition);
+  if (note.signal === MODEL_NOT_OFFERED_SIGNAL) return MODEL_NOT_OFFERED_NEXT;
   if (note.status === 402) return "add credits to the model account, then retry";
   switch (note.class) {
     case "key-rejected": return note.chatgpt === true ? "connect ChatGPT again, then retry" : "check the model key and its permissions, then retry";
@@ -210,6 +215,9 @@ export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "
     default: return "retry the step";
   }
 }
+
+/** DEC 254g: what to do when the model gateway does not offer the model (fixed words). */
+export const MODEL_NOT_OFFERED_NEXT = "the model is not offered: the model gateway does not offer this model to this company; choose a model it offers (agentx config set coreEngine.agentModel checks it against the gateway), then retry";
 
 export const MODEL_CALL_HEARTBEAT_MS = 60_000;
 export const MODEL_CALL_MAX_HEARTBEATS = 60;
