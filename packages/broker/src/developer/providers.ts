@@ -1,5 +1,6 @@
 // Spec 025 FR-002 to FR-004: the Slack and company OIDC providers. The code exchange runs here,
 // server side, with the client secret; the laptop never sees it.
+import { createHash } from "node:crypto";
 import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { claimValues } from "../aws/lambda.js";
 import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod } from "@agentx/contracts";
@@ -235,6 +236,86 @@ export function oidcSignInProvider(input: {
           ...(email === undefined ? {} : { email }),
           ...(isAdministrator(payload, input.administrator) ? { administrator: true as const } : {}),
           ...(typeof payload.auth_time === "number" && Number.isSafeInteger(payload.auth_time) && payload.auth_time > 0 ? { authTime: payload.auth_time } : {}),
+        },
+      };
+    },
+  };
+}
+
+/** DEC 254h: GitHub's issuer, as Code records it (GitHub is OAuth 2, not OpenID Connect: there is no ID token and no discovery). */
+export const GITHUB_ISSUER = "https://github.com";
+/** What Code asks GitHub for: the profile (the stable numeric id and a name) and the email addresses, to find the primary verified one. */
+export const GITHUB_SCOPES = "read:user user:email";
+const GITHUB_API = "https://api.github.com";
+/** GitHub's user ids are positive whole numbers; the login can be renamed and reused, so it is never the subject. */
+const GITHUB_ID_MAX = Number.MAX_SAFE_INTEGER;
+/** At most this many email rows are read; a longer answer is read only this far (the primary one is never missing from a real answer of this size). */
+const GITHUB_EMAILS_MAX = 100;
+
+/** One GitHub call through the injected fetch, with its HTTP status. 429 and 5xx: try again. Anything not JSON: unavailable. */
+async function githubCall(fetchFn: typeof fetch, url: string, init: RequestInit): Promise<{ status: number; body: unknown }> {
+  let response: Response;
+  try {
+    response = await fetchFn(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+  } catch {
+    throw new ProviderUnavailableError("GitHub could not be reached; try again in a minute");
+  }
+  if (response.status === 429 || response.status >= 500) throw new ProviderUnavailableError(`GitHub answered HTTP ${response.status}; try again in a minute`);
+  try {
+    return { status: response.status, body: await response.json() };
+  } catch {
+    throw new ProviderUnavailableError("GitHub answered with something other than JSON; try again in a minute");
+  }
+}
+
+/**
+ * DEC 254h: sign-in with GitHub (an OAuth app). Authorize with PKCE S256 (the verifier is this sign-in's own single-use nonce, so a code is only
+ * redeemable by the request that asked for it), exchange the code server side with the client secret, then read the user (subject = GitHub's
+ * stable numeric id, never the login) and their emails. Only the primary AND verified email is used; none such: no email (the person can still
+ * join with an invite secret). GitHub's access token is used for those two reads and then dropped: it is never stored, logged or returned.
+ */
+export function githubSignInProvider(input: { clientId: string; clientSecret: () => Promise<string>; fetch: typeof fetch; now: () => number }): SignInProvider {
+  const challenge = (verifier: string) => createHash("sha256").update(verifier).digest("base64url");
+  const refused = (reason: string): ProviderResult => ({ ok: false, reason: `GitHub refused the sign-in (${reason}); run agentx login again` });
+  return {
+    method: "github",
+    async authorizeUrl({ state, nonce, redirectUri }) {
+      const url = new URL("https://github.com/login/oauth/authorize");
+      for (const [key, value] of Object.entries({ client_id: input.clientId, redirect_uri: redirectUri, scope: GITHUB_SCOPES, state, code_challenge: challenge(nonce), code_challenge_method: "S256", allow_signup: "true" })) url.searchParams.set(key, value);
+      return url.toString();
+    },
+    async complete({ code, nonce, redirectUri }) {
+      const secret = await input.clientSecret();
+      const token = await githubCall(input.fetch, "https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_id: input.clientId, client_secret: secret, code, redirect_uri: redirectUri, code_verifier: nonce }).toString(),
+      });
+      const grant = token.body as { access_token?: unknown; token_type?: unknown; error?: unknown } | null;
+      if (token.status !== 200 || grant === null || typeof grant !== "object") return refused("no token");
+      if (typeof grant.access_token !== "string" || grant.access_token === "" || grant.access_token.length > 4096 || typeof grant.token_type !== "string" || grant.token_type.toLowerCase() !== "bearer") {
+        return refused(errorCode(grant.error));
+      }
+      const headers = { accept: "application/vnd.github+json", authorization: `Bearer ${grant.access_token}`, "user-agent": "Rovara-sign-in", "x-github-api-version": "2022-11-28" };
+      const user = await githubCall(input.fetch, `${GITHUB_API}/user`, { headers });
+      const profile = user.body as { id?: unknown; login?: unknown; name?: unknown } | null;
+      if (user.status !== 200 || profile === null || typeof profile !== "object" || typeof profile.id !== "number" || !Number.isSafeInteger(profile.id) || profile.id <= 0 || profile.id > GITHUB_ID_MAX
+        || typeof profile.login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(profile.login)) {
+        return { ok: false, reason: "GitHub's answer names no GitHub user; run agentx login again" };
+      }
+      // A failed or unreadable email list is no email (never a guess): the person can still sign in, and join only with an invite secret.
+      const emails = await githubCall(input.fetch, `${GITHUB_API}/user/emails?per_page=${GITHUB_EMAILS_MAX}`, { headers });
+      const rows = emails.status === 200 && Array.isArray(emails.body) ? emails.body.slice(0, GITHUB_EMAILS_MAX) : [];
+      const chosen = rows.filter((row): row is { email: string } => typeof row === "object" && row !== null && (row as { primary?: unknown }).primary === true
+        && (row as { verified?: unknown }).verified === true && typeof (row as { email?: unknown }).email === "string");
+      const email = chosen.length === 1 && chosen[0]!.email.length <= 320 && /^[^\s@]+@[^\s@]+$/.test(chosen[0]!.email) ? chosen[0]!.email : undefined;
+      const subject = String(profile.id);
+      return {
+        ok: true,
+        identity: {
+          method: "github", issuer: GITHUB_ISSUER, subject,
+          displayName: (typeof profile.name === "string" ? cleanDisplayName(profile.name) : undefined) ?? cleanDisplayName(profile.login) ?? profile.login,
+          ...(email === undefined ? {} : { email }),
         },
       };
     },

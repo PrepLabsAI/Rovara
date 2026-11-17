@@ -1,4 +1,5 @@
 import { App, Stack } from "aws-cdk-lib";
+import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { Template } from "aws-cdk-lib/assertions";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -262,8 +263,10 @@ describe("the named TEST proof-only installation gate", () => {
           RouteKey: "GET /v1/internal/project-setups/{setupExecutionId}/execution",
         },
       });
-      expect(parentRemainderDigest(template), `${label} parent remainder with the route`).toBe(withRoute);
-      const priorRemainder = structuredClone(template);
+      // DEC 254h: GitHub sign-in's named-environment additions are asserted and taken out (tests/support/github-signin-template.ts); legacy has none.
+      const pinned = label === "legacy" ? template : withoutGithubSignIn(structuredClone(template), label === "named" ? "agentxlivetest123" : "staging");
+      expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
+      const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
       expect(parentRemainderDigest(priorRemainder), `${label} parent remainder with only the approved route removed`).toBe(withoutRoute);
     }

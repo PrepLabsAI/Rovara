@@ -57,3 +57,20 @@ export const COMPANY_SELF_CREATE_TEXT = {
   /** 400. */
   badName: "Give your company a name of 1 to 80 characters.",
 } as const;
+
+/**
+ * DEC 254h: an invite link's single-use secret. The broker makes one with each company pre-approval and answers it ONCE; only its SHA-256 is
+ * stored (in the company's own partition, bound to that pre-approval). Sign-in spends it, whatever the sign-in method, in the one transaction
+ * that writes the membership. A fixed prefix, so a leaked one is recognisable.
+ */
+export const COMPANY_INVITE_LINK_PREFIX = "rvlink_";
+/** The longest `invite=` value sign-in reads; a longer one is refused before anything is stored. */
+export const COMPANY_INVITE_LINK_MAX = 256;
+/** A new link secret (24 random bytes: 192 bits, URL-safe) and its hash. Only the caller that made it ever holds the secret. */
+export function newCompanyInviteLink(): { secret: string; secretHash: string } {
+  const secret = `${COMPANY_INVITE_LINK_PREFIX}${randomBytes(CODE_BYTES).toString("base64url")}`;
+  return { secret, secretHash: companyInviteCodeHash(secret) };
+}
+/** `POST /v1/dev/company/preapprovals`'s answer: the link secret, shown once, and when it (and its pre-approval) ends. */
+export const CompanyPreapprovalCreatedSchema = z.object({ ok: z.literal(true), invite: z.object({ secret: z.string().startsWith(COMPANY_INVITE_LINK_PREFIX), expiresAt: z.iso.datetime() }).strict() }).strict();
+export type CompanyPreapprovalCreated = z.infer<typeof CompanyPreapprovalCreatedSchema>;
