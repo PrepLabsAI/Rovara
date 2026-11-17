@@ -3,8 +3,15 @@ import { createBrokerCoreServices } from "./core-job-services.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
+import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
+import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
+import { slackInstallThroughLambda } from "./slack-install-identity.js";
+import type { SlackChannelWiring } from "./slack-channel-link.js";
+import { handleSlackRovara, isSlackRovaraEvent, SlackRovaraEventSchema, slackSignInUrlOf } from "./slack-rovara-command.js";
+import { isSlackWorkspaceRemovedEvent, SlackWorkspaceRemovedEventSchema } from "./slack-workspace-removal.js";
 import { refuseBrowserEvidenceOnCloud } from "./browser-evidence-seam.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
@@ -284,7 +291,9 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
+import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
+import { linearCompanyWiring } from "./linear-wiring.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -323,6 +332,7 @@ import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type Com
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
+import { installEngineModel } from "../core-host/company-engine-model.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -349,7 +359,7 @@ import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntri
 import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
-import { ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace } from "./engine-boundary.js";
+import { ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace } from "./engine-boundary.js"; import { coreAdminStop, type CoreStopOutcome } from "./core-stop-entry.js"; import { coreStopButton, coreThreadStop } from "./slack-core-stop.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
@@ -384,7 +394,7 @@ import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEve
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { companyInvitesThroughLambda, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
-import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
+import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js"; import { signInLinksThroughLambda } from "./sign-in-link-routes.js";
 import { companyImportThroughLambda } from "./company-import-forwarding.js";
 import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
@@ -402,7 +412,7 @@ import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
-import { SessionManager } from "./sessions.js";
+import { SessionManager } from "./sessions.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; // one line: no line of broker.ts moves (the company inventory pins its sites by line)
 import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
 import { workflowRunEndedReason } from "./outbox-failure.js";
 import { blockStoppedWorkflowRun, stopBlocksWorkflowStep, workflowStepStage } from "./workflow-cancel-reconcile.js";
@@ -579,8 +589,16 @@ interface CodeBuildRecord {
 interface AwsBrokerDependencies {
   workspaces?: SlackWorkspaceAccess;
   companies?: CompanyMembershipReader;
+  /** L2-2 PR 18c: the membership reader Slack company mode brings (slack-company-wiring.ts); given only to the company handler, never to the install team's legacy handler. */
+  slackCompanies?: CompanyMembershipReader;
   /** Install workspace for the additive operator backfill; independent of sign-in being enabled. */
   slackWorkspaceLegacyTeamId?: string;
+  /** Guided onboarding PR 4: Add to Slack's wiring (named environments with the company layer); absent, a Slack removal event is refused. */
+  slackInstall?: SlackInstallWiring;
+  /** Guided onboarding PR 5: channel links and /rovara (named environments with the company layer); absent, /rovara answers "not set up". */
+  slackChannels?: SlackChannelWiring;
+  /** Guided onboarding PR 5: where /rovara's "Sign in to Rovara first" links to; only an https address is used. */
+  slackSignInUrl?: string;
   documentClient: DynamoDBDocumentClient;
   s3: S3Client;
   /** Starts deleting an ec2-ebs workspace's instance and volume (#84). */
@@ -611,6 +629,8 @@ interface AwsBrokerDependencies {
     page(page: number): Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }>;
   };
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
+  /** Guided onboarding PR 7: the Linear OAuth app's webhooks (linear-app-webhook.ts). Absent: the route answers 404. */
+  linearWebhook?: LinearWebhookWiring;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
   descriptionUpdateMaxMs?: number;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
@@ -631,6 +651,11 @@ interface AwsBrokerDependencies {
     /** The repositories the GitHub App can reach, for GET /v1/dev/client/repositories. */
     repositories(): Promise<ClientRepositoriesResponse["installations"]>;
     workerBinding(): Promise<Ec2RuntimeBinding>;
+    /**
+     * Guided onboarding PR 6: which installation serves a repository and whether it is suspended, read from GitHub now (no cache). Every create
+     * checks it against the company's bindings; absent while bindings are on, the multi-repository and bulk creates refuse every repository.
+     */
+    repositoryInstallation?(url: string): Promise<LiveRepositoryInstallation>;
   };
   /**
    * Lanes AU and EV: the company audit and event reads for a company administrator (`/v1/dev/client/company/*`): the company's document store, the host's company
@@ -992,6 +1017,14 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
+  // L2-2 PR 18b (slack-company-split.ts): without `workspaces` (Slack company mode off) this is today's handler, unchanged. With it, SLACK_TEAM_ID's team and every request
+  // naming no team get a handler built without `workspaces` (today's legacy path); every other team gets the company path.
+  const company = dependencies.workspaces === undefined ? undefined
+    : brokerEventHandler(core, { ...dependencies, ...(dependencies.companies === undefined && dependencies.slackCompanies !== undefined ? { companies: dependencies.slackCompanies } : {}) });
+  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : withoutSlackCompanyMode(dependencies, dependencies.slackWorkspaceLegacyTeamId ?? "")), company, dependencies.slackWorkspaceLegacyTeamId);
+}
+
+function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
@@ -1010,6 +1043,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json({ error: "core_event_failed" }, "core-engine", 500);
       }
     }
+    // L2-2 PR 18c: the Slack Lambda (no State write, #126) asks for an unlinked person's link notice; only the company handler has `workspaces`, so the install's team is refused.
+    if (dependencies.workspaces !== undefined && isSlackLinkNoticeEvent(event)) return json(await answerSlackLinkNotice(dependencies, event), "slack-link-notice");
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (dependencies.workspaces !== undefined) return json({ error: { code: "FORBIDDEN", message: SLACK_WEB_SIGNIN_NOTICE } }, "slack-ingress", 403);
@@ -1030,6 +1065,26 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         await workspaces.bind(parsed.data.companyId, parsed.data.teamId, parsed.data.by);
         return json({ outcome: "bound" }, "slack-workspace");
       } catch { return json({ outcome: "refused" }, "slack-workspace", 404); }
+    }
+    // Guided onboarding PR 4: the Slack ingress's verified app_uninstalled / tokens_revoked. IAM protects the direct invoke; the company comes from the team's binding.
+    if (isSlackWorkspaceRemovedEvent(event)) {
+      const parsed = SlackWorkspaceRemovedEventSchema.safeParse(event);
+      if (!parsed.success || dependencies.slackInstall === undefined) return json({ outcome: "refused" }, "slack-workspace", 404);
+      try { return json(await handleSlackWorkspaceRemoved({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, wiring: dependencies.slackInstall }, parsed.data), "slack-workspace"); }
+      catch { return json({ outcome: "failed" }, "slack-workspace", 500); }
+    }
+    // Guided onboarding PR 5: a /rovara command or press from the Slack Lambda, after Slack's signature check there. IAM protects the direct invoke; company and person come
+    // from the team's binding and the person's own sign-in, never from the event.
+    if (isSlackRovaraEvent(event)) {
+      const parsed = SlackRovaraEventSchema.safeParse(event);
+      if (!parsed.success) return json({ error: "invalid_request" }, "slack-rovara", 400);
+      const signInTableName = dependencies.developer?.signInTableName;
+      const context = dependencies.slackChannels === undefined || signInTableName === undefined ? undefined : {
+        documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName, now: Date.now, wiring: dependencies.slackChannels,
+        ...(dependencies.slackWorkspaceLegacyTeamId === undefined ? {} : { installTeamId: dependencies.slackWorkspaceLegacyTeamId }),
+        ...(slackSignInUrlOf(dependencies.slackSignInUrl) === undefined ? {} : { signInUrl: slackSignInUrlOf(dependencies.slackSignInUrl)! }),
+      };
+      return json(await handleSlackRovara(context, parsed.data), "slack-rovara");
     }
     if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-claim") {
       try {
@@ -1219,6 +1274,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
       // Lane L12: the same for the core's /v1/app/* route: what it carries goes to the core's routes or nowhere.
       if (event.routeKey === CORE_APP_ROUTE_KEY && !url.pathname.startsWith("/v1/app/")) throw agentXError("NOT_FOUND", "route not found");
+      // Guided onboarding PR 7: the Linear app's webhooks verify their own signature (HMAC of the raw body under the app's signing secret); no sign-in.
+      if (url.pathname === LINEAR_WEBHOOK_PATH) {
+        if (request.method !== "POST" || dependencies.linearWebhook === undefined) return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
+        return linearWebhookResponse(await handleLinearAppWebhook(dependencies.linearWebhook, { rawBody: request.body, headers: request.headers }), request.requestId);
+      }
       if (url.pathname === "/v1/github/webhooks") {
         if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
         if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
@@ -1236,7 +1296,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         try {
           const secret = await readWebhookSecret(false);
           if (secret === undefined) return notConfigured();
-          const deliver = (webhookSecret: string) => handleGithubWebhook({
+          // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
+          const deliver = (webhookSecret: string) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
+            ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
+            : handleGithubWebhook({
             documentClient: dependencies.documentClient,
             tableName: dependencies.tableName,
             rawBody: request.body ?? "",
@@ -2123,7 +2186,8 @@ async function checkCompanyRepository(dependencies: AwsBrokerDependencies, compa
     if (companyId === undefined || dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
     const installationId = await budget.read(() => dependencies.githubPullRequests.installationIdFor!(url));
     await dependencies.githubBindings.withBudget(budget).requireBound(companyId, installationId);
-  } catch {
+  } catch (error) {
+    if (isGithubDisconnected(error)) throw githubDisconnectedRefusal();
     throw agentXError("CONFIG_INVALID", `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`);
   }
 }
@@ -2158,7 +2222,7 @@ async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   value: unknown,
-  checked?: { preflight?: PreflightOutcome; githubCompany?: { companyId: string | undefined; budget: ReturnType<typeof boundedCompanyReads> } },
+  checked?: { preflight?: PreflightOutcome; githubCompany?: { companyId: string | undefined; budget: ReturnType<typeof boundedCompanyReads> }; nameClaim?: { name: string } },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
@@ -2250,7 +2314,7 @@ async function registerProject(
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
   await judgeAuthority((await readCatalogSnapshot()).newestRevision);
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight, { companyId, budget: companyBudget });
-  const now = new Date().toISOString();
+  const now = new Date().toISOString(); const nameClaimWrites = checked?.nameClaim === undefined ? [] : companyNameClaimWrites(dependencies.tableName, { companyId, name: checked.nameClaim.name, projectId: definition.name, revision: definition.revision, by: identity.ownerKey, at: now }); // L2-1: in the same transaction
   const record: RegisteredProjectRecord = {
     ...key,
     entityType: "PROJECT",
@@ -2341,7 +2405,7 @@ async function registerProject(
       } }] : []),
       ...(setupAdmissionRows?.transactionItems ?? []),
       ...accounts.items,
-      ...corePlan.writes,
+      ...corePlan.writes, ...nameClaimWrites,
       ] }));
       if (authority === "takeover") {
         ownershipTakenOver = true;
@@ -5954,9 +6018,9 @@ async function cancelWorkspaceTask(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   workspaceId: string,
-): Promise<TaskCancellation> {
-  const workspace = await requireWorkspace(dependencies, workspaceId);
-  await requireAdministrator(dependencies, identity, workspace.projectName);
+): Promise<TaskCancellation | CoreStopOutcome> {
+  const core = await coreAdminStop(dependencies, dependencies.developer?.coreTasks, identity, workspaceId, (project) => requireAdministrator(dependencies, identity, project)); if (core !== undefined) return core; // S2: a core task's workspace: the core's stop (core-stop-entry.ts)
+  const workspace = await requireWorkspace(dependencies, workspaceId); await requireAdministrator(dependencies, identity, workspace.projectName);
   return cancelRunningTask(dependencies, workspace, {});
 }
 
@@ -6587,7 +6651,7 @@ async function sendSlackWorkflowBack(dependencies: AwsBrokerDependencies, tasks:
  * closed", heard nothing more.
  */
 async function closeSlackWorkflowTask(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowCloseEvent) {
-  const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task");
+  const core = dependencies.developer === undefined ? undefined : await coreStopButton(dependencies, dependencies.developer.coreTasks, event, async () => { const thread = SlackThreadSchema.parse(event.thread); if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks"); return await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId)); }); if (core !== undefined) return core; const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task"); // S2: the Stop button on a core task first (core-stop-entry.ts)
   let closeRequestId = requestId;
   if (event.stop === true) {
     // The close a Stop leads to carries the first press's request ID, so every later press (or the post-result hook) is the same close.
@@ -6862,10 +6926,10 @@ export function isSlackStopTaskEvent(event: unknown): event is SlackStopTaskEven
   return value.source === "agentx.slack-ingress" && value.action === "stop-task" && value.requestContext === undefined;
 }
 
-async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation | { outcome: "NOT_OWNER" }> {
+async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation | CoreStopOutcome | { outcome: "NOT_OWNER" }> {
   const thread = SlackThreadSchema.parse(event.thread);
   const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: event.userId });
-  await companySlackCaller(dependencies, thread, requester.userId);
+  const caller = await companySlackCaller(dependencies, thread, requester.userId);
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   // Spec 043 FR-005: a thread running a SWE-bench run stops the run.
@@ -6876,7 +6940,7 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
   // Q8: in a continue thread a teammate's stop cancels the task's running task operation, whoever
   // started it, as the developer's own cancel would. A view-only or closed thread, or one whose
   // channel now serves another project (F16), stops nothing.
-  const shared = await sharedThread(dependencies, thread);
+  const shared = await sharedThread(dependencies, thread); const core = await coreThreadStop(dependencies, dependencies.developer?.coreTasks, shared, binding, async () => caller); if (core !== undefined) return core; // S2: a thread whose task the core owns: the core's own authorized stop as this Slack person
   // A task started in Slack is driven from its own thread, and only its owner stops it there.
   if (shared?.workflowThread === true) {
     if (shared.closedAt !== undefined || binding.projectName !== shared.project) return { outcome: "NOTHING_RUNNING" };
@@ -14489,12 +14553,58 @@ function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: 
 /** What a chat agent is told about a project a sign-in client created; the project's administrators refine it later. */
 const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
 
-/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. */
-function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "clientRepositories" | "companyReads"> {
+/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. Guided onboarding PR 6: or from several, or one per repository. */
+function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyProjectCreator" | "companyReads"> {
   const clientProjects = dependencies.clientProjects;
   if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
+  const rules = { ...(dependencies.githubBindings === undefined ? {} : { bindings: dependencies.githubBindings }),
+    ...(clientProjects.repositoryInstallation === undefined ? {} : { live: (url: string) => clientProjects.repositoryInstallation!(url) }) };
+  const projectExists = async (name: string) => ((await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] }).Items ?? []).length > 0; const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
+  /**
+   * Guided onboarding PR 6: one project from `repositories`, for `companyId` (the caller's, from membership). Every repository is checked against the
+   * company's bindings with GitHub's live answer before any token is made for any of them; one that fails refuses the whole create, in one fixed answer.
+   */
+  const createFromRepositories = async (developerId: string, companyId: string | undefined, repositories: readonly string[], options: { name?: string; setupCommands?: string[]; testCommands?: string[] }, commitBy: number, naming?: ClientProjectNaming) => {
+    const urls = repositories.map((repository) => `https://github.com/${repository}.git`);
+    const budget = boundedCompanyReads(dependencies.documentClient);
+    if (!await onCompanyInstallations(rules, companyId, urls, budget)) throw notAvailable();
+    let found: Array<{ name: string; defaultBranch: string }>;
+    try {
+      found = await eachLimited(urls, LOOKUP_CONCURRENCY, (url) => companyId === undefined ? clientProjects.repositoryDefaults(url) : budget.read(() => clientProjects.repositoryDefaults(url)));
+    } catch (error) {
+      throw (error as { code?: unknown }).code === "NOT_FOUND" ? notAvailable() : unavailable();
+    }
+    const repositoryNames = uniqueRepositoryNames(found.map((entry) => entry.name));
+    const name = options.name ?? repositoryNames[0]!; const nameOwner = names.owner(naming, companyId);
+    if (await names.taken(nameOwner, name)) throw nameTaken(name); const id = await names.idFor(nameOwner, name);
+    const cwd = `repo/${repositoryNames[0]!}`;
+    // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted. They run in the first repository.
+    const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
+    const definition = ProjectDefinitionSchema.parse({
+      name: id, revision: 1,
+      repositories: urls.map((url, index) => ({ name: repositoryNames[index]!, url, path: `repo/${repositoryNames[index]!}`, defaultBranch: found[index]!.defaultBranch, credentialRef: clientProjects.credentialRef })),
+      setup: (options.setupCommands ?? []).map(command), readiness: (options.testCommands ?? []).map(command),
+      orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
+    });
+    const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
+    const runtimeBinding = await clientProjects.workerBinding();
+    // One wall-clock limit for the whole request: too late to register safely before the gateway gives up, so nothing is written.
+    if (Date.now() > commitBy) throw unavailable();
+    try {
+      // Registration checks every repository's binding once more (its own budget), in the transaction's company.
+      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) }, ...names.claim(nameOwner, name) });
+    } catch (error) {
+      if (await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable();
+      if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
+      throw error;
+    }
+    return { name: id, latestRevision: 1 };
+  };
   return {
-    ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }),
+    ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }), ...companyProjectCreatorOf(dependencies.githubBindings !== undefined, dependencies.companies),
     async clientRepositories(developerId) {
       if (dependencies.githubBindings === undefined) return clientProjects.repositories();
       const budget = boundedCompanyReads(dependencies.documentClient);
@@ -14504,32 +14614,64 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
         return await filterInstallationsFor(companyId!, listed, dependencies.githubBindings, budget);
       } catch { throw githubBindingRefusal(); }
     },
-    async createClientProject(developerId, input) {
+    async clientRepositoryChoices(developerId, query) {
+      const budget = boundedCompanyReads(dependencies.documentClient);
+      const companyId = await githubCallerCompany(dependencies, developerId, budget);
+      let installations: ClientRepositoriesResponse["installations"];
+      if (dependencies.githubBindings === undefined) installations = await clientProjects.repositories();
+      else {
+        try {
+          installations = await filterInstallationsFor(companyId!, await budget.read(() => clientProjects.repositories()), dependencies.githubBindings, budget);
+        } catch { throw githubBindingRefusal(); }
+      }
+      let marks: Map<string, string[]>;
+      try { marks = await projectsByRepository(dependencies.documentClient, dependencies.tableName, companyId, boundedCompanyReads(dependencies.documentClient)); }
+      catch { throw agentXError("RUNTIME_UNAVAILABLE", REPOSITORY_CHOICES_UNAVAILABLE); }
+      return repositoryChoices(installations, marks, query);
+    },
+    async createClientProject(developerId, input, naming) {
       const url = `https://github.com/${input.repository}.git`;
       const budget = boundedCompanyReads(dependencies.documentClient);
       const companyId = await githubCallerCompany(dependencies, developerId, budget);
       await checkCompanyRepository(dependencies, companyId, url, budget);
+      // Guided onboarding PR 6: where the live lookup is wired, a suspended installation is refused too, in the same words.
+      if (rules.live !== undefined && !await onCompanyInstallations(rules, companyId, [url], budget)) {
+        const repository = parseGitHubRepository(url);
+        throw agentXError("CONFIG_INVALID", `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`);
+      }
       const found = companyId === undefined ? await clientProjects.repositoryDefaults(url) : await budget.read(() => clientProjects.repositoryDefaults(url));
-      const repositoryName = found.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/^([^a-z])/, "r-$1").slice(0, 63) || "repository";
-      const name = input.name ?? repositoryName;
-      const existing = await dependencies.documentClient.send(new QueryCommand({
-        TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-        ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
-      })) as { Items?: unknown[] };
-      if ((existing.Items ?? []).length > 0) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
+      const repositoryName = projectRepositoryName(found.name);
+      const name = input.name ?? repositoryName; const nameOwner = names.owner(naming, companyId);
+      if (await names.taken(nameOwner, name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`); const id = await names.idFor(nameOwner, name);
       const cwd = `repo/${repositoryName}`;
       // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
       const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
       const definition = ProjectDefinitionSchema.parse({
-        name, revision: 1,
+        name: id, revision: 1,
         repositories: [{ name: repositoryName, url, path: cwd, defaultBranch: found.defaultBranch, credentialRef: clientProjects.credentialRef }],
         setup: (input.setupCommands ?? []).map(command), readiness: (input.testCommands ?? []).map(command),
         orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
       });
       // As the person: their developer ID owns the project, so they administer it and it is listed for them.
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
-      await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget } });
-      return { name, latestRevision: 1 };
+      try { await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget }, ...names.claim(nameOwner, name) }); } catch (error) { if (nameOwner !== undefined && await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable(); throw error; } // L2-1
+      return { name: id, latestRevision: 1 };
+    },
+    async createClientProjects(developerId, input, naming) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
+      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient));
+      return createFromRepositories(developerId, companyId, input.repositories, {
+        ...(input.name === undefined ? {} : { name: input.name }), ...(input.setupCommands === undefined ? {} : { setupCommands: input.setupCommands }),
+        ...(input.testCommands === undefined ? {} : { testCommands: input.testCommands }),
+      }, commitBy, naming);
+    },
+    async createClientProjectsBulk(developerId, input, naming) {
+      const commitBy = Date.now() + COMMIT_DEADLINE_MS;
+      const companyId = await githubCallerCompany(dependencies, developerId, boundedCompanyReads(dependencies.documentClient)); names.owner(naming, companyId);
+      return bulkCreate(input.repositories, {
+        now: Date.now, nameOf: (repository) => projectRepositoryName(repository.split("/")[1]!),
+        create: async (repository) => (await createFromRepositories(developerId, companyId, [repository], {}, commitBy, naming)).name,
+      });
     },
   };
 }
@@ -14537,9 +14679,15 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
 function slackCallerRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "workspaces" | "companies"> {
   return { ...(dependencies.workspaces === undefined ? {} : { workspaces: dependencies.workspaces }), ...(dependencies.companies === undefined ? {} : { companies: dependencies.companies }) };
 }
-function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes" | "workspaces" | "companies"> {
-  if (dependencies.workspaces !== undefined) return { ...slackCallerRouteDependencies(dependencies), channelLinkCodes: createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }) };
+export function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes" | "workspaces" | "companies"> {
   const channelAdapters = dependencies.channelAdapters;
+  if (dependencies.workspaces !== undefined) {
+    // L2-2 PR 18b: the company's Slack codes, then the install's adapter codes as before (the link page is served only by the company handler when company mode is on).
+    const install = channelAdapters === undefined ? undefined : { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now };
+    return { ...slackCallerRouteDependencies(dependencies), channelLinkCodes: companyThenInstallLinkCodes(
+      createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }),
+      install === undefined ? undefined : installAdapterLinkCodes(install)) };
+  }
   return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
 }
 
@@ -15067,7 +15215,18 @@ async function requireGithubProjectBinding(dependencies: AwsBrokerDependencies, 
     const companyId = OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw);
     if (dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
     await dependencies.githubBindings.requireBound(companyId, await dependencies.githubPullRequests.installationIdFor(repositoryUrl));
-  } catch { throw githubBindingRefusal(); }
+  } catch (error) {
+    // Guided onboarding PR 3: the company's own uninstalled or suspended GitHub says so, in one fixed sentence.
+    if (isGithubDisconnected(error) || await githubDisconnectedFor(dependencies, project, repositoryUrl)) throw githubDisconnectedRefusal();
+    throw githubBindingRefusal();
+  }
+}
+
+async function githubDisconnectedFor(dependencies: AwsBrokerDependencies, project: RegisteredProjectRecord, repositoryUrl: string): Promise<boolean> {
+  try {
+    const raw = (project as RegisteredProjectRecord & { companyId?: unknown }).companyId;
+    return await dependencies.githubBindings!.disconnectedFor(OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw), parseGitHubRepository(repositoryUrl).owner);
+  } catch { return false; }
 }
 
 async function exchangeRepositoryCredential(
@@ -15292,16 +15451,25 @@ const ec2Sessions = new SessionManager({
   },
 });
 const github = createGitHubAppCredentials(secretsManager);
+/** Guided onboarding PR 4: Add to Slack (slack-company-install.ts), with the company layer only. Slack's side (the app's client secret, the code exchange, the token store's
+ * writer) runs in DeveloperIdentity (slack-install-identity.ts), which this broker already invokes; the broker never reads the Slack app secret. */
+const slackInstallSlack = process.env.COMPANY_SIGNIN !== "enabled" || !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined
+  : slackInstallThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: process.env.DEVELOPER_IDENTITY_FUNCTION_ARN, Payload: payload })));
+const slackInstallWiring: SlackInstallWiring | undefined = slackInstallSlack === undefined ? undefined : { slack: slackInstallSlack, log: brokerLogLine };
+/** Guided onboarding PR 5: channel links (slack-channel-link.ts) and /rovara (slack-rovara-command.ts), through the same sign-in Lambda calls (the company's own token stays there). */
+const slackChannelWiring: SlackChannelWiring | undefined = slackInstallSlack === undefined ? undefined : { slack: slackInstallSlack, log: brokerLogLine };
 const githubCredentials = github.provider;
-const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
-  .update("agentx:repository-grants:v3")
-  .digest();
-const repositoryGrants = new RepositoryGrantService(
-  repositoryGrantSigningKey,
-  (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
-);
-
 const lambdaClient = new LambdaClient(awsClientConfiguration);
+// Guided onboarding PR 7: Linear by OAuth as the app, only where infra gives the token key (CHATGPT_CONNECTION_KEY_ARN); the app's settings come from its connector secret.
+/** Batch 12: the core root buildBrokerHandler made (#872 builds it on the first request); Linear's intake asks it at delivery time. */
+let builtCoreRoot: ReturnType<typeof createBrokerCoreRoot> | undefined;
+const linear = linearCompanyWiring({ env: process.env, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), kms: new KMSClient(awsClientConfiguration), secrets: secretsManager,
+  connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine,
+  // L2-4: each company's tracker intake from the core root (built below; asked only at delivery time).
+  // Batch 12 (#872 builds the core root on the first request, after the callback key is read): the root built then; no delivery reaches this before it.
+  intakeFor: async (companyId) => await builtCoreRoot?.intake?.intakeFor(companyId) });
+// Guided onboarding PR 14 (DEC 254n item 1): the company engine model route's read of the gateway's live list for one company; set only where the gateway's origin is.
+const companyEngineModelOffered = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
 function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
   return createDeveloperApiConfiguration(process.env, (issuer, functionName) => ({
@@ -15321,7 +15489,18 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       companySelfCreate: companySelfCreateThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       companyInvites: companyInvitesThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
-      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }) } : {}),
+      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
+      // Guided onboarding PR 1: GitHub connect (github-connect-routes.ts), through the same App secret's client (slug, OAuth client) and the State table's bindings.
+      githubConnect: { bindings: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")), github: new GitHubAppClient(github.clientOptions), log: brokerLogLine },
+      // Guided onboarding PR 4: Add to Slack (slack-company-install.ts).
+      ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
+      ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
+      // Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts), where the token key is given.
+      ...(linear === undefined ? {} : { linearConnect: linear.connect }),
+      // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
+      ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine } }),
+      // DEC 254w: connected sign-ins, through the same sign-in Lambda (it owns the sign-in table).
+      signInLinks: signInLinksThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // DEC 254b (b): the operator's company import runs BEFORE COMPANY_SIGNIN is switched on, so it is wired with the company layer on or off.
     companyImport: companyImportThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -15352,41 +15531,6 @@ const signIn = developerConfiguration();
 const linkingOnly = process.env.DEVELOPER_API_SCOPE === "linking";
 const linking = linkingOnly ? signIn : undefined;
 
-// Lane E2 step 6: the core engine's root. With ROVARA_CORE_ENGINE off (the default) it builds nothing and the developer routes get no core entry, so the broker is as before.
-const coreRoot = createBrokerCoreRoot({
-  env: process.env,
-  documentClient,
-  stateTableName: requiredEnvironment("STATE_TABLE_NAME"),
-  signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME,
-  callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
-  repositoryGrantKey: repositoryGrantSigningKey,
-  repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
-  checkTaskPerson: async (task, developerId, admission) => {
-    if (signIn === undefined) throw new Error("task person proof is unavailable");
-    const deps = developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
-      { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null);
-    return await deps.checkTaskPerson!(task, developerId, admission);
-  },
-  // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
-  codeModules: (core) => brokerCoreModuleDeps(process.env, {
-    dynamo: dynamoClient,
-    objects: { bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), client: s3 },
-    secrets: { namePrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, clientFor: () => secretsManager },
-    workerMachines: () => brokerCoreWorkerMachines({ sessions: ec2Sessions, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
-    codeHost: () => brokerCoreCodeHost({
-      credentials: github.clientOptions,
-      requireInstallationBound: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")).requireBound,
-      storage: core.storage,
-      log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
-    }),
-  }),
-  services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode! }),
-  policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
-  origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
-  log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
-});
-// Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
-const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
 
 // DEC 254g: the gateway's offered models for an administrator's config set; set only where the gateway's origin is.
 const offeredModelsKms = new KMSClient(awsClientConfiguration);
@@ -15405,123 +15549,202 @@ const chatgpt = chatGptKeyArn === undefined || chatGptKeyArn === "" ? undefined 
 const cloudWatch = new CloudWatchClient(awsClientConfiguration);
 const sqs = new SQSClient(awsClientConfiguration);
 
-export const handler = createAwsBrokerHandler({
-  core: coreRoot,
-  ...(coreOfferedModels === undefined ? {} : { coreOfferedModels }),
-  ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
-  documentClient,
-  s3,
-  tableName: requiredEnvironment("STATE_TABLE_NAME"),
-  artifactBucketName: requiredEnvironment("ARTIFACT_BUCKET_NAME"),
-  issuer: requiredEnvironment("OIDC_ISSUER"),
-  adminClaim: process.env.ADMIN_CLAIM ?? "cognito:groups",
-  adminValues: JSON.parse(process.env.ADMIN_VALUES ?? "[\"agentx-admin\"]") as string[],
-  callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
-  repositoryGrants,
-  githubPullRequests: githubCredentials,
-  // Spec 065b: where the foundation's worker settings are given, a sign-in client may create projects.
-  githubBindingInstallations: { get: id => githubCredentials.bindingInstallation(id), page: page => githubCredentials.bindingInstallations(page) },
-  ...(process.env.EC2_WORKER_SUBNETS && process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID ? { clientProjects: {
-    credentialRef: githubCredentials.credentialRef,
-    repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
-    repositories: () => githubCredentials.installedRepositories(),
-    workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
-  } } : {}),
-  projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
-  ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
-    ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }
-    : {}),
-  ...(process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID
-    ? { e2eFeatureRuntimeCatalogId: process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID }
-    : {}),
-  githubWebhookSecret: github.webhookSecret,
-  checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
-  githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
-  connectorCredentials: {
-    secrets: secretsManagerSource(secretsManager, process.env.CONNECTOR_SECRET_PREFIX),
-    githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: github.privateKeySecretArn },
-    ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
-  },
-  codeBuild,
-  // Spec 061: set only where the PlanEvidence function exists (infra/lib/control-plane.ts).
-  ...(process.env.PLAN_SELF_CHECK_ENABLED === "false" ? { planSelfCheck: false } : {}),
-  autofix: autofixConfigFromEnvironment(process.env),
-  ...(process.env.PLAN_EVIDENCE_FUNCTION_NAME
-    ? { startPlanEvidenceJob: async (event: PlanEvidenceEvent) => {
-        const response = await lambdaClient.send(new InvokeCommand({ FunctionName: process.env.PLAN_EVIDENCE_FUNCTION_NAME, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(event)) }));
-        if (response.StatusCode !== 202) throw new Error(`plan evidence start answered ${String(response.StatusCode)}`);
-      } }
-    : {}),
-  ...(developer ? { developer } : {}),
-  ...(linking ? { linking } : {}),
-  ...(companyReads ? { companyReads } : {}),
-  ...(chatgpt ? { chatgpt } : {}),
-  // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
-  ...(process.env.CHANNEL_ADAPTERS === "enabled"
-    ? { channelAdapters: {
-        secretPrefix: requiredEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX"),
-        secrets: secretsManagerAdapterSecrets(secretsManager),
-      } }
-    : {}),
-  // M1.4 Task 4.2: the installation's worker model settings (SSM, ids and ARNs only), read per request. Absent until a guarded deploy sets the prefix and grants the read, so the
-  // AI navigation route cannot be derived and agent steps stay unavailable (`agent-route-not-approved`).
-  ...(process.env.AGENTX_E2E_AGENT_SETTINGS_PREFIX
-    ? { e2eAgentInstallation: () => e2eAgentInstallationFromParameters(requiredEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX"), async (names) => {
-        const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
-        return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
-      }, process.env.AWS_REGION, { readShape: (modelId) => readE2EModelRouteShape({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, E2E_DEFAULT_MODEL_ROUTE_ID, modelId) }) }
-    : {}),
-  // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
-  adminReads: {
-    me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) },
-    health: healthProbes({
-      cloudWatch,
-      sqs,
-      release: process.env.AGENTX_RELEASE_VERSION,
-      alarmPrefix: process.env.AGENTX_ALARM_PREFIX,
-      deadLetterQueues: process.env.HEALTH_DEAD_LETTER_QUEUES,
-      slackAuthCheck: developer?.slackAuthCheck,
-      github: githubCredentials,
-      log: brokerLogLine,
+// L2-2 PR 18c: Slack company mode (both switches on, slack-company-wiring.ts); off, nothing is added and the broker is today's.
+const slackCompany = slackCompanyDependenciesFromEnvironment(process.env, { documentClient, dynamo: dynamoClient, secrets: secretsManager,
+  ...(process.env.DEVELOPER_TOKEN_ISSUER ? { linkOrigin: process.env.DEVELOPER_TOKEN_ISSUER } : {}) });
+
+/**
+ * The broker's handler, built on the first request, once the callback signing key has been read from Secrets Manager (callback-signing-key.ts): the control plane gives this function
+ * the secret's ARN, never the key. A failed read builds nothing and is tried again on the next request.
+ */
+function buildBrokerHandler(callbackSigningKey: string) {
+  const repositoryGrantSigningKey = createHmac("sha256", callbackSigningKey)
+    .update("agentx:repository-grants:v3")
+    .digest();
+  const repositoryGrants = new RepositoryGrantService(
+    repositoryGrantSigningKey,
+    (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
+  );
+  // Lane E2 step 6: the core engine's root. With ROVARA_CORE_ENGINE off (the default) it builds nothing and the developer routes get no core entry, so the broker is as before.
+  const coreRoot = createBrokerCoreRoot({
+    env: process.env,
+    documentClient,
+    stateTableName: requiredEnvironment("STATE_TABLE_NAME"),
+    signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME,
+    callbackSigningKey,
+    repositoryGrantKey: repositoryGrantSigningKey,
+    repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
+    checkTaskPerson: async (task, developerId, admission) => {
+      if (signIn === undefined) throw new Error("task person proof is unavailable");
+      const deps = developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+        { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null);
+      return await deps.checkTaskPerson!(task, developerId, admission);
+    },
+    // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
+    codeModules: (core) => brokerCoreModuleDeps(process.env, {
+      dynamo: dynamoClient,
+      objects: { bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), client: s3 },
+      secrets: { namePrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, clientFor: () => secretsManager },
+      workerMachines: () => brokerCoreWorkerMachines({ sessions: ec2Sessions, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
+      codeHost: () => brokerCoreCodeHost({
+        credentials: github.clientOptions,
+        ...((bindings) => ({ requireInstallationBound: bindings.requireBound, disconnectedFor: (orgId: string, owner: string) => bindings.disconnectedFor(orgId, owner) }))(new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME"))),
+        storage: core.storage,
+        log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
+      }),
     }),
-  },
-  ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
-  ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
-  ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
-    ? {
-        slack: {
-          orchestratorRoleArn: process.env.SLACK_ORCHESTRATOR_ROLE_ARN,
-          memberWorkspaceLimit: positiveInteger(
-            Number(process.env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"),
-            "SLACK_MEMBER_WORKSPACE_LIMIT",
-          ),
-          organizationWorkspaceLimit: positiveInteger(
-            Number(process.env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20"),
-            "SLACK_ORGANIZATION_WORKSPACE_LIMIT",
-          ),
-        },
-      }
-    : {}),
-  async deleteEc2Session(workspaceId) {
-    await ec2Sessions.deleteSession(workspaceId);
-  },
-  // Spec 043: read per request, so installing the eval stack or a new runner image needs no broker release.
-  ...(process.env.SWEBENCH_SETTINGS_PREFIX
-    ? {
-        swebench: {
-          deployment: () => swebenchDeploymentFromParameters(requiredEnvironment("SWEBENCH_SETTINGS_PREFIX"), async (names) => {
-            const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
-            return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
-          }),
-          async startExecution(input) {
-            const response = await stepFunctions.send(new StartExecutionCommand(input));
-            // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
-            return { executionArn: response.executionArn };
+    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode! }),
+    policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
+    origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
+    log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
+    // L2-4: the tracker intake and ticket write-back over the company's own Linear connection, where Linear is wired.
+    ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections } }),
+  });
+  builtCoreRoot = coreRoot;
+  // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
+  const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
+  return createAwsBrokerHandler({
+    core: coreRoot,
+    ...(coreOfferedModels === undefined ? {} : { coreOfferedModels }),
+    ...(slackCompany === undefined ? {} : { workspaces: slackCompany.workspaces, ...(slackCompany.companies === undefined ? {} : { slackCompanies: slackCompany.companies }) }),
+    ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
+    ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
+    ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
+    ...(process.env.ROVARA_SIGNIN_URL === undefined ? {} : { slackSignInUrl: process.env.ROVARA_SIGNIN_URL }),
+    documentClient,
+    s3,
+    tableName: requiredEnvironment("STATE_TABLE_NAME"),
+    artifactBucketName: requiredEnvironment("ARTIFACT_BUCKET_NAME"),
+    issuer: requiredEnvironment("OIDC_ISSUER"),
+    adminClaim: process.env.ADMIN_CLAIM ?? "cognito:groups",
+    adminValues: JSON.parse(process.env.ADMIN_VALUES ?? "[\"agentx-admin\"]") as string[],
+    callbackSigningKey,
+    repositoryGrants,
+    githubPullRequests: githubCredentials,
+    // Spec 065b: where the foundation's worker settings are given, a sign-in client may create projects.
+    githubBindingInstallations: { get: id => githubCredentials.bindingInstallation(id), page: page => githubCredentials.bindingInstallations(page) },
+    ...(process.env.EC2_WORKER_SUBNETS && process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID ? { clientProjects: {
+      credentialRef: githubCredentials.credentialRef,
+      repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
+      repositories: () => githubCredentials.installedRepositories(),
+      repositoryInstallation: (url: string) => githubCredentials.repositoryInstallation(url),
+      workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
+    } } : {}),
+    projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
+    ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
+      ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }
+      : {}),
+    ...(process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID
+      ? { e2eFeatureRuntimeCatalogId: process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID }
+      : {}),
+    githubWebhookSecret: github.webhookSecret,
+    ...(linear === undefined ? {} : { linearWebhook: linear.webhook }),
+    checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
+    githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
+    connectorCredentials: {
+      secrets: secretsManagerSource(secretsManager, process.env.CONNECTOR_SECRET_PREFIX),
+      githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: github.privateKeySecretArn },
+      ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
+    },
+    codeBuild,
+    // Spec 061: set only where the PlanEvidence function exists (infra/lib/control-plane.ts).
+    ...(process.env.PLAN_SELF_CHECK_ENABLED === "false" ? { planSelfCheck: false } : {}),
+    autofix: autofixConfigFromEnvironment(process.env),
+    ...(process.env.PLAN_EVIDENCE_FUNCTION_NAME
+      ? { startPlanEvidenceJob: async (event: PlanEvidenceEvent) => {
+          const response = await lambdaClient.send(new InvokeCommand({ FunctionName: process.env.PLAN_EVIDENCE_FUNCTION_NAME, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(event)) }));
+          if (response.StatusCode !== 202) throw new Error(`plan evidence start answered ${String(response.StatusCode)}`);
+        } }
+      : {}),
+    ...(developer ? { developer } : {}),
+    ...(linking ? { linking } : {}),
+    ...(companyReads ? { companyReads } : {}),
+    ...(chatgpt ? { chatgpt } : {}),
+    // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
+    ...(process.env.CHANNEL_ADAPTERS === "enabled"
+      ? { channelAdapters: {
+          secretPrefix: requiredEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX"),
+          secrets: secretsManagerAdapterSecrets(secretsManager),
+        } }
+      : {}),
+    // M1.4 Task 4.2: the installation's worker model settings (SSM, ids and ARNs only), read per request. Absent until a guarded deploy sets the prefix and grants the read, so the
+    // AI navigation route cannot be derived and agent steps stay unavailable (`agent-route-not-approved`).
+    ...(process.env.AGENTX_E2E_AGENT_SETTINGS_PREFIX
+      ? { e2eAgentInstallation: () => e2eAgentInstallationFromParameters(requiredEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX"), async (names) => {
+          const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
+          return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
+        }, process.env.AWS_REGION, { readShape: (modelId) => readE2EModelRouteShape({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, E2E_DEFAULT_MODEL_ROUTE_ID, modelId) }) }
+      : {}),
+    // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
+    adminReads: {
+      me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) },
+      health: healthProbes({
+        cloudWatch,
+        sqs,
+        release: process.env.AGENTX_RELEASE_VERSION,
+        alarmPrefix: process.env.AGENTX_ALARM_PREFIX,
+        deadLetterQueues: process.env.HEALTH_DEAD_LETTER_QUEUES,
+        slackAuthCheck: developer?.slackAuthCheck,
+        github: githubCredentials,
+        log: brokerLogLine,
+      }),
+    },
+    ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
+    ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
+    ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
+      ? {
+          slack: {
+            orchestratorRoleArn: process.env.SLACK_ORCHESTRATOR_ROLE_ARN,
+            memberWorkspaceLimit: positiveInteger(
+              Number(process.env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"),
+              "SLACK_MEMBER_WORKSPACE_LIMIT",
+            ),
+            organizationWorkspaceLimit: positiveInteger(
+              Number(process.env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20"),
+              "SLACK_ORGANIZATION_WORKSPACE_LIMIT",
+            ),
           },
-        },
-      }
-    : {}),
-});
+        }
+      : {}),
+    async deleteEc2Session(workspaceId) {
+      await ec2Sessions.deleteSession(workspaceId);
+    },
+    // Spec 043: read per request, so installing the eval stack or a new runner image needs no broker release.
+    ...(process.env.SWEBENCH_SETTINGS_PREFIX
+      ? {
+          swebench: {
+            deployment: () => swebenchDeploymentFromParameters(requiredEnvironment("SWEBENCH_SETTINGS_PREFIX"), async (names) => {
+              const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
+              return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
+            }),
+            async startExecution(input) {
+              const response = await stepFunctions.send(new StartExecutionCommand(input));
+              // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
+              return { executionArn: response.executionArn };
+            },
+          },
+        }
+      : {}),
+  });
+}
+
+type BrokerHandler = ReturnType<typeof createAwsBrokerHandler>;
+let brokerHandler: Promise<BrokerHandler> | undefined;
+export const handler: BrokerHandler = async (event, context) => {
+  brokerHandler ??= loadCallbackSigningKey(process.env, secretsManager).then(buildBrokerHandler).catch((error: unknown) => {
+    // Not kept: the next request reads the secret again. Nothing is served meanwhile, so a missing key never signs.
+    brokerHandler = undefined;
+    throw error;
+  });
+  return (await brokerHandler)(event, context);
+};
 
 /** One broker log line writer; company-scoped events wrap it with companyLog so the helper owns companyId. */
 function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.stringify({ component: "broker", ...entry })); }
+
+/** Guided onboarding L2-1: the client create's dependencies, so tests can call it with per-company naming before any route does (PR 19 wires the route). */
+export function clientProjectDependenciesForTests(input: AwsBrokerInput): ReturnType<typeof clientProjectRouteDependencies> {
+  const brokerInput: Omit<AwsBrokerInput, "core"> = { ...input };
+  delete (brokerInput as AwsBrokerInput).core;
+  return clientProjectRouteDependencies(brokerDependencies(brokerInput));
+}

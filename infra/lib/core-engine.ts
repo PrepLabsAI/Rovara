@@ -182,10 +182,10 @@ export class CoreEngine extends Construct {
    *     there whatever the switch says. Exactly this queue, never send and never the dead letters. The dispatcher's role is not the broker's (which is at IAM's size limit);
    *   - only while the switch is not off (a policy of its own under `CoreEngineIsOn`): the deleter's start (the core ends a machine it started for a workspace that closed meanwhile).
    *     No ec2:TerminateInstances: the core's dispatch never stops a machine, and a stop claimed elsewhere is finished by the idle reaper;
-   *   - the switch, the queue's names and the workers' placement (subnets, launch template) as plain variables, and the callback signing key only while the switch is not off (an empty value otherwise), so an off dispatcher holds no
-   *     key it does not use.
+   *   - the switch, the queue's names and the workers' placement (subnets, launch template) as plain variables, and the callback signing key's secret name only while the switch is not off (an empty value otherwise, and no grant to read it), so an off dispatcher can read no
+   *     key it does not use. The key is never an environment value.
    */
-  connectDispatcher(dispatcher: lambda.Function, props: { deleterArn: string; callbackSigningKey: string; workerSubnets: string; workerLaunchTemplateId: string }): lambda.CfnEventSourceMapping {
+  connectDispatcher(dispatcher: lambda.Function, props: { deleterArn: string; callbackSigningKeySecret: { secretName: string; secretArn: string }; workerSubnets: string; workerLaunchTemplateId: string }): lambda.CfnEventSourceMapping {
     dispatcher.addEnvironment(CORE_DISPATCH_QUEUE_ARN_VARIABLE, this.queue.queueArn);
     dispatcher.addEnvironment(CORE_DISPATCH_QUEUE_URL_VARIABLE, this.queue.queueUrl);
     dispatcher.addEnvironment(CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, this.deadLetters.queueUrl);
@@ -193,11 +193,15 @@ export class CoreEngine extends Construct {
     // Where a core workspace's worker runs: the install's own workers, as the broker places a sign-in client's project (never a binding a company writes).
     dispatcher.addEnvironment("EC2_WORKER_SUBNETS", props.workerSubnets);
     dispatcher.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", props.workerLaunchTemplateId);
-    dispatcher.addEnvironment("CALLBACK_SIGNING_KEY", Token.asString(Fn.conditionIf(this.isOn.logicalId, props.callbackSigningKey, "")));
+    dispatcher.addEnvironment("CALLBACK_SIGNING_KEY_SECRET_ID", Token.asString(Fn.conditionIf(this.isOn.logicalId, props.callbackSigningKeySecret.secretName, "")));
     dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: "ConsumeCoreDispatchQueue", actions: [...CORE_DISPATCHER_QUEUE_ACTIONS], resources: [this.queue.queueArn] }));
     const corePolicy = new iam.Policy(this, "DispatcherCorePolicy", {
       roles: [dispatcher.role!],
-      statements: [new iam.PolicyStatement({ sid: "CoreStartSessionDeleter", actions: ["states:StartExecution"], resources: [props.deleterArn] })],
+      statements: [
+        new iam.PolicyStatement({ sid: "CoreStartSessionDeleter", actions: ["states:StartExecution"], resources: [props.deleterArn] }),
+        // The callback signing key, by name, exactly that secret, and only while the switch is not off (with the ARN itself).
+        new iam.PolicyStatement({ sid: "ReadCallbackSigningKey", actions: ["secretsmanager:GetSecretValue"], resources: [props.callbackSigningKeySecret.secretArn] }),
+      ],
     });
     (corePolicy.node.defaultChild as iam.CfnPolicy).cfnOptions.condition = this.isOn;
     const mapping = new lambda.CfnEventSourceMapping(this, "DispatcherMapping", {

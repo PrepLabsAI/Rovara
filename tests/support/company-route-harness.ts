@@ -5,14 +5,24 @@ import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 
 export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects",
-  "GET /v1/dev/client/repositories", "POST /v1/dev/client/projects",
+  "GET /v1/dev/client/repositories", "POST /v1/dev/client/projects", "POST /v1/dev/client/projects/bulk", "GET /v1/dev/client/repositories/available",
   "GET /v1/dev/client/projects/{id}", "POST /v1/dev/access",
   "GET /v1/dev/tasks/{taskId}/events", "GET /v1/dev/tasks/{taskId}/readers",
   "GET /v1/dev/tasks/{taskId}/messages", "GET /v1/dev/tasks/{taskId}/comments", "GET /v1/dev/tasks/{taskId}/diff",
   "GET /v1/admin/sign-in-clients", "POST /v1/dev/company/preapprovals", "DELETE /v1/dev/company/preapprovals/", "DELETE /v1/dev/company/preapprovals/{id}",
   "GET /v1/dev/projects/{id}/settings", "PUT /v1/dev/projects/{id}/settings", "GET /v1/dev/company/settings-compliance",
   "GET /v1/dev/company/members", "GET /v1/dev/company/members/{id}/removal-preview", "POST /v1/dev/company/members/{id}/removal", "PUT /v1/dev/company/members/{id}/role",
+  "POST /v1/dev/company/github/connect", "POST /v1/dev/company/github/claim", "POST /v1/dev/company/github/choose", "GET /v1/dev/company/github", "DELETE /v1/dev/company/github/{id}",
+  "POST /v1/dev/company/slack/install", "POST /v1/dev/company/slack/install/complete", "POST /v1/dev/company/slack/disconnect", "GET /v1/dev/company/slack",
+  "GET /v1/dev/company/slack/channels", "GET /v1/dev/company/slack/projects/{id}/channel", "PUT /v1/dev/company/slack/projects/{id}/channel", "DELETE /v1/dev/company/slack/projects/{id}/channel",
+  "POST /v1/dev/company/slack/projects/{id}/channel/check",
+  "GET /v1/dev/company/linear", "POST /v1/dev/company/linear/connect", "POST /v1/dev/company/linear/complete", "DELETE /v1/dev/company/linear",
+  "GET /v1/dev/company/linear/projects/{id}", "PUT /v1/dev/company/linear/projects/{id}", "DELETE /v1/dev/company/linear/projects/{id}",
+  "GET /v1/dev/company/engine-model", "PUT /v1/dev/company/engine-model",
   "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
+  "GET /v1/dev/client/projects/{id}/setup-status", "PUT /v1/dev/client/projects/{id}/setup-status/skips", "PUT /v1/dev/client/projects/{id}/setup-status/eval-none",
+  // Guided onboarding PR 16: two-company cases in tests/contract/project-lifecycle-routes.test.ts.
+  "GET /v1/dev/client/projects/{id}/archive-preview", "POST /v1/dev/client/projects/{id}/archive", "GET /v1/dev/client/projects/{id}/restore-preview", "POST /v1/dev/client/projects/{id}/restore",
 ] as const;
 export const PERSON = "d".repeat(64);
 export const TASK = "11111111-1111-4111-8111-111111111111";

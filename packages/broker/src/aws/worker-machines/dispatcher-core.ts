@@ -37,6 +37,7 @@ import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
 import type { MoneyStop } from "../../core/task-flow/money-stop.js";
 import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
+import { companyEngineModelRoute } from "../../core-host/company-engine-model.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
 import { createDispatcherLearned, type DispatcherLessonsOptions } from "./dispatcher-lessons.js";
 
@@ -188,6 +189,8 @@ export interface DispatcherMachineOps {
 
 export interface DispatcherCoreInputs {
   env: NodeJS.ProcessEnv;
+  /** The callback signing key, read from Secrets Manager by the dispatcher (aws/callback-signing-key.ts); never part of `env`. Blank: the host is not configured. */
+  callbackSigningKey: string;
   /** The State table, as the dispatcher's document client reads it (whose a workspace is, its binding). */
   documentClient: Parameters<typeof workspaceCompanyReader>[0];
   /** The AWS clients the core's adapters speak (made by the dispatcher only when the core is first needed). */
@@ -218,7 +221,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
   const queueUrl = required(env[CORE_DISPATCH_QUEUE_URL_VARIABLE]);
   const deadLetterUrl = required(env[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE]);
   const tableName = required(env.STATE_TABLE_NAME);
-  const callbackSigningKey = required(env.CALLBACK_SIGNING_KEY);
+  const callbackSigningKey = required(inputs.callbackSigningKey);
   const bucket = required(env.ARTIFACT_BUCKET_NAME);
   const subnets = required(env.EC2_WORKER_SUBNETS);
   const launchTemplateId = required(env.EC2_WORKER_LAUNCH_TEMPLATE_ID);
@@ -262,7 +265,9 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       const flow = typeof inputs.flow === "function" ? inputs.flow(registry, companyId) : inputs.flow;
       // Declared means present AND `null` (an explicit none) or a value: a key that is there with `undefined` in it is not a declaration.
       if (flow === undefined || flow === null || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name) || flow[name] === undefined)) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
-      const { standingInstructions, modelAccess, learned } = flow;
+      const { standingInstructions, learned } = flow;
+      // DEC 254n (1): each step's route is the company's own engine model when it set one, else the install's (the same answer as before); an unreadable setting dispatches nothing.
+      const modelAccess = flow.modelAccess === null || flow.modelAccess === undefined ? flow.modelAccess : companyEngineModelRoute({ store: registry.require("storage"), companyId, install: flow.modelAccess });
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),

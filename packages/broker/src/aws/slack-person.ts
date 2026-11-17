@@ -125,11 +125,21 @@ export interface SlackWorkspaceAccess extends SlackWorkspaceDelivery {
   store: DocumentStore;
   getProject(name: string): Promise<unknown>;
   linkUrl(code: string): string;
+  /** L2-2 PR 18c: a consumer without State writes (the Slack Lambda, #126) asks the broker for the notice; the broker runs slackLinkNotice with its own store. */
+  linkNotice?(teamId: string, userId: string): Promise<string | undefined>;
 }
 export interface SlackCompanyDependencies {
   workspaces?: SlackWorkspaceAccess;
   companies?: CompanyMembershipReader;
   now?: () => number;
+  /**
+   * L2-2 PR 18b: set only on the install team's legacy view while Slack company mode is on (slack-company-split.ts). A channel binding of any other team is then "not bound"
+   * there, so a request that reaches the legacy handler naming another team (by a path or body the split does not read) can neither read nor write it. Absent (the switch
+   * off), today's rule.
+   */
+  slackInstallTeamOnly?: string;
+  /** L2-2 PR 18c: told after the broker accepted a verified removal (#836), to drop this process's cached token. */
+  onWorkspaceRemoved?: (teamId: string) => void;
 }
 
 export const SLACK_LINK_NOTICE = "link your account: Open in Rovara";
@@ -142,7 +152,7 @@ export async function slackCompanyPerson(deps: SlackCompanyDependencies, teamId:
 }
 
 export async function slackCompanyProject(deps: SlackCompanyDependencies, teamId: string, name: string): Promise<boolean> {
-  if (deps.workspaces === undefined) return true;
+  if (deps.workspaces === undefined) return deps.slackInstallTeamOnly === undefined || teamId === deps.slackInstallTeamOnly;
   try {
     const company = await deps.workspaces.requireCompany(teamId);
     return OrgIdSchema.safeParse(company).success && recordInCompany(await deps.workspaces.getProject(name), company);
@@ -160,6 +170,7 @@ export async function slackCompanyToken(deps: SlackCompanyDependencies, legacy: 
 /** A bounded, company-scoped notice claim. No EVENT, queue, counter or task is written. */
 export async function slackLinkNotice(deps: SlackCompanyDependencies, teamId: string, userId: string): Promise<string | undefined> {
   if (deps.workspaces === undefined || !slackWorkspaceTeam(teamId) || !SlackUserIdSchema.safeParse(userId).success) throw new SlackWorkspaceRefused();
+  if (deps.workspaces.linkNotice !== undefined) return deps.workspaces.linkNotice(teamId, userId);
   const now = deps.now ?? Date.now;
   const started = now();
   const company = await deps.workspaces.requireCompany(teamId);

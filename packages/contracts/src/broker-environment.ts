@@ -34,6 +34,41 @@ export const BROKER_SETTINGS_VARIABLE = "AGENTX_SETTINGS";
 export const BROKER_ACCOUNT_VARIABLE = "AGENTX_ACCOUNT_ID";
 
 /**
+ * ENV-ROOM 2 (broker 4 KB, owner decision 2026-11-17): a named environment's AGENTX_NAMES is not in the function's environment at all. The control plane writes it to one SSM
+ * String parameter (BROKER_NAMES_PARAMETER_VARIABLE names it; brokerNamesParameterName says which it must be) and gives the function the revision of what it wrote
+ * (BROKER_NAMES_REVISION_VARIABLE). The parameter's value is `v1:<revision>:<the AGENTX_NAMES list>` (encodeBrokerNamesParameterPrefix, decodeBrokerNamesParameter).
+ * The broker's handler (packages/broker/src/aws/broker-handler.ts) reads it before any broker module loads and refuses to start unless both revisions are the same, so a
+ * function and a parameter from different deploys never run together. Only CloudFormation-generated names go there: they change only when the template replaces a resource,
+ * and a name CloudFormation generates is never reused, so a stale one fails rather than pointing somewhere else. The settings (stack parameters an operator changes with
+ * `agentx config set`) stay in AGENTX_SETTINGS: a change to them changes the function, so every running broker restarts with it. No secret is in the parameter.
+ */
+export const BROKER_NAMES_PARAMETER_VARIABLE = "AGENTX_NAMES_PARAMETER";
+export const BROKER_NAMES_REVISION_VARIABLE = "AGENTX_NAMES_REVISION";
+/** A revision: the sha256, in lowercase hex, of what the control plane writes (infra/lib/broker-names.ts). */
+export const BROKER_NAMES_REVISION = /^[0-9a-f]{64}$/u;
+/** The parameter a named environment's broker names are kept in. */
+export function brokerNamesParameterName(env: string): string {
+  return `${environmentSettingsPrefix(env)}broker-names`;
+}
+/** A Standard-tier String parameter's limit, which the parameter's worst case is held under (tests/contract/broker-names-parameter-infrastructure.test.ts). */
+export const BROKER_NAMES_PARAMETER_MAX_BYTES = 4096;
+const BROKER_NAMES_PARAMETER_FORMAT = "v1";
+
+/** What the control plane writes before the list: the format and the revision. */
+export function encodeBrokerNamesParameterPrefix(revision: string): string {
+  if (!BROKER_NAMES_REVISION.test(revision)) throw new Error("a broker names revision is 64 lowercase hex digits");
+  return `${BROKER_NAMES_PARAMETER_FORMAT}:${revision}:`;
+}
+
+/** The parameter's value, read: the revision it was written for and the AGENTX_NAMES list. Anything else is an error in fixed words, never a partial read. */
+export function decodeBrokerNamesParameter(raw: string): { revision: string; list: string } | { error: string } {
+  if (new TextEncoder().encode(raw).length > BROKER_NAMES_PARAMETER_MAX_BYTES) return { error: "is longer than a parameter can be" };
+  const match = /^v1:([0-9a-f]{64}):([^\n]*)$/u.exec(raw);
+  if (match === null) return { error: "is not in the v1 format" };
+  return { revision: match[1]!, list: match[2]! };
+}
+
+/**
  * How AGENTX_NAMES and AGENTX_SETTINGS are written: `code=value` pairs joined by commas (`ts=agentx-staging-table,ar=agentx-staging-bucket`). Lambda counts the JSON of the map, so a
  * quote inside a value costs two bytes; this form has none. The values hold no quote, comma, equals sign, brace, slash or space (the infrastructure refuses a parameter or a literal
  * that could), so nothing is escaped. Anything else is an error, never a partial read.
@@ -137,6 +172,9 @@ export const BROKER_SETTINGS = {
   signInSlack: { code: "ss", variable: "DEVELOPER_SIGNIN_SLACK" },
   signInSlackSince: { code: "sn", variable: "DEVELOPER_SIGNIN_SLACK_SINCE" },
   oidcSince: { code: "os", variable: "DEVELOPER_OIDC_SINCE" },
+  // DEC 254h: GitHub sign-in (Code's company layer only) and when it was last turned on.
+  signInGithub: { code: "gh", variable: "DEVELOPER_SIGNIN_GITHUB" },
+  githubSince: { code: "gs", variable: "DEVELOPER_GITHUB_SINCE" },
   mcpConfirmElicitation: { code: "mc", variable: "MCP_CONFIRM_ELICITATION" },
   coreAllowedCompanies: { code: "ac", variable: "ROVARA_CORE_ALLOWED_COMPANIES" },
   coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },
@@ -145,8 +183,12 @@ export const BROKER_SETTINGS = {
   // Core switch-on blocker (2026-11-17): the switch, and the model gateway's host and agent model (the stack parameters CoreEngine, CoreModelGatewayHost and CoreAgentModel), packed
   // to make room for the gateway settings in the broker's 4 KB.
   coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
+  /** DEC 254o (b), L2-2: Slack company mode for workspaces other than SLACK_TEAM_ID (stack parameter SlackCompanyWorkspaces; the broker also needs COMPANY_SIGNIN=enabled). */
+  slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES" },
   coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
   coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
+  // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
+  channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;
@@ -171,6 +213,9 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   { variable: "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", kind: "text", value: environmentE2eFeatureRuntimeCatalogId },
   // Core switch-on blocker (2026-11-17): the channel adapters' secret prefix is the environment's own, so it is derived, making room for the gateway settings.
   { variable: "CHANNEL_ADAPTER_SECRET_PREFIX", kind: "text", value: environmentChannelAdapterSecretPrefix },
+  // DEC 254h (room for GitHub sign-in): every named broker has the company reads on (infra/lib/developer-signin.ts, hosted wiring (d)); a named environment always deploys the
+  // tasks, so the value is the same for every name, and the broker sets it itself. The legacy install, which is never packed, is given none, as before.
+  { variable: "COMPANY_READS", kind: "text", value: () => "enabled" },
   // Core switch-on lane L1a: the core dispatch queue and its dead letters have fixed names (core-engine-infra.ts), so the broker builds their URLs; nothing is passed.
   { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName },
   { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName },

@@ -31,6 +31,7 @@ import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.
 import { createCoreHostApp, DispatchOnlyMergeTrackingError, DISPATCH_ONLY_MERGE_TRACKING_REFUSED } from "../../packages/broker/src/core-host/app.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { createFakeOfferedModels } from "../support/offered-models-fake.js";
+import { COMPANY_ENGINE_MODEL_UNREADABLE, companyEngineModelKey } from "../../packages/broker/src/core-host/company-engine-model.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
 import { FakeS3 } from "../support/ports/aws-fakes.js";
@@ -313,17 +314,18 @@ describe("the dispatcher's router", () => {
 describe("the core on the dispatcher", () => {
   const env = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => ({
     [CORE_ENGINE_VARIABLE]: `on:${COMPANY_A}`, CORE_DISPATCH_QUEUE_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch",
-    CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State", CALLBACK_SIGNING_KEY: "k".repeat(48),
+    CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State",
     ARTIFACT_BUCKET_NAME: "artifacts", AWS_REGION: "us-west-2", EC2_WORKER_SUBNETS: "us-west-2a=subnet-0aaaaaaaaaaaaaaaa", EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-0123456789abcdef0", ...overrides,
   });
-  const inputs = (environment: NodeJS.ProcessEnv) => {
+  // The callback signing key is an input (the dispatcher reads it from Secrets Manager), never part of the environment.
+  const inputs = (environment: NodeJS.ProcessEnv, callbackSigningKey = "k".repeat(48)) => {
     const world = createSessionMachinesWorld();
     let clock = Date.now();
     const log = vi.fn();
     return {
       world,
       inputs: {
-        env: environment, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
+        env: environment, callbackSigningKey, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
         machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined },
         changeVisibility: async () => undefined, log, now: () => new Date(clock),
       } as Parameters<typeof createDispatcherCoreHost>[0],
@@ -342,10 +344,13 @@ describe("the core on the dispatcher", () => {
   });
 
   it("refuses to build without the core queue's URLs, the State table, the callback signing key, the artifacts bucket or the workers' placement, in fixed words", () => {
-    for (const missing of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "STATE_TABLE_NAME", "CALLBACK_SIGNING_KEY", "ARTIFACT_BUCKET_NAME", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
+    for (const missing of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "STATE_TABLE_NAME", "ARTIFACT_BUCKET_NAME", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
       expect(() => createDispatcherCoreHost(inputs(env({ [missing]: undefined })).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
       expect(() => createDispatcherCoreHost(inputs(env({ [missing]: " " })).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
     }
+    // The key is an input, not an environment value: none (or a blank one) refuses, and a plain CALLBACK_SIGNING_KEY in the environment is not taken for it.
+    for (const key of ["", " "]) expect(() => createDispatcherCoreHost(inputs(env(), key).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
+    expect(() => createDispatcherCoreHost(inputs(env({ CALLBACK_SIGNING_KEY: "k".repeat(48) }), "").inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
     // A malformed placement refuses too, before anything runs (and its value is not echoed).
     const bad = (() => { try { createDispatcherCoreHost(inputs(env({ EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-secret-ish; rm" })).inputs); return undefined; } catch (error) { return error as Error; } })();
     expect(bad?.message).toBe(DISPATCHER_CORE_NOT_CONFIGURED);
@@ -382,7 +387,8 @@ describe("the core on the dispatcher", () => {
     const route = { route: async () => undefined };
     const { built, world } = withFlow({ standingInstructions: null, modelAccess: route, learned: null });
     const runtime = await built.app.runtimeFor(COMPANY_A);
-    expect(runtime.flow.deps.modelAccess).toBe(route);
+    // DEC 254n (1): the declared route, per company (a company with no engine model of its own gets exactly its answer).
+    expect(await runtime.flow.deps.modelAccess!.route()).toEqual(await route.route());
     expect(runtime.flow.deps.standingInstructions).toBeUndefined();
     expect(DISPATCHER_FLOW_DECLARATIONS).toEqual(["standingInstructions", "modelAccess", "learned"]);
     // The dispatcher is a dispatch-only root: no CI mode reader is handed in (it runs no merge tracking), and the honest-CI switch blocker does not refuse it.
@@ -406,7 +412,7 @@ describe("the core on the dispatcher", () => {
     // The dispatcher always consults stored state, and absence uses the configured default.
     const plain = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow }).app.runtimeFor(COMPANY_A);
     expect(await plain.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
-    expect(plain.flow.deps.modelAccess).toBe(route);
+    expect(await plain.flow.deps.modelAccess!.route()).toStrictEqual(await route.route());
     // REVIEW-2 F-1: on the default, a checking step is the same model as the work it checks when that work's model is unknown or the same; a non-checking step never is.
     expect(await plain.flow.deps.stepModels!.choose({ stage: "plan_check" })).toMatchObject({ ok: true, step: { sameModelAsChecked: true } });
     expect(await plain.flow.deps.stepModels!.choose({ stage: "code_review", reference: agentModelIdentity("claude-sonnet-5-5") })).toMatchObject({ ok: true, step: { sameModelAsChecked: true } });
@@ -422,7 +428,7 @@ describe("the core on the dispatcher", () => {
     const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow, env: { ...made.inputs.env, [CORE_ENGINE_VARIABLE]: "on", ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } });
     const a = await host.app.runtimeFor(COMPANY_A);
     const b = await host.app.runtimeFor(COMPANY_B);
-    expect(a.flow.deps.modelAccess).toBe(route);
+    expect(await a.flow.deps.modelAccess!.route()).toStrictEqual(await route.route());
     const registry = await host.app.registry();
     const choice = createAgentModelChoice({ store: registry.require("storage"), companyId: COMPANY_A, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), reader, defaultModel: async () => "claude-sonnet-5-5", now: () => made.inputs.now!().getTime() });
     await choice.service().state();
@@ -449,6 +455,27 @@ describe("the core on the dispatcher", () => {
     // A company's model rule with no validated choice (the broker's model choice off, or never published) is no stored choice: the default model, not a refusal.
     await state.update({ key: policyKey, ops: [change.remove("agentModelValidation")] });
     expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
+  });
+
+  it("DEC 254n (1): each step's route is the company's OWN engine model when it set one, else the install's; another company's setting never reaches it; an unreadable setting dispatches nothing", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
+    const route = { route: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" }) };
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { standingInstructions: null, modelAccess: route, learned: null } });
+    const a = await host.app.runtimeFor(COMPANY_A);
+    const b = await host.app.runtimeFor(COMPANY_B);
+    const state = (await host.app.registry()).require("storage");
+    await state.put({ item: { ...companyEngineModelKey(COMPANY_A), entityType: "COMPANY_ENGINE_MODEL", orgId: COMPANY_A, version: 1, model: "zai.glm-5", updatedAt: "2026-11-17T00:00:00.000Z", updatedBy: "d".repeat(64) } });
+    expect(await a.flow.deps.modelAccess!.route()).toStrictEqual({ alias: "zai.glm-5", api: "anthropic-messages", catalog: "zai.glm-5" });
+    // The stored-choice default (no validated choice) is the company's own model too.
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "zai.glm-5" } } });
+    // B never sees A's setting.
+    expect(await b.flow.deps.modelAccess!.route()).toStrictEqual(await route.route());
+    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-sonnet-5-5" } } });
+    // A row under A's key that names another company is unreadable: no route on a guess.
+    await state.put({ item: { ...companyEngineModelKey(COMPANY_A), entityType: "COMPANY_ENGINE_MODEL", orgId: COMPANY_B, version: 1, model: "zai.glm-5", updatedAt: "2026-11-17T00:00:00.000Z", updatedBy: "d".repeat(64) } });
+    await expect(a.flow.deps.modelAccess!.route()).rejects.toThrow(COMPANY_ENGINE_MODEL_UNREADABLE);
   });
 
   it("builds nothing until a core record arrives, and then refuses by name while the security-list points are owed: the record comes back, no machine is started", async () => {

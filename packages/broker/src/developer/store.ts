@@ -29,11 +29,13 @@ import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 /** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
 export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[]; companyId?: string;
   /** Lane ID part 2: the client asked for a step-up (`acr_values=step-up`). The sign-in at the provider then only says who it is; Code's own factor follows. */
-  stepUp?: true }
+  stepUp?: true;
+  /** DEC 254h: the SHA-256 of the invite link secret this sign-in carries (`invite=`, with `company=`). The secret itself is never stored. */
+  inviteHash?: string }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
-  email?: string; slackUserId?: string;
+  email?: string; slackUserId?: string; /** DEC 254w: a connected install-workspace Slack user (kept by every sign-in), and on a connected sign-in's own record the person it signs in as. */ linkedSlackUserId?: string; mergedInto?: string;
   /** DEC 254e: the Slack workspace (id, and its name when Slack gives one) of a Slack sign-in with Code's company layer on. Never a company. */
   slackTeamId?: string; slackTeamName?: string;
   firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
@@ -46,7 +48,7 @@ export interface DeveloperRecord { developerId: string; provider: DeveloperSignI
   factorEmailSetBy?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
+export interface SessionRecord { signedInId?: string; sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
 
 /**
  * What a code carries into its session. `stepUpAt` (epoch seconds) and `stepUpMethod` (lane ID part 2): when and how the person last proved it was them with a factor Code owns.
@@ -56,7 +58,7 @@ export interface SessionRecord { sessionId: string; developerId: string; amr: De
  * check refuses it once the company has its own issuer, and refuses an unmarked session for a company that has none.
  * DEC 254b (f): `joinedByInvite` is set only by the sign-in server, when this sign-in's own join consumed a live pre-approval for the session's company.
  */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
+export interface CodeGrant { /** DEC 254w: the identity that signed in when it is not `developerId` (seated as its person); each redeem and refresh walks it again. */ signedInId?: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string; installMethod?: true; joinedByInvite?: true }
 
 /**
  * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
@@ -144,7 +146,7 @@ export class DeveloperSignInStore {
   constructor(private readonly input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number }) {}
 
   private seconds(): number { return Math.floor(this.input.now() / 1000); }
-  private iso(): string { return new Date(this.input.now()).toISOString(); }
+  private iso(): string { return new Date(this.input.now()).toISOString(); } /** DEC 254w: the table and client, for the sign-in link transactions (sign-in-links.ts). */ table(): { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string } { return { documentClient: this.input.documentClient, tableName: this.input.tableName }; }
 
   private async get<T>(pk: string): Promise<(T & { pk: string; sk: string }) | undefined> {
     const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: { pk, sk: META }, ConsistentRead: true })) as { Item?: T & { pk: string; sk: string } };
@@ -317,7 +319,7 @@ export class DeveloperSignInStore {
    * `companyless` (DEC 253z): a sign-in with no company. Its record is marked, so it never reads as a legacy person's (who would join the built-in
    * company), and its email goes in no company's email index.
    */
-  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string, options: { companyless?: true } = {}): Promise<DeveloperRecord> {
+  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string, options: { companyless?: true; unmerged?: true } = {}): Promise<DeveloperRecord> {
     // One atomic update, not a read-then-overwrite: a concurrent revocation (or another sign-in)
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
@@ -363,14 +365,14 @@ export class DeveloperSignInStore {
       UpdateExpression: `SET ${[...setClauses, ...(withName ? ["displayName = :displayName"] : [])].join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
       // A name the person chose is theirs: the sign-in writes the provider's name only while they have not chosen one. The check is part of
       // the write, so a name chosen while this sign-in is in flight is not overwritten either (ported from an earlier private release).
-      ...(withName ? { ConditionExpression: "attribute_not_exists(displayNameChosen) OR displayNameChosen = :false" } : {}),
+      ...(withName ? { ConditionExpression: `(attribute_not_exists(displayNameChosen) OR displayNameChosen = :false)${options.unmerged === true ? " AND attribute_not_exists(mergedInto)" : ""}` } : options.unmerged === true ? { ConditionExpression: "attribute_not_exists(mergedInto)" } : {}), // DEC 254w (`unmerged`): a record connected to a person meanwhile is never written as a person of its own.
       ExpressionAttributeValues: { ...values, ...(withName ? { ":displayName": profile.displayName } : {}) },
     }));
     try {
       await update(true);
     } catch (error) {
       if (!conditionFailed(error)) throw error;
-      await update(false);
+      await update(false).catch((again: unknown) => { throw options.unmerged === true && conditionFailed(again) ? new Error("the sign-in was connected to a person meanwhile") : again; });
     }
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
@@ -464,7 +466,7 @@ export class DeveloperSignInStore {
     const record = await this.get<CodeRecord>(pk);
     if (record === undefined || record.redirectUri !== input.redirectUri || !pkceChallengeMatches(input.verifier, record.codeChallenge)) return undefined;
     return {
-      developerId: record.developerId, amr: record.amr,
+      developerId: record.developerId, amr: record.amr, ...(typeof record.signedInId === "string" ? { signedInId: record.signedInId } : {}),
       ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }),
       ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
       ...(record.administrator === true ? { administrator: true as const } : {}),

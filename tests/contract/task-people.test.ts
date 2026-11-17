@@ -248,9 +248,9 @@ const task = (overrides: Partial<DeveloperTaskRecord> = {}): DeveloperTaskRecord
   ...overrides,
 });
 
-const identity = (developerId: string, slackUserId: string, name: string, method: "slack" | "oidc" = "slack") => ({
+const identity = (developerId: string, slackUserId: string, name: string, method: "slack" | "oidc" | "github" = "slack") => ({
   developerId, slackUserId, name, method,
-  issuer: method === "slack" ? "https://slack.com" : "https://identity.example.test",
+  issuer: method === "slack" ? "https://slack.com" : method === "github" ? "https://github.com" : "https://identity.example.test",
   subject: method === "slack" ? slackUserId : `subject-${name}`,
 });
 
@@ -702,6 +702,22 @@ describe("task people", () => {
 
     expect(view.people).toEqual([expect.objectContaining({ personId: "44444444-4444-4444-8444-444444444444", role: "owner" })]);
     expect(h.db.find((item) => item.pk === `DEVTASK#${TASK_ID}` && String(item.sk).startsWith("PERSON#"))).toHaveLength(1);
+  });
+
+  // DEC 254n (2): a GitHub creator's registry row reads exactly as an OIDC creator's.
+  it.each(["oidc", "github"] as const)("reuses a verified %s creator registry and labels a same-Slack native person apart from it", async (method) => {
+    const creator = identity(A, SA, OWNER.name, method);
+    const h = harness({ enabled: true, creator, record: task({ provider: method }) });
+    h.seedPerson(A, "44444444-4444-4444-8444-444444444444", creator);
+    const view = await getTaskPeople(h.deps, OWNER, TASK_ID);
+    expect(view.people).toEqual([expect.objectContaining({ personId: "44444444-4444-4444-8444-444444444444", role: "owner" })]);
+
+    const external = identity(C, SB, MEMBER.name, method);
+    h.checks.set(C, { subject: { developerId: C, slackUserId: SB }, identity: external, eligible: true, channelMember: true });
+    h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    h.seedPerson(C, "33333333-3333-4333-8333-333333333333", external);
+    const names = (await getTaskPeople(h.deps, OWNER, TASK_ID)).people.map((person) => person.name).sort();
+    expect(names).toEqual([OWNER.name, `${MEMBER.name} (Slack identity)`, `${MEMBER.name} (${method === "github" ? "GitHub" : "OIDC"} identity)`].sort());
   });
 
   it("requires explicit enablement for initialization, and (C3) initializes an unshared task only for its proved creator", async () => {

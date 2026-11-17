@@ -299,8 +299,8 @@ default boundary to a company boundary, the old `agentx-<env>-boundary` policy m
 roles still use it while the switch is in progress, so CloudFormation cannot always remove it
 cleanly. Once every stack carries the new boundary, delete the leftover policy by hand.
 
-**Reinstalling an environment name.** The environment's Slack secret `agentx/<env>/slack` is kept
-when the control-plane stack is deleted. Reinstalling the same environment name needs that secret
+**Reinstalling an environment name.** The environment's Slack secret `agentx/<env>/slack` and its callback key
+secret `agentx/<env>/callback-key` are kept when the control-plane stack is deleted. Reinstalling the same environment name needs those secrets
 deleted first, with `--force-delete-without-recovery` if it is still in its recovery window;
 otherwise the new stack cannot create a secret of the same name.
 
@@ -538,11 +538,17 @@ It reads `init-answers.json`, asks only the rest, checks the access stack exists
 the bundle's permission boundary), records the `access` step as done, and goes on; it never deploys access
 (the operator role is denied change sets on it, and init refuses the `access` step under that role).
 
-**The callback signing key** lives only in Secrets Manager, at `agentx/<env>/callback-signing-key`, never in
-settings. The templates engine passes it to CloudFormation as a `NoEcho` parameter, never printed. The cdk
-engine can only pass it as a `cdk deploy --parameters` argument, so for that command's length it is visible
-in the operator's own machine's process list (the engines' one difference in secret handling); it stays
-redacted everywhere `agentx` itself prints anything, including the displayed command, any error, and the
+**The callback signing key** lives only in Secrets Manager, never in settings and never in a Lambda's
+environment. The CLI keeps its own copy at `agentx/<env>/callback-signing-key` and passes the value to the
+control-plane stack as the `NoEcho` `CallbackSigningKey` parameter, never printed. The stack makes a second secret
+from that parameter, `agentx/<env>/callback-key` (retained on a stack delete, like the Slack secret), and gives the broker, the eval batch tick, the
+sessions reconciler and (while the core switch is not off) the dispatcher only that secret's name, as
+`CALLBACK_SIGNING_KEY_SECRET_ID`. Each reads it with GetSecretValue on exactly that secret when it starts, keeps it in memory
+for the container's life, and refuses to serve or sign without it. An upgrade passes the parameter's previous value
+(`UsePreviousValue`), so the existing key carries into the new secret without anyone reading or printing it. The templates
+engine passes the parameter to CloudFormation, never printed. The cdk engine can only pass it as a `cdk deploy --parameters`
+argument, so for that command's length it is visible in the operator's own machine's process list (the engines' one difference in
+secret handling); it stays redacted everywhere `agentx` itself prints anything, including the displayed command, any error, and the
 streamed output.
 
 ### Tearing down an environment
@@ -564,7 +570,7 @@ foundation stack's delete. The export bundle's README lists the exact commands, 
 Stack deletion keeps, on purpose: the Cognito user pool (deletion protection), three
 S3 buckets (two versioned: empty every version and delete marker first), three DynamoDB tables, the VPC
 flow-log group, and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
-stacks: `agentx/<env>/callback-signing-key` (created by the CLI) and `agentx/<env>/slack`; delete both with
+stacks: `agentx/<env>/callback-signing-key` (created by the CLI), `agentx/<env>/callback-key` (retained by the control-plane stack) and `agentx/<env>/slack`; delete all three with
 `--force-delete-without-recovery` so a new install can reuse the names. An install made with `agentx init`
 also has the secrets init stored itself: `agentx/<env>/github-app`, `agentx/<env>/alert-endpoint` (a
 webhook alert address only) and `agentx/<env>/openrouter`, `agentx/<env>/anthropic` and

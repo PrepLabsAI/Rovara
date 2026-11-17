@@ -4,8 +4,8 @@ import { BUILT_IN_SIGN_IN_METHODS } from "./outside-account.js";
 
 /**
  * Web task channel C1 (plan 4.1, decisions D1, D2, D4): how a task person proves who they are, fixed when they are registered.
- * `slack`: a Slack sign-in, or an OIDC sign-in linked to a Slack account; proved fresh through Slack, exactly as before.
- * `web`: any other built-in sign-in (github, cloud, saml, or oidc with no Slack link). It carries no Slack account id.
+ * `slack`: a Slack sign-in, or an OIDC or GitHub sign-in linked to a Slack account; proved fresh through Slack, exactly as before.
+ * `web`: any other built-in sign-in (cloud, saml, or oidc or github with no Slack link). It carries no Slack account id.
  */
 export const TaskPersonIdentityKindSchema = z.enum(["slack", "web"]);
 export type TaskPersonIdentityKind = z.infer<typeof TaskPersonIdentityKindSchema>;
@@ -22,7 +22,7 @@ const isBuiltInMethod = (value: unknown): value is (typeof BUILT_IN_SIGN_IN_METH
 /**
  * The kind of a stored task person identity (a PERSON row, or an identity built from one), or undefined when it is malformed.
  * The chat account field is read by key presence, never guessed: present means `slack` and it must be a valid Slack user id
- * on a `slack` or `oidc` method; absent means `web` and the method must not be `slack`. Anything else is undefined, which
+ * on a `slack`, `oidc` or `github` method (DEC 254n 2: a GitHub sign-in linked to Slack is checked like an OIDC one); absent means `web` and the method must not be `slack`. Anything else is undefined, which
  * every caller treats as a fixed refusal, never as the other kind.
  */
 export function taskPersonIdentityKind(fields: Readonly<Record<string, unknown>>): TaskPersonIdentityKind | undefined {
@@ -30,7 +30,7 @@ export function taskPersonIdentityKind(fields: Readonly<Record<string, unknown>>
   if (!isBuiltInMethod(method)) return undefined;
   if (!Object.hasOwn(fields, CHAT_ACCOUNT_FIELD)) return method === "slack" ? undefined : "web";
   if (!SlackUserIdSchema.safeParse(fields[CHAT_ACCOUNT_FIELD]).success) return undefined;
-  return method === "slack" || method === "oidc" ? "slack" : undefined;
+  return method === "slack" || method === "oidc" || method === "github" ? "slack" : undefined;
 }
 
 /**

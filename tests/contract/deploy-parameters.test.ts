@@ -344,3 +344,11 @@ describe("deploy parameters", () => {
     expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPersonProofEnabled");
   });
 });
+
+describe("L2-2 18d: Slack company mode's slack-stack parameters", () => {
+  it("are always sent, off unless the control plane's switch outputs are present", () => {
+    expect(stackParameters("slack", answers(), outputs, { packages: true })).toMatchObject({ SlackCompanyWorkspacesState: "disabled", SlackCompanyStateTableName: "", SlackCompanyTeamId: "" });
+    const on = { ...outputs, "control-plane": { ...outputs["control-plane"], SlackCompanyWorkspacesState: "enabled", SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" } };
+    expect(stackParameters("slack", answers(), on, { packages: true })).toMatchObject({ SlackCompanyWorkspacesState: "enabled", SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" });
+  });
+});

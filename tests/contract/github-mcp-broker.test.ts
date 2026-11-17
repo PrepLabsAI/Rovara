@@ -8,7 +8,7 @@ describe("thread-authenticated GitHub MCP routes", () => {
   it("enforces owner, membership, revision policy and repository before discovery, and durably deduplicates writes", async () => {
     Object.assign(process.env, {
       AWS_REGION: "us-east-1", STATE_TABLE_NAME: "unused", ARTIFACT_BUCKET_NAME: "unused",
-      OIDC_ISSUER: "https://identity.example.test", CALLBACK_SIGNING_KEY: "c".repeat(64),
+      OIDC_ISSUER: "https://identity.example.test",
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:test",
       GITHUB_APP_CREDENTIAL_REF: "github-app", GITHUB_APP_ACCOUNT: "example", GITHUB_APP_ID: "123", GITHUB_APP_INSTALLATION_ID: "456",
     });
