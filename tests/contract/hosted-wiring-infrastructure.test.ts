@@ -39,7 +39,7 @@ function statementsOfRole(template: TemplateJson, rolePrefix: string): Statement
 }
 const envOf = (template: TemplateJson, functionPrefix: string) => {
   const [, fn] = ofType(template, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === functionPrefix)!;
-  return unpackedBrokerVariables((fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables, template as never);
+  return unpackedBrokerVariables((fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables, template);
 };
 const keyPolicy = (template: TemplateJson, prefix: string) => {
   const keys = ofType(template, "AWS::KMS::Key").filter(([id]) => id.startsWith(prefix));

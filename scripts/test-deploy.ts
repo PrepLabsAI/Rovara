@@ -273,6 +273,11 @@ interface LambdaSpec {
   logicalId: string;
   entry: string;
   extraFiles?: ReadonlyArray<ExtraFile>;
+  /**
+   * Modules the entry loads only at its first invocation, which loading the entry's bundle therefore never runs. The load check (scripts/lambda-load-check.ts) bundles and loads
+   * each as well, so an init-time crash in one is still caught before a deploy (ENV-ROOM 2: the broker's entry loads broker.ts only after it has read its names).
+   */
+  loadsLater?: readonly string[];
 }
 /**
  * Every control-plane stack Lambda built with `packagedFunction` (infra/lib), by its logical ID in the deployed template. They all
@@ -280,7 +285,7 @@ interface LambdaSpec {
  * installer's setup page is in another stack and is not here; a unit test keeps this list equal to the infra's entries.
  */
 export const CONTROL_PLANE_LAMBDAS = {
-  broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker-handler.ts" },
+  broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker-handler.ts", loadsLater: ["packages/broker/src/aws/broker.ts"] },
   dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/broker/src/aws/dispatcher.ts" },
   "plan-evidence": { logicalId: "PlanEvidence3615C4CB", entry: "packages/broker/src/aws/plan-evidence-handler.ts" },
   "outbox-publisher": { logicalId: "OutboxPublisherD572F72E", entry: "packages/broker/src/aws/outbox-publisher.ts" },
@@ -1435,11 +1440,19 @@ function assertRepositoryExists(context: ApplyContext, repository: string): void
 }
 
 /** Builds the repo, then bundles and loads each Lambda `units` moves (scripts/lambda-load-check.ts); throws, changing nothing, if one does not load. */
+/** What the load check bundles and loads for these Lambdas: each entry, and each module it loads only later (`<unit>:<module file>`). */
+export function lambdaLoadEntries(units: readonly LambdaUnit[]): Array<{ name: string; entry: string }> {
+  return units.flatMap((unit) => {
+    const spec: LambdaSpec = LAMBDAS[unit];
+    return [{ name: unit, entry: spec.entry }, ...(spec.loadsLater ?? []).map((entry) => ({ name: `${unit}:${entry.split("/").pop()!}`, entry }))];
+  });
+}
+
 export async function assertLambdasLoad(context: ApplyContext, units: readonly DeployUnit[], requalifyIsInstalled = false): Promise<void> {
   runNpmBuild(context);
   // `requalify-infra` adds the renewal's Lambda with its own change set, but it runs from this bundle all the same.
   const moving = [...lambdaUnitsFor(units, requalifyIsInstalled), ...(units.includes("requalify-infra") ? [REQUALIFY_LAMBDA.unit] : [])];
-  const entries = moving.map((unit) => ({ name: unit, entry: LAMBDAS[unit].entry }));
+  const entries = lambdaLoadEntries(moving);
   console.log(`\n== lambda-load-check (${entries.length} bundle(s))`);
   const report = await checkLambdaBundles({ root: process.cwd(), entries });
   for (const result of report.results) console.log(`${result.status} ${result.name}: ${result.detail}`);

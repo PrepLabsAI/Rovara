@@ -298,7 +298,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
       "DEVELOPER_OIDC_DISPLAY_NAME", "DEVELOPER_OIDC_SECRET_ID",
     ]));
     // FR-045: both functions get each method's enabled-since cutoff straight from its parameter.
-    const variables = (prefix: string) => unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named as never);
+    const variables = (prefix: string) => unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named);
     expect(variables("Broker")).toMatchObject({
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
       AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
@@ -559,7 +559,7 @@ describe("task-token key and membership IAM", () => {
     expect(JSON.stringify(legacy)).not.toContain("TaskTokenKey");
     expect(JSON.stringify(legacy)).not.toContain("TASK_TOKEN_KEY_ARN");
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
-      const variables = unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named as never);
+      const variables = unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named);
       // ENV-ROOM: the broker is given the key's id packed and builds the same ARN (tests/contract/broker-environment.test.ts); the sign-in function gets the ARN whole.
       expect(variables.TASK_TOKEN_KEY_ARN).toEqual(prefix === "Broker" ? { Ref: id } : roleArn(id));
       if (prefix === "DeveloperSignInFunction") expect(variables.DEVELOPER_TOKEN_KEY_ARN).toEqual(roleArn(signingKey(named, "DeveloperSignInTokenKey")[0]));

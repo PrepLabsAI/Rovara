@@ -82,7 +82,7 @@ describe("the broker entry module reads no packed name before it unpacks them", 
     beforeAll(() => {
       const { functions, template, resolver } = controlPlaneOf("staging", synthesized("staging"));
       const broker = functions.find((entry) => entry.logicalId.startsWith("Broker"))!;
-      const parameter = brokerNamesParameterOf(template as never, broker.variables.AGENTX_NAMES_PARAMETER!);
+      const parameter = brokerNamesParameterOf(template, broker.variables.AGENTX_NAMES_PARAMETER!);
       parameterValue = resolver.text((template.Resources[parameter.id]!.Properties as { Value: unknown }).Value);
       const environment: Record<string, string | undefined> = { ...saved };
       for (const name of names) delete environment[name];

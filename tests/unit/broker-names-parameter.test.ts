@@ -21,7 +21,7 @@ const POINTED = (): MutableEnvironment => ({
   AWS_REGION: "us-west-2", AGENTX_ACCOUNT_ID: "123456789012", AGENTX_ENV: "staging",
   [BROKER_NAMES_PARAMETER_VARIABLE]: PARAMETER, [BROKER_NAMES_REVISION_VARIABLE]: REVISION,
 });
-const stored = (value: string, type = "String") => vi.fn(async (_name: string): Promise<FetchedParameter> => ({ type, value }));
+const stored = (value: string, type = "String") => vi.fn(async (): Promise<FetchedParameter> => ({ type, value }));
 const written = (revision = REVISION, list = LIST): string => `${encodeBrokerNamesParameterPrefix(revision)}${list}`;
 
 async function refusal(env: MutableEnvironment, read: (name: string) => Promise<FetchedParameter>): Promise<Error> {
@@ -113,7 +113,7 @@ describe("loadBrokerNamesParameter", () => {
     ["an error whose name is not a name", Object.assign(new Error("x"), { name: `bad name ${SECRETISH}` }), "the broker names parameter could not be read (an error)"],
     ["something thrown that is not an error", SECRETISH, "the broker names parameter could not be read (an error)"],
   ])("refuses %s, naming only the error", async (_label, thrown, message) => {
-    expect((await refusal(POINTED(), async () => { throw thrown; })).message).toBe(message);
+    expect((await refusal(POINTED(), () => Promise.reject(thrown as Error))).message).toBe(message);
   });
 
   it.each([
@@ -194,7 +194,7 @@ describe("the broker's Lambda entry", () => {
 });
 
 describe("readOneParameter (GetParameters for exactly one name)", () => {
-  const client = (output: unknown) => ({ send: vi.fn(async (_command: unknown) => output) });
+  const client = (output: unknown) => ({ send: vi.fn(async (command: unknown) => { void command; return output; }) });
 
   it("asks for exactly the one name and returns its type and value", async () => {
     const fake = client({ Parameters: [{ Name: PARAMETER, Type: "String", Value: written() }], InvalidParameters: [] });

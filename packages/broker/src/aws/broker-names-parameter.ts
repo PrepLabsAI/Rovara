@@ -46,6 +46,7 @@ export async function loadBrokerNamesParameter(env: MutableEnvironment, read: Pa
   try {
     fetched = await read(pointer);
   } catch (error) {
+    // eslint-disable-next-line preserve-caught-error -- An AWS error's message names the parameter and the caller; the refusal carries only the error's name.
     throw new Error(`the broker names parameter could not be read (${errorName(error)})`);
   }
   if (fetched.type !== "String") throw new Error("the broker names parameter is not a plain String parameter");

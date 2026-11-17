@@ -399,7 +399,7 @@ describe("the named TEST proof-only installation gate", () => {
       const envVars = (resource.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
       expect(envVars, `${id} must not receive proof-only runtime configuration`).not.toHaveProperty("TASK_PERSON_PROOF_FUNCTION_ARN");
     }
-    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables, { Resources: resources } as never);
+    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables, { Resources: resources });
     expect(brokerVars.SLACK_TEAM_ID).toEqual({ Ref: "SlackTeamId" });
     expect(brokerVars.DEVELOPER_SIGNIN_TABLE_NAME).toEqual({ Ref: tableId });
     const notifierVars = (notifier.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;

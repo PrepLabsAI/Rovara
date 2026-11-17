@@ -45,11 +45,14 @@ function pieces(raw: unknown): Map<string, unknown> {
 
 export function unpackedBrokerVariables(variables: Record<string, unknown>, template?: ResourcesTemplate): Record<string, unknown> {
   if (!(BROKER_NAMES_VARIABLE in variables) && !(BROKER_SETTINGS_VARIABLE in variables) && !(BROKER_NAMES_PARAMETER_VARIABLE in variables)) return variables;
-  const { [BROKER_NAMES_VARIABLE]: inline, [BROKER_SETTINGS_VARIABLE]: settings, [BROKER_NAMES_PARAMETER_VARIABLE]: pointer, [BROKER_NAMES_REVISION_VARIABLE]: _revision, ...rest } = variables;
+  const { [BROKER_NAMES_VARIABLE]: inline, [BROKER_SETTINGS_VARIABLE]: settings, [BROKER_NAMES_PARAMETER_VARIABLE]: pointer, ...rest } = variables;
+  // The revision is not a variable the broker's code reads.
+  delete rest[BROKER_NAMES_REVISION_VARIABLE];
   let names = inline;
   if (pointer !== undefined) {
     if (template === undefined) throw new Error("this broker's names are in their SSM parameter: pass the template to unpack them");
-    names = brokerNamesParameterOf(template, String(pointer)).names;
+    if (typeof pointer !== "string") throw new Error("the broker's names parameter pointer is not a string");
+    names = brokerNamesParameterOf(template, pointer).names;
   }
   const out: Record<string, unknown> = { ...rest };
   const nameSpecs = new Map((Object.values(BROKER_NAMES) as BrokerNameSpec[]).map((spec) => [spec.code, spec]));
@@ -109,7 +112,8 @@ export function withoutBrokerNamesParameter<T>(template: T): T {
   const parameter = brokerNamesParameterOf(template as unknown as ResourcesTemplate, pointer as string);
   if (parameter.revision !== revision) fail("the broker's revision is not the parameter's");
   const parameterResource = resources[parameter.id]!;
-  const { Value: _value, Tags: tags, ...parameterCore } = parameterResource.Properties!;
+  const { Tags: tags, ...parameterCore } = parameterResource.Properties!;
+  delete parameterCore.Value;
   const expectedCore = { Description: "The broker's CloudFormation-generated resource names (AGENTX_NAMES); no secrets. Written by the control plane stack only.", Name: pointer, Tier: "Standard", Type: "String" };
   if (!same(Object.entries(parameterCore).sort(), Object.entries(expectedCore).sort())) fail("the parameter has properties this does not expect");
   if (tags !== undefined && !same(Object.keys(tags as object), ["agentx:env"])) fail("the parameter has tags this does not expect");

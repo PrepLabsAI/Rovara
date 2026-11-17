@@ -79,7 +79,7 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
     const env0 = { ...given, AWS_REGION: RESOLVER_REGION };
     const hydrated: MutableEnvironment = { ...env0 };
     // ENV-ROOM 2: the names come from their SSM parameter, as the handler reads it (its value resolved the way CloudFormation writes it), then hydration runs as before.
-    const parameter = brokerNamesParameterOf(template as never, String(raw[BROKER_NAMES_PARAMETER_VARIABLE]));
+    const parameter = brokerNamesParameterOf(template, String(raw[BROKER_NAMES_PARAMETER_VARIABLE]));
     const parameterValue = resolver.text((template.Resources[parameter.id]!.Properties as { Value: unknown }).Value);
     beforeAll(async () => {
       await loadBrokerNamesParameter(hydrated, async () => ({ type: "String", value: parameterValue }));
