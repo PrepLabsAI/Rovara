@@ -16,7 +16,7 @@
 // `edit` on every session of the install and nobody else holds anything. The hosted product's members (org member rows, project grants, the Slack channel) plug in here with the same rules.
 import { z } from "zod";
 import {
-  AgentPrincipalSchema, SessionLevelSchema, agentSessionKey, agentXError, atLeast, cleanSessionName, sessionLevelRequiredMessage, sessionViewerOnlyMessage,
+  AgentPrincipalSchema, SessionLevelSchema, agentSessionKey, agentXError, atLeast, cleanSessionName, sessionLevelRequiredMessage, sessionViewerOnlyMessage, taskPeopleEntryKind,
   type AgentPrincipal, type AgentSessionRecord, type DocumentStore, type OrgId, type Principal, type SessionLevel,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
@@ -121,19 +121,31 @@ export async function readSessionShares(store: Pick<DocumentStore, "query">, org
 export type PeopleRole = "owner" | "commenter" | "viewer" | "denied";
 const PEOPLE_ROLES: ReadonlySet<string> = new Set(["owner", "commenter", "viewer", "denied"]);
 
-/** A People item: undefined for none, "unreadable" for one that does not parse (a denial for everyone). A person listed twice keeps their last entry. */
-export function peopleOfItem(item: Item | undefined): Map<string, PeopleRole> | "unreadable" | undefined {
+/** One person's People entry: its role, and whether it is a `web` identity's entry (web task channel C1/C2), which must be re-proved live. */
+export interface PeopleEntryOfItem { role: PeopleRole; web: boolean }
+
+/**
+ * A People item: undefined for none, "unreadable" for one that does not parse (a denial for everyone). A person listed twice keeps their last entry.
+ * C2 (C1 review L4): an entry carrying a sign-in `method` is a `web` identity's entry; it must parse as one, or the whole item is unreadable. Every other
+ * entry reads exactly as before.
+ */
+export function peopleOfItem(item: Item | undefined): Map<string, PeopleEntryOfItem> | "unreadable" | undefined {
   if (item === undefined) return undefined;
   const people = item["people"];
   if (item["schemaVersion"] !== 1 || !Array.isArray(people)) return "unreadable";
-  const roles = new Map<string, PeopleRole>();
+  const roles = new Map<string, PeopleEntryOfItem>();
   for (const entry of people as unknown[]) {
     const person = entry as { developerId?: unknown; role?: unknown } | null;
     if (typeof person !== "object" || person === null || typeof person.developerId !== "string" || typeof person.role !== "string" || !PEOPLE_ROLES.has(person.role)) return "unreadable";
-    roles.set(person.developerId, person.role as PeopleRole);
+    const web = Object.hasOwn(person, "method");
+    if (web && taskPeopleEntryKind(person as Record<string, unknown>) !== "web") return "unreadable";
+    roles.set(person.developerId, { role: person.role as PeopleRole, web });
   }
   return roles;
 }
+
+/** The grants a `web` People entry needs live (plan 4.1 rule 4, decision D3): a developer (`contributor`) or administrator (`maintainer`) grant of the person's own. */
+const WEB_PEOPLE_GRANTS: ReadonlySet<SessionProjectRole> = new Set(["maintainer", "contributor"]);
 
 // ---- the effective owner
 
@@ -223,7 +235,12 @@ async function compute(deps: SessionAccessDependencies, person: SessionPerson, c
   let denied = false;
   if (task !== undefined && session.subject.kind === "task") {
     const people = peopleOfItem(await deps.store.get({ pk: `DEVTASK#${session.subject.taskId}`, sk: "PEOPLE" }));
-    const entry = people === undefined || people === "unreadable" ? people : people.get(person.developerId);
+    const found = people === undefined || people === "unreadable" ? people : people.get(person.developerId);
+    // C2 (C1 review L4): a stored role is never trusted alone for a `web` entry. It grants only while the person, already a live member of this
+    // company (the members seam, above), holds a live developer or administrator grant on the task's project: the same live rule as the People
+    // proof (plan 4.1 rules 3 and 4). A denial always applies. A `slack` entry reads exactly as before.
+    const entry = found === undefined || found === "unreadable" ? found
+      : found.web && found.role !== "denied" && (grantRole === undefined || !WEB_PEOPLE_GRANTS.has(grantRole)) ? undefined : found.role;
     if (entry === "denied" || entry === "unreadable") { level = orgAdmin ? "view" : "none"; denied = true; }
     else if (entry === "owner") level = best(level, isTakenOver(task) ? "none" : "edit");
     else if (entry === "commenter") level = best(level, "use");

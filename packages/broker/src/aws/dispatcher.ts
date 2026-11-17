@@ -381,7 +381,7 @@ function taskPersonRuntimePorts(input: {
     return { items, complete: true };
   };
   const taskProjection = (sortKey: string): readonly string[] => sortKey === "META"
-    ? ["pk", "sk", "entityType", "taskId", "project", "developerId", "provider", "slackUserId", "developerName", "share"]
+    ? ["pk", "sk", "entityType", "taskId", "project", "developerId", "provider", "slackUserId", "developerName", "share", "companyId", "orgId"]
     : sortKey.startsWith("PERSON_SUBJECT#")
       ? ["pk", "sk", "schemaVersion", "personId", "developerId", "createdAt"]
       : ["pk", "sk", "schemaVersion", "personId", "developerId", "slackUserId", "name", "method", "issuer", "subject", "createdAt"];

@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   SlackTeamIdSchema,
-  agentXError,
+  agentXError, type StoredDocument,
   type TaskPersonProofRequest,
   type TaskPersonProofResponse,
 } from "@agentx/contracts";
@@ -14,12 +14,12 @@ import {
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../developer/task-person-identity.js";
-import type { ProjectAuthorityReader, ProjectAuthorityWitness } from "../developer/task-project-access.js";
-import { readProjectAuthority } from "../developer/task-project-access.js";
+import { readProjectAuthority, type ProjectAuthorityReader, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import { META, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
+import { companyMembershipFromStore, membershipKey } from "./company-check.js";
 
 export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
   "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
@@ -28,7 +28,7 @@ export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
 export type TaskPersonDeveloperRecordProjection = { pk: string; sk: string } & Pick<DeveloperRecord,
   "developerId" | "provider" | "issuer" | "subject" | "slackUserId" | "revoked" | "displayName">;
 
-export interface TaskPersonRuntimePorts {
+export interface TaskPersonRuntimePorts extends TaskPersonRuntimeWebPorts {
   /** Reads only a task-partition META, PERSON_SUBJECT#<developerId>, or PERSON#<UUID> row. */
   readTaskRecord(input: { taskId: string; sortKey: string; abortSignal: AbortSignal }): Promise<Record<string, unknown> | undefined>;
   /** Strong DEVELOPER#<developerId>/META read with the exact projected fields named here. */
@@ -64,6 +64,26 @@ function projectedDeveloperRecord(record: TaskPersonDeveloperRecordProjection | 
     ...(record.revoked === undefined ? {} : { revoked: record.revoked }),
     ...(record.displayName === undefined ? {} : { displayName: record.displayName }),
   } as unknown as DeveloperRecord;
+}
+
+/** C2: the fields of a `COMPANY_MEMBER#<developerId>` / `COMPANY` row the web proof reads (the reviewed `Membership` record, company-check.ts). */
+export const TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES = [
+  "pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy",
+] as const;
+
+/** C2 (plan 4.1 rule 3): the bounded read set's addition for a `web` identity. */
+export interface TaskPersonRuntimeWebPorts {
+  /**
+   * Strong `COMPANY_MEMBER#<developerId>` / `COMPANY` read from the sign-in table with exactly the projected fields named here, for the checked `web`
+   * identity only. It counts as one state read and is never asked for a `slack` identity. Absent (the dispatcher today: its role may read only
+   * `DEVELOPER#*` on the sign-in table): every `web` identity is unavailable, so a system-started step parks and nothing is reconciled.
+   */
+  readCompanyMembership?(input: {
+    developerId: string;
+    consistentRead: true;
+    projection: typeof TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES;
+    abortSignal: AbortSignal;
+  }): Promise<Record<string, unknown> | undefined>;
 }
 
 function identityDocumentClient(input: {
@@ -146,6 +166,41 @@ function identityDependencies(input: {
       });
       admission.assertOpen();
       return projectedDeveloperRecord(record, targetDeveloperId);
+    },
+    // C2 (plan 4.1 rules 3 and 4): the web proof's live reads, bounded like every other read here (state reads, zero Slack calls), for the checked person only.
+    ...(ports.readCompanyMembership === undefined ? {} : { companyMembership: async (targetDeveloperId: string) => {
+      if (targetDeveloperId !== developerId || ports.readCompanyMembership === undefined) throw unavailable();
+      const key = membershipKey(targetDeveloperId);
+      const reader = companyMembershipFromStore({
+        get: async (requested) => {
+          if (requested.pk !== key.pk || requested.sk !== key.sk) throw unavailable();
+          admission.assertOpen();
+          const item = await ports.readCompanyMembership!({
+            developerId: targetDeveloperId,
+            consistentRead: true,
+            projection: TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES,
+            abortSignal: admission.admitStateRead(),
+          });
+          admission.assertOpen();
+          if (item === undefined) return undefined;
+          if (item.pk !== key.pk || item.sk !== key.sk) throw unavailable();
+          return item as unknown as StoredDocument;
+        },
+      });
+      const membership = await reader.membershipOf!(targetDeveloperId);
+      return membership === undefined ? undefined : { companyId: membership.companyId };
+    } }),
+    projectGrant: async (targetDeveloperId, project) => {
+      if (targetDeveloperId !== developerId) throw unavailable();
+      // No Slack user id and no channel list: `readProjectAuthority` can then answer only `access: "granted"` (a developer or administrator grant).
+      const result = await readProjectAuthority(ports.projectAuthorityReader, { project, developerId: targetDeveloperId, teamId: slackTeamId, admission });
+      if (result.kind === "allowed") {
+        if (result.access !== "granted" || result.witness === undefined) throw unavailable();
+        input.onProjectAuthority(result.witness);
+        return true;
+      }
+      if (result.kind === "denied" && result.reason === "project-access") return false;
+      throw unavailable();
     },
     projectChannelIds: readBindings,
     targetProjectAccess: async (subject: ProjectAccessSubject, project: string, freshMemberOf: readonly string[]) => {

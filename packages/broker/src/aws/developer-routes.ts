@@ -1625,6 +1625,38 @@ export function developerTaskRouteDependencies(
     .filter((binding) => binding.projectName === project)
     .map((binding) => binding.channelId)
     .sort();
+  // C2 (plan 4.1, decisions D1, D3): the web proof's reads, none of them Slack's. The developer record and the membership are the sign-in table's
+  // own rows (the reviewed reader every sign-in uses); the grant is the project's in the TASK'S company, by grant only (no channel list, no Slack id).
+  const developerRecord = async (targetDeveloperId: string): Promise<DeveloperRecord | undefined> => {
+    const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
+    return response.Item;
+  };
+  const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant"> = {
+    companyMembership: async (targetDeveloperId) => {
+      const reader = deps.companies ?? deps.developer.companies;
+      if (reader?.membershipOf === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+      const membership = await reader.membershipOf(targetDeveloperId);
+      return membership === undefined ? undefined : { companyId: membership.companyId };
+    },
+    projectGrant: async (targetDeveloperId, project, companyId) => {
+      const revision = await latestDefinition(deps, project, companyId);
+      if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
+      const memberships = await queryAll<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, `MEMBER#${targetDeveloperId}`, "PROJECT#");
+      const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
+      if (result.kind === "allowed") return result.access === "granted";
+      if (result.kind === "denied" && result.reason === "project-access") return false;
+      throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+    },
+  };
+  /** When the Slack parts cannot be built (no Slack on this install, or no workspace for the task), only a `web` identity can still be proven: every Slack port refuses. */
+  const webOnlyIdentityDependencies = (): TaskPersonIdentityDependencies => {
+    const noSlack = async (): Promise<never> => { throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable"); };
+    return {
+      documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId: "", now: deps.now, uuid: randomUUID,
+      taskPersonProof: noSlack, developerRecord, projectChannelIds: noSlack, targetProjectAccess: noSlack, ...webProof,
+      ...(trustedCaller === null ? {} : { trustedCaller }),
+    };
+  };
   const identityDependencies = async (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonIdentityDependencies> => {
     const workspace = await taskWorkspace(task);
     const slackTeamId = workspace?.teamId ?? deps.developer.slackTeamId;
@@ -1633,10 +1665,8 @@ export function developerTaskRouteDependencies(
     return {
       documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId, now: deps.now, uuid: randomUUID, taskPersonProof,
       ...(workspace === undefined ? {} : { workspace }),
-      developerRecord: async (targetDeveloperId) => {
-        const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
-        return response.Item;
-      },
+      developerRecord,
+      ...webProof,
       projectChannelIds: (project) => projectChannelIds(project, workspace),
       targetProjectAccess: async (subject, project, freshMemberOf) => {
         const revision = await latestDefinition(deps, project, workspace?.companyId);
@@ -1684,7 +1714,14 @@ export function developerTaskRouteDependencies(
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
     ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
     checkTaskPerson: async (task, developerId, admission) => {
-      return checkTaskPersonIdentity(await identityDependencies(task, admission), task, developerId);
+      let dependencies: TaskPersonIdentityDependencies;
+      try {
+        dependencies = await identityDependencies(task, admission);
+      } catch {
+        // A `slack` identity still refuses (its Slack ports throw); a `web` identity needs no Slack (C2).
+        dependencies = webOnlyIdentityDependencies();
+      }
+      return checkTaskPersonIdentity(dependencies, task, developerId);
     },
     resolveTaskPickerPerson: async (taskId, slackUserId) => {
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
