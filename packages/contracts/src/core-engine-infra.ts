@@ -62,8 +62,25 @@ export const CORE_AGENT_MODEL_PARAMETER = "CoreAgentModel";
 /** Empty, or the gateway's host: lowercase DNS labels (at least two) and an optional port. No scheme, credentials, path, query or fragment: the origin is always https. */
 export const CORE_MODEL_GATEWAY_HOST_PATTERN = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+(:[1-9][0-9]{0,4})?)?$";
 export const CORE_MODEL_GATEWAY_HOST_MAX_LENGTH = 56;
-/** Empty, or an Anthropic model id (`claude-...`, as the gateway's agent route names it; not a Bedrock `us.anthropic....` id). */
-export const CORE_AGENT_MODEL_PATTERN = "^(claude-[a-z0-9][a-z0-9.-]{0,31})?$";
+/**
+ * DEC 254f: the agent models besides Claude that Cloud's model gateway offers (Rovara's AI, through Bedrock Converse), each named exactly by the Bedrock id it calls. Pinned from
+ * the gateway's offered list as deployed to staging on 2026-11-17 (ROVARA_AI_US_CONVERSE_MODELS, in its order); each passed the gateway's agent-loop test and a real tool call.
+ * The core engine's agent model may be one of these or an Anthropic id; any other Bedrock id is refused (the gateway would refuse it too, after the switch was set). When Cloud's list
+ * changes, this list changes with it.
+ */
+export const CORE_GATEWAY_CONVERSE_AGENT_MODELS: readonly string[] = Object.freeze([
+  "qwen.qwen3-coder-480b-a35b-v1:0", "qwen.qwen3-coder-30b-a3b-v1:0", "qwen.qwen3-235b-a22b-2507-v1:0", "mistral.devstral-2-123b", "mistral.mistral-large-3-675b-instruct",
+  "deepseek.v3-v1:0", "moonshotai.kimi-k2.5", "zai.glm-5", "zai.glm-4.7", "us.amazon.nova-2-lite-v1:0", "openai.gpt-oss-120b-1:0", "openai.gpt-oss-20b-1:0", "us.amazon.nova-pro-v1:0",
+  "moonshot.kimi-k2-thinking", "minimax.minimax-m2.5", "us.moonshotai.kimi-k3", "us.moonshotai.kimi-k3.1",
+]);
+/** Whether `value` is exactly one of the gateway's offered Bedrock agent models (no trimming, no case folding). */
+export const isGatewayConverseAgentModel = (value: string): boolean => CORE_GATEWAY_CONVERSE_AGENT_MODELS.includes(value);
+const escapeForPattern = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/**
+ * Empty, an Anthropic model id (`claude-...`, as the gateway's agent route names it; not a Bedrock `us.anthropic....` id), or exactly one of CORE_GATEWAY_CONVERSE_AGENT_MODELS
+ * (each escaped: no wildcard, so no packing separator can pass).
+ */
+export const CORE_AGENT_MODEL_PATTERN = `^(claude-[a-z0-9][a-z0-9.-]{0,31}|${CORE_GATEWAY_CONVERSE_AGENT_MODELS.map(escapeForPattern).join("|")})?$`;
 export const CORE_AGENT_MODEL_MAX_LENGTH = 40;
 
 /** The core's most dispatch attempts for one message (DISPATCH_ATTEMPTS_MAX in core/task-flow/dispatch.ts). The queue's redrive limit must be above it, or SQS dead-letters a message the core still retries. */

@@ -46,8 +46,13 @@ describe("the gateway settings", () => {
       expect(() => gatewayModelAccessFromEnvironment({ ...ENV, [CORE_MODEL_GATEWAY_URL_VARIABLE]: bad })).toThrow(GATEWAY_URL_INVALID);
     }
   });
-  it("refuses anything but an Anthropic model id (the gateway's agent route is Anthropic Messages)", () => {
-    for (const bad of ["gpt-6", "Claude-sonnet", "claude-", "claude-sonnet 4", `claude-${"a".repeat(120)}`, "claude-x/../y"]) {
+  it("takes a Bedrock model the gateway offers, such as GLM 5 (DEC 254f), on the same Anthropic Messages route, named by its Bedrock id", () => {
+    for (const offered of ["zai.glm-5", "zai.glm-4.7", "qwen.qwen3-coder-480b-a35b-v1:0", "us.moonshotai.kimi-k3.1"]) {
+      expect(readGatewayModelAccess({ ...ENV, [CORE_AGENT_MODEL_VARIABLE]: offered }), offered).toEqual({ gatewayUrl: URL_, route: { alias: offered, api: "anthropic-messages", catalog: offered } });
+    }
+  });
+  it("refuses anything but an Anthropic model id or a Bedrock model the gateway offers", () => {
+    for (const bad of ["gpt-6", "Claude-sonnet", "claude-", "claude-sonnet 4", `claude-${"a".repeat(120)}`, "claude-x/../y", "zai.glm-9", "us.zai.glm-5", "deepseek.v3.2", "ZAI.GLM-5", "zai.glm-5:0", "global.zai.glm-5.3", "us.anthropic.claude-sonnet-4-6"]) {
       expect(readGatewayModelAccess({ ...ENV, [CORE_AGENT_MODEL_VARIABLE]: bad }), bad).toEqual({ problem: AGENT_MODEL_INVALID });
     }
   });

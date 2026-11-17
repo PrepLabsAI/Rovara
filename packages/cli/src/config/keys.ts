@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_AGENT_MODEL_PATTERN, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_AGENT_MODEL_PATTERN, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isGatewayConverseAgentModel, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
@@ -86,14 +86,16 @@ export const coreModelGatewayUrl = (key: string) => (value: string): string => {
 export const coreModelGatewayShown = (stored: string): string => (stored === "" ? "" : `https://${stored}`);
 
 /**
- * coreEngine.agentModel: empty, or an Anthropic model id this Rovara's model catalog knows (the gateway's agent route speaks Anthropic Messages; a Bedrock `us.anthropic....` id is
- * refused: the gateway maps the Anthropic id to the company's own key or Bedrock role).
+ * coreEngine.agentModel: empty, an Anthropic model id this Rovara's model catalog knows (the gateway's agent route speaks Anthropic Messages; a Bedrock `us.anthropic....` id is
+ * refused: the gateway maps the Anthropic id to the company's own key or Bedrock role), or (DEC 254f) exactly one of the Bedrock models the Cloud gateway offers through Converse
+ * (contracts CORE_GATEWAY_CONVERSE_AGENT_MODELS, such as zai.glm-5). Any other Bedrock id is refused.
  */
 export const coreAgentModel = (key: string) => (value: string): string => {
   const trimmed = value.trim();
   if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
-  if (trimmed.length > CORE_AGENT_MODEL_MAX_LENGTH || !new RegExp(CORE_AGENT_MODEL_PATTERN, "u").test(trimmed) || catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined) {
-    return refuse(key, "empty (none) or an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock id)");
+  const known = trimmed.startsWith("claude-") ? catalogModel({ provider: "anthropic", modelId: trimmed }) !== undefined : isGatewayConverseAgentModel(trimmed);
+  if (trimmed.length > CORE_AGENT_MODEL_MAX_LENGTH || !new RegExp(CORE_AGENT_MODEL_PATTERN, "u").test(trimmed) || !known) {
+    return refuse(key, "empty (none), an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock us.anthropic. id), or a model the Cloud model gateway offers through Bedrock, such as zai.glm-5");
   }
   return trimmed;
 };
@@ -171,7 +173,7 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   // Core switch-on blocker (2026-11-17): where the core's model calls go, kept across upgrades. Both are needed; either empty leaves the core refusing work by name.
   { key: "coreEngine.modelGatewayUrl", description: "the Cloud model gateway's https origin the core engine's agents call AI through (no path or credentials); empty (the default, or none) leaves the core engine refusing work. Set coreEngine.agentModel too",
     target: parameter("control-plane", CORE_MODEL_GATEWAY_HOST_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.agentModel", shown: coreModelGatewayShown, parse: coreModelGatewayUrl("coreEngine.modelGatewayUrl") },
-  { key: "coreEngine.agentModel", description: "the Anthropic model id every core engine step runs on through the model gateway, such as claude-sonnet-4-6; empty (the default, or none) leaves the core engine refusing work. Set coreEngine.modelGatewayUrl too",
+  { key: "coreEngine.agentModel", description: "the model every core engine step runs on through the model gateway: an Anthropic model id, such as claude-sonnet-4-6, or a Bedrock model the gateway offers, such as zai.glm-5; empty (the default, or none) leaves the core engine refusing work. Set coreEngine.modelGatewayUrl too",
     target: parameter("control-plane", CORE_AGENT_MODEL_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.modelGatewayUrl", parse: coreAgentModel("coreEngine.agentModel") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
 ];

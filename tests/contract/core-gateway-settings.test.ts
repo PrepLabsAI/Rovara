@@ -4,7 +4,7 @@
 // so the core then refused work. The synthesized templates are checked in core-engine-infrastructure.test.ts ("the model gateway settings").
 import { describe, expect, it } from "vitest";
 import {
-  BROKER_SETTINGS, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE,
+  BROKER_SETTINGS, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_GATEWAY_CONVERSE_AGENT_MODELS, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, isGatewayConverseAgentModel,
 } from "@agentx/contracts";
 import { hydrateBrokerEnvironment, hydrateBrokerSettings } from "../../packages/broker/src/aws/broker-environment.js";
 import { gatewayModelKeysModules, readGatewayModelAccess } from "../../packages/broker/src/core-host/gateway-model-access.js";
@@ -14,6 +14,7 @@ import { updateStackParameters } from "../../packages/cli/src/deploy/parameter-u
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { seeded, services, stacks } from "../support/config-services.js";
+import { GATEWAY_CONVERSE_MODELS } from "../support/offered-models-fake.js";
 
 const ENV = "staging";
 const HOST = "gateway.staging.example.dev";
@@ -22,7 +23,13 @@ const MODEL = "claude-sonnet-4-6";
 const URL_KEY = "coreEngine.modelGatewayUrl";
 const MODEL_KEY = "coreEngine.agentModel";
 const URL_ALLOWED = `${URL_KEY} must be empty (none) or the model gateway's https origin, such as https://gateway.example.com, with no user name, password, path, query or fragment and a host of at most ${CORE_MODEL_GATEWAY_HOST_MAX_LENGTH} characters; nothing changed`;
-const MODEL_ALLOWED = `${MODEL_KEY} must be empty (none) or an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock id); nothing changed`;
+const MODEL_ALLOWED = `${MODEL_KEY} must be empty (none), an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock us.anthropic. id), or a model the Cloud model gateway offers through Bedrock, such as zai.glm-5; nothing changed`;
+/** DEC 254f: the strongest GLM model the gateway offers. */
+const GLM = "zai.glm-5";
+/** Bedrock-shaped ids the gateway does NOT offer (unlisted, another geography's profile, a made-up version, a different case, a separator): refused everywhere. */
+const UNOFFERED = ["zai.glm-9", "us.zai.glm-5", "global.zai.glm-5.3", "deepseek.v3.2", "zai.glm-5:0", "ZAI.GLM-5", "zai.glm-5,x=y", "zai.glm-5 ", "qwen.qwen3-coder-480b-a35b-v1:1", "zai.glm-5.", ".zai.glm-5",
+  // Each "." of an id is literal: a wildcard would let a packing separator (or any other character) through.
+  "zai,glm-5", "zai/glm-5", "zai glm-5", "zaixglm-5", "zai=glm-5", "qwen.qwen3-coder-480b-a35b-v1,0"];
 
 describe("the broker reads the packed settings back", () => {
   it("has the packed codes: gw (a host, read as its https origin) and am", () => {
@@ -96,6 +103,34 @@ describe("the stack parameters' own patterns", () => {
   it.each(["us.anthropic.claude-sonnet-4-6", "anthropic.claude-sonnet-4-6-v1:0", "gpt-5", "Claude-sonnet-4-6", "claude-", "claude-sonnet 4", "claude-a,b", `claude-${"a".repeat(33)}`])("the model pattern refuses %j", (value) => {
     expect(model.test(value)).toBe(false);
   });
+  it("admits exactly the gateway's offered Bedrock models besides Claude (DEC 254f), each within the parameter's length", () => {
+    for (const offered of CORE_GATEWAY_CONVERSE_AGENT_MODELS) {
+      expect(model.test(offered), offered).toBe(true);
+      expect(offered.length, offered).toBeLessThanOrEqual(CORE_AGENT_MODEL_MAX_LENGTH);
+    }
+  });
+  it.each(UNOFFERED)("the model pattern refuses the unoffered Bedrock id %j", (value) => {
+    expect(model.test(value)).toBe(false);
+  });
+});
+
+describe("the pinned list of the gateway's offered Bedrock agent models (DEC 254f)", () => {
+  it("is Cloud's gateway list (ROVARA_AI_US_CONVERSE_MODELS as deployed to staging 2026-11-17), in its order", () => {
+    expect(CORE_GATEWAY_CONVERSE_AGENT_MODELS).toEqual([
+      "qwen.qwen3-coder-480b-a35b-v1:0", "qwen.qwen3-coder-30b-a3b-v1:0", "qwen.qwen3-235b-a22b-2507-v1:0", "mistral.devstral-2-123b", "mistral.mistral-large-3-675b-instruct",
+      "deepseek.v3-v1:0", "moonshotai.kimi-k2.5", "zai.glm-5", "zai.glm-4.7", "us.amazon.nova-2-lite-v1:0", "openai.gpt-oss-120b-1:0", "openai.gpt-oss-20b-1:0", "us.amazon.nova-pro-v1:0",
+      "moonshot.kimi-k2-thinking", "minimax.minimax-m2.5", "us.moonshotai.kimi-k3", "us.moonshotai.kimi-k3.1",
+    ]);
+    expect(Object.isFrozen(CORE_GATEWAY_CONVERSE_AGENT_MODELS)).toBe(true);
+  });
+  it("is matched exactly: no trimming, case folding, prefix or suffix", () => {
+    expect(isGatewayConverseAgentModel(GLM)).toBe(true);
+    for (const value of [...UNOFFERED, "zai.glm-5x", "xzai.glm-5", "", "claude-sonnet-4-6"]) expect(isGatewayConverseAgentModel(value), value).toBe(false);
+  });
+  it("holds every Bedrock model the offered-models fake serves, and no Claude name", () => {
+    for (const offered of GATEWAY_CONVERSE_MODELS) expect(CORE_GATEWAY_CONVERSE_AGENT_MODELS).toContain(offered);
+    expect(CORE_GATEWAY_CONVERSE_AGENT_MODELS.some((offered) => offered.startsWith("claude-") || offered.includes("anthropic"))).toBe(false);
+  });
 });
 
 describe("the config keys", () => {
@@ -137,13 +172,20 @@ describe("the config keys", () => {
     expect(configKey(MODEL_KEY).parse("claude-haiku-4-5")).toBe("claude-haiku-4-5");
   });
 
-  it.each(["claude-made-up-9", "us.anthropic.claude-sonnet-4-6", "anthropic.claude-sonnet-4-6-v1:0", "gpt-5.4", "Claude-Sonnet-4-6", "claude sonnet", `claude-${"a".repeat(80)}`])("refuses the model %j", (value) => {
+  it("accepts every Bedrock model the gateway offers, such as the GLM models (DEC 254f)", () => {
+    expect(configKey(MODEL_KEY).parse(` ${GLM} `)).toBe(GLM);
+    expect(configKey(MODEL_KEY).parse("zai.glm-4.7")).toBe("zai.glm-4.7");
+    for (const offered of CORE_GATEWAY_CONVERSE_AGENT_MODELS) expect(configKey(MODEL_KEY).parse(offered), offered).toBe(offered);
+  });
+
+  it.each(["claude-made-up-9", "us.anthropic.claude-sonnet-4-6", "anthropic.claude-sonnet-4-6-v1:0", "gpt-5.4", "Claude-Sonnet-4-6", "claude sonnet", `claude-${"a".repeat(80)}`, ...UNOFFERED.filter((value) => value.trim() === value)])("refuses the model %j", (value) => {
     expect(() => configKey(MODEL_KEY).parse(value)).toThrow(MODEL_ALLOWED);
   });
 
   it("stores only values the stack parameters admit", () => {
     expect(new RegExp(CORE_MODEL_GATEWAY_HOST_PATTERN, "u").test(configKey(URL_KEY).parse("https://GW.Example.com:8443"))).toBe(true);
     expect(new RegExp(CORE_AGENT_MODEL_PATTERN, "u").test(configKey(MODEL_KEY).parse("claude-sonnet-4-5-20250929"))).toBe(true);
+    expect(new RegExp(CORE_AGENT_MODEL_PATTERN, "u").test(configKey(MODEL_KEY).parse(GLM))).toBe(true);
   });
 });
 

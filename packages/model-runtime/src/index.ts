@@ -17,7 +17,7 @@ export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
 export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isGatewayConverseAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -273,6 +273,13 @@ function proxyRequestKey(proxy: ModelProxyOptions, api?: InvocationModelRoute["a
   };
 }
 
+/**
+ * DEC 254f: the most output tokens a call to a Bedrock model the model gateway offers (contracts CORE_GATEWAY_CONVERSE_AGENT_MODELS) may ask for. The gateway's agent route holds every
+ * non-Anthropic model name to its default output limit (64,000) and refuses a request asking for more; Pi asks for the catalog's whole limit (zai.glm-5: 131,072). So such a route asks
+ * for at most this (a lower catalog limit stays). Claude and every other routed model keep their catalog limit.
+ */
+export const GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS = 64_000;
+
 /** What a model the installed catalogs do not know (a company's own) is given: no reasoning, no images, a modest window. */
 const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 16_384 };
 
@@ -298,7 +305,8 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
     baseUrl, api: route.api,
     models: [{
       id: route.alias, name: route.alias, api: route.api, baseUrl,
-      reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow, maxTokens: base.maxTokens,
+      reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow,
+      maxTokens: route.api === "anthropic-messages" && isGatewayConverseAgentModel(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
       compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),

@@ -11,9 +11,9 @@
 //   modelGateway  the broker's core callback layer mints the task token (the task key in KMS, purpose `task`) and answers the gateway's address.
 //
 // Settings (the function's environment, both the broker and the dispatcher): ROVARA_CORE_MODEL_GATEWAY_URL (the gateway's https origin) and
-// ROVARA_CORE_AGENT_MODEL (an Anthropic model id). Both absent: nothing is built and the model-keys point stays empty, so the registry refuses the switch
+// ROVARA_CORE_AGENT_MODEL (an Anthropic model id, or a Bedrock model the gateway offers by its exact id, DEC 254f). Both absent: nothing is built and the model-keys point stays empty, so the registry refuses the switch
 // by name, as before. One without the other, or either malformed, refuses in fixed words (no value is echoed).
-import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, TASK_KEY_PURPOSE, type InvocationModelRoute, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
+import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, TASK_KEY_PURPOSE, isGatewayConverseAgentModel, type InvocationModelRoute, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
 import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
 import type { ModelGateway } from "../core/model-gateway/route.js";
 import type { TaskTokenDescriber } from "../core/model-gateway/token.js";
@@ -34,7 +34,7 @@ export interface GatewayModelAccessSettings {
 /** Fixed refusal words: they name the variables, never their values. */
 export const GATEWAY_SETTINGS_PARTIAL = `the core engine's model gateway settings are incomplete: set both ${CORE_MODEL_GATEWAY_URL_VARIABLE} and ${CORE_AGENT_MODEL_VARIABLE}, or neither`;
 export const GATEWAY_URL_INVALID = `${CORE_MODEL_GATEWAY_URL_VARIABLE} is not an https origin`;
-export const AGENT_MODEL_INVALID = `${CORE_AGENT_MODEL_VARIABLE} is not an Anthropic model id`;
+export const AGENT_MODEL_INVALID = `${CORE_AGENT_MODEL_VARIABLE} is not an Anthropic model id or a model the model gateway offers`;
 
 const AGENT_MODEL = /^claude-[a-z0-9][a-z0-9.-]{0,99}$/u;
 
@@ -48,7 +48,9 @@ export function readGatewayModelAccess(env: NodeJS.ProcessEnv): GatewayModelAcce
   try { url = new URL(rawUrl); } catch { return { problem: GATEWAY_URL_INVALID }; }
   if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || rawUrl.length > 512
     || (rawUrl !== url.origin && rawUrl !== `${url.origin}/`)) return { problem: GATEWAY_URL_INVALID };
-  if (!AGENT_MODEL.test(rawModel)) return { problem: AGENT_MODEL_INVALID };
+  // DEC 254f: a Bedrock model the gateway offers (contracts CORE_GATEWAY_CONVERSE_AGENT_MODELS, such as zai.glm-5) is called by its exact id on the same Anthropic Messages route;
+  // the gateway translates it to Bedrock Converse. Any other id is refused here.
+  if (!AGENT_MODEL.test(rawModel) && !isGatewayConverseAgentModel(rawModel)) return { problem: AGENT_MODEL_INVALID };
   return { gatewayUrl: url.origin, route: { alias: rawModel, api: "anthropic-messages", catalog: rawModel } };
 }
 
