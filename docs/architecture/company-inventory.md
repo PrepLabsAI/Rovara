@@ -1,4 +1,4 @@
-427 record kinds: 62 company-scoped, 19 install-wide, 346 needs-company. 205 routes: 36 company-scoped, 5 install-wide, 164 needs-company.
+427 record kinds: 62 company-scoped, 19 install-wide, 346 needs-company. 206 routes: 36 company-scoped, 5 install-wide, 165 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -503,6 +503,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/dev/tasks | company-scoped | State table | yes | GET, POST | R4 optional membership reader; absent preserves legacy bytes. Other methods on this path remain T2. |
 | route | /v1/dev/tasks/ | needs-company | State table | no | prefix | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId} | company-scoped | State table | yes | GET | R4 optional membership reader; absent preserves legacy bytes. Other methods on this path remain T2. |
+| route | /v1/dev/tasks/{taskId}/answers | needs-company | State table | no | POST | T2 on the AWS dispatch, as its siblings. S3: a core-owned task is answered by the core host (company and owner from live membership and the company's owner rule; two-company tests in tests/unit/core-host-dev-answers.test.ts); a workflow task answers not waiting after the legacy read check and writes nothing. |
 | route | /v1/dev/tasks/{taskId}/cancel | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId}/canvas-closeout/retry | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId}/close | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
