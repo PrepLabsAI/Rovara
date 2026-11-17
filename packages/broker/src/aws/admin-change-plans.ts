@@ -18,8 +18,9 @@ import {
 import { adminSlackScope, adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
 import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
-import { IMPLICIT_COMPANY_ID, companyInviteCodeId } from "@agentx/contracts";
+import { COMPANY_IMPORT_MEMBERS_MAX, IMPLICIT_COMPANY_ID, companyInviteCodeId, type CompanyImportPreview } from "@agentx/contracts";
 import { resolveCompany } from "./company-check.js";
+import { planCompanyImport, planCompanyImportUndo, type CompanyImportReads } from "./install-company-import.js";
 
 export interface AdminChangeHandlers {
   requireAdministrator(identity: AuthenticatedIdentity, project: string): Promise<void>;
@@ -530,6 +531,92 @@ const planCompanySelfServe: Planner = async (deps, identity, input) => {
   };
 };
 
+/** DEC 254b (b): the reads an import's plan needs and the sign-in Lambda that writes it; NOT_FOUND where developer sign-in is not set up. */
+function companyImportSetup(deps: PlanDependencies): { reads: CompanyImportReads; registry: NonNullable<PlanDependencies["actions"]["companyImport"]> } {
+  const { companyImport: registry, signInTableName, documentClient, tableName } = deps.actions;
+  if (registry === undefined || signInTableName === undefined) throw agentXError("NOT_FOUND", "company import is not set up in this deployment");
+  return { reads: { documentClient, tableName, signInTableName }, registry };
+}
+/** People named in one line of an effect or a refusal; the preview lists them all. */
+const IMPORT_IDS_SHOWN = 4;
+const importIds = (people: string[]) => people.length <= IMPORT_IDS_SHOWN ? people.join(", ") : `${people.slice(0, IMPORT_IDS_SHOWN).join(", ")} and ${people.length - IMPORT_IDS_SHOWN} more`;
+const IMPORT_REFUSAL: Record<NonNullable<CompanyImportPreview["refusal"]>, string> = {
+  no_open_company: "the install has no open company with that id",
+  too_many_members: `it has more than ${COMPANY_IMPORT_MEMBERS_MAX} members, more than one import copies`,
+  no_owner: "nobody would be its owner after the import",
+  unreadable: "a record it needs does not read",
+  built_in_company: "the built-in company is never imported",
+};
+const IMPORT_PERSON_REFUSAL: Record<CompanyImportPreview["refused"][number]["reason"], string> = {
+  unknown_role: "a role Code does not know",
+  member_of_another_company: "already in another company in Code's records",
+  unreadable_record: "records that do not read",
+};
+/** Fixed words and opaque ids only. */
+export function companyImportRefusalText(preview: CompanyImportPreview): string {
+  const parts = preview.refusal === undefined ? [] : [IMPORT_REFUSAL[preview.refusal]];
+  for (const reason of Object.keys(IMPORT_PERSON_REFUSAL) as Array<keyof typeof IMPORT_PERSON_REFUSAL>) {
+    const people = preview.refused.filter((entry) => entry.reason === reason).map((entry) => entry.personId);
+    if (people.length > 0) parts.push(`${IMPORT_PERSON_REFUSAL[reason]}: ${importIds(people)}`);
+  }
+  return `Company ${preview.companyId} cannot be ${preview.mode === "undo" ? "un-imported" : "imported"}, and nothing was written: ${parts.join("; ")}. Run agentx admin company import --from-install ${preview.companyId}${preview.mode === "undo" ? " --undo" : ""} to see the whole preview.`;
+}
+const skippedText = (preview: CompanyImportPreview) => {
+  if (preview.skipped.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const entry of preview.skipped) counts.set(entry.reason, (counts.get(entry.reason) ?? 0) + 1);
+  return ` Leaves ${preview.skipped.length} as they are (${[...counts].map(([reason, count]) => `${count} ${reason.replaceAll("_", " ")}`).join(", ")}).`;
+};
+
+/** DEC 254b (b): copy one company of the install's old layout into Code's company records. The plan is the snapshot: anything that changes before the yes makes it stale. */
+const planImportInstallCompany: Planner = async (deps, identity, input) => {
+  if (input.kind !== "import_install_company") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const { reads, registry } = companyImportSetup(deps);
+  const plan = await planCompanyImport(reads, input.companyId);
+  const { preview } = plan;
+  if (!preview.ready) throw agentXError("CONFIG_INVALID", companyImportRefusalText(preview));
+  const roles = (["owner", "admin", "member"] as const).flatMap((role) => {
+    const people = preview.members.filter((member) => member.role === role).map((member) => member.personId);
+    return people.length === 0 ? [] : [`${role}s ${importIds(people)}`];
+  });
+  const nothing = preview.company === "exists" && preview.members.length === 0;
+  return {
+    effect: nothing
+      ? `Nothing to import for company ${preview.companyId}: its company record and every member that would be copied are already in Code's records.${skippedText(preview)}`
+      : `Copy company ${preview.companyId} from the install's old records into Code's company records: ${preview.company === "write" ? "its company record and " : ""}${preview.members.length} members with their roles${roles.length === 0 ? "" : ` (${roles.join("; ")})`}.${skippedText(preview)} Every row is new and marked as imported; nothing is overwritten. agentx admin company import --from-install ${preview.companyId} --undo removes them.`,
+    details: { companyId: preview.companyId, companyRecord: preview.company, people: preview.members.length, skipped: preview.skipped.length },
+    snapshot: plan,
+    apply: async (applier) => {
+      const written = nothing ? { rows: 0, company: false } : await registry.importCompany(plan.write, applier.ownerKey);
+      return { companyId: preview.companyId, people: written.rows, companyRecord: written.company };
+    },
+  };
+};
+
+/** DEC 254b (b): remove exactly what an import wrote and nobody changed since. */
+const planUndoInstallCompanyImport: Planner = async (deps, identity, input) => {
+  if (input.kind !== "undo_install_company_import") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const { reads, registry } = companyImportSetup(deps);
+  const plan = await planCompanyImportUndo(reads, input.companyId);
+  const { preview } = plan;
+  if (!preview.ready) throw agentXError("CONFIG_INVALID", companyImportRefusalText(preview));
+  const nothing = preview.company === "keep" && preview.members.length === 0;
+  const kept = preview.skipped.length === 0 ? "" : ` Keeps ${preview.skipped.length} whose rows changed since the import (${importIds(preview.skipped.map((entry) => entry.personId))}).`;
+  return {
+    effect: nothing
+      ? `Nothing to undo for company ${preview.companyId}: no row an import wrote is left unchanged.${kept}`
+      : `Remove what the import of company ${preview.companyId} wrote: ${preview.members.length} imported memberships${preview.members.length === 0 ? "" : ` (${importIds(preview.members.map((member) => member.personId))})`}${preview.company === "delete" ? " and its company record" : ""}.${kept} Nothing else is touched.`,
+    details: { companyId: preview.companyId, companyRecord: preview.company, people: preview.members.length, kept: preview.skipped.length },
+    snapshot: plan,
+    apply: async (applier) => {
+      const removed = nothing ? { rows: 0, company: false } : await registry.undoImport(plan.remove, applier.ownerKey);
+      return { companyId: preview.companyId, people: removed.rows, companyRecord: removed.company };
+    },
+  };
+};
+
 /** How many people at or over the new limit the effect names; details carry the full count. */
 const EFFECT_PEOPLE_MAX = 10;
 
@@ -675,6 +762,8 @@ export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
   create_company_invite: planCreateCompanyInvite,
   revoke_company_invite: planRevokeCompanyInvite,
   set_company_self_serve: planCompanySelfServe,
+  import_install_company: planImportInstallCompany,
+  undo_install_company_import: planUndoInstallCompanyImport,
 };
 
 /**
