@@ -24,6 +24,8 @@ export interface DeveloperSignInParameters {
   tasks?: DeveloperTaskParameters;
   /** Hosted wiring (a), named environments only: the verified SES identity (one address) step-up codes are sent from; empty: no email factor. */
   stepUpEmailSender?: CfnParameter;
+  /** DEC 254h, named environments only: GitHub sign-in (offered only with Code's company layer), its OAuth app's client id, and when it was last turned on. */
+  github?: { enabled: CfnParameter; clientId: CfnParameter; since: CfnParameter };
 }
 
 export interface DeveloperTaskParameters {
@@ -62,7 +64,14 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
   if (options.named !== true) return { ...signIn, tasks };
   // Hosted wiring (a): named environments only, declared last, so the legacy template keeps its parameters exactly.
   const stepUpEmailSender = new CfnParameter(stack, "StepUpEmailSender", { type: "String", default: "", maxLength: 254, allowedPattern: STEP_UP_EMAIL_SENDER_PATTERN, description: "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)" });
-  return { ...signIn, tasks, stepUpEmailSender };
+  // DEC 254h: declared after StepUpEmailSender, so the parameters before it keep their order. The client secret is never a parameter: it lives in
+  // the secret agentx/<env>/developer-github, which only the sign-in function may read.
+  const github = {
+    enabled: new CfnParameter(stack, "DeveloperSignInGithub", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "enabled: developers may sign in with GitHub (only with company sign-in on); disabled: they may not" }),
+    clientId: new CfnParameter(stack, "DeveloperGithubClientId", { type: "String", default: "", allowedPattern: "^[A-Za-z0-9._-]{0,64}$", description: "Client ID of the GitHub OAuth app for developer sign-in" }),
+    since: new CfnParameter(stack, "DeveloperGithubSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When GitHub sign-in was last turned on, in epoch seconds; GitHub sessions started before it are refused" }),
+  };
+  return { ...signIn, tasks, stepUpEmailSender, github };
 }
 
 /**
@@ -258,6 +267,20 @@ export class DeveloperSignIn extends Construct {
       // address too. (While the account is in the SES sandbox, SES also checks the recipient's identity: move the account out of the sandbox before people other than the verified
       // test addresses step up.) An empty parameter names no identity, and the function then builds no sender.
       if (p.stepUpEmailSender === undefined) throw new Error("a named environment declares StepUpEmailSender");
+      if (p.github === undefined) throw new Error("a named environment declares the GitHub sign-in parameters");
+      // DEC 254h: GitHub sign-in. The client secret is read by reference (its name) by this function only; the grant names that one secret.
+      const githubSecretName = `agentx/${props.env}/developer-github`;
+      fn.addEnvironment("DEVELOPER_SIGNIN_GITHUB", p.github.enabled.valueAsString);
+      fn.addEnvironment("DEVELOPER_GITHUB_CLIENT_ID", p.github.clientId.valueAsString);
+      fn.addEnvironment("DEVELOPER_GITHUB_SECRET_ID", githubSecretName);
+      fn.addEnvironment("DEVELOPER_GITHUB_SINCE", p.github.since.valueAsString);
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["secretsmanager:GetSecretValue"],
+        // Secrets Manager appends "-" and six characters to a secret's name in its ARN.
+        resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${githubSecretName}-??????`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      }));
+      addBrokerSetting(props.broker, props.naming, "signInGithub", p.github.enabled.valueAsString);
+      addBrokerSetting(props.broker, props.naming, "githubSince", p.github.since.valueAsString);
       const sender = p.stepUpEmailSender.valueAsString;
       fn.addEnvironment("STEP_UP_EMAIL_FROM", sender);
       fn.addToRolePolicy(new iam.PolicyStatement({

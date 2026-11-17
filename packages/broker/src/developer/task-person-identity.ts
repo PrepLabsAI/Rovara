@@ -85,17 +85,20 @@ async function getItem(deps: TaskPersonIdentityDependencies, pk: string, sk: str
   return isRecord(result.Item) ? result.Item : undefined;
 }
 
+/** DEC 254n (2): the record-backed methods. A GitHub person is checked exactly as an OIDC person is: their own sign-in record, its Slack link and the same Slack proof. */
+const recordMethod = (method: unknown): method is "oidc" | "github" => method === "oidc" || method === "github";
+
 async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string): Promise<DeveloperTaskRecord> {
   if (!UUID.test(taskId)) return refuse();
   const item = await getItem(deps, taskPk(taskId), "META");
   if (item?.pk !== taskPk(taskId) || item.sk !== "META" || item.entityType !== "DEVELOPER_TASK" || item.taskId !== taskId
-    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || (item.provider !== "slack" && item.provider !== "oidc")) return refuse();
+    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || (item.provider !== "slack" && !recordMethod(item.provider))) return refuse();
   return item as unknown as DeveloperTaskRecord;
 }
 
 function parsedIdentity(item: Record<string, unknown>): TaskPersonIdentity | undefined {
   if (!HEX64.test(String(item.developerId)) || !SlackUserIdSchema.safeParse(item.slackUserId).success || typeof item.name !== "string"
-    || safeName(item.name, String(item.slackUserId)) !== item.name || (item.method !== "slack" && item.method !== "oidc")
+    || safeName(item.name, String(item.slackUserId)) !== item.name || (item.method !== "slack" && !recordMethod(item.method))
     || typeof item.issuer !== "string" || item.issuer.length === 0 || item.issuer.length > 2048
     || typeof item.subject !== "string" || item.subject.length === 0 || item.subject.length > 512) return undefined;
   return {
@@ -299,14 +302,14 @@ async function storedIdentityStatus(deps: TaskPersonIdentityDependencies, identi
     if (identity.issuer !== SLACK_OIDC_ISSUER || identity.subject !== identity.slackUserId || identity.developerId !== developerIdForSlackUser(identity.slackUserId)) return refuse();
     return "current";
   }
-  if (identity.issuer === SLACK_OIDC_ISSUER || identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
+  if (!recordMethod(identity.method) || identity.issuer === SLACK_OIDC_ISSUER || identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
   let record: DeveloperRecord | undefined;
   try {
     record = await deps.developerRecord(identity.developerId);
   } catch {
     return unavailable();
   }
-  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== "oidc" || record.developerId !== identity.developerId
+  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== identity.method || record.developerId !== identity.developerId
     || record.issuer !== identity.issuer || record.subject !== identity.subject || record.slackUserId !== identity.slackUserId
     || ownerKeyForSubject(record.issuer, record.subject) !== record.developerId) return refuse();
   return record.revoked ? "ineligible" : "current";
@@ -347,18 +350,20 @@ export async function checkTaskPersonIdentity(
       if (developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
       identity = nativeIdentity(stored.slackUserId!, safeName(stored.developerName, stored.slackUserId!));
     } else {
+      const method = stored.provider;
+      if (!recordMethod(method)) return refuse();
       let record: DeveloperRecord | undefined;
       try {
         record = await deps.developerRecord(developerId);
       } catch {
         return unavailable();
       }
-      if (record === undefined || record.provider !== "oidc" || record.developerId !== developerId || typeof record.issuer !== "string"
+      if (record === undefined || record.provider !== method || record.developerId !== developerId || typeof record.issuer !== "string"
         || typeof record.subject !== "string" || !SlackUserIdSchema.safeParse(record.slackUserId).success
         || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return refuse();
       identity = {
         developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
-        method: "oidc", issuer: record.issuer, subject: record.subject,
+        method, issuer: record.issuer, subject: record.subject,
       };
     }
   }

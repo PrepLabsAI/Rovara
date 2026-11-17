@@ -139,6 +139,25 @@ describe("Task Person invite handler", () => {
     expect([...f.receipts.values()][0]).toMatchObject({ status: "ACCEPTED", attempt: 1, actorDeveloperId: actorId, targetDeveloperId: targetId });
   });
 
+  // DEC 254n (2): a target whose registry row is record-backed reads the same for GitHub as for OIDC; any other method stays refused.
+  it.each([["oidc", "https://id.example.test", true], ["github", "https://github.com", true], ["saml", "https://saml.example.test", false], ["cloud", "https://cloud.example.test", false]] as const)(
+    "a %s target registry row is accepted only for a record-backed sign-in method", async (method, issuer, accepted) => {
+      const f = fixture();
+      const target = f.rows.get(`PERSON#${personId}`)!;
+      f.rows.set(`PERSON#${personId}`, { ...target, method, issuer, subject: "subject-1001" });
+      const checker = f.ports.createPersonChecker.bind(f.ports);
+      f.ports.createPersonChecker = (admission) => {
+        const runtime = checker(admission);
+        return { ...runtime, checkTaskPerson: async (task, developerId) => {
+          const checked = await runtime.checkTaskPerson(task, developerId);
+          return developerId === targetId ? { ...checked, identity: { ...checked.identity, method, issuer, subject: "subject-1001" } } : checked;
+        } };
+      };
+      const outcome = await createTaskPersonInviteHandler(f.ports)(f.request).then((result) => result.status, (error: { code?: string }) => error.code);
+      if (accepted) { expect(outcome).toBe("accepted"); expect(f.send).toHaveBeenCalledTimes(1); }
+      else { expect(outcome).not.toBe("accepted"); expect(f.send).not.toHaveBeenCalled(); }
+    });
+
   it("uses a durable receipt CAS to stop duplicate endpoint invocations from posting twice", async () => {
     const f = fixture();
     const handler = createTaskPersonInviteHandler(f.ports);
