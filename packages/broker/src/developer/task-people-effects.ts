@@ -361,6 +361,8 @@ export async function addTaskWebPerson(deps: TaskPeopleEffectsDependencies, call
   if (deps.registerTaskWebPerson === undefined) return peopleUnavailable();
   const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
   if (!capabilities.canManagePeople) return denied();
+  // A stale People revision writes nothing (no PERSON rows), unless this very request already has its proposal (a replay is answered by the propose step).
+  if (capabilities.peopleRevision !== input.expectedPeopleRevision && await read(deps, taskId, input.requestId) === undefined) return conflict();
   const task = await loadTaskPeopleTask(deps, taskId);
   let registered: { personId: string };
   try {

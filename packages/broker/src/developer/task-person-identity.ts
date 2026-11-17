@@ -494,7 +494,10 @@ export async function resolveTaskPersonId(
   return identity;
 }
 
-/** C4: the `web` identity a developer's own sign-in record names now, or undefined when the record cannot make one (Slack, revoked, malformed). */
+/**
+ * C4: the `web` identity a developer's own sign-in record names now, or undefined when the record cannot make one (Slack, revoked, malformed, or
+ * carrying a Slack link: plan 4.1, D2, `web` means no Slack link, so a Slack-linked OIDC or GitHub person is added through Slack and keeps the Slack proof).
+ */
 async function webIdentityFromRecord(deps: TaskPersonIdentityDependencies, developerId: string): Promise<TaskPersonIdentity | undefined> {
   let record: DeveloperRecord | undefined;
   try {
@@ -504,6 +507,7 @@ async function webIdentityFromRecord(deps: TaskPersonIdentityDependencies, devel
   }
   if (record === undefined || record.revoked !== false || record.developerId !== developerId || typeof record.issuer !== "string" || typeof record.subject !== "string"
     || record.provider === "slack" || !DeveloperSignInMethodSchema.safeParse(record.provider).success || record.issuer === SLACK_OIDC_ISSUER
+    || record.slackUserId !== undefined
     || record.subject.length === 0 || record.subject.length > 512 || record.issuer.length === 0 || record.issuer.length > 2048
     || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return undefined;
   const identity: TaskPersonIdentity = {

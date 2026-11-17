@@ -736,8 +736,11 @@ export async function authenticateDeveloperSessionId(deps: DeveloperRouteDepende
   }
 }
 
+/** C4: the most grant rows one person's web proof reads (one row per project they hold). More than this is unreadable, so a refusal. */
+export const WEB_PROOF_GRANT_ROWS_MAX = 500;
+
 /** Every item under `pk` with the sort key prefix, following LastEvaluatedKey through each page. */
-async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string): Promise<T[]> {
+async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string, maxItems?: number): Promise<T[]> {
   const items: T[] = [];
   let start: Record<string, unknown> | undefined;
   do {
@@ -749,6 +752,7 @@ async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix:
       ConsistentRead: true,
     })) as { Items?: T[]; LastEvaluatedKey?: Record<string, unknown> };
     items.push(...(response.Items ?? []));
+    if (maxItems !== undefined && items.length > maxItems) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
     start = response.LastEvaluatedKey;
   } while (start !== undefined);
   return items;
@@ -1631,6 +1635,7 @@ export function developerTaskRouteDependencies(
     const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
     return response.Item;
   };
+  const definitionReads = new Map<string, ReturnType<typeof latestDefinition>>();
   const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant" | "projectMemberIds"> = {
     // C4: one bounded page of the project's side of its grants (admin-actions.ts projectMemberKey rows); each id is proved live before use.
     projectMemberIds: async (project, limit) => {
@@ -1650,9 +1655,18 @@ export function developerTaskRouteDependencies(
       return strictLiveMembership(response.Item, targetDeveloperId);
     },
     projectGrant: async (targetDeveloperId, project, companyId) => {
-      const revision = await latestDefinition(deps, project, companyId);
+      // C4 read budget: one project definition read per request however many people are proved (the candidates list proves up to 200), and one
+      // person's own grant rows are read up to a cap; a person with more is unreadable (a refusal), never read without bound.
+      const definitionKey = `${companyId}\u0000${project}`;
+      let pending = definitionReads.get(definitionKey);
+      if (pending === undefined) {
+        pending = latestDefinition(deps, project, companyId);
+        definitionReads.set(definitionKey, pending);
+        pending.catch(() => definitionReads.delete(definitionKey));
+      }
+      const revision = await pending;
       if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
-      const memberships = await queryAll<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, `MEMBER#${targetDeveloperId}`, "PROJECT#");
+      const memberships = await queryAll<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, `MEMBER#${targetDeveloperId}`, "PROJECT#", WEB_PROOF_GRANT_ROWS_MAX);
       const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
       if (result.kind === "allowed") return result.access === "granted";
       if (result.kind === "denied" && result.reason === "project-access") return false;

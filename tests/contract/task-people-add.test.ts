@@ -6,7 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import { SLACK_OIDC_ISSUER, TaskPeopleAddRequestSchema, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { WEB_PROOF_GRANT_ROWS_MAX, developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { renderTaskPeoplePanel } from "../../packages/broker/src/aws/task-people-page-view.js";
 import { TASK_PAGE_API, createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
 import {
@@ -25,6 +26,9 @@ const GALE_ID = ownerKeyForSubject(GH, "gh-1234");
 const WREN_ID = ownerKeyForSubject(CLOUD, "wren-7");
 const BRYN_ID = ownerKeyForSubject(GH, "gh-bryn");
 const NOOR_ID = ownerKeyForSubject(GH, "gh-noor");
+const OIDC = "https://id.example.test";
+const OLA_ID = ownerKeyForSubject(OIDC, "ola-1");
+const IVY_ID = ownerKeyForSubject(GH, "gh-ivy");
 const SAM = "U0SAMSLACK";
 const SAM_ID = developerIdForSlackUser(SAM);
 const P_GALE = "66666666-6666-4666-8666-666666666666";
@@ -68,14 +72,17 @@ function harness(world: World = {}) {
     [BRYN_ID]: record(BRYN_ID, "github", GH, "gh-bryn", "Bryn Other"),
     [NOOR_ID]: record(NOOR_ID, "github", GH, "gh-noor", "Noor Revoked", { revoked: true }),
     [SAM_ID]: record(SAM_ID, "slack", SLACK_OIDC_ISSUER, SAM, "Sam Slack", { slackUserId: SAM }),
+    // M1: an OIDC sign-in linked to a Slack account is a Slack-kind person (added through Slack), never a web one.
+    [OLA_ID]: record(OLA_ID, "oidc", OIDC, "ola-1", "Ola Linked", { slackUserId: SAM }),
+    [IVY_ID]: record(IVY_ID, "github", GH, "gh-ivy", "Ivy Eligible"),
     ...(world.records ?? {}),
   };
-  const memberships: Record<string, string | undefined> = { [GALE_ID]: COMPANY_A, [WREN_ID]: COMPANY_A, [BRYN_ID]: COMPANY_B, [NOOR_ID]: COMPANY_A, [SAM_ID]: COMPANY_A, ...(world.memberships ?? {}) };
-  const grants: Record<string, boolean> = { [GALE_ID]: true, [WREN_ID]: true, [BRYN_ID]: true, [NOOR_ID]: true, [SAM_ID]: true, ...(world.grants ?? {}) };
+  const memberships: Record<string, string | undefined> = { [GALE_ID]: COMPANY_A, [WREN_ID]: COMPANY_A, [BRYN_ID]: COMPANY_B, [NOOR_ID]: COMPANY_A, [SAM_ID]: COMPANY_A, [OLA_ID]: COMPANY_A, [IVY_ID]: COMPANY_A, ...(world.memberships ?? {}) };
+  const grants: Record<string, boolean> = { [GALE_ID]: true, [WREN_ID]: true, [BRYN_ID]: true, [NOOR_ID]: true, [SAM_ID]: true, [OLA_ID]: true, [IVY_ID]: true, ...(world.grants ?? {}) };
   const proof = vi.fn(async (request: TaskPersonProofRequest): Promise<TaskPersonProofResponse> => ({ ok: true, user: { id: request.slackUserId, teamId: TEAM, name: "Sam" }, memberOf: [] }));
   const projectMemberIds = vi.fn(async (project: string, limit: number) => {
     void project;
-    const ids = world.members ?? [GALE_ID, WREN_ID, BRYN_ID, NOOR_ID, SAM_ID];
+    const ids = world.members ?? [GALE_ID, WREN_ID, BRYN_ID, NOOR_ID, SAM_ID, OLA_ID];
     return { ids: ids.slice(0, limit), complete: world.complete ?? true };
   });
   const uuids = [P_NEW];
@@ -141,6 +148,66 @@ describe("candidates (GET people/candidates)", () => {
   });
 });
 
+describe("candidates: the lister's answer is checked", () => {
+  it("is unavailable when the project lister returns more ids than were asked for", async () => {
+    const h = harness();
+    h.projectMemberIds.mockResolvedValueOnce({ ids: Array.from({ length: 201 }, (_, index) => index.toString(16).padStart(64, "0")), complete: true });
+    expect((await errorOf(listTaskWebCandidates(h.identityDeps, webTask(), GALE_ID, 200))).code).toBe("SLACK_UNAVAILABLE");
+  });
+
+  it("is unavailable when the list handed to the effects carries anything beyond names and ids", async () => {
+    const h = harness();
+    h.deps.listTaskWebCandidates = async () => ({ candidates: [{ developerId: WREN_ID, name: "Wren Cloud", email: "wren@example.test" }], complete: true });
+    expect((await errorOf(getTaskPeopleCandidates(h.deps, GALE_CALLER, TASK_A))).code).toBe("RUNTIME_UNAVAILABLE");
+  });
+});
+
+describe("candidates: the read budget on the route wiring", () => {
+  const SIGNIN = "signin";
+  function routeWorld(extraGrantRows = 0) {
+    const db = new FakeDynamoDb();
+    const meta = webTask();
+    db.set(meta as unknown as Record<string, unknown>);
+    db.set({ pk: "PROJECT#payments", sk: "REV#000000000007", companyId: COMPANY_A, definition: { revision: 7 } });
+    const KAI_ID = ownerKeyForSubject(GH, "gh-kai");
+    const people = [
+      record(WREN_ID, "cloud", CLOUD, "wren-7", "Wren Cloud"),
+      record(IVY_ID, "github", GH, "gh-ivy", "Ivy Eligible"),
+      record(KAI_ID, "github", GH, "gh-kai", "Kai Eligible"),
+    ];
+    for (const person of people) {
+      const developerId = person.developerId;
+      db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", ...person });
+      db.set({ pk: `COMPANY_MEMBER#${developerId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: developerId, companyId: COMPANY_A, role: "member", joinedAt: CREATED });
+      db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
+      db.set({ pk: "PROJECT_MEMBERS#payments", sk: `DEVELOPER#${developerId}`, projectName: "payments", developerId });
+    }
+    for (let index = 0; index < extraGrantRows; index += 1) db.set({ pk: `MEMBER#${WREN_ID}`, sk: `PROJECT#extra-${String(index).padStart(4, "0")}`, projectName: `extra-${index}`, role: "viewer" });
+    const queries: Array<{ pk: unknown; prefix: unknown }> = [];
+    const counting = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      if (command.constructor.name === "QueryCommand") queries.push({ pk: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":pk"], prefix: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":prefix"] });
+      return db.send(command as never);
+    } };
+    const developer = { signInTableName: SIGNIN, issuer: "https://code.example.test", companies: companyMembershipFromDynamo(db, SIGNIN) };
+    const deps = developerTaskRouteDependencies({ documentClient: counting, tableName: "state", developer, now: () => T0, tasks: {} } as never, GALE_CALLER);
+    return { deps, meta, queries };
+  }
+
+  it("reads the project definition once however many people are proved", async () => {
+    const { deps, meta, queries } = routeWorld();
+    const listed = await deps.listTaskWebCandidates!(meta, 200);
+    expect(listed.candidates.length).toBeGreaterThanOrEqual(2);
+    expect(queries.filter((query) => query.pk === "PROJECT#payments")).toHaveLength(1);
+  });
+
+  it("leaves out a person whose grant rows exceed the cap, and keeps the others", async () => {
+    const { deps, meta } = routeWorld(WEB_PROOF_GRANT_ROWS_MAX + 1);
+    const names = (await deps.listTaskWebCandidates!(meta, 200)).candidates.map((candidate) => candidate.developerId);
+    expect(names).not.toContain(WREN_ID);
+    expect(names).toContain(IVY_ID);
+  });
+});
+
 describe("add (POST people/add) through propose -> confirm", () => {
   it("registers a web candidate, proposes the role, and the confirm step writes the web entry with no Slack invitation", async () => {
     const h = harness();
@@ -169,6 +236,7 @@ describe("add (POST people/add) through propose -> confirm", () => {
     ["a member of another company (even with a grant on a same-named project)", BRYN_ID],
     ["a person with a revoked sign-in", NOOR_ID],
     ["a Slack sign-in (added through Slack)", SAM_ID],
+    ["an OIDC sign-in linked to Slack (added through Slack, keeps the Slack proof)", OLA_ID],
     ["someone with no sign-in record", ownerKeyForSubject(GH, "gh-ghost")],
   ])("refuses %s with fixed words and writes nothing", async (_label, developerId) => {
     const h = harness();
@@ -191,9 +259,30 @@ describe("add (POST people/add) through propose -> confirm", () => {
     expect(h.db.find((item) => item.developerId === WREN_ID)).toEqual([]);
   });
 
-  it("refuses a stale People revision", async () => {
+  it("is owner only: a commenter who tries to add a third member is refused, and no PERSON row is written for the target", async () => {
+    const h = harness();
+    h.db.set({ pk: `DEVTASK#${TASK_A}`, sk: "PEOPLE", schemaVersion: 1, revision: 3, orphaned: false, people: [GALE("owner"), { developerId: WREN_ID, name: "Wren Cloud", role: "commenter", method: "cloud" }] });
+    h.db.set({ pk: `DEVTASK#${TASK_A}`, sk: "PERSON#88888888-8888-4888-8888-888888888888", schemaVersion: 1, personId: "88888888-8888-4888-8888-888888888888", developerId: WREN_ID, name: "Wren Cloud", method: "cloud", issuer: CLOUD, subject: "wren-7", createdAt: CREATED });
+    h.db.set({ pk: `DEVTASK#${TASK_A}`, sk: `PERSON_SUBJECT#${WREN_ID}`, schemaVersion: 1, personId: "88888888-8888-4888-8888-888888888888", developerId: WREN_ID, createdAt: CREATED });
+    for (const role of ["owner", "commenter", "viewer"] as const) {
+      expect((await errorOf(addTaskWebPerson(h.deps, WREN_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId: IVY_ID, role }))).code).toBe("TASK_ACCESS_DENIED");
+    }
+    expect(h.db.find((item) => item.developerId === IVY_ID)).toEqual([]);
+    expect(h.db.find((item) => String(item.sk).startsWith("PEOPLE_PROPOSAL#"))).toEqual([]);
+  });
+
+  it("refuses a stale People revision, and writes no PERSON row for it (the revision is checked before registering)", async () => {
     const h = harness();
     expect((await errorOf(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 2, developerId: WREN_ID, role: "commenter" }))).code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(h.db.find((item) => item.developerId === WREN_ID)).toEqual([]);
+  });
+
+  it("still answers a replay of a committed request after the People revision moved on", async () => {
+    const h = harness();
+    const input = { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "commenter" as const };
+    await addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, input);
+    await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, REQUEST);
+    await expect(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, input)).resolves.toMatchObject({ status: "COMMITTED" });
   });
 
   it("takes only owner, commenter or viewer (removal stays role `denied` through people/role)", () => {
