@@ -35,6 +35,7 @@
 import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
+import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
 import { createTaskActions, type TaskActions } from "../core/task-flow/task-actions.js";
 import { stopTaskOnRequest } from "../core/task-flow/stop-request.js";
@@ -83,6 +84,7 @@ export const COMPANY_RULES_NO_ANSWER = "The company rules service did not answer
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 export const SESSION_CAP_UNREADABLE = "This install's session limit could not be read, so no token was made. Try again later, or ask whoever runs the install.";
 const PROJECT_NOT_FOUND = "project not found";
+export const INVOLVED_UNAVAILABLE = "Your involved tasks could not be listed right now. Try again in a moment.";
 
 /** The deployed caller, as the broker's sign-in vouches for it. */
 export interface DeployedCaller {
@@ -175,8 +177,9 @@ function tokenIdOf(raw: string): string {
 }
 
 /** Only the methods the core's handlers serve: anything else under these paths stays the old broker's (a playbook PUT is its editor's). */
-function owns(path: string, method: string): boolean {
-  if (path === TASK_START) return method === "POST";
+function owns(path: string, method: string, query: string): boolean {
+  // The ordinary list (`GET /v1/dev/tasks`) is the old broker's; only `?involved=1` (exactly) is the core's: the tasks the caller was added to.
+  if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
   if (TASK_ANSWERS.test(path)) return method === "POST";
   if (TASK_READ.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path)) return method === "GET";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
@@ -285,8 +288,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       // Off: nothing is read and nothing answers here.
       if (!options.app.serving) return undefined;
       const path = request.path.split("?")[0] ?? request.path;
-      if (!owns(path, request.method)) return undefined;
-      const starting = path === TASK_START;
+      if (!owns(path, request.method, request.path.split("?")[1] ?? "")) return undefined;
+      const starting = path === TASK_START && request.method === "POST";
       let membership: CompanyMembership | undefined;
       let unreadable = false;
       try {
@@ -297,6 +300,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       }
       // A start by a person with no member company is no core company's: the old broker starts it, as before. (Every other route refuses below.)
       if (starting && !unreadable && (membership === undefined || membership === null)) return undefined;
+      // The involved list says "nothing" only when it is sure: a membership that could not be read is a fixed outage answer, never an empty list.
+      if (unreadable && path === TASK_START && request.method === "GET") return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", INVOLVED_UNAVAILABLE));
       // Fail closed: no member company, a malformed one or an unknown role is a sign-in refusal, never the install's company.
       if (membership === undefined || membership === null || typeof membership !== "object" || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || !OrgRoleSchema.safeParse(membership.role).success) return unauthenticated();
       const companyId = membership.companyId;
@@ -323,6 +328,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         if (INBOX_PATH.test(path)) return await inboxAnswer(target.inbox, request, taskCaller); if (SESSIONS.test(path)) {
           if (target.sessions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return (await target.sessions(request, taskCaller)) ?? errorAnswer(agentXError("NOT_FOUND", "route not found"));
+        }
+        if (path === TASK_START && request.method === "GET") {
+          // The involved list: the caller's own rows in this company, each re-checked against the live task access (the core's task read rule). Another company's task is never listed.
+          return json(200, await listInvolvedTasks(target.runtime.flow.deps, taskCaller, involvedListOptions(new URLSearchParams(request.path.split("?")[1] ?? ""))));
         }
         if (starting) {
           // The core's own start (it parses the request, checks the person may start on the project, holds the admission and writes the engine stamp in one transaction). A retry with the

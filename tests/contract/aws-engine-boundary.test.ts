@@ -12,6 +12,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp, type EngineStamp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
@@ -475,6 +476,36 @@ describe("the AWS readers see only workflow rows", () => {
     expect(listed.body).toEqual({ tasks: [{ taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: row.createdAt, updatedAt: row.updatedAt }] });
     expect(writes).toEqual([]);
     expect(workspaceReads()).toEqual([]);
+  });
+
+  it("the ordinary task list is unchanged by the involved list: every query but exactly involved=1 is the same list, byte for byte (web task channel C5)", async () => {
+    const { db, task, dev } = await coreWorld();
+    db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
+    db.set({ pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-11-15T00:00:00.000Z#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" });
+    const golden = { tasks: [{ taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" }] };
+    expect((await dev(MAYA, "GET", "/v1/dev/tasks")).body).toEqual(golden);
+    for (const query of ["?involved=0", "?involved=true", "?involved=11", "?involved=", "?involved=1x", "?involvedx=1"]) {
+      const answer = await dev(MAYA, "GET", `/v1/dev/tasks${query}`);
+      expect(JSON.stringify(answer), query).toBe(JSON.stringify({ status: 200, body: golden }));
+    }
+  });
+
+  it("?involved=1 is the core's list: empty with nothing added (never the ordinary list), empty with no core handlers on this install, and another company's task is never listed even for a row that names it", async () => {
+    for (const wired of [true, false]) {
+      const { dev, task, world, app } = await coreWorld({ wired });
+      const empty = { status: 200, body: { involved: true, tasks: [] } };
+      expect(await dev(MAYA, "GET", "/v1/dev/tasks?involved=1"), String(wired)).toEqual(empty);
+      // OMAR (company OTHER) holds a row naming MAYA's task (company FAKE_COMPANY): his list shows none of it.
+      await writeInvolvedRow({ store: world.store }, { companyId: OTHER, personId: "local-owner", taskId: task.taskId, createdAt: task.createdAt });
+      expect(await dev(OMAR, "GET", "/v1/dev/tasks?involved=1"), String(wired)).toEqual(empty);
+      // A task of OMAR's own company, started by someone else, is listed for him when the core's access lets him see it (and only then).
+      const other = await (await app.runtimeFor(OTHER)).flow.start({ principal: localOwnerPrincipal({ companyId: OTHER, personId: "someone" }), client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "A task OMAR was added to", workflow: true, workflowPath: "QUICK" });
+      await writeInvolvedRow({ store: world.store }, { companyId: OTHER, personId: "local-owner", taskId: other.task.taskId, createdAt: other.task.createdAt });
+      const listed = await dev(OMAR, "GET", "/v1/dev/tasks?involved=1");
+      if (wired) expect(listed).toMatchObject({ status: 200, body: { involved: true, tasks: [{ taskId: other.task.taskId, title: "A task OMAR was added to" }] } });
+      else expect(listed).toEqual(empty);
+      expect(JSON.stringify(listed.body)).not.toContain("Add a /health endpoint");
+    }
   });
 
   it("a Slack thread note on a core task's thread is refused, even where the workflow would take it from a legacy commenter, and nothing is written", async () => {
