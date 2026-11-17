@@ -214,3 +214,18 @@ it("a change drops the per-step choice's stored validation of THIS company only 
   expect((await fresh.call("PUT", { model: "zai.glm-5" })).status).toBe(200);
   expect(fresh.h.db.get(`ORG#${A}#SETTINGS`, "MODEL_SELECTION_POLICY")).toBeUndefined();
 });
+
+it("the validation drop never touches a row under the company's key that names another company, and its failure neither fails the change nor echoes anything", async () => {
+  const w = world();
+  const foreign = { pk: `ORG#${A}#SETTINGS`, sk: "MODEL_SELECTION_POLICY", entityType: "MODEL_SELECTION_POLICY", orgId: B, revision: 1, agentModelValidation: { choice: {} } };
+  w.h.db.set(foreign);
+  expect((await w.call("PUT", { model: "zai.glm-5" })).status).toBe(200);
+  expect(w.h.db.get(`ORG#${A}#SETTINGS`, "MODEL_SELECTION_POLICY")).toEqual(foreign);
+  const failing = world();
+  failing.h.db.set({ pk: `ORG#${A}#SETTINGS`, sk: "MODEL_SELECTION_POLICY", entityType: "MODEL_SELECTION_POLICY", orgId: A, revision: 1, agentModelValidation: { choice: {} } });
+  failing.h.db.injectFault({ command: "UpdateCommand", error: { name: "InternalServerError", message: "https://dynamodb.internal down" } });
+  const cleared = await failing.call("PUT", { model: null });
+  expect(cleared.status).toBe(200);
+  expect(cleared.raw).not.toContain("dynamodb.internal");
+  expect(failing.logs).toContainEqual({ companyId: A, event: "company.engine_model_validation_not_cleared" });
+});
