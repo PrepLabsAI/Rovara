@@ -542,7 +542,7 @@ describe("/rovara in Slack", () => {
     expect(w.linkRow(ACME, "C0GENERAL")).toBeUndefined();
   });
 
-  it("a press from another team leaves the token unspent; tokens carry the table's TTL", async () => {
+  it("a press from another team leaves the token unspent; tokens carry no TTL attribute and are deleted when spent", async () => {
     const w = world();
     const value = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
     expect(w.db.get(rovaraActionKey(value).pk, "META")).toMatchObject({ expiresAt: Math.floor(Date.parse(TIME) / 1000) + 600 });
@@ -552,6 +552,15 @@ describe("/rovara in Slack", () => {
     expect((await w.press(w.adminA, ROVARA_LINK_ACTION, value))!.text).toContain("Linked <#C0GENERAL> to *web*");
     // Spent: the row is gone.
     expect(w.db.get(rovaraActionKey(value).pk, "META")).toBeUndefined();
+  });
+
+  it("two presses of one token at once: exactly one links", async () => {
+    const w = world();
+    const token = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
+    const press = { source: "agentx.slack-rovara" as const, kind: "press" as const, teamId: ACME, userId: "U0ADA", channelId: "C0GENERAL", action: "link" as const, token };
+    const answers = await Promise.all([handleSlackRovara(w.context(), press), handleSlackRovara(w.context(), press)]);
+    expect(answers.map((answer) => answer.text).sort()).toEqual([ROVARA_EXPIRED, "Linked <#C0GENERAL> to *web*. Mention @Rovara here to start work."].sort());
+    expect(w.audits(A)).toHaveLength(1);
   });
 
   it("a token is refused one second after its 10 minutes, and accepted just before", async () => {
