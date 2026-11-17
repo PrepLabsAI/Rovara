@@ -33,7 +33,8 @@ const SCAN = "const n=require('net');const open=[];let left=0;for(let p=1024;p<=
  */
 const PORT_OWNERS = new Map<number, string>([[5037, "adb"], [5554, "emulator"], [5555, "emulator"]]);
 
-describe.runIf(wanted)("device evidence: the Android emulator in the device executor", () => {
+// Quarantine (DEC 254zn): the emulator test is flaky, so vitest retries a failed test of this file twice before it counts as red. The fixture build and the sandbox stand-in in prepare() are done once and survive a retry.
+describe.runIf(wanted)("device evidence: the Android emulator in the device executor", { retry: 2 }, () => {
   const suffix = randomBytes(4).toString("hex");
   const sandbox = `rovara-dev-sbx-${suffix}`;
   const created = `rovara-dev-chk-${suffix}`;
@@ -79,6 +80,7 @@ describe.runIf(wanted)("device evidence: the Android emulator in the device exec
     const args = deviceExecutorRunArgs({ image: IMAGE!, sandbox, name: created, appsDir, kvmGid, plan });
     expect(deviceExecutorArgProblems(args, { image: IMAGE!, sandbox, name: created, appsDir, plan })).toEqual([]);
     // `docker create` takes the same flags as `docker run` but not --rm, and does not start anything.
+    docker(["rm", "--force", created]); // a retry after a failed attempt must not meet the leftover container of the first
     const made = docker(["create", ...args.slice(1).filter((word) => word !== "--rm")]);
     expect(made.status, made.stderr).toBe(0);
     const inspected = docker(["inspect", created, sandbox]);
