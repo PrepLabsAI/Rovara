@@ -26,6 +26,8 @@ const PAGE_TOKEN_PATH = /^\/s\/[A-Za-z0-9_-]{43}(?:\/|$)/;
 /** The hosts of an install on this computer, whose local pages are plain http. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const URL_MAX = 2048;
+/** A task's ID (a UUID), which a session ID (`ses_...`) is never. */
+const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const UNEXPECTED = `AgentX answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`;
 
 /**
@@ -146,8 +148,21 @@ export async function sessionSay(deps: DeveloperSessionDeps, env: string | undef
   return result(answer, answer.body, `${fate}\n${linkOf(answer.url, id)}\n`);
 }
 
-/** `stop` and `retry`: each answers the session that carries on, which for a retry may be a new one. */
+/**
+ * `session stop <task ID>`: a task on a deployed install (the core engine) has no session, so a task ID is stopped on the task's own cancel route, `POST /v1/dev/tasks/{id}/cancel`, with a new
+ * request id. The route decides who may stop (the task's owner or a company admin) and its refusal is printed as it wrote it. A session ID never comes here: it keeps the session route.
+ */
+async function taskStop(deps: DeveloperSessionDeps, env: string | undefined, taskId: string): Promise<AppResult> {
+  const answer = await appRequest(deps, env, `/v1/dev/tasks/${seg(taskId)}/cancel`, { method: "POST", body: { requestId: randomUUID() } });
+  const task = answer.body.task as Body | undefined;
+  if (task === undefined || typeof task !== "object") throw agentXError("RUNTIME_UNAVAILABLE", UNEXPECTED);
+  const lines = ["Stop requested.", `${str(task.title, "(no title)")}`, `  task ${taskId}${typeof task.project === "string" ? ` on ${str(task.project)}` : ""}${typeof task.status === "string" ? `; ${str(task.status.toLowerCase())}` : ""}`];
+  return result(answer, answer.body, `${lines.join("\n")}\n`);
+}
+
+/** `stop` and `retry`: each answers the session that carries on, which for a retry may be a new one. `stop` also takes a task ID (see `taskStop`); a session ID is never sent anywhere but its own routes. */
 export async function sessionControl(deps: DeveloperSessionDeps, env: string | undefined, id: string, action: "stop" | "retry"): Promise<AppResult> {
+  if (action === "stop" && !SessionIdSchema.safeParse(id).success && TASK_ID.test(id)) return await taskStop(deps, env, id);
   const answer = await appRequest(deps, env, sessionPath(id, `/${action}`), { method: "POST", body: { requestId: randomUUID() } });
   const view = (answer.body.session ?? {}) as Body;
   const fresh = typeof view.sessionId === "string" && view.sessionId !== id;
@@ -224,8 +239,6 @@ export async function sessionStart(deps: DeveloperSessionDeps, env: string | und
 }
 
 // ---- naming a session by its task
-
-const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 /** The session a person named: a session ID, or a task ID, whose session is asked for. */
 async function sessionOfRef(deps: DeveloperSessionDeps, env: string | undefined, ref: string): Promise<string> {
