@@ -218,7 +218,7 @@ describe("the repos row", () => {
     const good = { ...repositoryMovedKey(A, "acme/web"), entityType: "GITHUB_REPOSITORY_MOVED", companyId: A, fullName: "acme/web", reason: "removed", installationId: 101, at: "2026-11-17T12:00:00.000Z", deliveryId: D(1) };
     for (const bad of [{ ...good, companyId: B }, { ...good, fullName: "acme/other" }, { ...good, reason: "gone" }, { ...good, entityType: "OTHER" }]) {
       const { db } = await bound(); db.set(bad);
-      await expect(repos(db, A, "alpha")).rejects.toMatchObject({ message: expect.stringContaining(SETUP_STATUS_UNREADABLE) });
+      await expect(repos(db, A, "alpha")).rejects.toThrow(SETUP_STATUS_UNREADABLE);
     }
   });
 });
