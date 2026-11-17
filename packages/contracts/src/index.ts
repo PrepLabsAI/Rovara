@@ -308,6 +308,8 @@ export { MODEL_CATALOG_MAX_BYTES, modelCatalogDigest } from "./model-catalog-dig
 // TE-F4: additive static prompt/model change detection; no production callers.
 export * from "./prompt-change.js";
 export * from "./prompt-change-detect.js";
+// EVAL-TRIGGER-NARROW: the worker's AI-related file set treats F4's prompt-file path rule as setup-discovered prompt files.
+export { promptFilePath } from "./prompt-change-rules.js";
 export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
@@ -413,6 +415,10 @@ export * from "./machine-setup.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
+export * from "./eval-plan-delivery.js";
+// DEC 253j(1): the trusted EVAL_PLAN record (stored next to EVAL_SPEND, bound by its digest).
+export * from "./eval-plan-record.js";
+export * from "./eval-discovery-report.js";
 export * from "./eval-proof-basis.js";
 
 export * from "./model-gateway-token.js";

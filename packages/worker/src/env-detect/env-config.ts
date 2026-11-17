@@ -248,9 +248,18 @@ const MAX_CODE_REFERENCES = 60;
 /** The text with every comment replaced by spaces (newlines kept, so lines still line up). One pass per kind of block: no pattern rescans to the end of the text. */
 function withoutComments(text: string, python: boolean): string {
   const blank = (value: string): string => value.replace(/[^\n]/gu, " ");
-  let out = text;
-  const blocks = python ? [...blocksBetween(out, '"""', '"""'), ...blocksBetween(out, "'''", "'''")] : blocksBetween(out, "/*", "*/");
-  for (const block of blocks.sort((a, b) => b.index - a.index)) out = out.slice(0, block.index) + blank(block.text) + out.slice(block.end);
+  const blocks = python ? [...blocksBetween(text, '"""', '"""'), ...blocksBetween(text, "'''", "'''")] : blocksBetween(text, "/*", "*/");
+  // One pass over the text: the blocks in order (the two docstring kinds may overlap, and an overlap is one blanked stretch), each blanked once. Rebuilding the whole text per block cost n^1.7 on a file of thousands of tiny blocks.
+  const pieces: string[] = [];
+  let cursor = 0;
+  for (const block of blocks.sort((a, b) => a.index - b.index || a.end - b.end)) {
+    if (block.end <= cursor) continue;
+    const from = Math.max(block.index, cursor);
+    pieces.push(text.slice(cursor, from), blank(text.slice(from, block.end)));
+    cursor = block.end;
+  }
+  pieces.push(text.slice(cursor));
+  const out = pieces.join("");
   return out.split("\n").map((line) => {
     if (python) { const at = line.indexOf("#"); return at < 0 ? line : line.slice(0, at); }
     const trimmed = line.trimStart();

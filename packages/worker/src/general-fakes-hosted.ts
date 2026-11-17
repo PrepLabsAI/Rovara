@@ -24,6 +24,7 @@ import {
   GENERAL_FAKES_HELPER_PORT, GENERAL_FAKES_LEDGER_DIR, GENERAL_FAKES_MAX_SERVICES, GENERAL_FAKES_RUN_DIR, GENERAL_FAKES_SET_PATH, GENERAL_FAKES_SUMMARY_MAX_BYTES, agentXError, buildGeneralFakesSetBytes,
   parseGeneralFakesSummaryText, type GeneralFakeServiceFake, type TrustedGeneralFakesSummary,
 } from "@agentx/contracts";
+import { GENERAL_FAKES_HELPER_MAX_LIFETIME_MS, GENERAL_FAKES_HELPER_MIN_LIFETIME_MS } from "./general-fakes-helper.js";
 import { DOCKER_CALL_TIMEOUT_MS, setupWorkspaceKey } from "./setup-network.js";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, startServicesNetwork, type ServicesNetwork } from "./run-network.js";
 import { TEST_SERVICES_BOOT_FACTS_ENVIRONMENT, parseBootFacts } from "./test-services-report.js";
@@ -39,6 +40,8 @@ export const GENERAL_FAKES_IMAGE_ENVIRONMENT = "AGENTX_WORKER_IMAGE";
 export const GENERAL_FAKES_HELPER_ENTRY = "/opt/agentx/packages/worker/dist/general-fakes-helper.js";
 /** The one sentence every start failure gives: Docker's own words are never repeated. */
 export const GENERAL_FAKES_HOSTED_FAILURE_SENTENCE = "AgentX could not start the fake helper for this check round";
+/** How long past the round's budget the helper container lives on its own before it stops itself (shorter than the run network's 15 minute stale margin, so it is gone before the sweep would remove it). */
+export const GENERAL_FAKES_HELPER_GRACE_MS = 5 * 60_000;
 const NODE = "/usr/local/bin/node";
 const HELPER_USER = "1000:1000";
 /** The helper's only DNS server is its own loopback, where nothing listens. */
@@ -102,6 +105,8 @@ export interface GeneralFakesLaunchInput {
   digest: string;
   workspaceId: string;
   operationId: string;
+  /** The helper's own deadline in milliseconds (`--lifetime-ms`): it cuts every connection and exits after this, even if the worker never calls stop(). */
+  lifetimeMs: number;
 }
 
 /** The helper container's name: the network's own name and `-fakes`. */
@@ -114,6 +119,7 @@ function assertInput(input: GeneralFakesLaunchInput): void {
   if (!RUN_DIR_PATH.test(input.runDir) || input.runDir.split("/").includes("..")) bad("a run directory");
   if (!DIGEST.test(input.digest)) bad("a digest");
   if (!UUID.test(input.workspaceId) || !UUID.test(input.operationId)) bad("a company and task");
+  if (!Number.isSafeInteger(input.lifetimeMs) || input.lifetimeMs < GENERAL_FAKES_HELPER_MIN_LIFETIME_MS || input.lifetimeMs > GENERAL_FAKES_HELPER_MAX_LIFETIME_MS) bad("a lifetime");
 }
 
 /** The `docker run` arguments of the fake helper on the run's network. Throws (a fixed sentence) for an input that is not plain, or arguments that read back unsound. */
@@ -130,9 +136,9 @@ export function generalFakesRunArgs(input: GeneralFakesLaunchInput): string[] {
     "--tmpfs", LEDGER_TMPFS,
     "--entrypoint", NODE,
     input.image, GENERAL_FAKES_HELPER_ENTRY,
-    "--listen", helperIp, "--caller", net.workingSandboxIp, "--digest", input.digest, "--workspace", input.workspaceId, "--operation", input.operationId,
+    "--listen", helperIp, "--caller", net.workingSandboxIp, "--digest", input.digest, "--workspace", input.workspaceId, "--operation", input.operationId, "--lifetime-ms", String(input.lifetimeMs),
   ];
-  const problems = generalFakesArgProblems(args, net, { digest: input.digest, workspaceId: input.workspaceId, operationId: input.operationId, runDir: input.runDir });
+  const problems = generalFakesArgProblems(args, net, { digest: input.digest, workspaceId: input.workspaceId, operationId: input.operationId, runDir: input.runDir, lifetimeMs: input.lifetimeMs });
   if (problems.length > 0) throw agentXError("CONFIG_INVALID", `the fake helper's arguments are unsound: ${problems.join("; ")}`);
   return args;
 }
@@ -150,7 +156,7 @@ function valuesOf(args: readonly string[], name: string): string[] {
  * Reads a fake helper's `docker run` arguments back and names every way they are unsound, in fixed words (no value is repeated). An empty list is a sound set. Allow-list: a flag that is not one the helper takes is a problem,
  * so a new way to reach a network, the host, a capability, a second mount or an environment variable cannot be added by accident.
  */
-export function generalFakesArgProblems(args: readonly string[], net: GeneralFakesLaunchNetwork, expected: { digest: string; workspaceId: string; operationId: string; runDir?: string }): string[] {
+export function generalFakesArgProblems(args: readonly string[], net: GeneralFakesLaunchNetwork, expected: { digest: string; workspaceId: string; operationId: string; lifetimeMs: number; runDir?: string }): string[] {
   const problems: string[] = [];
   const flags = new Map<string, string[]>();
   let at = 0;
@@ -201,8 +207,9 @@ export function generalFakesArgProblems(args: readonly string[], net: GeneralFak
   if (one("--caller") !== net.workingSandboxIp) problems.push("the program must serve exactly the working sandbox's address");
   if (one("--digest") !== expected.digest) problems.push("the program must be pinned to the set's digest");
   if (one("--workspace") !== expected.workspaceId || one("--operation") !== expected.operationId) problems.push("the program must be bound to this company and task");
+  if (one("--lifetime-ms") !== String(expected.lifetimeMs)) problems.push("the program must carry the round's own deadline");
   const names = program.filter((arg) => arg.startsWith("--"));
-  if (names.length !== 5 || program.length !== 10) problems.push("the program takes exactly its five flags");
+  if (names.length !== 6 || program.length !== 12) problems.push("the program takes exactly its six flags");
   if (!program.every((arg) => WORD.test(arg))) problems.push("a program argument is not a plain word");
   return problems;
 }
@@ -278,6 +285,8 @@ export interface StartGeneralFakesHelperInput {
   scratchParent: string;
   /** This round's maximum lifetime: its objects count as left behind from creation + this + 15 minutes. */
   roundBudgetMs: number;
+  /** Test seam: the helper's own deadline in milliseconds (default: the round's budget plus GENERAL_FAKES_HELPER_GRACE_MS). */
+  helperLifetimeMs?: number;
   environment?: NodeJS.ProcessEnv;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -342,7 +351,7 @@ export async function startGeneralFakesHelper(input: StartGeneralFakesHelperInpu
     net = await startServicesNetwork(input.docker, { runId: generalFakesRunId(input.operationId, input.round), workspace: input.workspaceKey, roundBudgetMs: input.roundBudgetMs, ...(input.now === undefined ? {} : { now: input.now }) });
     helperName = generalFakesContainerName(net);
     helperIp = net.helperIp(0);
-    const args = generalFakesRunArgs({ net, image: input.image, runDir: files.runDir, digest: files.digest, workspaceId: input.workspaceId, operationId: input.operationId });
+    const args = generalFakesRunArgs({ net, image: input.image, runDir: files.runDir, digest: files.digest, workspaceId: input.workspaceId, operationId: input.operationId, lifetimeMs: input.helperLifetimeMs ?? input.roundBudgetMs + GENERAL_FAKES_HELPER_GRACE_MS });
     const started = await input.docker.run(args, { timeoutMs: START_TIMEOUT_MS }).catch(() => undefined);
     if (started === undefined || started.exitCode !== 0) throw new Error("run");
     await waitForHelper(call, helperName, net, helperIp, sleep, { digest: files.digest, workspaceId: input.workspaceId, operationId: input.operationId });

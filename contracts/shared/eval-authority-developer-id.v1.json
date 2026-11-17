@@ -1,0 +1,14 @@
+{
+  "purpose": "Code's eval authority ask (POST /v1/product/eval/authority) sends approver {personId, provider} as the identity adapter names the approver (Principal.personId, Principal.provider), NOT as a developer id. Cloud converts that pair to Code's developer id with the derivation below before comparing it with its stored approval.",
+  "function": "developerIdOf",
+  "source": "packages/broker/src/core/sessions/create.ts",
+  "inputs": ["provider", "personId"],
+  "derivation": "lowercase hex of SHA-256 over the UTF-8 bytes of: \"developer\" + U+0000 + provider + U+0000 + personId",
+  "length": 64,
+  "vectors": [
+    { "provider": "local-owner", "personId": "local-owner", "developerId": "3a1ffb674bf75bb195c53cef5e5da45419a42d3126adc1c8095ec911a5c54f06" },
+    { "provider": "rovara-sign-in", "personId": "person-1", "developerId": "a2389b50163f927aeb226bdce4345cf12e0bcbac45a00217909d2183b56ffa4d" },
+    { "provider": "ab", "personId": "c", "developerId": "82e70ec761e244de335b8e304cc1f90720053eec66c916859d5f47efeb8e4d47" },
+    { "provider": "a", "personId": "bc", "developerId": "15959872f7033caa3dd5edf3c191e0509075fc88d34c166bcac1f9345fa4ebca" }
+  ]
+}

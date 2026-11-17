@@ -112,14 +112,21 @@ describe("off by default", () => {
     expect(evalGatewayOriginFrom({ [EVAL_GATEWAY_URL_VARIABLE]: ` ${GATEWAY}/ ` })).toBe(GATEWAY);
     expect(evalGatewayOriginFrom({ [EVAL_GATEWAY_URL_VARIABLE]: "https://gateway.example.test:8443" })).toBe("https://gateway.example.test:8443");
   });
-  it("this base delivers no trusted sources yet: main.ts's production source is none, so the eval stays not connected", () => {
-    expect(evalHostSourcesFor({ operationId: "op-1", callbackCapability: CAP_A })).toBeUndefined();
+  it("the trusted plan, approval and cache come over the eval-plan route (DEC 253j(1)); without the check round's own host (TE-B1's fresh sandbox) there are no sources, so the eval stays not connected", () => {
+    const invocation = { workspaceId: "11111111-1111-4111-8111-111111111111", operationId: "22222222-2222-4222-8222-222222222222", callbackCapability: CAP_A };
+    expect(evalHostSourcesFor(invocation, { controlPlaneUrl: "http://broker.invalid" })).toBeUndefined();
+    const sandbox = { available: () => true, run: async () => { throw new Error("unused"); } } as never;
+    const bound = evalHostSourcesFor(invocation, { controlPlaneUrl: "http://broker.invalid", check: { sandbox, runDir: "/tmp/x", modelAllowed: () => true } });
+    expect(bound === undefined ? [] : Object.keys(bound).sort()).toEqual(["approval", "baselines", "cache", "modelAllowed", "plan", "runDir", "sandbox"]);
+    expect(evalHostSourcesFor(invocation, { controlPlaneUrl: "", check: { sandbox, runDir: "/tmp/x", modelAllowed: () => true } })).toBeUndefined();
   });
   it("main.ts binds it for a task that carries an eval request, passing the invocation's own capability and the sources only then, and spreads the ports only when there are some", () => {
     const main = readFileSync(join(__dirname, "../../packages/worker/src/main.ts"), "utf8");
     expect(main).toContain('from "./verification/eval-wiring.js"');
     expect(main).toMatch(/const evalRequested = invocation\.payload\.evalRequest !== undefined;/u);
-    expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: process\.env, controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation\) : undefined \}\)/u);
+    expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: process\.env, controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation, \{ controlPlaneUrl,/u);
+    // DEC 253n(2): the fresh check sandbox is the worker's own (its environment, Docker and workspace key), built per check from the delivered plan.
+    expect(main).toMatch(/fresh: \{ environment: process\.env, docker: createDockerCli\(\), workspaceKey: \(\) => setupWorkspaceKey\(rootPath\) \} \}\) : undefined \}\)/u);
     expect(main).toMatch(/\.\.\.\(evalFinalCheck === undefined \? \{\} : \{ evalFinalCheck \}\)/u);
   });
 });

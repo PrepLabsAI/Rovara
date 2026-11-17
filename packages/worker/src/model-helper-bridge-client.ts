@@ -8,7 +8,7 @@
 //             `{t:"cut",why}` (the answer ended early: `time`, `fault`, `response_too_large`, `gone`).
 import http from "node:http";
 import { StringDecoder } from "node:string_decoder";
-import type { ModelEgressEvent, ModelEgressSettle } from "@agentx/contracts";
+import type { ModelEgressEvent, ModelEgressSettle } from "@agentx/contracts/model-helper";
 
 export type ModelBridgeMode = "real" | "record" | "replay";
 export const MODEL_BRIDGE_MODES: readonly ModelBridgeMode[] = ["real", "record", "replay"];

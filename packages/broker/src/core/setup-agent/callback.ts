@@ -7,7 +7,9 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //   journal       the commands the run ran, in order (at most 20 a call; the broker reads each again and keeps the first for a position);
 //   host          a website the run could not reach: the name only (and where it came from): the broker decides whether it is refused, already allowed, joined or a new ask. Nothing is granted;
 //   poll          "anything for me?": the next command the owner typed (handed over once), and where each host this run asked for stands (open, approved, refused);
-//   command_done  a person's command finished, with the journal position of its result.
+//   command_done  a person's command finished, with the journal position of its result;
+//   eval_discovery  DEC 253n(1): the eval questions the run found (suites, their question files and categories, the command, judge pins, model catalog row and image), kept once per run and
+//                 never trusted for a hash (`eval-discovery.ts`): a maintainer or admin confirms a selection from it, and the broker builds the eval plan from its own reads.
 // Nothing in a reply is repository or command text except the person's own command (which only the owner could type and the broker already checked).
 import { z } from "zod";
 import { agentXError, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
@@ -16,6 +18,7 @@ import { SETUP_AGENT_WORKFLOW_MODE } from "./agent.js";
 import { finishSetupCommand, readSetupCommand, takeSetupCommand } from "./command.js";
 import { listHostAsks, approvedHostsOf, requestHostAsk } from "./host-ask.js";
 import { SETUP_JOURNAL_BATCH_MAX, appendSetupJournal } from "./journal.js";
+import { recordEvalDiscovery, type EvalDiscoveryLogEvent } from "./eval-discovery.js";
 
 export interface SetupAgentCallbackDeps {
   store: DocumentStore;
@@ -29,6 +32,8 @@ export interface SetupAgentCallbackDeps {
   sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** Whether the person who typed a command may still have it run (the owner, read live at hand-over). Absent: nothing is handed over. */
   mayStillRun?: ((by: string) => Promise<boolean>) | undefined;
+  /** Fixed-word log lines (the eval discovery's); never the body. */
+  log?: ((entry: { event: EvalDiscoveryLogEvent; reason?: string }) => void) | undefined;
 }
 
 /** The authenticated operation, as the callback route read it. */
@@ -47,6 +52,8 @@ export const SetupAgentCallbackBodySchema = z.discriminatedUnion("kind", [
   HostSchema,
   z.object({ kind: z.literal("poll") }).strict(),
   z.object({ kind: z.literal("command_done"), seq: z.number().int().min(1).max(20), journalN: z.number().int().min(1).max(400).optional() }).strict(),
+  // The report itself is checked by `recordEvalDiscovery` (`SetupEvalDiscoveryReportSchema`), so a bad report gets its own fixed refusal.
+  z.object({ kind: z.literal("eval_discovery"), report: z.unknown() }).strict(),
 ]);
 export type SetupAgentCallbackBody = z.infer<typeof SetupAgentCallbackBodySchema>;
 
@@ -64,7 +71,7 @@ export async function setupRunOfOperation(deps: Pick<SetupAgentCallbackDeps, "st
   return { orgId: deps.companyId, project: task["project"], taskId: pointer["taskId"] };
 }
 
-/** Handles one setup callback. Throws CALLBACK_FORBIDDEN for an operation that is not a running setup run, CONFIG_INVALID for a body that is not one of the four shapes. */
+/** Handles one setup callback. Throws CALLBACK_FORBIDDEN for an operation that is not a running setup run, CONFIG_INVALID for a body that is not one of the five shapes. */
 export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, operation: SetupAgentOperation, rawBody: unknown): Promise<object> {
   const run = await setupRunOfOperation(deps, operation);
   if (run === undefined) throw agentXError("CALLBACK_FORBIDDEN", "the setup callback is limited to a running setup run");
@@ -92,5 +99,7 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
     }
     case "command_done":
       return { finished: await finishSetupCommand(table, run, { seq: body.seq, journalN: body.journalN }) };
+    case "eval_discovery":
+      return await recordEvalDiscovery({ ...table, store: deps.store, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.report);
   }
 }

@@ -12,16 +12,6 @@ type Files = Record<string, string>;
 const HANG_GUARDS: ReadonlyArray<readonly [size: number, capMs: number]> = [[1_024, 250], [2_048, 500], [4_096, 1_000]];
 // The scaling check times each hostile file at 2 KiB and at 16 KiB: linear work grows about 8 times, a quadratic pattern about 64 times.
 const SCALING_N = 2_048;
-// Measured: every (file, filler) pair below grows about 10.5 to 12.4 times for 4 times the size, not 4 (the rest stay under 5, measured at 4 KiB against 16 KiB): a scanner that, for each unterminated quote or comment opener in a code file,
-// looks on to the end. The cost is small (about 30 ms at 64 KiB) and bounded by the detectors' file-size limit, so these pairs keep the earlier fixed bar at 16 KiB and 64 KiB instead of the scaling check.
-// Fix the scanner and delete the entry; do NOT widen the ratio.
-const KNOWN_QUADRATIC: ReadonlySet<string> = new Set([
-  "lib/stack.ts|opener /*", "infra/app_stack.py|opener '", "knexfile.js|opener /*", "infra/app_stack.py|opener \"", "inference.py|opener \"", "app/service.py|opener \"",
-  "inference.py|opener '", "src/a.ts|opener /*", "app/service.py|opener '", "app/settings.py|opener '", "src/b.test.ts|opener /*", "app/settings.py|opener \"",
-]);
-const ON_CI = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false";
-const BAR_MS = ON_CI ? 1_000 : 250;
-
 // Small, ordinary files that let a detector get past its early exits (a Java or Go build only looks closely when there are tests, Python wants a test file), so the hostile file is really read.
 const COMPANIONS: Files = { "src/test/java/AT.java": "class AT {}\n", "tests/test_a.py": "def test_a():\n    pass\n", "pkg/x_test.go": "package x\n", "src/ok.test.ts": "export {};\n" };
 
@@ -129,15 +119,6 @@ describe("every detector stays fast as a hostile file grows", () => {
           // A case over the guard is timed once more (a busy machine), and the faster run is judged; stop at the first case over it.
           if (took > capMs) took = Math.min(took, await timed(files));
           if (took > capMs) expect.fail(`${kind.path} with ${label} at ${String(size)} bytes took ${String(Math.round(took))} ms (hang guard ${String(capMs)} ms)`);
-        }
-        if (KNOWN_QUADRATIC.has(`${kind.path}|${label}`)) {
-          for (const size of [16_384, 65_536]) {
-            const files = { ...COMPANIONS, [kind.path]: body(kind, unit, size) };
-            let took = await timed(files);
-            if (took > BAR_MS && took < 4 * BAR_MS) took = Math.min(took, await timed(files));
-            if (took > BAR_MS) expect.fail(`${kind.path} with ${label} at ${String(size)} bytes took ${String(Math.round(took))} ms (bar ${String(BAR_MS)} ms${ON_CI ? " on CI" : ""})`);
-          }
-          continue;
         }
         // The cost must grow about linearly with the file: 2 KiB against 16 KiB.
         await expectLinearScalingAsync((size) => {

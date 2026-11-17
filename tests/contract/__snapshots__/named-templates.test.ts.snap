@@ -5293,31 +5293,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::CloudWatch::Alarm",
     },
-    "CoreModelAccessRoute": {
-      "Properties": {
-        "ApiId": {
-          "Ref": "HttpApi",
-        },
-        "AuthorizationType": "NONE",
-        "RouteKey": "GET /v1/internal/model-access",
-        "Target": {
-          "Fn::Join": [
-            "",
-            [
-              "integrations/",
-              {
-                "Ref": "BrokerIntegration",
-              },
-            ],
-          ],
-        },
-      },
-      "Type": "AWS::ApiGatewayV2::Route",
-    },
     "DefaultStage": {
       "DependsOn": [
+        "DeveloperSignInAppRouteBAD38FAA",
         "DeveloperSignInAuthRoute98555360",
-        "DeveloperSignInCoreAppRoute6D4AEEF7",
         "DeveloperSignInDevRoute4BB932E2",
         "DeveloperSignInFeedbackReviewRoute881C7CFE",
       ],
@@ -5351,6 +5330,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::ApiGatewayV2::Stage",
     },
+    "DeveloperSignInAppRouteBAD38FAA": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /v1/app/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
     "DeveloperSignInAuthRoute98555360": {
       "Properties": {
         "ApiId": {
@@ -5365,27 +5365,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "integrations/",
               {
                 "Ref": "DeveloperSignInIntegration50CD0372",
-              },
-            ],
-          ],
-        },
-      },
-      "Type": "AWS::ApiGatewayV2::Route",
-    },
-    "DeveloperSignInCoreAppRoute6D4AEEF7": {
-      "Properties": {
-        "ApiId": {
-          "Ref": "HttpApi",
-        },
-        "AuthorizationType": "NONE",
-        "RouteKey": "ANY /v1/app/{proxy+}",
-        "Target": {
-          "Fn::Join": [
-            "",
-            [
-              "integrations/",
-              {
-                "Ref": "BrokerIntegration",
               },
             ],
           ],
@@ -8476,6 +8455,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Name": "agentx-jwt",
       },
       "Type": "AWS::ApiGatewayV2::Authorizer",
+    },
+    "ModelAccessRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "GET /v1/internal/model-access",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
     },
     "MonthlyBudget": {
       "Condition": "HasBudget",

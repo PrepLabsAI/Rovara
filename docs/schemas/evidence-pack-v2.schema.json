@@ -914,7 +914,8 @@
                 "spend_not_approved",
                 "needs_fresh_sandbox",
                 "checks_failed",
-                "stopped"
+                "stopped",
+                "questions_changed"
               ]
             },
             "privateSet": {

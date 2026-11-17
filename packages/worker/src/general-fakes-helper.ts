@@ -1,8 +1,9 @@
 // General fakes, slice 2b (owner decision 252a): the hosted fake-helper's container program. It runs from the WORKER'S OWN image (`node dist/general-fakes-helper.js`, the model helper's and the fake helper's pattern) on the
 // run's own network, beside a task sandbox, with arguments the worker built from numbers and ids (general-fakes-hosted.ts). It has two modes and nothing else:
-//   SERVE      `--listen <ipv4> --caller <ipv4> --digest <64 hex> --workspace <uuid> --operation <uuid>`: loads the one set at GENERAL_FAKES_SET_PATH (the worker's file, mounted read-only), serves ONLY a set that hashes to the
+//   SERVE      `--listen <ipv4> --caller <ipv4> --digest <64 hex> --workspace <uuid> --operation <uuid> --lifetime-ms <int>`: loads the one set at GENERAL_FAKES_SET_PATH (the worker's file, mounted read-only), serves ONLY a set that hashes to the
 //              digest and is bound to this workspace (company) and this operation (task), listens on `--listen` (never a wildcard) at GENERAL_FAKES_HELPER_PORT, serves the one `--caller` address and closes every other
-//              connection unread, labels every answer `x-rovara-label: madeByRovara`, and keeps a small summary of counts on its own tmpfs, rewritten before each answer is sent.
+//              connection unread, labels every answer `x-rovara-label: madeByRovara`, and keeps a small summary of counts on its own tmpfs, rewritten before each answer is sent. It has a deadline of its own: `--lifetime-ms` after it starts it closes every connection and exits, so a worker that dies (or never calls stop()) leaves no
+//              helper serving past its round.
 //   SUMMARIZE  `--summarize`: prints ONE line of JSON, the summary (`GeneralFakesSummary`). The worker runs it by `docker exec` while the helper is up and builds the round's facts from the line alone.
 // No path, URL, name or secret is an argument (the set's and the summary's places are fixed), the program takes nothing from the environment, and it makes no outbound connection: its import graph is walked by a test
 // (tests/unit/worker-general-fakes-helper-import-graph.test.ts) and reaches the contracts only through the narrow entry `@agentx/contracts/general-fakes-helper`.
@@ -27,7 +28,12 @@ export class GeneralFakesHelperRefused extends Error {
   }
 }
 
-export interface GeneralFakesServeArguments { readonly listen: string; readonly caller: string; readonly digest: string; readonly workspaceId: string; readonly operationId: string }
+/** The helper's own lifetime, in milliseconds: at least one second, at most a day. The worker passes the round's budget plus a grace; the program refuses anything else. */
+export const GENERAL_FAKES_HELPER_MIN_LIFETIME_MS = 1_000;
+export const GENERAL_FAKES_HELPER_MAX_LIFETIME_MS = 86_400_000;
+const LIFETIME = /^[1-9][0-9]{3,8}$/u;
+
+export interface GeneralFakesServeArguments { readonly listen: string; readonly caller: string; readonly digest: string; readonly workspaceId: string; readonly operationId: string; readonly lifetimeMs: number }
 
 function valuesOf(argv: readonly string[], name: string): string[] {
   const values: string[] = [];
@@ -48,15 +54,18 @@ const refuse = (): never => { throw new GeneralFakesHelperRefused("arguments"); 
 
 /** The arguments of serving, strictly: an unknown flag, a repeated one, a name instead of an address, a wildcard, the loopback or an id that is not a UUID is refused. */
 export function parseGeneralFakesServeArguments(argv: readonly string[]): GeneralFakesServeArguments {
-  const known = new Set(["listen", "caller", "digest", "workspace", "operation"]);
+  const known = new Set(["listen", "caller", "digest", "workspace", "operation", "lifetime-ms"]);
   for (const token of argv) if (token.startsWith("--") && !known.has(token.slice(2))) refuse();
   const listen = one(argv, "listen");
   const caller = one(argv, "caller");
   const digest = one(argv, "digest");
   const workspaceId = one(argv, "workspace");
   const operationId = one(argv, "operation");
+  const lifetimeText = one(argv, "lifetime-ms");
+  const lifetimeMs = LIFETIME.test(lifetimeText) ? Number(lifetimeText) : Number.NaN;
+  if (!(lifetimeMs >= GENERAL_FAKES_HELPER_MIN_LIFETIME_MS && lifetimeMs <= GENERAL_FAKES_HELPER_MAX_LIFETIME_MS)) refuse();
   if (isIP(listen) !== 4 || isIP(caller) !== 4 || listen === "0.0.0.0" || listen.startsWith("127.") || listen === caller || !DIGEST.test(digest) || !UUID.test(workspaceId) || !UUID.test(operationId)) refuse();
-  return { listen, caller, digest, workspaceId, operationId };
+  return { listen, caller, digest, workspaceId, operationId, lifetimeMs };
 }
 
 export function isGeneralFakesSummarizeRequest(argv: readonly string[]): boolean {
@@ -95,6 +104,8 @@ export interface ServeGeneralFakesOptions {
   readonly summaryPath?: string | undefined;
   /** Test seam: the counters' limit (the program's own is GENERAL_FAKES_SUMMARY_MAX_COUNT). */
   readonly countLimit?: number | undefined;
+  /** Test seam: what the deadline calls to end the process (the program's own is `process.exit`). */
+  readonly exit?: ((code: number) => void) | undefined;
 }
 
 /**
@@ -149,6 +160,11 @@ export async function serveGeneralFakes(args: GeneralFakesServeArguments, option
     throw new GeneralFakesHelperRefused("arguments");
   }
   let closed: Promise<void> | undefined;
+  // The helper's own hard stop: after its lifetime it cuts every connection and ends the process, whether or not the worker ever calls stop(). Not held open by the timer; cancelled by a normal close.
+  const exit = options.exit ?? ((code: number): void => { process.exit(code); });
+  const deadline = setTimeout(() => { server.closeAllConnections(); server.close(); exit(0); }, args.lifetimeMs);
+  deadline.unref();
+  server.once("close", () => { clearTimeout(deadline); });
   return {
     server, port: address.port, summary: current,
     close: () => (closed ??= new Promise<void>((resolveClose) => { server.closeAllConnections(); server.close(() => resolveClose()); })),

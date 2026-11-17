@@ -10,7 +10,7 @@ import {
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
-  EVAL_ROUND_FEATURE,
+  EVAL_PLAN_DELIVERY_ACTION, EVAL_ROUND_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
@@ -314,9 +314,11 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   const secret = Buffer.from(deps.callbackSigningKey);
   // The step's own model when the install's rule chose one (its thinking level goes with it), else the install's one model.
   const modelRoute = stepModel !== undefined ? stepModel.choice.route : spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
+  // A worker that cannot run the eval is sent no `evalRequest` (below), so its capability does not name the eval plan's action either.
+  const evalDropped = spec.kind === "task" && spec.payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE);
   const capability = new CallbackCapabilities(secret).issue({
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
-    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
+    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []).filter((action) => !evalDropped || action !== EVAL_PLAN_DELIVERY_ACTION), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
   let payload: Record<string, unknown> = { ...spec.payload, ...(spec.kind === "task" && deps.moneyStop !== undefined ? { usageCheckpoints: true } : {}), ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE)) {

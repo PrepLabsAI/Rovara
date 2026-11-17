@@ -56,6 +56,21 @@ describe("mergeOrderOf", () => {
     expect(mergeOrderOf(["app", "lib"], [edge("app", "lib"), ...Array.from({ length: MERGE_ORDER_EDGES_MAX - 1 }, (_, index) => edge("app", `x${String(index)}`))])).toMatchObject({ kind: "dependencies" });
   });
 
+  // SCALING-CAP-BLIND: the scaling check below stops at the cap (64 edges), so it cannot see a regression that reads facts past it. One over the cap is refused WITHOUT reading a single fact, however many there are.
+  it("refuses facts over the edge cap without reading any of them, and orders exactly the cap (control)", () => {
+    expect(MERGE_ORDER_EDGES_MAX).toBe(64);
+    const reads: string[] = [];
+    const counted = (length: number) => new Proxy(Array.from({ length }, (_unused, index) => (index === 0 ? edge("app", "lib") : edge("app", `lib${String(index)}`))), { get(target, key, receiver) { if (typeof key === "string" && /^\d+$/u.test(key)) reads.push(key); return Reflect.get(target, key, receiver) as unknown; } });
+    for (const length of [MERGE_ORDER_EDGES_MAX + 1, MERGE_ORDER_EDGES_MAX * 8, 100_000]) {
+      reads.length = 0;
+      expect(mergeOrderOf(["app", "lib"], counted(length)), String(length)).toEqual({ kind: "no_safe_order", reason: "unreadable", repositories: ["app", "lib"] });
+      expect(reads, `elements read for ${String(length)} facts`).toEqual([]);
+    }
+    reads.length = 0;
+    expect(mergeOrderOf(["app", "lib"], counted(MERGE_ORDER_EDGES_MAX))).toMatchObject({ kind: "dependencies" });
+    expect(reads.length).toBeGreaterThanOrEqual(MERGE_ORDER_EDGES_MAX);
+  });
+
   it("orders a large input in bounded time", () => {
     // The task's 32 repositories stay; the work grows linearly with the edges up to the 64 the reader allows (8, then 64), not faster.
     const repositories = Array.from({ length: 32 }, (_, index) => `r${String(index).padStart(2, "0")}`);

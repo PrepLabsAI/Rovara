@@ -1,7 +1,7 @@
 // Device testing slice 2: who owns each listening socket in the namespace the device executor shares with the task sandbox, judged on a made-up /proc. The point is the failure cases: a listener that
 // nothing in the executor holds (the sandbox's own code lives in another process namespace) and a listener held by a program that is not the emulator, adb or Maestro must each be a violation.
 import { describe, expect, it } from "vitest";
-import { DEVICE_ADB_PATH, DEVICE_EMULATOR_DIR, identifyProcess, listenerReport, listeningSockets, watchDeviceListeners, type ProcReader } from "../../packages/verifier/src/executor/device-listeners.js";
+import { DEVICE_ADB_PATH, DEVICE_EMULATOR_DIR, DEVICE_LISTENER_RESAMPLE, identifyProcess, listenerReport, listeningSockets, watchDeviceListeners, type ProcReader, type Resample } from "../../packages/verifier/src/executor/device-listeners.js";
 
 const HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
 const row = (n: number, port: number, state: string, inode: number, ip = "0100007F") => `   ${String(n)}: ${ip}:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000:0000 ${state} 00000000:00000000 00:00000000 00000000 10001 0 ${String(inode)} 1 0000000000000000 100 0 0 10 0\n`;
@@ -88,5 +88,79 @@ describe("device listener ownership", () => {
     const report = watched.stop();
     expect(report.rows.some((entry) => entry.port === 8081 && entry.owner === "unowned")).toBe(true);
     expect(report.violations).toEqual(["8081 unowned"]);
+  });
+});
+
+// ---- the flaky read (batch 6 run 1, 5554 / 5555 / 42311 "unowned", then green on the rerun): /proc is read in three separate steps, so a process can read as holding nothing for a moment ----
+/** A /proc where the emulator's descriptors cannot be seen for the first `blind` looks at them (it is mid-exec, or has not opened its sockets yet), then can. */
+function blinkingEmulator(blind: number): { proc: ProcReader; looks: () => number } {
+  const base = fake(normal); let looks = 0;
+  return {
+    looks: () => looks,
+    proc: { ...base, list: (path) => {
+      if (path === "/proc/11/fd") { looks += 1; if (looks <= blind) return []; }
+      return base.list(path);
+    } },
+  };
+}
+const noSleep = (log: number[] = []): Resample => ({ ...DEVICE_LISTENER_RESAMPLE, sleep: (ms) => { log.push(ms); } });
+
+describe("device listener ownership: a listener is unowned only if every look finds no holder", () => {
+  it("the emulator's ports that read unowned on the first look are owned on a later one, so no violation", () => {
+    const pauses: number[] = [];
+    const { proc } = blinkingEmulator(2);
+    const report = listenerReport(proc, noSleep(pauses));
+    expect(report.violations).toEqual([]);
+    expect(report.rows.filter((entry) => entry.port === 5554 || entry.port === 5555).map((entry) => entry.owner)).toEqual(["emulator", "emulator"]);
+    expect(pauses).toEqual([DEVICE_LISTENER_RESAMPLE.delayMs, DEVICE_LISTENER_RESAMPLE.delayMs]);
+  });
+
+  it("looks again only while something reads unowned, and only a few times in a short window", () => {
+    const pauses: number[] = [];
+    expect(listenerReport(fake(normal), noSleep(pauses)).violations).toEqual([]);
+    expect(pauses).toEqual([]);
+    const { proc, looks } = blinkingEmulator(1_000);
+    expect(listenerReport(proc, noSleep(pauses)).violations).toEqual(["5554 unowned", "5555 unowned"]);
+    expect(looks()).toBe(DEVICE_LISTENER_RESAMPLE.attempts);
+    expect(DEVICE_LISTENER_RESAMPLE.attempts).toBeLessThanOrEqual(5);
+    expect(DEVICE_LISTENER_RESAMPLE.attempts * DEVICE_LISTENER_RESAMPLE.delayMs).toBeLessThanOrEqual(500);
+  });
+
+  it("MUTANT: a stray listener that no process of the executor ever holds stays unowned however often it is looked at, and a held-by-nobody port never becomes owned by its number", () => {
+    const stray = { ...normal, tcp: (normal.tcp ?? "") + row(9, 8081, "0A", 999) };
+    const pauses: number[] = [];
+    const report = listenerReport(fake(stray), noSleep(pauses));
+    expect(report.violations).toEqual(["8081 unowned"]);
+    expect(pauses).toHaveLength(DEVICE_LISTENER_RESAMPLE.attempts - 1);
+    // the well-known port numbers are no excuse: 5554 with no holder anywhere is unowned
+    const noEmulator = { ...normal, procs: { 10: normal.procs![10]!, 12: normal.procs![12]! } };
+    expect(listenerReport(fake(noEmulator), noSleep()).violations).toEqual(["5554 unowned", "5555 unowned"]);
+  });
+
+  it("MUTANT: looking again does not widen who counts: a program that shows up holding the socket later is 'other', which is a violation", () => {
+    const base = fake(normal); let looks = 0;
+    const proc: ProcReader = { ...base, list: (path) => {
+      if (path === "/proc/11/fd") { looks += 1; return looks === 1 ? [] : base.list(path); }
+      if (path === "/proc/13/fd") return looks === 1 ? [] : ["3"];
+      return base.list(path);
+    }, link: (path) => (path === "/proc/13/fd/3" ? "socket:[222]" : path === "/proc/13/exe" ? "/usr/local/bin/node" : base.link(path)) };
+    const withIntruder: ProcReader = { ...proc, list: (path) => (path === "/proc" ? [...base.list(path), "13"] : proc.list(path)) };
+    expect(listenerReport(withIntruder, noSleep()).violations).toEqual(["5554 other /usr/local/bin/node", "5555 other /usr/local/bin/node"]);
+  });
+
+  it("MUTANT: the same port in the IPv4 and IPv6 tables is two sockets: an owned one never clears an unowned stray on the other", () => {
+    const both = { ...normal, tcp: (normal.tcp ?? "") + row(9, 50000, "0A", 999) };
+    expect(listenerReport(fake(both), noSleep()).violations).toEqual(["50000 unowned"]);
+  });
+
+  it("reads the listening table before the holders, so a socket opened after the table was read is not listed without its holder", () => {
+    // The emulator appears (its process and its socket) the moment the process list is first read: after that read, before the other.
+    const base = fake(normal); let appeared = false;
+    const proc: ProcReader = {
+      read: (path) => (path.startsWith("/proc/net/tcp") && !appeared ? HEADER : base.read(path)),
+      list: (path) => { if (path === "/proc") { const before = appeared ? base.list(path) : ["self"]; appeared = true; return before; } return base.list(path); },
+      link: base.link,
+    };
+    expect(listenerReport(proc, { ...DEVICE_LISTENER_RESAMPLE, attempts: 1 }).violations).toEqual([]);
   });
 });

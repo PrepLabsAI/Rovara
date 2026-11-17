@@ -154,6 +154,34 @@ async function listCommitTree(gitDir: string, commitSha: string, signal: AbortSi
   return entries;
 }
 
+/**
+ * The commit, its root tree and every subtree, each re-hashed from the bytes the object database answers with (`<type> <size>\0<bytes>`): the borrowed objects come from a repository the agent could write, so a planted object
+ * answering for a known id with other bytes must not pass. With every tree and blob re-hashed too, the files written are exactly the commit's (git's own Merkle chain, checked here rather than trusted).
+ */
+async function verifyCommitAndTrees(gitDir: string, commitSha: string, signal: AbortSignal): Promise<void> {
+  const cwd = dirname(gitDir);
+  const root = (await runGit([`--git-dir=${gitDir}`, "rev-parse", `${commitSha}^{tree}`], { cwd, signal, maxBytes: 4096 })).toString("utf8").trim();
+  if (!SHA1.test(root)) throw new Error("git did not answer with a tree id");
+  const listing = (await runGit([`--git-dir=${gitDir}`, "ls-tree", "-r", "-d", "-z", "--full-tree", root], { cwd, signal, maxBytes: TREE_LISTING_CAP_BYTES })).toString("utf8");
+  // `-d` lists trees; a submodule (a `160000 commit` entry) is never written and has no object here, so it is passed over.
+  const subtrees = listing.split("\0").filter((record) => record !== "" && !/^160000 commit [a-f0-9]{40}\t/u.test(record)).map((record) => /^040000 tree ([a-f0-9]{40})\t/u.exec(record)?.[1]);
+  if (subtrees.some((id) => id === undefined)) throw new Error("git listed a tree entry in an unexpected form");
+  const wanted: Array<{ id: string; type: "commit" | "tree" }> = [{ id: commitSha, type: "commit" }, { id: root, type: "tree" }, ...(subtrees as string[]).map((id) => ({ id, type: "tree" as const }))];
+  const objects = await runGit([`--git-dir=${gitDir}`, "cat-file", "--batch"], { cwd, signal, maxBytes: BLOB_STREAM_CAP_BYTES, input: Buffer.from(`${wanted.map((object) => object.id).join("\n")}\n`) });
+  let offset = 0;
+  for (const object of wanted) {
+    const newline = objects.indexOf(0x0a, offset);
+    const header = newline < 0 ? [] : objects.subarray(offset, newline).toString("utf8").split(" ");
+    const size = Number(header[2]);
+    if (header[0] !== object.id || header[1] !== object.type || !Number.isSafeInteger(size) || size < 0) throw new Error("a commit or tree object is missing");
+    const bytes = objects.subarray(newline + 1, newline + 1 + size);
+    if (bytes.byteLength !== size || objects[newline + 1 + size] !== 0x0a) throw new Error("a commit or tree object is truncated");
+    if (createHash("sha1").update(Buffer.concat([Buffer.from(`${object.type} ${size}\0`), bytes])).digest("hex") !== object.id) throw new Error("a commit or tree object does not match its git object id");
+    if (object.type === "commit" && bytes.subarray(0, 46).toString("latin1") !== `tree ${root}\n`) throw new Error("the commit does not name its tree");
+    offset = newline + 2 + size;
+  }
+}
+
 /** Writes `bytes` at `relativePath` under `root`: folders are created or must be real directories, the file is created exclusively, and nothing is followed. */
 async function writeFileConfined(root: string, relativePath: string, bytes: Buffer, executable: boolean): Promise<void> {
   const parts = relativePath.split("/");
@@ -188,6 +216,7 @@ export function createProcessCandidateGit(scratchRoot: string): CandidateGit & C
       if (!SHA1.test(commitSha)) throw new Error(NOT_A_SHA);
       return withBorrowedObjects(scratchRoot, repositoryRoot, signal, async (gitDir) => {
         const cwd = dirname(gitDir);
+        await verifyCommitAndTrees(gitDir, commitSha, signal);
         const files: Array<{ path: string; mode: string; sha: string }> = [];
         const skipped: SkippedTreeEntry[] = [];
         for (const { mode, type, sha, path } of await listCommitTree(gitDir, commitSha, signal)) {
@@ -208,6 +237,8 @@ export function createProcessCandidateGit(scratchRoot: string): CandidateGit & C
           if (totalBytes > MAX_TOTAL_FILE_BYTES) throw new Error("candidate files exceed the build source size bound");
           const bytes = blobs.subarray(newline + 1, newline + 1 + size);
           if (bytes.byteLength !== size || blobs[newline + 1 + size] !== 0x0a) throw new Error(`candidate blob for ${file.path} is truncated`);
+          // Re-hashed, as in `buildSourceOf`: a planted object answering for this id with other bytes is refused, never written.
+          if (createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${size}\0`), bytes])).digest("hex") !== file.sha) throw new Error(`candidate blob for ${file.path} does not match its git object id`);
           await writeFileConfined(destination, file.path, bytes, file.mode === "100755");
           offset = newline + 2 + size;
         }

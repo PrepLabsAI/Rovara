@@ -4,10 +4,13 @@
 import { existsSync, statSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import http from "node:http";
+import net from "node:net";
+import { basename, dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { attestRovaraOnlyBaseCheckout, type ModelEgress, type ModelEgressEvent, type ModelEgressFrame, type ModelEgressScope } from "@agentx/contracts";
-import { createBridgedEvalExec as create, EVAL_BRIDGE_CALLS_MAX, type FreshEvalSandbox, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
+import { bridgeMadeEnd, createBridgedEvalExec as create, EVAL_BRIDGE_CALLS_MAX, EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, type FreshEvalSandbox, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
+import { MODEL_BRIDGE_DROP_REASONS } from "../../packages/worker/src/model-bridge.js";
 import { collectModelBridge } from "../../packages/worker/src/model-helper-bridge-client.js";
 import type { EvalSandboxRequest } from "../../packages/worker/src/verification/eval-runner.js";
 import { answer, classAnswer, frame } from "../support/eval-model-access.js";
@@ -209,5 +212,54 @@ describe("limits", () => {
     const sandbox = sandboxOf(async (input) => { const refused = await send(input, { ...frame("x"), row: "Bad Row!" }); expect(refused.status).not.toBe(200); return ok(input); });
     await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow();
     expect(e.seen).toEqual([]);
+  });
+});
+
+describe("the helper's folder", () => {
+  it("is named `models` (the helper's one mount) and holds the socket `m`, so the launch can mount exactly this folder", async () => {
+    const root = await makeRoot(); let socket = "";
+    await createBridgedEvalExec({ sandbox: sandboxOf(async (input) => { socket = input.model.socketPath; return ok(input); }), runDir: root }).run(request(egressOf()));
+    expect(basename(socket)).toBe(EVAL_BRIDGE_SOCKET_NAME); expect(basename(dirname(socket))).toBe(EVAL_HELPER_DIR_NAME);
+    expect(EVAL_HELPER_DIR_NAME).toBe("models"); expect(dirname(dirname(dirname(socket)))).toBe(root);
+  });
+});
+
+describe("a drop the bridge makes itself fails the run (EVAL-WIRE-BRIDGE-UNLOGGED-DROPS)", () => {
+  const rawTo = (socketPath: string, write: (socket: net.Socket) => void): Promise<void> => new Promise((resolve) => {
+    const socket = net.connect(socketPath); socket.on("connect", () => write(socket)); socket.on("close", () => resolve()); socket.on("error", () => undefined);
+  });
+  it("a request that is not POST /call", async () => {
+    const root = await makeRoot(); const e = egressOf();
+    const sandbox = sandboxOf(async (input) => {
+      const status = await new Promise<number>((resolve) => { const r = http.request({ socketPath: input.model.socketPath, method: "GET", path: "/other" }, (res) => { res.resume(); resolve(res.statusCode ?? 0); }); r.on("error", () => resolve(0)); r.end(); });
+      expect(status).toBe(404);
+      return ok(input);
+    });
+    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow("eval run not clean");
+    expect(e.seen).toEqual([]);
+  });
+  it("a body that goes away before it is whole", async () => {
+    const root = await makeRoot(); const e = egressOf();
+    const sandbox = sandboxOf(async (input) => {
+      await rawTo(input.model.socketPath, (s) => s.write("POST /call HTTP/1.1\r\nhost: b\r\nx-rovara-mode: real\r\ncontent-length: 100000\r\n\r\n{", () => setTimeout(() => s.destroy(), 50)));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return ok(input);
+    });
+    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow("eval run not clean");
+  });
+  it("an answer the bridge cut (the stage's stream faulted after its head)", async () => {
+    const root = await makeRoot();
+    const faulty: ModelEgress = { capabilities: { schemes: [] }, async *forward() { yield { kind: "head", status: 200, headers: [["content-type", "application/json"]] }; throw new Error("reset"); } };
+    const sandbox = sandboxOf(async (input) => { const answered = await send(input, frame("x")); expect(answered.cut).toBe("fault"); return ok(input); });
+    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run({ ...request(egressOf()), egress: faulty })).rejects.toThrow("eval run not clean");
+  });
+  it("names exactly the bridge-made ends, in fixed words", () => {
+    expect(bridgeMadeEnd({ event: "dropped", reason: "gone" })).toBe(true);
+    expect(bridgeMadeEnd({ event: "refused", class: "refused" })).toBe(true);
+    expect(bridgeMadeEnd({ event: "answer", class: "refused" })).toBe(true);
+    expect(bridgeMadeEnd({ event: "call", class: "ok", reason: "time" })).toBe(true);
+    expect(bridgeMadeEnd({ event: "call", class: "ok", status: 200 })).toBe(false);
+    expect(bridgeMadeEnd({ event: "call", class: "rate_limit", status: 429 })).toBe(false);
+    for (const reason of MODEL_BRIDGE_DROP_REASONS) expect(bridgeMadeEnd({ event: "dropped", reason })).toBe(true);
   });
 });

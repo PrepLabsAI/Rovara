@@ -40,7 +40,9 @@ import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
-import { deployedDevWiringParts, stepUpDecisionProofs } from "../core-host/deployed-decisions.js";
+import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
+import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
+import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
 import {
@@ -72,6 +74,7 @@ import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
+import { evalReservationModules } from "../core-host/eval-authority-http.js";
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -195,6 +198,20 @@ export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): Hoste
   const parsed = HostedPolicyHookSettingsSchema.safeParse(settings);
   if (!parsed.success) throw new Error("the policy hook settings are not readable");
   return parsed.data;
+}
+
+// ---- the eval plan source of the deployed callback layer (EVAL-PLAN-CORE-WIRING, DEC 253c/253j(1))
+
+/**
+ * The trusted eval plan source a deployed company's callback layer answers the `eval-plan` callback from: the company's own stored EVAL_PLAN bound to an approved eval spend item, the
+ * approval through the install's bound `eval-reservation` adapter only, and the company's base-score cache. The approver's CURRENT role is the hosted members reader
+ * (`deployedSessionMembers`: live `COMPANY_MEMBER#` membership in THIS company, the broker's project grant), never the role stored at approval or a role the gateway names.
+ */
+export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void): EvalPlanSources {
+  return createEvalPlanSources({
+    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people),
+    ...(log === undefined ? {} : { log: (event) => { log({ event: `core_engine.${event}` }); } }),
+  });
 }
 
 // ---- membership and project grants (the broker's own records)
@@ -391,7 +408,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -567,6 +584,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           grants: new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential),
           ...(lessons === undefined ? {} : { onEvents: (operation, events) => lessons.host.onEvents(operation, events) }),
           bookUsage: money.bookUsage,
+          // DEC 253c/253j(1): the trusted eval plan, approval and baseline cache for this company's CHECKS runs, with the approver's live role from the hosted members reader.
+          evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),
         });
       })();
       found.catch(() => callbackHandlers.delete(companyId));
