@@ -35,7 +35,7 @@ import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js
 import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
 import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
 import { createCiWaitLines, createMergeOrderLines, createTaskRepositoryEdgesSeam } from "../../core/merge/repository-edges.js";
-import { createAsk } from "../../core/sessions/ask.js";
+import { createAsk } from "../../core/sessions/ask.js"; import { withLocalAnswers } from "./project-answers.js";
 import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
 import { createLocalAskModel } from "../ask-model.js";
 import { createLocalDiagnosisModel } from "../diagnosis-model.js";
@@ -830,7 +830,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   return {
     flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation, browserEvidence, afterMerge,
-    routes: (request, caller) => routes(request, caller),
+    routes: withLocalAnswers({ flow: flow.deps, registry, store, companyId, now: () => clock().getTime(), log, ask: { choice: chosen, keys, companyId, providers, ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }), ...(options.askFetch === undefined ? {} : { fetch: options.askFetch }) }, prices: modelPrices }, (request, caller) => routes(request, caller)),
     callbacks: callbackHandler,
     tick,
     async stop() {

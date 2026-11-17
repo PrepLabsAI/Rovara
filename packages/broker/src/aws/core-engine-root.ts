@@ -27,7 +27,7 @@ import { projectTaskCapReader, type ProjectSettingsHook } from "./project-settin
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, WIKI_BUILD_WORDS, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, WIKI_BUILD_WORDS, isContextSourceStage,
   when, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -715,6 +715,23 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Lead 4 A1/A2: the cost and time report. A task is filed or moved by its starter or a project maintainer: the standing is the setup run's own live read.
           report: { standing: setupRunStanding },
+          // Lead 4 J1: the smart Just answer. Any live role on the project asks (the setup run's standing); the code is the project's own repositories on the company's code host. NO model yet: the gateway's
+          // "answers" purpose is Cloud lane L4-E, so until it lands every answer is the fixed "answers are not set up here yet" outcome (pass `model` here when it does).
+          answers: {
+            standing: setupRunStanding,
+            repositories: async (companyId, project) => {
+              if (companyId !== runtime.companyId) return undefined;
+              const latest = await runtime.flow.deps.projects.latest(project);
+              // A repository whose code host cannot be resolved throws here: the answer is then unavailable, never answered over a shorter list (that list also decides what left the project).
+              return latest === undefined ? undefined : {
+                names: latest.definition.repositories.map((repository) => repository.name),
+                handles: codeRepositoriesOf(latest.definition).map((repository) => ({
+                  name: repository.name, defaultBranch: repository.defaultBranch, repository: { url: repository.url }, scope: { orgId: runtime.companyId },
+                  host: codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }),
+                })),
+              };
+            },
+          },
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
         };

@@ -91,6 +91,8 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/wiki-build/refresh", "full"], ["POST", "/v1/app/projects/payments/wiki-build/agents", "full"], ["POST", "/v1/app/projects/payments/wiki-build/delete", "full"],
     // L4-SC: the Update setup offers, making a candidate from one, and "Not now".
     ["GET", "/v1/app/projects/payments/setup-agent/updates", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/prepare", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/dismiss", "full"],
+    // Lead 4 J1: the smart Just answer.
+    ["POST", "/v1/app/projects/payments/answers", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -118,6 +120,8 @@ describe("the /v1/app route table", () => {
       ["GET", "/v1/app/org/report/people"], ["GET", "/v1/app/tasks/t1/feature"], ["POST", "/v1/app/tasks/t1/feature/extra"], ["POST", "/v1/app/tasks/feature"],
       // The wiki build controls: no other methods, no other tails.
       ["PUT", "/v1/app/projects/payments/wiki-build"], ["DELETE", "/v1/app/projects/payments/wiki-build"], ["GET", "/v1/app/projects/payments/wiki-build/stop"], ["GET", "/v1/app/projects/payments/wiki-build/delete"], ["POST", "/v1/app/projects/payments/wiki-build/extra"], ["GET", "/v1/app/projects/payments/wiki-builds"],
+      // The answer route is one POST: no read of answers, no other writes, no deeper paths.
+      ["GET", "/v1/app/projects/payments/answers"], ["PUT", "/v1/app/projects/payments/answers"], ["DELETE", "/v1/app/projects/payments/answers"], ["POST", "/v1/app/projects/payments/answers/a1"], ["POST", "/v1/app/projects/payments/answer"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });

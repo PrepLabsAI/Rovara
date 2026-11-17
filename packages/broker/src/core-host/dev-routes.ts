@@ -68,6 +68,7 @@ import type { HostedTestEnvironmentDecider } from "./hosted-test-environment-dec
 import { z } from "zod";
 import { isReportPath, routeHostedReport, type HostedReportWiring } from "./report-routes.js";
 import { isWikiBuildPath, routeHostedWikiBuild, type HostedWikiBuildWiring } from "./wiki-build-routes.js";
+import { isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "./answer-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -184,6 +185,8 @@ export interface CoreDevWiring {
   report?: HostedReportWiring;
   /** Lead 4 W4: the wiki build controls (`/v1/app/projects/<p>/wiki-build...`, wiki-build-routes.ts). Absent: those paths say "not on the core yet". */
   wikiBuild?: HostedWikiBuildWiring;
+  /** Lead 4 J1: the smart Just answer route (`POST /v1/app/projects/<p>/answers`, answer-routes.ts). Absent: that path says "not on the core yet". */
+  answers?: HostedAnswersWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -213,7 +216,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method)) return true;
+  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -501,6 +504,11 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target), log: options.log,
           });
+        }
+        if (isAnswersPath(path, request.method)) {
+          // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
+          if (target.wiring.answers === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {
