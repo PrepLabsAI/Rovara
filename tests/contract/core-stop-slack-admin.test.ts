@@ -258,11 +258,11 @@ describe("pointers that name a task they do not hold", () => {
     const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
     const authorize = vi.fn(async () => undefined);
     const foreign = randomUUID();
-    await world.store.put({ item: { ...workspaceKey(OTHER, foreign), entityType: "WORKSPACE", id: foreign, companyId: OTHER, ownerKey: "k", status: "READY", activeOperationId: null } as never });
+    await world.store.put({ item: { ...workspaceKey(OTHER, foreign), entityType: "WORKSPACE", id: foreign, companyId: OTHER, ownerKey: "k", status: "READY", activeOperationId: null } });
     await world.store.put({ item: { ...taskPointerKey(OTHER, foreign), taskId: task.taskId } });
     await expect(stopWorkspaceAsAdministrator({ ...deps, companyId: OTHER }, foreign, { id: "admin" }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND" });
     const stray = randomUUID();
-    await world.store.put({ item: { ...workspaceKey(FAKE_COMPANY, stray), entityType: "WORKSPACE", id: stray, companyId: FAKE_COMPANY, ownerKey: "k", status: "READY", activeOperationId: null } as never });
+    await world.store.put({ item: { ...workspaceKey(FAKE_COMPANY, stray), entityType: "WORKSPACE", id: stray, companyId: FAKE_COMPANY, ownerKey: "k", status: "READY", activeOperationId: null } });
     await world.store.put({ item: { ...taskPointerKey(FAKE_COMPANY, stray), taskId: task.taskId } });
     await expect(stopWorkspaceAsAdministrator(deps, stray, { id: "admin" }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(authorize).not.toHaveBeenCalled();
@@ -284,7 +284,7 @@ describe("a plain close (no Stop) on a core task", () => {
   it("is not the core's stop: it falls to the workflow's close, which refuses a core task; nothing is stopped", async () => {
     const { harness, task, status, coreTasks } = await coreWorld();
     const route = vi.spyOn(coreTasks, "route");
-    const response = await harness.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId: task.taskId, userId: SLACK.owner, thread: THREAD, requestId: randomUUID() } as never);
+    const response = await harness.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId: task.taskId, userId: SLACK.owner, thread: THREAD, requestId: randomUUID() });
     expect(JSON.parse(response.body)).toMatchObject({ refused: true });
     expect(route).not.toHaveBeenCalledWith(expect.objectContaining({ path: `/v1/dev/tasks/${task.taskId}/cancel` }), expect.anything());
     expect(await status()).not.toBe("CANCELLED");
@@ -298,8 +298,8 @@ describe("the Stop button on a workflow (unstamped) task", () => {
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
     const taskId = (started.body.task as { taskId: string }).taskId;
     route.mockClear();
-    await harness.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId, userId: SLACK.owner, thread: THREAD, requestId: randomUUID(), stop: true } as never);
-    await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: THREAD, userId: SLACK.owner } as never);
+    await harness.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId, userId: SLACK.owner, thread: THREAD, requestId: randomUUID(), stop: true });
+    await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: THREAD, userId: SLACK.owner });
     expect(route).not.toHaveBeenCalled();
   });
 });
