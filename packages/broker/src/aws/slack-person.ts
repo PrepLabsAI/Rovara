@@ -130,6 +130,12 @@ export interface SlackCompanyDependencies {
   workspaces?: SlackWorkspaceAccess;
   companies?: CompanyMembershipReader;
   now?: () => number;
+  /**
+   * L2-2 PR 18b: set only on the install team's legacy view while Slack company mode is on (slack-company-split.ts). A channel binding of any other team is then "not bound"
+   * there, so a request that reaches the legacy handler naming another team (by a path or body the split does not read) can neither read nor write it. Absent (the switch
+   * off), today's rule.
+   */
+  slackInstallTeamOnly?: string;
 }
 
 export const SLACK_LINK_NOTICE = "link your account: Open in Rovara";
@@ -142,7 +148,7 @@ export async function slackCompanyPerson(deps: SlackCompanyDependencies, teamId:
 }
 
 export async function slackCompanyProject(deps: SlackCompanyDependencies, teamId: string, name: string): Promise<boolean> {
-  if (deps.workspaces === undefined) return true;
+  if (deps.workspaces === undefined) return deps.slackInstallTeamOnly === undefined || teamId === deps.slackInstallTeamOnly;
   try {
     const company = await deps.workspaces.requireCompany(teamId);
     return OrgIdSchema.safeParse(company).success && recordInCompany(await deps.workspaces.getProject(name), company);

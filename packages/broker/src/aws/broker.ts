@@ -3,6 +3,7 @@ import { createBrokerCoreServices } from "./core-job-services.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
 import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
@@ -993,6 +994,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
+  // L2-2 PR 18b (slack-company-split.ts): without `workspaces` (Slack company mode off) this is today's handler, unchanged. With it, SLACK_TEAM_ID's team and every request
+  // naming no team get a handler built without `workspaces` (today's legacy path); every other team gets the company path.
+  const company = dependencies.workspaces === undefined ? undefined : brokerEventHandler(core, dependencies);
+  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : withoutSlackCompanyMode(dependencies, dependencies.slackWorkspaceLegacyTeamId ?? "")), company, dependencies.slackWorkspaceLegacyTeamId);
+}
+
+function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
@@ -14530,9 +14538,15 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
 function slackCallerRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "workspaces" | "companies"> {
   return { ...(dependencies.workspaces === undefined ? {} : { workspaces: dependencies.workspaces }), ...(dependencies.companies === undefined ? {} : { companies: dependencies.companies }) };
 }
-function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes" | "workspaces" | "companies"> {
-  if (dependencies.workspaces !== undefined) return { ...slackCallerRouteDependencies(dependencies), channelLinkCodes: createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }) };
+export function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes" | "workspaces" | "companies"> {
   const channelAdapters = dependencies.channelAdapters;
+  if (dependencies.workspaces !== undefined) {
+    // L2-2 PR 18b: the company's Slack codes, then the install's adapter codes as before (the link page is served only by the company handler when company mode is on).
+    const install = channelAdapters === undefined ? undefined : { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now };
+    return { ...slackCallerRouteDependencies(dependencies), channelLinkCodes: companyThenInstallLinkCodes(
+      createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }),
+      install === undefined ? undefined : installAdapterLinkCodes(install)) };
+  }
   return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
 }
 
