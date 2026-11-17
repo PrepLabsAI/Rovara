@@ -2,7 +2,9 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Lane L6a: the task flow end to end on the W0 fakes: a task is started, staged and dispatched to a fake worker machine, and every record is in the
 // document store port. Nothing here names DynamoDB, SQS or EC2.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { AdmissionRequest } from "@agentx/contracts";
+import { setMachineChoice } from "../../packages/broker/src/core/test-env/machine-size.js";
 import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { dispatchPartition, operationKey, taskIndexKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -323,6 +325,35 @@ describe("dispatching to a worker machine", () => {
     const view = await refusing.flow.get(refusing.owner, refused.task.taskId);
     expect(view).toMatchObject({ status: "FAILED", failure: { message: expect.stringMatching(/^This month's machine time/) as string } });
     expect(refusing.machines.delivered("none")).toEqual([]);
+  });
+
+  // DEC 254zb: with sized launches and their cost switch on, a machine start asks admission with one hour of the chosen size; off, the request is exactly today's.
+  it("asks admission for a machine start with the chosen size's estimate only while the cost switch is on", async () => {
+    const machineStarts = async (env: Record<string, string | undefined>) => {
+      for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
+      try {
+        const asked: AdmissionRequest[] = [];
+        const h = createHarness({
+          admission: {
+            async admit(request) { asked.push(request); return { allowed: true }; },
+            async stage() { return { decision: { allowed: true }, items: [] }; },
+            async settle() {}, async release() {},
+          },
+        });
+        await h.registerProject();
+        await setMachineChoice({ store: h.store, now: () => Date.now(), env: { ROVARA_MACHINE_SIZE: "1" } }, { orgId: T1_COMPANY, project: "payments", rowId: "arm64-4-16" });
+        await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
+        await drain(h);
+        return asked.filter((request) => request.action === "machine.start");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    };
+    const on = { ROVARA_MACHINE_SIZE: "1", ROVARA_MACHINE_SIZE_RUN: "1", ROVARA_MACHINE_SIZE_COST: "1", AWS_REGION: "us-east-1" };
+    const sized = await machineStarts(on);
+    expect(sized.length).toBeGreaterThan(0);
+    for (const request of sized) expect(request.estimate).toEqual({ cost: { micros: 169_400, currency: "USD" } });
+    for (const request of await machineStarts({ ...on, ROVARA_MACHINE_SIZE_COST: undefined })) expect(request).not.toHaveProperty("estimate");
   });
 
   it("delivers an invocation twice as one job (the fake worker and the queue are at-least-once)", async () => {

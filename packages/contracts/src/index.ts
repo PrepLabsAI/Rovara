@@ -418,6 +418,7 @@ export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationL
 export * from "./machine-size.js";
 export * from "./machine-setup.js";
 export * from "./machine-size-launch.js";
+export * from "./machine-size-price.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
