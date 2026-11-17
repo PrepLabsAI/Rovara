@@ -441,6 +441,7 @@ describe("company owners and admins create projects", () => {
     // A takes, through the single and bulk routes, names B holds: B's claimed "web" (above) and an older B project whose id IS its name.
     h.db.set({ ...orgProjectCatalogKey(B, "docs"), entityType: "PROJECT_CATALOG", companyId: B, name: "docs", latestRevision: 1 });
     h.db.set({ pk: "PROJECT#docs", sk: "REV#000000000001", entityType: "PROJECT", companyId: B, definition: { name: "docs", revision: 1 } });
+    h.db.set({ pk: "PROJECT#secret", sk: "REV#000000000001", entityType: "PROJECT", companyId: B, definition: { name: "secret", revision: 1 } });
     expect(json(await h.call("/v1/dev/client/projects", { repository: "acme-a/docs", name: "secret" }))).toMatchObject({ name: expect.stringMatching(/^secret-[a-z0-9]{6}$/) as unknown });
     expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/docs"] })).results).toEqual([{ repository: "acme-a/docs", outcome: "created", project: expect.stringMatching(/^docs-[a-z0-9]{6}$/) as unknown }]);
     // Bulk: A's api is created; A's second web (acme-a2/web) is name_taken only because A itself has web.
