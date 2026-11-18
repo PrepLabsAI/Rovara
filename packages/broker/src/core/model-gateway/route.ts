@@ -4,7 +4,7 @@ import type { CallbackCapabilities } from "../../callbacks.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { mintTaskToken, MODEL_ACCESS_INVALID, type TaskTokenDeps } from "./token.js";
-import { readTaskTokenRecords } from "./records.js";
+import { hasNoTask, readTaskTokenRecords, type TaskTokenRecords } from "./records.js";
 import { withinTaskTokenDeadline } from "./deadline.js";
 import { evalHealthTokenDescriber } from "./health.js";
 
@@ -34,8 +34,15 @@ export async function handleModelAccess(flow: TaskFlowDeps, capabilities: Callba
       const parsed = scopeSchema.safeParse(capability);
       if (!parsed.success) throw agentXError("CALLBACK_FORBIDDEN", "invalid capability");
       const scope = { ...parsed.data, ...(slots.length === 0 ? {} : { reviewerSlot: slots[0]! }) };
-      const records = await readTaskTokenRecords(flow, scope, deadline);
-      const minted = await mintTaskToken({ ...gateway, now: () => (flow.now?.() ?? new Date()).getTime() }, scope, records, deadline);
+      // The task path first, exactly as before #1026: a task's token mint makes no extra read. Only when the operation's workspace has no task at all, an opt-in eval health run's own preparation (L4-EVH) is described from the broker's own claim; any other refusal stays the task path's.
+      let records: TaskTokenRecords | undefined;
+      let health: Awaited<ReturnType<typeof evalHealthTokenDescriber>>;
+      try { records = await readTaskTokenRecords(flow, scope, deadline); } catch (error) {
+        if (!hasNoTask(error)) throw error;
+        health = await evalHealthTokenDescriber(flow, scope, deadline);
+        if (health === undefined) throw error;
+      }
+      const minted = await mintTaskToken({ ...gateway, ...(health === undefined ? {} : { describer: health }), now: () => (flow.now?.() ?? new Date()).getTime() }, scope, records, deadline);
       deadline.check();
       // Only these three metadata fields may be logged; never the token or a description.
       flow.log?.({ operationId: scope.operationId, iat: minted.expiresAt / 1000 - (scope.reviewerSlot === undefined ? TASK_TOKEN_SECONDS : REVIEWER_GRANT_SECONDS), exp: minted.expiresAt / 1000 });

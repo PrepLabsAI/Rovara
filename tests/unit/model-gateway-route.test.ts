@@ -263,6 +263,20 @@ it.each(["nightly", "app", "cli", "mcp", "slack", "tracker", "jira", "github_iss
   else { expect(answer).toMatchObject({ statusCode: 409, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"could not work out who pays for this task"}}' }); expect(w.w.signs()).toBe(0); }
 });
 
+it("a task-token mint reads exactly the task path's keys (the eval health fallback adds no read, before or after it)", async () => {
+  const w = await world();
+  const ok = operationKey(T1_COMPANY, v.ws, v.op);
+  await w.h.store.put({ item: { ...(await w.h.store.get(ok))!, kind: "task", requester: { personId: v.per!, provider: "test" } } });
+  w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
+  w.deps.modelGateway!.describer = createTaskTokenDescriber(w.h.deps);
+  const get = w.h.store.get.bind(w.h.store); const keys: string[] = [];
+  w.h.deps.store.get = async key => { keys.push(JSON.stringify(key)); return get(key); };
+  expect((await w.call()).statusCode).toBe(200);
+  // The task path's four point reads, once each: the workspace lookup, the operation, the task pointer and the task. Nothing about a health run's claim, request row or a second workspace/operation read.
+  expect(keys).toHaveLength(4);
+  expect(new Set(keys).size).toBe(4);
+  expect(keys.join()).not.toMatch(/eval-health|health/iu);
+});
 it("mints nothing for a task marked nightly that is not a wiki build (the model-free nightly test run gets no model access)", async () => {
   const w = await world();
   const ok = operationKey(T1_COMPANY, v.ws, v.op); const tk = taskKey(v.tid);
