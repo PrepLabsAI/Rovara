@@ -97,6 +97,11 @@ export interface DeveloperSignInProps {
   api: apigwv2.CfnApi;
   brokerIntegration: apigwv2.CfnIntegration;
   broker: lambdaNodejs.NodejsFunction;
+  /**
+   * CORE-DISPATCH-HOOK-SIGNER-20261117 (named environments only, with the policy hook's key): the dispatcher, which asks the company rules service the engine's per-task limit before
+   * each model run, as the broker does. Absent: the key's policy is the broker's alone, as before.
+   */
+  dispatcher?: lambdaNodejs.NodejsFunction;
   /** The concrete Secret (F5): control-plane.ts passes a secretsmanager.Secret. */
   slackSecret: secretsmanager.Secret;
   parameters: DeveloperSignInParameters;
@@ -239,7 +244,7 @@ export class DeveloperSignIn extends Construct {
       addBrokerName(props.broker, props.naming, "taskTokenKey", taskTokenKey.keyId, taskTokenKey.keyArn);
     }
     if (policyHookKey !== undefined) {
-      // As the task key: key-policy grants, so the broker's inline policy does not grow. Only the broker signs; only the broker and this function read the public key.
+      // As the task key: key-policy grants, so the broker's inline policy does not grow. Only the broker (and the dispatcher, below) signs; only they and this function read the public key.
       policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
         sid: "BrokerSignsPolicyQuestions",
         effect: iam.Effect.ALLOW,
@@ -247,13 +252,34 @@ export class DeveloperSignIn extends Construct {
         actions: ["kms:Sign", "kms:GetPublicKey"],
         resources: ["*"],
       }));
+      // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher signs its own questions (the engine's per-task limit before each model run), only as the question signer signs them (RS256 over
+      // the raw signing input, developer/tokens.ts kmsTokenSigner), and reads the public key for the question's kid. Key-policy grants: the dispatcher's role policy does not change.
+      const dispatcherRole = props.dispatcher?.role?.roleArn;
+      if (dispatcherRole !== undefined) {
+        policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
+          sid: "DispatcherSignsPolicyQuestions",
+          effect: iam.Effect.ALLOW,
+          principals: [new iam.ArnPrincipal(dispatcherRole)],
+          actions: ["kms:Sign"],
+          resources: ["*"],
+          conditions: { StringEquals: { "kms:SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256", "kms:MessageType": "RAW" } },
+        }));
+        policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
+          sid: "DispatcherReadsPolicyQuestionKey",
+          effect: iam.Effect.ALLOW,
+          principals: [new iam.ArnPrincipal(dispatcherRole)],
+          actions: ["kms:GetPublicKey"],
+          resources: ["*"],
+        }));
+      }
+      const signers = dispatcherRole === undefined ? props.broker.role!.roleArn : [props.broker.role!.roleArn, dispatcherRole];
       policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
         sid: "SignOnlyAsBroker",
         effect: iam.Effect.DENY,
         principals: [new iam.AnyPrincipal()],
         actions: ["kms:Sign"],
         resources: ["*"],
-        conditions: { ArnNotEquals: { "aws:PrincipalArn": props.broker.role!.roleArn } },
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": signers } },
       }));
       policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
         sid: "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity",
@@ -261,8 +287,13 @@ export class DeveloperSignIn extends Construct {
         principals: [new iam.AnyPrincipal()],
         actions: ["kms:GetPublicKey"],
         resources: ["*"],
-        conditions: { ArnNotEquals: { "aws:PrincipalArn": [props.broker.role!.roleArn, fn.role!.roleArn] } },
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": [props.broker.role!.roleArn, fn.role!.roleArn, ...(dispatcherRole === undefined ? [] : [dispatcherRole])] } },
       }));
+      if (props.dispatcher !== undefined) {
+        // The dispatcher's question signer: the key and the install's issuer (hosted-wiring.ts policyHookInstallFromEnvironment). Values the template already has, no new parameter.
+        props.dispatcher.addEnvironment("POLICY_HOOK_KEY_ARN", policyHookKey.keyArn);
+        props.dispatcher.addEnvironment("DEVELOPER_TOKEN_ISSUER", issuer);
+      }
       policyHookKey.grant(fn, "kms:GetPublicKey");
       fn.addEnvironment("POLICY_HOOK_KEY_ARN", policyHookKey.keyArn);
       addBrokerName(props.broker, props.naming, "policyHookKey", policyHookKey.keyId, policyHookKey.keyArn);
