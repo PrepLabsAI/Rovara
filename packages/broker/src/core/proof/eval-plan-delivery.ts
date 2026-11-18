@@ -21,7 +21,11 @@ const NOT_AVAILABLE: EvalPlanDelivery = Object.freeze({ status: "not_available" 
 export interface EvalPlanScope { readonly companyId: string; readonly project: string }
 
 /** The run's own pinned base: each repository's base commit, from the operation's own stored dispatch payload (`workflowBase`, the broker's pin), never the request. Undefined when it has none. */
-export interface EvalPlanRun { readonly bases: ReadonlyArray<{ readonly repositoryId: string; readonly baseCommitSha: string }> | undefined }
+export interface EvalPlanRun {
+  readonly bases: ReadonlyArray<{ readonly repositoryId: string; readonly baseCommitSha: string }> | undefined;
+  /** L4-EVH: the digest of the one approved spend item the run was made under (a health run's request). Set: only that item answers, so a re-approval in between gives no plan and no grant. */
+  readonly spendDigest?: string | undefined;
+}
 
 /** One consistent read of the plan and its approval: both of the SAME approved spend item (EVAL-PLAN-SNAPSHOT). */
 export interface EvalPlanRead {
@@ -65,7 +69,7 @@ export interface EvalPlanDeliveryDeps {
 const record = (value: unknown): Record<string, unknown> | undefined => typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 
 /** The base-score cache parts the round looks up for a public eval: the plan's key, its base eval set, no hidden set, and its measured settings. Undefined when the plan does not name them. */
-function baselineParts(plan: Record<string, unknown>): EvalBaseCacheKeyParts | undefined {
+export function baselineParts(plan: Record<string, unknown>): EvalBaseCacheKeyParts | undefined {
   const key = record(plan["key"]); const inputs = record(plan["inputs"]);
   const evalSetHash = typeof plan["baseEvalSetHash"] === "string" ? plan["baseEvalSetHash"] : plan["evalSetHash"];
   if (key === undefined || inputs === undefined || typeof evalSetHash !== "string" || typeof inputs["settingsFingerprint"] !== "string") return undefined;
