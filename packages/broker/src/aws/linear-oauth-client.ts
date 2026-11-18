@@ -6,7 +6,7 @@
 // Checked against Linear's developer docs on 2026-11-17 (briefs/guided-onboarding-build-20261117.md, "Pre-build checks"):
 //   - authorize  https://linear.app/oauth/authorize  (client_id, redirect_uri, response_type=code, scope comma-separated, state, actor=app, prompt=consent, PKCE S256)
 //   - token      POST https://api.linear.app/oauth/token  (form-encoded; authorization_code with the PKCE verifier, or refresh_token)
-//   - revoke     POST https://api.linear.app/oauth/revoke  (form `token=`)
+//   - revoke     POST https://api.linear.app/oauth/revoke  (form `token=` and `token_type_hint=`)
 //   - access tokens last 24 hours; refresh tokens 30 days and ROTATE on every refresh (the old one is accepted again for 30 minutes)
 //   - GraphQL    POST https://api.linear.app/graphql, `Authorization: Bearer <access token>`
 import { createHash } from "node:crypto";
@@ -20,11 +20,13 @@ export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 /**
  * The scopes Rovara asks for, and why each (the Linear tracker's own calls, plugins/tracker/linear/api.ts):
  *   read             read an issue, what is asked for now, the workspace and its teams (every app needs it);
+ *   write            edit Rovara's own comment in the ticket thread (`commentUpdate`); Linear's comments:create is creation only;
  *   comments:create  post Rovara's answer on an issue (`commentCreate`);
  *   issues:create    move an issue to a named status (`issueUpdate`): Linear's issues:create covers creating AND updating issues.
- * Not `write` (more than the tracker does) and never `admin` (refused with actor=app, and nothing Rovara does needs it).
+ * The targeted scopes stay beside `write` so the consent screen still says what Rovara does. Never `admin` (refused with actor=app, and nothing Rovara does needs it).
+ * Linear takes the scopes comma-separated in the authorize address (`LINEAR_SCOPES.join(",")` below). Adding a scope later forces every connected workspace to authorize again, so it is added before workspaces connect.
  */
-export const LINEAR_SCOPES = ["read", "comments:create", "issues:create"] as const;
+export const LINEAR_SCOPES = ["read", "write", "comments:create", "issues:create"] as const;
 
 const TIMEOUT_MS = 10_000;
 const ANSWER_MAX_BYTES = 1_000_000;
@@ -123,11 +125,16 @@ export async function refreshLinearTokens(input: { fetch: Fetch; app: LinearApp;
   return tokensOf(answer.status, answer.text, input.now);
 }
 
-/** Revokes a token (access or refresh). Best effort: true when Linear said so. */
-export async function revokeLinearToken(input: { fetch: Fetch; token: string }): Promise<boolean> {
+/**
+ * Revokes a token. Linear's docs do not say whether revoking one token ends the whole grant, so a disconnect revokes BOTH the refresh token and the access token, each with
+ * its `token_type_hint`. Best effort: true when Linear said so (2xx) or answered 400 (the token is already revoked or no longer valid: nothing is left to revoke).
+ */
+export async function revokeLinearToken(input: { fetch: Fetch; token: string; hint?: "access_token" | "refresh_token" }): Promise<boolean> {
   try {
-    const answer = await post(input.fetch, LINEAR_REVOKE_URL, { ...FORM, authorization: `Bearer ${input.token}` }, new URLSearchParams({ token: input.token }).toString());
-    return answer.status >= 200 && answer.status < 300;
+    const form = new URLSearchParams({ token: input.token });
+    if (input.hint !== undefined) form.set("token_type_hint", input.hint);
+    const answer = await post(input.fetch, LINEAR_REVOKE_URL, { ...FORM, authorization: `Bearer ${input.token}` }, form.toString());
+    return (answer.status >= 200 && answer.status < 300) || answer.status === 400;
   } catch { return false; }
 }
 

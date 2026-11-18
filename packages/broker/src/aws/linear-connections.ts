@@ -212,10 +212,10 @@ export class LinearConnections {
       const sealedRefresh = await this.deps.sealer.seal(tokens.refresh, tokenContext(companyId, workspace.id, "refresh"));
       const reconnect = binding !== undefined;
       // The pair being replaced (a reconnect) is revoked at Linear after the commit, best effort.
-      const replaced: string[] = [];
-      for (const [sealed, field] of [[existing?.sealedAccess, "access"], [existing?.sealedRefresh, "refresh"]] as const) {
+      const replaced: Array<{ token: string; hint: "access_token" | "refresh_token" }> = [];
+      for (const [sealed, field, hint] of [[existing?.sealedRefresh, "refresh", "refresh_token"], [existing?.sealedAccess, "access", "access_token"]] as const) {
         if (sealed === undefined || existing === undefined) continue;
-        try { replaced.push(await this.deps.sealer.open(sealed, tokenContext(companyId, existing.organizationId, field))); } catch { /* not revoked */ }
+        try { replaced.push({ token: await this.deps.sealer.open(sealed, tokenContext(companyId, existing.organizationId, field)), hint }); } catch { /* not revoked */ }
       }
       try {
         await this.deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -236,7 +236,7 @@ export class LinearConnections {
         continue;
       }
       this.log(companyId, { event: reconnect ? "linear.connection_reconnected" : "linear.connection_bound", actor: personId });
-      for (const token of replaced) if (!await revokeLinearToken({ fetch: this.deps.fetch, token })) this.log(companyId, { event: "linear.revoke_failed" });
+      for (const { token, hint } of replaced) if (!await revokeLinearToken({ fetch: this.deps.fetch, token, hint })) this.log(companyId, { event: "linear.revoke_failed" });
       return { outcome: reconnect ? "reconnected" : "connected" };
     }
     // Lost twice: whatever is stored now decides; nothing was overwritten.
@@ -424,9 +424,11 @@ export class LinearConnections {
         ExpressionAttributeValues: { ":company": companyId } })).catch(() => undefined);
     }
     this.log(companyId, { event: "linear.connection_disconnected", actor: personId, projects: picks.length });
-    for (const token of [access, refresh]) {
+    // The tokens are already deleted above. Linear's docs do not say whether revoking one token ends the whole grant, so BOTH go, the refresh token first, each with its hint;
+    // a failed call is one fixed log line and never undoes or blocks the disconnect.
+    for (const [token, hint] of [[refresh, "refresh_token"], [access, "access_token"]] as const) {
       if (token === undefined) continue;
-      if (!await revokeLinearToken({ fetch: this.deps.fetch, token })) this.log(companyId, { event: "linear.revoke_failed" });
+      if (!await revokeLinearToken({ fetch: this.deps.fetch, token, hint })) this.log(companyId, { event: "linear.revoke_failed" });
     }
     return { outcome: "disconnected", workspaceName: row.workspaceName, projects: [...new Set(picks.map((pick) => pick.project))].sort() };
   }
