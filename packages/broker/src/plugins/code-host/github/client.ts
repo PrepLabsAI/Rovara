@@ -1,7 +1,8 @@
 import { createHash, createSign } from "node:crypto";
 import { githubUserOfCode, userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
-import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { findEvalWrapperPullRequestOn, openEvalWrapperPullRequestOn } from "./eval-wrapper-pr.js";
+import { DeploymentEnvironmentSchema, EVAL_WRAPPER_BRANCH_PATTERN, GitBranchNameSchema, HostRateLimitError, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type EvalWrapperPullRequestInput, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -1946,6 +1947,24 @@ export class GitHubAppCredentialProvider {
       if (reached) { await reader.cancel().catch(() => undefined); break; }
     }
     return new TextDecoder().decode(Buffer.concat(chunks));
+  }
+
+  /**
+   * L4-EVW6 (DEC 254zzz43): the eval wrapper pull request, the one write to a customer's repository outside a task (see `eval-wrapper-pr.ts`: a new branch `rovara/eval-wrapper-<12 hex>`, one new file at one of two fixed paths,
+   * one pull request; nothing else). The token is the company's own installation's, scoped to this one repository, with `contents` and `pull_requests` at write.
+   */
+  async openEvalWrapperPullRequest(repositoryUrl: string, request: EvalWrapperPullRequestInput, scope: GitHubTokenScope): Promise<{ revision: string; number: number; url: string }> {
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.createInstallationToken(repository, { contents: "write", pull_requests: "write" }, scope);
+    return openEvalWrapperPullRequestOn({ fetch: this.fetchImplementation, owner: repository.owner, name: repository.name, token }, request);
+  }
+
+  /** L4-EVW6: the pull request (any state) made from one of Rovara's `rovara/eval-wrapper-<12 hex>` branches, or undefined. A read (`pull_requests: read`). */
+  async findEvalWrapperPullRequest(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined> {
+    if (!EVAL_WRAPPER_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.createInstallationToken(repository, { pull_requests: "read" }, scope);
+    return findEvalWrapperPullRequestOn({ fetch: this.fetchImplementation, owner: repository.owner, name: repository.name, token }, branch);
   }
 
   /**

@@ -11,6 +11,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalCommandSchema, EvalPlanQuestionSchema, EvalReportPathSchema, evalCommandFingerprintOf } from "./eval-plan-record.js";
+import { EvalOutputShapeSchema } from "./eval-wrapper.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 import { modelBelongsToFamily, type VendorFamily } from "./vendor-family.js";
 
@@ -85,6 +86,13 @@ export const EvalDiscoverySuiteSchema = z.object({
   questions: z.array(EvalDiscoveryQuestionSchema).min(1).max(EVAL_QUESTION_LIMIT),
   command: EvalCommandSchema,
   report: EvalReportPathSchema,
+  /** L4-EVW2 (DEC 254zzz20 D2): what the command writes at `report`, when it is not a file Rovara already reads (a `rows` file or a `custom` shape needs a wrapper the setup agent proposes as a pull request). Absent: readable as before. */
+  output: EvalOutputShapeSchema.optional(),
+  /**
+   * DEC 254zzz43: the setup run's dry-run of the wrapper in its own sandbox, against sample results in the shape it described (and a syntax check for a `custom` file): `passed` = the file read them and wrote the report.
+   * Only `passed` makes the file offered. Absent or `failed`: not offered. Informational for the card; never a hash and never trusted for spend.
+   */
+  wrapperDryRun: z.enum(["passed", "failed"]).optional(),
   /** The run's own fingerprint of `command` and `report`: refused unless it is the broker's `evalCommandFingerprintOf`. */
   commandFingerprint: hash,
   judge: EvalJudgeSchema,

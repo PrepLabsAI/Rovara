@@ -8,9 +8,9 @@
 //  - `events.normalise` (`events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
 // The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
-  agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, DeploymentStatusReadSchema, RecentCommitsReadSchema, type RecentCommitsRead, ChangeRequestUpdateSchema, HostScopeSchema,
+  agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, EvalWrapperPullRequestInputSchema, DeploymentStatusReadSchema, RecentCommitsReadSchema, type RecentCommitsRead, ChangeRequestUpdateSchema, HostScopeSchema,
   type BranchPage, type CommitActivityRead, type DirectoryRead, type RepositoryTreeRead, type TreeEntry, type TreeEntryKind, type DeploymentStatusRead, type CodeOwnersRead, type CommitChanges, type CompareChanges, type PageBudget, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
-  type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
+  type ChangeRequestStatus, type ChangeRequestUpdate, type EvalWrapperPullRequestHost, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef, type SummaryCheckPost,
 } from "@agentx/contracts";
 import { parseGitHubRepository } from "../../../github-app.js";
@@ -73,6 +73,20 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
   const compareChangesOfProvider = typeof provider.getCompareChanges === "function" ? provider.getCompareChanges.bind(provider) : undefined;
   const recentCommitsOfProvider = typeof provider.listRecentCommits === "function" ? provider.listRecentCommits.bind(provider) : undefined;
   const deploymentStatusesOfProvider = typeof provider.getDeploymentStatuses === "function" ? provider.getDeploymentStatuses.bind(provider) : undefined;
+  const openEvalWrapper = typeof provider.openEvalWrapperPullRequest === "function" ? provider.openEvalWrapperPullRequest.bind(provider) : undefined;
+  const findEvalWrapper = typeof provider.findEvalWrapperPullRequest === "function" ? provider.findEvalWrapperPullRequest.bind(provider) : undefined;
+  /** L4-EVW6: the narrow eval wrapper write, only where the client has both halves. The input is parsed (branch family, the two fixed paths) before the client is asked. */
+  const evalWrapperPullRequest: EvalWrapperPullRequestHost | undefined = openEvalWrapper === undefined || findEvalWrapper === undefined ? undefined : {
+    async open(input, scope) {
+      const parsed = EvalWrapperPullRequestInputSchema.parse(input);
+      const opened = await openEvalWrapper(parsed.repository.url, parsed, checkedScope(scope));
+      return { revision: opened.revision, ref: refOf(parsed.repository.url, opened.number, opened.url) };
+    },
+    async forBranch(repository, branch, scope) {
+      const found = await findEvalWrapper(repository.url, branch, checkedScope(scope));
+      return found === undefined ? undefined : refOf(repository.url, found.number, found.url);
+    },
+  };
   const listComments = typeof provider.listPullRequestComments === "function" ? provider.listPullRequestComments.bind(provider) : undefined;
   const postComment = typeof provider.postPullRequestComment === "function" ? provider.postPullRequestComment.bind(provider) : undefined;
   const checkSource = typeof provider.summaryCheckSource === "function" ? provider.summaryCheckSource.bind(provider) : undefined;
@@ -200,6 +214,8 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
       const text = await provider.readCodeOwners(repository.url, branch, checkedScope(scope));
       return text === undefined ? undefined : readCodeOwnersFile(text);
     },
+
+    ...(evalWrapperPullRequest === undefined ? {} : { evalWrapperPullRequest }),
 
     async reconcileChangeRequest(input: ChangeRequestInput, scope: HostScope): Promise<ChangeRequestReconciled> {
       const parsed = ChangeRequestInputSchema.parse(input);

@@ -26,6 +26,7 @@ import type { TaskRecord } from "../task-flow/records.js";
 import { iso, log } from "../task-flow/support.js";
 import { approvedCodingPlan } from "./plan-input.js";
 import { flagUnplannedMocks, mockFactsOf, mockPrLines } from "../setup-agent/plan-setup.js";
+import { evalSetupNeededLine } from "../setup-agent/eval-wrapper-card.js";
 import { pullRequestRecordKey, pullRequestRecordOf } from "./records.js";
 
 export const WORKSPACE_DIFF_ARTIFACT = "workspace.diff";
@@ -202,6 +203,8 @@ export interface DescriptionInputs {
   setupLines: readonly string[];
   /** L4-U5: the one line about the setup when it was re-checked for this task (none when there was no drift). */
   setupLine: string | undefined;
+  /** L4-EVW4 (DEC 254zzz43): "Eval not read: setup needed", when the project's eval card was set aside with "Not now" and an eval is still not readable. */
+  evalSetupLines: readonly string[];
 }
 
 /**
@@ -223,15 +226,17 @@ export async function descriptionInputsOf(deps: TaskFlowDeps, task: TaskRecord, 
   const setupLines = mockPrLines(plan?.setupChanges);
   // L4-U5: the one line about the setup when it was re-checked for this task (none when there was no drift).
   const setupLine = await setupPullRequestLineOf(deps, task.project, task.taskId).catch(() => undefined);
-  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines, setupLine };
+  const evalSetupLine = await evalSetupNeededLine(deps, task.project);
+  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines, setupLine, evalSetupLines: evalSetupLine === undefined ? [] : [evalSetupLine] };
 }
 
 /** The description's context for one repository: the inputs, plus what depends on the repository (its changed files, the order lines, the lessons its readers may read). */
 export function descriptionContextOf(inputs: DescriptionInputs, own: { changedFiles?: ChangedFilesRead | undefined; mergeOrderLines: readonly string[]; lessonsUsed: LessonsUsedSection | undefined }): PullRequestBodyContext {
-  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines, setupLine } = inputs;
+  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines, setupLine, evalSetupLines } = inputs;
   return {
     ...(setupLine === undefined ? {} : { setupLine }),
     ...(setupLines.length === 0 ? {} : { setupLines }),
+    ...(evalSetupLines.length === 0 ? {} : { evalSetupLines }),
     ...(own.changedFiles === undefined ? {} : { changedFiles: own.changedFiles }),
     ...(own.mergeOrderLines.length === 0 ? {} : { mergeOrderLines: own.mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }),
     ...(own.lessonsUsed === undefined ? {} : { lessonsUsed: own.lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }),

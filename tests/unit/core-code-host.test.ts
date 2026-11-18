@@ -160,6 +160,9 @@ function scopedCalls(provider: GitHubCodeHostProvider, url: string, scope: unkno
     ["getCompareChanges", () => provider.getCompareChanges!(url, sha, "b".repeat(40), s)],
     ["listPullRequestComments", () => provider.listPullRequestComments!(url, 1, {}, s)],
     ["postPullRequestComment", () => provider.postPullRequestComment!(url, 1, "Done.", s)],
+    // L4-EVW6: the eval wrapper pull request (the one narrow write) and its lookup.
+    ["openEvalWrapperPullRequest", () => provider.openEvalWrapperPullRequest!(url, { repository: { url }, baseBranch: "main", baseRevision: sha, branch: "rovara/eval-wrapper-0123456789ab", path: "rovara/eval-wrapper.py", content: "x", title: "t", body: "b" }, s)],
+    ["findEvalWrapperPullRequest", () => provider.findEvalWrapperPullRequest!(url, "rovara/eval-wrapper-0123456789ab", s)],
     // L4-RC: the "Rovara" Check write.
     ["upsertRovaraCheck", () => provider.upsertRovaraCheck!(url, { headSha: sha, payload: { status: "completed", conclusion: "success", title: "t", summary: "s", text: "x" } }, s)],
   ];

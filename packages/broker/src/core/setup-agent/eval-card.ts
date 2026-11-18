@@ -1,7 +1,7 @@
 // L4-EVC (DEC 254zzz20 D5, D6, D8): what the setup flow's ONE eval card shows, in plain dollars, read from the broker's own records. Pure reads: no model, no write, no spend. The hosted route serves it and
 // Cloud draws it; every sentence comes from `eval-cost.ts`, so the page never works out a figure of its own. No call counts, tokens or micro-dollar words reach the text; the whole-number figures a
 // person's yes must echo (`seen`) travel as data, never as words.
-import type { DocumentStore, OrgId, Principal } from "@agentx/contracts";
+import { EVAL_OUTPUT_UNREADABLE_MESSAGE, evalOutputNeedsWrapper, type DocumentStore, type EvalOutputShape, type EvalWrapperCard, type OrgId, type Principal } from "@agentx/contracts";
 import { developerIdOf } from "../sessions/create.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
@@ -10,6 +10,8 @@ import { evalEstimateOf, evalProposalDollars, readEvalDiscovery } from "./eval-d
 import { evalHealthNotRunWords } from "@agentx/contracts";
 import { readEvalHealthView, type EvalHealthResultSummary } from "./eval-health-request.js";
 import { readEvalSpendItem, readEvalSpendRecord, roleFor } from "./eval-spend.js";
+import { listEvalWrapperFiles, needsOf, wrapperFileFor } from "./eval-wrapper.js";
+import { readEvalWrapperCards } from "./eval-wrapper-card.js";
 
 export interface EvalCardDeps {
   store: DocumentStore;
@@ -31,6 +33,9 @@ export interface EvalCardSuiteView {
   sentence: string;
   perPr: string;
   monthly: string;
+  /** L4-EVW4: false when Rovara cannot read this eval's results as they are and no wrapper file is on the default branch yet: the eval cannot be approved until it is, and `needsFile` says why. */
+  readable: boolean;
+  needsFile?: string;
   /** What the person's yes echoes back (`seen`): the dollars as whole numbers, held against the broker's own at the confirm. */
   seen: { perCheckHighMicros: number; monthlyCapMicros: number };
   /** D6, a best-effort preview by dollars alone (the confirm decides with the model, judge and command too): an approved eval stands and this set stays inside it, or grew past it. */
@@ -45,6 +50,8 @@ export interface EvalCardView {
   /** The run whose report the card is about, and the digest the confirm is bound to (the report the person saw). */
   report?: { taskId: string; reportDigest: string };
   suites: EvalCardSuiteView[];
+  /** L4-EVW4 (DEC 254zzz43): ONE card per eval whose results Rovara cannot read as they are: the file (path and text, for everyone to view and copy), where it stands, and what this person may do about it. */
+  wrappers: EvalWrapperCard[];
   spend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; perPr?: string; monthly?: string; needsApproval?: string; carried?: boolean; setupRevision?: number; approval?: { requestId: string; revision: number; artifactDigest: string } };
   /** D5: the opt-in health run, offered only once the spend is approved. `seenCostMicros` is what a yes echoes. */
   health?: { state: "none" | "requested" | "running" | "finished" | "not_run"; label: string; cost: string; seenCostMicros: number;
@@ -52,6 +59,13 @@ export interface EvalCardView {
     words?: string; result?: EvalHealthResultSummary };
   /** Why no card can be offered (the install has no eval budget). */
   unavailable?: string;
+}
+
+/** Whether an eval's results are readable: its output is one Rovara reads as it is, or its own wrapper file is on the default branch (present, as offered or edited; see `wrapperFileFor`). */
+function readableThroughFile(files: Parameters<typeof wrapperFileFor>[0], needs: ReturnType<typeof needsOf>, suite: { output?: EvalOutputShape | undefined; selection: string }): boolean {
+  if (!evalOutputNeedsWrapper(suite.output)) return true;
+  const need = needs.find((entry) => entry.selection === suite.selection);
+  return need !== undefined && wrapperFileFor(files, { repository: need.suite.repository, selection: need.selection, firstOfFile: need.firstOfFile }, need.language) !== undefined;
 }
 
 /** The whole card for a project, as `principal` sees it. Reads only this company's own rows; an unreadable one reads as absent. */
@@ -65,6 +79,8 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
   // An approval counts for the preview only while its approver still may approve (the item's own live reading) and it carries the dollars the person saw.
   const standing = item?.state === "approved" && record?.state === "approved" && record.plan.dollars !== undefined ? record.plan : undefined;
   const suites: EvalCardSuiteView[] = [];
+  const files = await listEvalWrapperFiles({ store: deps.store, companyId: deps.companyId }, project);
+  const needs = found === undefined ? [] : needsOf(found.report);
   if (found?.state === "reported" && monthlyCap !== undefined) {
     for (const suite of found.report.suites) {
       const dollars = evalProposalDollars(suite.questions.length, suite, monthlyCap);
@@ -76,6 +92,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
         && suite.catalogRowId === standing.inputs.catalogRowId && evalCommandFingerprintOf(suite.command, suite.report) === standing.inputs.commandFingerprint;
       const within = sameSuite && standing?.dollars !== undefined && dollars.perCheckHighMicros <= standing.dollars.perCheckHighMicros && estimate.calls <= standing.budget.maximum.calls && estimate.costMicros <= standing.budget.maximum.costMicros;
       suites.push({ selection: suite.selection, files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
+        ...(readableThroughFile(files, needs, suite) ? { readable: true } : { readable: false, needsFile: EVAL_OUTPUT_UNREADABLE_MESSAGE }),
         seen: { perCheckHighMicros: dollars.perCheckHighMicros, monthlyCapMicros: dollars.monthlyCapMicros },
         ...(standing?.dollars === undefined ? {} : { versusApproved: within ? { within: true, words: "Inside the approved cost. A change to the model, judge or command asks again." } : { within: false, words: evalAsksAgainWords({ reason: sameSuite ? "grew" : "changed", approvedHighMicros: standing.dollars.perCheckHighMicros }) } }) });
     }
@@ -84,6 +101,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
     : item === undefined ? (found === undefined ? "none" : "waiting")
       : item.state === "waiting" ? "waiting" : item.state === "approved" ? "approved" : item.state === "rejected" ? "rejected" : "renew";
   const card = item?.card;
+  const wrappers = await readEvalWrapperCards({ store: deps.store, companyId: deps.companyId }, project, found === undefined ? undefined : { reportDigest: found.reportDigest, report: found.report }, role !== undefined);
   const health = deps.healthRuns === true && role !== undefined && item?.state === "approved" && card !== undefined && record !== undefined
     ? await (async () => {
       const view = await readEvalHealthView({ ...table, ...(deps.now === undefined ? {} : { now: deps.now }) }, project);
@@ -92,7 +110,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
     })()
     : undefined;
   return {
-    state, canApprove: role !== undefined, ...(found === undefined ? {} : { report: { taskId: found.taskId, reportDigest: found.reportDigest } }), suites,
+    state, canApprove: role !== undefined, wrappers, ...(found === undefined ? {} : { report: { taskId: found.taskId, reportDigest: found.reportDigest } }), suites,
     ...(item === undefined ? {} : { spend: { state: item.state,
       ...(card === undefined ? {} : { perPr: card.perPr, monthly: card.monthly, ...(card.needsApproval === undefined ? {} : { needsApproval: card.needsApproval }), ...(card.carried === true ? { carried: true } : {}), ...(card.setupRevision === undefined ? {} : { setupRevision: card.setupRevision }) }),
       ...(item.approval === undefined ? {} : { approval: { requestId: item.approval.requestId, revision: item.approval.revision, artifactDigest: item.approval.artifactDigest } }) } }),

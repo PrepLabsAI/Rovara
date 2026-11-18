@@ -368,6 +368,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: a fresh step-up, then the live owner/admin/maintainer rule). Full access only, like the setup candidate.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/eval", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },
+  // L4-EVW2 (DEC 254zzz20 D2): "Try again" for Rovara's proposed wrapper file (a pull request on the repository that a person merges; Rovara never merges it): full access only, then the live owner/admin/maintainer rule.
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-wrapper", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-decide", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-health", requires: "full" },
   // DEC 254zzz39 (6): the task owner's "Accept findings" on the web page, the one route that may accept a SECURITY finding on a core task (core-host/dev-routes.ts TASK_PAGE_FINDINGS): full access only, then the
