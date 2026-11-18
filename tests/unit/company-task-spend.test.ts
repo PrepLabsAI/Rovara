@@ -134,6 +134,17 @@ describe("the hosted task spend reader (L4-TSU)", () => {
     expect(fault.message).toBe(TASK_SPEND_UNKNOWN);
     expect(seen).toEqual(["storage_unavailable"]);
     expect(JSON.stringify([fault.message, seen])).not.toContain("secret-detail");
+    // a store whose runs read fine but whose total read fails is the same refusal (not the raw error)
+    const healthy = await rowStore([total(A, TASK)]);
+    const totalSeen: TaskSpendRefusal[] = [];
+    const failingTotal = new Proxy(healthy.store, { get(target, property) {
+      if (property === "get") return async (key: { pk: string; sk: string }) => { if (key.sk === "TOTAL") throw new Error("DynamoDB said secret-detail-xyz"); return target.get(key); };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    } });
+    const totalFault = await createCompanyTaskSpend({ store: failingTotal, companyId: A, refused: (r) => { totalSeen.push(r); } })(TASK).then(() => new Error("no refusal"), (error: unknown) => error as Error);
+    expect(totalFault.message).toBe(TASK_SPEND_UNKNOWN);
+    expect(totalSeen).toEqual(["storage_unavailable"]);
     // a task id that is not an id never reaches the store
     const get = vi.fn(async () => undefined);
     const guarded = createCompanyTaskSpend({ store: { get } as never, companyId: A });
@@ -189,7 +200,9 @@ describe("the hosted task spend reader (L4-TSU)", () => {
 
     it("answers when every model run has its end report, and passes over the checks, runs of other kinds, and a run that never reached a machine", async () => {
       const runs: Run[] = [...HEALTHY, { id: "op-3", workflowMode: "CHECKS", status: "FAILED", booked: "none" }, { id: "op-4", workflowMode: "PLAN", status: "SUCCEEDED" },
-        { id: "op-5", workflowMode: "IMPLEMENT", status: "FAILED", kind: "cancel", booked: "none" }, { id: "op-6", workflowMode: "REVIEW", status: "CANCELLED", booked: "none", machineless: true }];
+        { id: "op-5", workflowMode: "IMPLEMENT", status: "FAILED", kind: "cancel", booked: "none" }, { id: "op-6", workflowMode: "REVIEW", status: "CANCELLED", booked: "none", machineless: true },
+        // a run of another kind is not a model run whatever its status: even one that succeeded or is still going owes no usage report
+        { id: "op-7", workflowMode: "IMPLEMENT", status: "SUCCEEDED", kind: "cancel", booked: "none" }, { id: "op-8", workflowMode: "IMPLEMENT", status: "RUNNING", kind: "cancel", booked: "none" }];
       expect(await refusedFor(runs)).toEqual({ answer: 4.25, seen: [] });
     });
 
