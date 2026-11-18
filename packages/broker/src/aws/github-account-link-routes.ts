@@ -21,7 +21,8 @@
 //   - The step-up (a factor Code owns, `requireFreshStepUp`) is checked at start AND at claim. Unlinking needs none: it only takes away what the person had.
 //   - Never logged or returned: the code, the state, the user token. The claim's answer names the linked account (GitHub's numeric id and login, to the person who just proved it is theirs); log lines carry
 //     event names and the person's id only; audit rows never carry the GitHub id or login.
-//   - A removed member's link rows stay until the person erase or the company purge (the identity point reads the member live, so a removed member resolves to nobody); re-adding the person revives it.
+//   - A member's removal from the company removes their link rows in the same request (company-member-routes.ts, L4-GH2; the person erase and the company purge remove them too), so re-adding the person
+//     starts with no link. The identity point also reads the member live, so a removed member resolves to nobody meanwhile.
 import { createHash, randomBytes } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
