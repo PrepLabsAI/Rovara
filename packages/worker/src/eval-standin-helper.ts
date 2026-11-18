@@ -138,27 +138,24 @@ export async function serveEvalStandIn(args: EvalStandInServeArguments, options:
   let additionsSize = -1;
   let additionsDropped = false;
   const additionsOf = (): EvalStandInBookEntry[] => book.snapshot().filter((entry) => !initial.has(entry.key));
-  const current = (): TrustedEvalStandInSummary => {
+  const current = (withAdditions: boolean): TrustedEvalStandInSummary => {
     const stats = servers.stats();
-    const additions = additionsOf();
     const counts = book.counts();
     return {
       schemaVersion: 1, trusted: true, workspaceId: args.workspaceId, operationId: args.operationId, digest: args.digest,
       counts: { ...counts, saturated: counts.saturated || additionsDropped },
-      foreign: stats.foreign, refused: stats.refused, tlsFailed: stats.tlsFailed, additions, gaps: stats.gaps, newHosts: stats.newHosts,
+      foreign: stats.foreign, refused: stats.refused, tlsFailed: stats.tlsFailed, additions: withAdditions ? additionsOf() : [], gaps: stats.gaps, newHosts: stats.newHosts,
     };
   };
-  /** The small summary (everything but the additions) and, when the book grew, the additions. Written BEFORE the answer is sent: a summary read after an answer arrived always includes it. */
+  /** The small summary (everything but the additions: no snapshot is taken for it) on every call and, only when the book grew, the additions. Written BEFORE the answer is sent: a summary read after an answer arrived always includes it. */
   const record = (): void => {
-    // The small summary is the full one without its additions (JSON drops an undefined member): they are kept in a file of their own.
-    files.write(summaryPath, `${JSON.stringify({ ...current(), additions: undefined })}\n`);
-    const added = additionsOf();
-    if (added.length !== additionsSize) {
-      let text = JSON.stringify(added);
+    if (!additionsDropped && book.size() !== additionsSize + initial.size) {
+      let text = JSON.stringify(additionsOf());
       if (text.length > ADDITIONS_MAX_BYTES) { additionsDropped = true; text = "[]"; }
       files.write(additionsPath, `${text}\n`);
-      additionsSize = added.length;
+      additionsSize = book.size() - initial.size;
     }
+    files.write(summaryPath, `${JSON.stringify({ ...current(false), additions: undefined })}\n`);
   };
   // The first summary exists before anything listens: a helper that cannot write it never serves.
   try { record(); } catch { throw new EvalStandInHelperRefused("summary"); }
@@ -189,7 +186,7 @@ export async function serveEvalStandIn(args: EvalStandInServeArguments, options:
   deadline.unref();
   servers.http.once("close", () => { clearTimeout(deadline); });
   return {
-    http: servers.http, tls, httpPort, tlsPort, summary: current,
+    http: servers.http, tls, httpPort, tlsPort, summary: () => current(true),
     close: () => (closed ??= new Promise<void>((resolveClose) => {
       let open = 2;
       const done = (): void => { open -= 1; if (open === 0) resolveClose(); };

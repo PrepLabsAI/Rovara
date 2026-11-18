@@ -717,7 +717,8 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
       // What must never show in a failed run's output tail: this run's token and the placeholder keys.
       const secrets: string[] = [input.model.token, MODEL_DUMMY_KEY];
       // L4-E12: the sealed name server (E2) is used when asked for, for a dry run, and (unless switched off) whenever the round has services; otherwise loopback DNS as before.
-      const sealed = dryRun || config.sealedDns === true || (config.sealedDns === undefined && (config.services !== undefined || config.standIns !== undefined));
+      // A stand-in always uses the sealed name server (a setting that says otherwise cannot leave the vendor names unresolved).
+      const sealed = dryRun || config.sealedDns === true || config.standIns !== undefined || (config.sealedDns === undefined && config.services !== undefined);
       let servicesRun: EvalServicesStarted | undefined;
       let standIn: StartedEvalStandIns | undefined;
       const outcome = await (async (): Promise<FreshEvalSandboxResult | undefined> => { try {
@@ -735,6 +736,14 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         await chmod(checkout, 0o755);
         await (config.materialize ?? ((root, sha, destination, signal) => createProcessCandidateGit(runDir).materializeInto(root, sha, destination, signal)))(config.repository.directory, commit, checkout, input.signal);
         if (input.signal.aborted) throw new Error("eval stage stopped");
+        // 1a. L4-E56: the round's PUBLIC certificate, written NOW, before any install step runs repository code in a box that mounts this checkout read-write as the worker's own uid: such code could plant a link where the worker
+        // writes. The folder is removed first (it is the worker's own materialized content, a link in it is removed as a link), made new, and the file created exclusively and never through a link. Never in a dry run.
+        if (!dryRun && config.standIns !== undefined) {
+          const certificateDir = join(checkout, dirname(EVAL_CA_RELATIVE_PATH));
+          await rm(certificateDir, { recursive: true, force: true });
+          await mkdir(certificateDir, { mode: 0o755 });
+          await writeFile(join(checkout, EVAL_CA_RELATIVE_PATH), config.standIns.round.certificatePem, { mode: 0o644, flag: "wx" });
+        }
         // 1b. L4-EVS: the environment. The saved image's dependency folders next to the commit's files, or (when there is none, or it cannot be used) the project's approved install steps, run now in a box with no
         // model route and gone before the round network exists. No environment in the plan: nothing here runs and the sealed run is exactly what it was.
         const environment = config.evalEnvironment;
@@ -792,7 +801,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         }
         if (input.signal.aborted) throw new Error("eval stage stopped");
         // 4a. L4-E56: the round's outside-HTTP stand-in at the sinkhole's address (.47), serving only the box (.4) on ports 80 and 443. One retry; a second failure fails the run (a Rovara problem: the eval is "Not run", the task still
-        // reaches its PR). The PUBLIC certificate goes into the checkout (the box's one writable mount); the authority's key stays in the helper's own read-only mount and the worker's memory. Never in a dry run.
+        // reaches its PR). The PUBLIC certificate was written into the checkout right after it was materialized (step 1a: before any install step can plant a link); the authority's key stays in the helper's own read-only mount and the worker's memory. Never in a dry run.
         let standInNames: string[] = [];
         if (!dryRun && config.standIns !== undefined) {
           const round = config.standIns.round;
@@ -801,8 +810,6 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           const standInDir = join(runDir, "standin-run");
           await mkdir(standInDir, { mode: 0o700 });
           standIn = await (config.standIns.start ?? startEvalStandIns)({ docker, image: config.image, net: helper.network, parent: standInDir, content: round.setContent(), roundBudgetMs: config.roundBudgetMs, ...(config.sleep === undefined ? {} : { sleep: config.sleep }) });
-          await mkdir(join(checkout, dirname(EVAL_CA_RELATIVE_PATH)), { recursive: true, mode: 0o755 });
-          await writeFile(join(checkout, EVAL_CA_RELATIVE_PATH), round.certificatePem, { mode: 0o644 });
           if (input.signal.aborted) throw new Error("eval stage stopped");
         }
         // 4b. L4-E12 (E2): the sealed name server at .2: the run's service names and the model hosts in its table, every other name to the sinkhole (.47), every unknown name recorded. Its two files are mounted read-only over /etc/resolv.conf and /etc/hosts.

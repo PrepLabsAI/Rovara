@@ -16,12 +16,13 @@ const samples = (pass: boolean, count: number) => Array.from({ length: count }, 
 const COUNTS: EvalStandInCounts = { recorded: 0, generated: 1, generatedNoContract: 1, newConnections: 0, served: 6, gapCalls: 4, saturated: false };
 
 /** A round whose new side fails the questions in `failing` (and passes the rest), and whose runs report a gap according to `gapOf`. */
-async function setup(options: { n?: number; failing?: readonly string[]; gapOf?: (side: "old" | "new", ids: readonly string[], index: number) => boolean | undefined } = {}) {
+async function setup(options: { n?: number; failing?: readonly string[]; failFirstOnly?: readonly string[]; subsetSupported?: boolean; flakyOld?: readonly string[]; gapOf?: (side: "old" | "new", ids: readonly string[], index: number) => boolean | undefined } = {}) {
   const n = options.n ?? 3;
   const root = await mkdtemp(join(process.env["TMPDIR"] ?? process.cwd(), "e56-round-")); roots.push(root);
   const ids = Array.from({ length: n }, (_, i) => `q${i}`);
   const failing = new Set(options.failing ?? ids);
-  const record: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", direction: "up_good", value: 1 }], caseCount: n, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1, questions: ids.map((id) => ({ id, samples: samples(true, 3) })) };
+  const failFirstOnly = new Set(options.failFirstOnly ?? []);
+  const record: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", direction: "up_good", value: 1 }], caseCount: n, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1, questions: ids.map((id) => ({ id, samples: (options.flakyOld ?? []).includes(id) ? [{ pass: true, answer: "old answer" }, { pass: false, answer: "old answer" }, { pass: true, answer: "old answer" }] : samples(true, 3) })) };
   const requests: Array<{ side: string; ids: readonly string[]; runs: number }> = [];
   let first = true;
   const input: EvalRoundInput = {
@@ -31,14 +32,14 @@ async function setup(options: { n?: number; failing?: readonly string[]; gapOf?:
     evalSetHash: hash,
     cache: { read: async () => record, write: async () => "stored" },
     questionPlan: {
-      company: "org-a", provider: "customer", connected: true, previousPasses: 0, judgePin: hash, baselineJudgePin: hash, subsetSupported: true,
+      company: "org-a", provider: "customer", connected: true, previousPasses: 0, judgePin: hash, baselineJudgePin: hash, subsetSupported: options.subsetSupported ?? true,
       questions: ids.map((id) => ({ id, category: "ordinary", baseHash: hash, headHash: hash })),
       maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
       run: async (request) => {
         const index = requests.length;
         requests.push(request);
         const path = `run-${requests.length}.json`;
-        await writeFile(join(root, path), JSON.stringify({ schemaVersion: 1, measures: record.measures, questions: request.ids.map((id) => ({ id, samples: samples(request.side === "old" || !failing.has(id), request.runs) })) }));
+        await writeFile(join(root, path), JSON.stringify({ schemaVersion: 1, measures: record.measures, questions: request.ids.map((id) => ({ id, samples: samples(request.side === "old" || !(failing.has(id) || (failFirstOnly.has(id) && index === 0)), request.runs) })) }));
         const changed = first && request.side === "new"; first = false;
         const gap = options.gapOf?.(request.side, request.ids, index);
         return {
@@ -97,10 +98,21 @@ describe("a gap can never make a question 'Worse on eval'", () => {
     expect(output.result.excluded).toEqual([]);
     expect(output.result.standIns).toMatchObject({ notCompared: 0, generated: 1 });
   });
-  it("does not ask a dropped question again at the second look", async () => {
-    const { input, requests } = await setup({ n: 4, failing: ["q0"], gapOf: () => true });
-    await runEvalRound(input);
-    for (const request of requests.filter((r) => r.runs === 2)) expect(request.ids).not.toContain("q0");
+  it("a whole-set runner (no subsets) in a gap round still ends in a judged or fixed-words result, never invalid question data", async () => {
+    const { input } = await setup({ subsetSupported: false, gapOf: () => true });
+    const output = await runEvalRound(input);
+    if (output.status !== "done") throw new Error("done");
+    expect(output.result.notRun?.reason).not.toBe("invalid_question_data");
+    expect(output.result.label).not.toBe("Worse on eval");
+  });
+  it("does not ask a dropped question again at the second look (q2 is flaky on main and was only ever asked in the gap run; q0 and q1 failed once by noise and were cleared by gap-free re-asks)", async () => {
+    const { input, requests } = await setup({ n: 6, failing: [], failFirstOnly: ["q0", "q1"], flakyOld: ["q2"], gapOf: (_side, _ids, index) => index === 0 });
+    const output = await runEvalRound(input);
+    if (output.status !== "done") throw new Error("done");
+    expect(output.result.excluded).toEqual([{ id: "q2", reason: "stand_in_gap" }]);
+    const looks = requests.filter((r) => r.runs === 2);
+    expect(looks).toHaveLength(1);
+    expect(looks[0]!.ids).toEqual(["q0", "q1", "q3", "q4", "q5"]);
   });
 });
 
@@ -153,6 +165,12 @@ describe("the round object", () => {
     const round = new EvalStandInRound({ workspaceId: WORKSPACE, operationId: OPERATION, plan: [] });
     expect(round.absorb(summary({ counts: { recorded: 1, generated: 0, generatedNoContract: 0, newConnections: 0, served: 2, gapCalls: 0, saturated: false }, additions: [] })).hitGap).toBe(false);
     expect(round.absorb(summary({ counts: { recorded: 1, generated: 0, generatedNoContract: 0, newConnections: 0, served: 2, gapCalls: 0, saturated: true }, additions: [] })).hitGap).toBe(true);
+  });
+  it("counts a TLS handshake a client abandoned, or a refused request, as a run that hit a gap even with no made-up answer", () => {
+    for (const extra of [{ tlsFailed: 1 }, { refused: 1 }]) {
+      const round = new EvalStandInRound({ workspaceId: WORKSPACE, operationId: OPERATION, plan: [] });
+      expect(round.absorb(summary({ counts: { recorded: 0, generated: 0, generatedNoContract: 0, newConnections: 0, served: 1, gapCalls: 0, saturated: false }, additions: [], ...extra })).hitGap).toBe(true);
+    }
   });
   it("counts an unreadable summary as a run that hit a gap and marks every count a lower bound", () => {
     const round = new EvalStandInRound({ workspaceId: WORKSPACE, operationId: OPERATION, plan: [] });

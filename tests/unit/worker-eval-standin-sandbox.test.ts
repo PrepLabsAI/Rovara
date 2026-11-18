@@ -207,6 +207,21 @@ describe("with standIns", () => {
     expect(hosts).not.toContain(`${standInIp} generativelanguage.googleapis.com`);
     expect(hosts.match(/^127\.0\.0\.1 localhost/mu)).not.toBeNull();
   });
+  it("writes the certificate before any install step and never through a link an install step could plant (a link from the commit or an earlier step is removed, never followed)", async () => {
+    const w = await world();
+    const outside = await mkdtemp(join(tmpdir(), "fes-out-")); roots.push(outside);
+    await writeFile(join(outside, "ca.pem"), "UNTOUCHED");
+    const { symlink } = await import("node:fs/promises");
+    const sandbox = createFreshEvalSandbox({ ...w.config, materialize: async (_root, commit, destination) => { await writeFile(join(destination, "eval.js"), `// ${commit}`); await symlink(outside, join(destination, ".rovara-eval-ca")); } });
+    await sandbox.run(w.input());
+    expect(await readFile(join(outside, "ca.pem"), "utf8")).toBe("UNTOUCHED");
+    expect(w.seen[0]!.ca).toBe(w.round.certificatePem);
+  });
+  it("a sealedDns setting of false cannot leave the vendor names unresolved: a stand-in still seals the round", async () => {
+    const w = await world();
+    await createFreshEvalSandbox({ ...w.config, sealedDns: false }).run(w.input());
+    expect(runArgsOf(w.daemon.calls, "-dns")).toBeDefined();
+  });
   it("fails the run when the stand-in will not start, and leaves no container, network or file behind", async () => {
     const w = await world();
     w.stand.failStart = true;

@@ -102,6 +102,8 @@ describe("the run's certificate authority", () => {
     expect(leaf.checkHost("open.tiktokapis.com")).toBe("open.tiktokapis.com");
     expect(leaf.checkHost("evil.example.test")).toBeUndefined();
     expect(leaf.keyUsage).toEqual(["1.3.6.1.5.5.7.3.1"]);
+    // The authority signs server certificates only: pathLenConstraint 0 (DER: basicConstraints cA TRUE, pathLen 0).
+    expect(authority.raw.includes(Buffer.from([0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00]))).toBe(true);
     expect(new X509Certificate(minter.mint("127.0.0.1")!.certPem).checkIP("127.0.0.1")).toBe("127.0.0.1");
     // Not a host name: no certificate. The same name twice is the same certificate.
     expect(minter.mint("not a host")).toBeUndefined();
@@ -116,13 +118,17 @@ describe("the run's certificate authority", () => {
     const probe = spawnSync("openssl", ["version"]);
     if (probe.status !== 0) return;
     const ca = createRunCa();
-    const leaf = createLeafMinter(ca).mint("api.vendor.test")!;
+    const minted = createLeafMinter(ca);
+    const leaf = minted.mint("api.vendor.test")!;
+    const ipLeaf = minted.mint("172.30.5.47")!;
     const dir = join(process.env["TMPDIR"] ?? process.cwd(), `standin-openssl-${String(process.pid)}`);
     spawnSync("mkdir", ["-p", dir]);
     try {
       spawnSync("sh", ["-c", `printf '%s' '${ca.certPem}' > ${dir}/ca.pem && printf '%s' '${leaf.certPem}' > ${dir}/leaf.pem`]);
       const verify = spawnSync("openssl", ["verify", "-x509_strict", "-purpose", "sslserver", "-CAfile", `${dir}/ca.pem`, `${dir}/leaf.pem`], { encoding: "utf8" });
       expect(verify.stdout + verify.stderr).toContain("OK");
+      spawnSync("sh", ["-c", `printf '%s' '${ipLeaf.certPem}' > ${dir}/ip.pem`]);
+      expect((spawnSync("openssl", ["verify", "-x509_strict", "-purpose", "sslserver", "-CAfile", `${dir}/ca.pem`, `${dir}/ip.pem`], { encoding: "utf8" }).stdout)).toContain("OK");
     } finally { spawnSync("rm", ["-rf", dir]); }
   });
   it("tells the box only variable NAMES and one certificate PATH: never the key, never PEM text", () => {

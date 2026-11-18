@@ -65,7 +65,8 @@ export class EvalStandInRound {
     this.served = Math.min(1_000_000, this.served + summary.counts.served);
     this.gapCalls = Math.min(1_000_000, this.gapCalls + summary.counts.gapCalls);
     if (summary.counts.saturated) this.saturated = true;
-    return { hitGap: summary.counts.gapCalls > 0 || summary.counts.saturated, counts: this.counts() };
+    // A request the stand-in did not answer (a TLS handshake a client abandoned, a body past the limit) is a sandbox artifact like a made-up answer: the run counts as having hit a gap.
+    return { hitGap: summary.counts.gapCalls > 0 || summary.counts.saturated || summary.tlsFailed > 0 || summary.refused > 0, counts: this.counts() };
   }
 
   /** The round's counts: distinct answers by class from the book, calls from the summaries. */

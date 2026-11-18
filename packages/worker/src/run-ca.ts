@@ -109,7 +109,8 @@ export function createRunCa(now: () => number = Date.now): RunCa {
     subjectName: subject, issuerName: subject, subjectKey: publicKey, issuerKey: privateKey, issuerKeyIdentifier: identifier,
     notBefore: start, notAfter: start + RUN_CA_LIFETIME_MS,
     extensions: [
-      extension(OID_BASIC, true, sequence(boolean(true))),
+      // pathLenConstraint 0: this authority signs server certificates only, never another authority.
+      extension(OID_BASIC, true, sequence(boolean(true), integer(Uint8Array.of(0)))),
       // keyCertSign (bit 5) and cRLSign (bit 6): 0000 0110, one unused bit.
       extension(OID_KEY_USAGE, true, bitString(Uint8Array.of(0x06), 1)),
       extension(OID_SKI, false, octetString(identifier)),

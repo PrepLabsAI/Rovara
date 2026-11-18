@@ -180,6 +180,9 @@ export class EvalAnswerBook {
     return answer;
   }
 
+  /** How many answers are stored. */
+  size(): number { return this.entries.size; }
+
   /** What is stored, in a stable order, for the worker to keep between runs. Recorded cassette answers that were never asked are not included. */
   snapshot(): readonly EvalStandInBookEntry[] {
     return [...this.entries].map(([key, answer]) => ({ key, ...answer })).sort((a, b) => (a.key < b.key ? -1 : 1));

@@ -338,7 +338,8 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   // A confirmed failure survives an outage/cap on later work. Never turn it into Not run.
   if (judge().label !== "Worse on eval" && stop === undefined && evalNeedsSecondLook(questions)) {
     // Questions already dropped for a gap are not asked again.
-    const lookIds = ids.filter(id => !notCompared.has(id));
+    // A whole-set runner reports every question whatever it is asked, so it is asked for all of them.
+    const lookIds = config.subsetSupported ? ids.filter(id => !notCompared.has(id)) : ids;
     const more = lookIds.length > 0 && reserve("second look", 2 * lookIds.length) ? await run("new", lookIds, 2) : undefined;
     questions = questions.map(q => ({ ...q, moreNew: more?.get(q.id)?.samples }));
   }
