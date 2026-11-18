@@ -38,7 +38,7 @@ function setup(over: { dir?: ReturnType<typeof directory> } = {}) {
 describe("a held lesson a person approves", () => {
   it("is out of the pull set and the page while held, and in both once a person approves it; the approval and the cleared flag are one commit", async () => {
     const w = setup();
-    await w.add(held("les_held0001"), { ...held("les_okay0001"), status: "active", reviewRequired: undefined, approvals: [{ approvalId: "ap-ann", by: "ann", at: 1, mode: "one" }] } as Lesson);
+    await w.add(held("les_held0001"), { ...held("les_okay0001"), status: "active", reviewRequired: undefined, approvals: [{ approvalId: "ap-ann", by: "ann", at: 1, mode: "one" }] });
     expect(await w.pull()).toEqual(["les_okay0001"]);
     expect(await w.page()).toEqual(["les_okay0001"]);
     const commits: Lesson[][] = [];
@@ -46,7 +46,7 @@ describe("a held lesson a person approves", () => {
     w.store.commit = async (...args: Parameters<typeof real>) => { commits.push([...args[2]]); return real(...args); };
     let mutated = 0;
     const realMutate = w.store.mutate.bind(w.store);
-    w.store.mutate = ((...args: Parameters<typeof realMutate>) => { mutated += 1; return realMutate(...args); }) as typeof w.store.mutate;
+    w.store.mutate = ((...args: Parameters<typeof realMutate>) => { mutated += 1; return realMutate(...args); });
     expect(await approveLesson(w.approve, w.input("ann", "les_held0001"))).toMatchObject({ ok: true, status: "active" });
     const stored = (await w.store.get(KEY, "les_held0001"))!;
     expect(stored).toMatchObject({ status: "active", approvals: [{ by: "ann", mode: "one" }] });
@@ -86,7 +86,7 @@ describe("a lesson with another flag still open stays out", () => {
   it("an approved lesson that still contradicts another, may duplicate another or has a retire proposal is not pulled and not on the page, though its review flag is gone", async () => {
     const w = setup();
     await w.add(
-      { ...held("les_base0001"), status: "active", reviewRequired: undefined, approvals: [{ approvalId: "ap-ann", by: "ann", at: 1, mode: "one" }] } as Lesson,
+      { ...held("les_base0001"), status: "active", reviewRequired: undefined, approvals: [{ approvalId: "ap-ann", by: "ann", at: 1, mode: "one" }] },
       held("les_contra01", { contradictsWith: "les_base0001" }), held("les_dup00001", { possibleDuplicateOf: "les_base0001" }),
     );
     expect(await approveLesson(w.approve, w.input("ann", "les_contra01"))).toMatchObject({ ok: true, status: "active" });
