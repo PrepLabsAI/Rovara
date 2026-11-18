@@ -336,6 +336,12 @@ describe("the checklist's rows, each from its own records", () => {
   it("eval confirm (D9): a finished run that found no evals makes the row done by itself, and the first task can start", async () => {
     const h = companyA();
     setupRun(h, A, "alpha", READY());
+    // L4-T2 (D1) + L4-T5 (D9) together: the eval row is done by itself on the proposal, but the first task still waits for the setup to be approved and checked.
+    const unapproved = await h.ok();
+    expect(unapproved.evalConfirm).toEqual({ state: "done", report: "none" });
+    expect(unapproved.setupRun.state).toBe("needs_you");
+    expect(unapproved.firstTask.canStart).toBe(false);
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
     const body = await h.ok();
     expect(body.evalConfirm).toEqual({ state: "done", report: "none" });
     expect(body.firstTask.canStart).toBe(true);
