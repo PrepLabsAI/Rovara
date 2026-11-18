@@ -24,6 +24,18 @@ export type SetupRowState = (typeof SETUP_ROW_STATES)[number];
 const State = z.enum(SETUP_ROW_STATES);
 
 /**
+ * L4-T2 (setup review D1, G1): where the project's setup stands in the approval, which is what makes the "Setup run" row done.
+ * none: no setup of Rovara's has been turned into a candidate (no run yet, a run still going, a proposal nobody has used, or one a person rejected or discarded).
+ * candidate: a setup was made into a candidate revision and waits for a person's decision (its check is ready, or it failed or went stale: `check` says which).
+ * checking: that candidate's check is running on a fresh machine.
+ * approved: a person approved a candidate revision. The row is done only when its check is also ready.
+ */
+export const SETUP_APPROVALS = ["none", "candidate", "checking", "approved"] as const;
+export type SetupApproval = (typeof SETUP_APPROVALS)[number];
+/** The status of a setup check, as the project's setup state words it (`setupStateOf`). */
+export const SETUP_CHECK_STATUSES = ["unchecked", "outdated", "checking", "failed", "ready"] as const;
+
+/**
  * DEC 254zc(1): what GitHub's signed webhooks said about a repository since the project was set up. transferred: it moved to another owner (`repository` transferred). removed: it left the
  * GitHub App's repository list (`installation_repositories` removed; a transfer out looks the same, so the word stays "removed" unless GitHub said "transferred"). Absent: GitHub said nothing.
  */
@@ -62,6 +74,15 @@ export const ProjectSetupChecklistSchema = z.object({
     stop: z.string().max(60).optional(),
     /** The broker's fixed sentence (never a log line or a model's words). */
     failure: z.string().max(1_000).optional(),
+    /**
+     * L4-T2: the approval (see SETUP_APPROVALS). The row is `done` only with `approval: "approved"` and a `ready` check; a proposal nobody has used, a candidate waiting for a decision and a failed check are `needs_you`
+     * (the check's own words are in `check.failedStep`); a check going on a fresh machine is `running`.
+     */
+    approval: z.enum(SETUP_APPROVALS),
+    /** The check of the waiting candidate, or of the approved revision (absent with `approval: "none"`). `failedStep` is the broker's one-line, redacted, bounded failing step. */
+    check: z.object({ status: z.enum(SETUP_CHECK_STATUSES), failedStep: z.string().max(300).optional() }).passthrough().optional(),
+    /** With `approval: "approved"`: when the person approved it. */
+    approvedAt: z.string().max(40).optional(),
     /** The command that failed and the last lines of its (redacted, bounded) output, as the run's journal shows them. Only on a failed run that kept a journal. */
     failedCommand: z.object({ n: z.number().int().min(1), command: z.string().max(2_000), exitCode: z.number().int().nullable(), timedOut: z.boolean(), lastLines: z.array(z.string().max(300)).max(20) }).passthrough().optional(),
   }).passthrough(),
@@ -83,6 +104,11 @@ export const ProjectSetupChecklistSchema = z.object({
     companyModelSaved: z.boolean(),
     /** The project's own per-task model budget in dollars, when it saved one. */
     modelBudgetUsd: z.number().min(0).nullable(),
+    /**
+     * L4-T2 (G6): whether the company can run a model call. `none`: it cannot (the row is `needs_you`: connect an AI key or choose Rovara's AI). `possible`: it can. `unknown`: the gateway could not say (the row is not
+     * blocked on a guess). Absent: this install has no gateway to ask (the install's own model setup applies).
+     */
+    modelCall: z.enum(["possible", "none", "unknown"]).optional(),
   }).passthrough(),
   slackChannel: z.object({ state: State, channels: z.array(Channel).max(32) }).passthrough(),
   linear: z.object({ state: State, team: z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(200).optional() }).passthrough().nullable() }).passthrough(),

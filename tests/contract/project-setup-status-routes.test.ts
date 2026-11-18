@@ -1,9 +1,9 @@
 // Guided onboarding PR 8: `GET /v1/dev/client/projects/{project}/setup-status` and `PUT .../setup-status/skips`.
 // Each row's state comes from fixture records; two companies never read or change each other's project; a member reads but cannot set skips; the existing route table is unchanged.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, ProjectSetupEvalNoneResponseSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
+  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, projectRevisionKey, ProjectSetupEvalNoneResponseSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
   type SetupEvalDiscoveryReport,
 } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
@@ -14,11 +14,12 @@ import {
   EVAL_ALREADY_CONFIRMED, EVAL_NONE_BODY, EVAL_NONE_NEEDS_SETUP, NOT_AN_EVAL_ADMIN, NOT_A_SETUP_ADMIN, SETUP_SKIPS_BODY, SETUP_SKIPS_STALE, SETUP_STATUS_UNREADABLE, readProjectSetupStatus, readSkips, setupEvalNoneKey, setupSkipsKey,
 } from "../../packages/broker/src/aws/project-setup-status.js";
 import { projectSettingsKey } from "../../packages/broker/src/aws/project-settings.js";
+import { setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { SETUP_AGENT_FAILURES } from "../../packages/broker/src/core/setup-agent/agent.js";
 import { evalDiscoveryDigest, evalDiscoveryKey } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
 import { journalKey, setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
-import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
+import { OPERATION_SK_PREFIX, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { CLIENT_MEMBERS_NOT_ALLOWED } from "../../packages/broker/src/aws/developer-routes.js";
 import { LinearConnections, linearConnectionKey, linearTeamKey } from "../../packages/broker/src/aws/linear-connections.js";
@@ -109,6 +110,25 @@ function setupRun(h: Harness, company: string, project: string, result: RunResul
   h.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, orgId: company, taskId, project, purpose: "setup_agent", workspaceId: "33333333-3333-4333-8333-333333333333", startingRevision: 1, ...(result === undefined ? {} : { setupAgentResult: result }) });
   return taskId;
 }
+/**
+ * L4-T2: the proposal row ("SETUP_APPLY") a person's "Use this setup" makes, with its candidate revision and the check's workspace. `state` is the row's; `check` is the check's own state: ready (workspace READY),
+ * checking (PREPARING), failed (PREPARATION_FAILED, with the worker's recorded error) or none (no workspace row at all). `madeAt` is when the row was made (default: after the setup run started).
+ */
+function setupApply(h: Harness, company: string, project: string, opts: { state: "checking" | "approved" | "rejected" | "discarded"; check: "ready" | "checking" | "failed" | "none"; madeAt?: string; row?: Record<string, unknown> }) {
+  const workspaceId = randomUUID();
+  const command = (executable: string, args: string[]) => ({ cwd: "repo/api", executable, args, timeoutSeconds: 600 });
+  const definition = { name: project, revision: 2, setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])], orchestratorInstructions: "Delegate work.",
+    repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "host-app" }] };
+  h.db.set({ ...projectRevisionKey(company, project, 2), entityType: "PROJECT", candidate: true, definition });
+  const at = opts.madeAt ?? new Date(NOW - 60_000).toISOString();
+  if (opts.check !== "none") {
+    const status = opts.check === "ready" ? "READY" : opts.check === "checking" ? "PREPARING" : "PREPARATION_FAILED";
+    h.db.set({ ...workspaceKey(company, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: company, orgId: company, status });
+    if (opts.check === "failed") h.db.set({ pk: workspaceKey(company, workspaceId).pk, sk: `${OPERATION_SK_PREFIX}${randomUUID()}`, kind: "prepare", error: "readiness check 0 (npm test) exited with 1", createdAt: at });
+  }
+  h.db.set({ ...setupApplyKey(company, project), entityType: "SETUP_APPLY", orgId: company, project, taskId: "11111111-1111-4111-8111-111111111111", requestId: randomUUID(), by: ADA, digest: "d".repeat(64), baseRevision: 1, candidateRevision: 2,
+    state: opts.state, check: { workspaceId, revision: 2, startedAt: at, startedBy: ADA }, reply: {}, createdAt: at, ...(opts.state === "approved" ? { decidedAt: new Date(NOW - 30_000).toISOString(), decidedBy: ADA } : {}), ...opts.row });
+}
 const READY = (over: Record<string, unknown> = {}) => ({ status: "ready", stop: "proposed", proposal: PROPOSAL(), summary: SUMMARY(), ...over });
 function journal(h: Harness, company: string, project: string, taskId: string, n: number, entry: Record<string, unknown>) {
   h.db.set({ ...journalKey({ orgId: company, project, taskId }, n), entityType: "SETUP_JOURNAL", orgId: company, project, taskId, entry: { n, source: "agent", command: "npm test", exitCode: 0, durationMs: 1000, timedOut: false, flagged: false, blockedHosts: [], tail: "", startedAt: TIME, ...entry } });
@@ -150,7 +170,7 @@ describe("the checklist's rows, each from its own records", () => {
     const h = companyA();
     const body = await h.ok();
     expect(body.repos).toEqual({ state: "done", count: 1, items: [{ name: "api", defaultBranch: "main", fullName: "acme/api" }] });
-    expect(body.setupRun).toEqual({ state: "needs_you", status: "none" });
+    expect(body.setupRun).toEqual({ state: "needs_you", status: "none", approval: "none" });
     expect(body.evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
     expect(body.aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
     expect(body.slackChannel).toEqual({ state: "optional", channels: [] });
@@ -176,17 +196,17 @@ describe("the checklist's rows, each from its own records", () => {
   it("setup run: running", async () => {
     const h = companyA();
     setupRun(h, A, "alpha", undefined);
-    expect((await h.ok()).setupRun).toEqual({ state: "running", status: "running", startedAt: new Date(NOW - 120_000).toISOString() });
+    expect((await h.ok()).setupRun).toEqual({ state: "running", status: "running", approval: "none", startedAt: new Date(NOW - 120_000).toISOString() });
   });
 
-  it("setup run: ready is done, with the commands found, time, cost and the test outcome from the run's own journal", async () => {
+  it("setup run: ready with a proposal nobody used is Needs you (not done), with the commands found, time, cost and the test outcome from the run's own journal", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
     journal(h, A, "alpha", task, 1, { command: "npm ci" });
     journal(h, A, "alpha", task, 2, { command: "npm test", exitCode: 0 });
     const run = (await h.ok()).setupRun;
     expect(run).toEqual({
-      state: "done", status: "ready", startedAt: new Date(NOW - 120_000).toISOString(), elapsedMs: 91_000, costCents: 37, commandsRun: 4, partial: false, stop: "proposed",
+      state: "needs_you", status: "ready", approval: "none", startedAt: new Date(NOW - 120_000).toISOString(), elapsedMs: 91_000, costCents: 37, commandsRun: 4, partial: false, stop: "proposed",
       commandsFound: { setup: 1, tests: 1 }, testOutcome: "passed",
     });
     expect(run).not.toHaveProperty("failedCommand");
@@ -247,13 +267,13 @@ describe("the checklist's rows, each from its own records", () => {
     expect(run.failedCommand).toBeUndefined();
     expect(JSON.stringify(run)).not.toContain(CANARY);
     h.db.set({ ...(h.db.get(setupAgentKey(A, "alpha").pk, "AGENT") as object), orgId: B });
-    expect((await h.ok()).setupRun).toEqual({ state: "needs_you", status: "none" });
+    expect((await h.ok()).setupRun).toEqual({ state: "needs_you", status: "none", approval: "none" });
   });
 
   it("setup run: a timed-out command is the failing one; a failed run with no journal has none", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", { status: "failed", stop: "infrastructure", failure: SETUP_AGENT_FAILURES.infrastructure });
-    expect((await h.ok()).setupRun).toEqual({ state: "failed", status: "failed", startedAt: new Date(NOW - 120_000).toISOString(), testOutcome: "unknown", failure: SETUP_AGENT_FAILURES.infrastructure });
+    expect((await h.ok()).setupRun).toEqual({ state: "failed", status: "failed", approval: "none", startedAt: new Date(NOW - 120_000).toISOString(), testOutcome: "unknown", failure: SETUP_AGENT_FAILURES.infrastructure });
     journal(h, A, "alpha", task, 1, { command: "npm ci", exitCode: null, timedOut: true, tail: "still going" });
     expect((await h.ok()).setupRun.failedCommand).toEqual({ n: 1, command: "npm ci", exitCode: null, timedOut: true, lastLines: ["still going"] });
   });
@@ -262,7 +282,7 @@ describe("the checklist's rows, each from its own records", () => {
     const h = companyA();
     setupRun(h, A, "alpha", READY({ proposal: { version: 2, setup: "nope" } }));
     const run = (await h.ok()).setupRun;
-    expect(run.state).toBe("done");
+    expect(run.state).toBe("needs_you");
     expect(run).not.toHaveProperty("commandsFound");
     expect(run.testOutcome).toBe("unknown");
   });
@@ -378,6 +398,10 @@ describe("the checklist's rows, each from its own records", () => {
     const task = setupRun(h, A, "alpha", READY());
     expect((await h.ok()).firstTask.canStart).toBe(false);
     evalReport(h, A, "alpha", task, "confirmed");
+    // L4-T2: a proposal nobody approved is not a finished setup, so the first task cannot start yet.
+    expect((await h.ok()).firstTask).toEqual({ state: "needs_you", hasTask: false, canStart: false });
+    expect((await h.ok()).progress).toEqual({ done: 3, total: 8, percent: 38, nextRequired: "setupRun" });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
     expect((await h.ok()).firstTask).toEqual({ state: "needs_you", hasTask: false, canStart: true });
     expect((await h.ok()).progress).toEqual({ done: 4, total: 8, percent: 50, nextRequired: "firstTask" });
     realTask(h, A, "alpha", "5");
@@ -387,6 +411,132 @@ describe("the checklist's rows, each from its own records", () => {
     expect((await h.ok()).progress).toEqual({ done: 8, total: 8, percent: 100, nextRequired: null });
     expect(await h.call("PUT", SKIPS(), { row: "invites", skipped: false })).toMatchObject({ status: 200 });
     expect((await h.ok()).progress).toMatchObject({ done: 7, percent: 88 });
+  });
+});
+
+// L4-T2 (setup review D1, G1, G6): "Setup run: Done" means a person APPROVED the setup and its check on a fresh machine is ready.
+describe("Done means approved (L4-T2)", () => {
+  type Apply = Parameters<typeof setupApply>[3];
+  const table: Array<{ name: string; run: "ready" | "none" | "running"; apply?: Apply; state: string; approval: string; check?: string; reason?: RegExp }> = [
+    { name: "a proposal only (nobody used it)", run: "ready", state: "needs_you", approval: "none" },
+    { name: "no run and no setup", run: "none", state: "needs_you", approval: "none" },
+    { name: "a candidate whose check is ready, waiting for a decision", run: "ready", apply: { state: "checking", check: "ready" }, state: "needs_you", approval: "candidate", check: "ready" },
+    { name: "a candidate whose check is going on a fresh machine", run: "ready", apply: { state: "checking", check: "checking" }, state: "running", approval: "checking", check: "checking" },
+    { name: "a candidate whose check failed: needs you, with the reason", run: "ready", apply: { state: "checking", check: "failed" }, state: "needs_you", approval: "candidate", check: "failed", reason: /^test: npm test/u },
+    { name: "a candidate whose check has no workspace (stale)", run: "ready", apply: { state: "checking", check: "none" }, state: "needs_you", approval: "candidate", check: "unchecked" },
+    { name: "approved and its check ready", run: "ready", apply: { state: "approved", check: "ready" }, state: "done", approval: "approved", check: "ready" },
+    { name: "approved and its check failed: needs you, with the reason", run: "ready", apply: { state: "approved", check: "failed" }, state: "needs_you", approval: "approved", check: "failed", reason: /^test: npm test/u },
+    { name: "approved and its check going", run: "ready", apply: { state: "approved", check: "checking" }, state: "running", approval: "approved", check: "checking" },
+    { name: "approved with no readable check", run: "ready", apply: { state: "approved", check: "none" }, state: "needs_you", approval: "approved", check: "unchecked" },
+    { name: "rejected: the proposal is waiting again", run: "ready", apply: { state: "rejected", check: "ready" }, state: "needs_you", approval: "none" },
+    { name: "discarded: the proposal is waiting again", run: "ready", apply: { state: "discarded", check: "ready" }, state: "needs_you", approval: "none" },
+    { name: "approved, then a newer run with a proposal nobody used", run: "ready", apply: { state: "approved", check: "ready", madeAt: new Date(NOW - 600_000).toISOString() }, state: "needs_you", approval: "approved", check: "ready" },
+    { name: "approved with no run (a plan's setup update): done", run: "none", apply: { state: "approved", check: "ready" }, state: "done", approval: "approved", check: "ready" },
+    { name: "a candidate waiting while no run exists (a plan's setup update)", run: "none", apply: { state: "checking", check: "ready" }, state: "needs_you", approval: "candidate", check: "ready" },
+    { name: "a run going wins over an approved setup", run: "running", apply: { state: "approved", check: "ready" }, state: "running", approval: "approved", check: "ready" },
+  ];
+  for (const row of table) {
+    it(row.name, async () => {
+      const h = companyA();
+      if (row.run === "ready") setupRun(h, A, "alpha", READY());
+      if (row.run === "running") setupRun(h, A, "alpha", undefined);
+      if (row.apply !== undefined) setupApply(h, A, "alpha", row.apply);
+      const run = (await h.ok()).setupRun;
+      expect(run.state).toBe(row.state);
+      expect(run.approval).toBe(row.approval);
+      expect(run.check?.status).toBe(row.check);
+      if (row.reason === undefined) expect(run.check?.failedStep).toBeUndefined(); else expect(run.check?.failedStep).toMatch(row.reason);
+      expect(run.approvedAt !== undefined).toBe(row.approval === "approved");
+    });
+  }
+
+  it("a failed or partial run stays failed whatever was approved before", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "failed", status: "failed", approval: "approved" });
+  });
+
+  it("the first task, the next required row and the progress follow the approval", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "confirmed");
+    for (const [apply, canStart, next] of [[undefined, false, "setupRun"], [{ state: "checking", check: "ready" }, false, "setupRun"], [{ state: "approved", check: "failed" }, false, "setupRun"], [{ state: "approved", check: "ready" }, true, "firstTask"]] as const) {
+      if (apply !== undefined) setupApply(h, A, "alpha", apply);
+      const body = await h.ok();
+      expect([body.firstTask.canStart, body.progress.nextRequired]).toEqual([canStart, next]);
+    }
+  });
+
+  it("the eval row still waits on the run's proposal, not on the approval, and no other row changes with it", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "reported");
+    realTask(h, A, "alpha", "5");
+    const before = await h.ok();
+    expect(before.evalConfirm).toEqual({ state: "needs_you", report: "reported", suites: [{ selection: "evals/demo", questions: 2 }] });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    const after = await h.ok();
+    for (const row of ["repos", "evalConfirm", "aiAndSpend", "slackChannel", "linear", "invites", "firstTask", "viewer"] as const) expect(after[row], row).toEqual(before[row]);
+    expect(after.setupRun.state).toBe("done");
+    expect(before.setupRun.state).toBe("needs_you");
+  });
+
+  it("a proposal row of another project or company is no approval, and company B's approval never reaches company A", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    setupApply(h, A, "alpha", { state: "approved", check: "ready", row: { project: "beta" } });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready", row: { orgId: B } });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    h.db.delete(setupApplyKey(A, "alpha").pk, setupApplyKey(A, "alpha").sk);
+    setupApply(h, B, "alpha", { state: "approved", check: "ready" });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+  });
+
+  it("the check's reason is the broker's one redacted line, bounded", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    setupApply(h, A, "alpha", { state: "checking", check: "failed" });
+    const step = (await h.ok()).setupRun.check?.failedStep ?? "";
+    expect(step.length).toBeLessThanOrEqual(300);
+    expect(step).not.toMatch(/[\n\r]/u);
+  });
+
+  describe("AI and spend: done only while a model call is possible (G6)", () => {
+    const read = async (modelCall?: () => Promise<boolean | null>) => {
+      const h = companyA();
+      const task = setupRun(h, A, "alpha", READY());
+      evalReport(h, A, "alpha", task, "confirmed");
+      setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+      return ProjectSetupChecklistSchema.parse(await readProjectSetupStatus({
+        documentClient: h.db, tableName: "State", now: () => NOW, companyId: A, project: "alpha", definition: { revision: 1, repositories: [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main" }] },
+        viewer: { companyRole: "admin", projectAdmin: false }, readers: { channels: async () => [], ...(modelCall === undefined ? {} : { modelCall }) },
+      }));
+    };
+    it("no key (the gateway says no call is possible): needs you, the first task cannot start, the AI row is the next required one", async () => {
+      const body = await read(async () => false);
+      expect(body.aiAndSpend).toEqual({ state: "needs_you", source: "default", companyModelSaved: false, modelBudgetUsd: null, modelCall: "none" });
+      expect(body.firstTask.canStart).toBe(false);
+      expect(body.progress.nextRequired).toBe("aiAndSpend");
+      expect(body.setupRun.state).toBe("done");
+    });
+    it("a call is possible: done", async () => {
+      const body = await read(async () => true);
+      expect(body.aiAndSpend).toMatchObject({ state: "done", modelCall: "possible" });
+      expect(body.firstTask.canStart).toBe(true);
+    });
+    it("the gateway could not say (null or a throw): not blocked on a guess, and said so", async () => {
+      for (const reader of [async () => null, async (): Promise<boolean> => { throw new Error("gateway down"); }]) {
+        const body = await read(reader);
+        expect(body.aiAndSpend).toMatchObject({ state: "done", modelCall: "unknown" });
+        expect(body.firstTask.canStart).toBe(true);
+      }
+    });
+    it("an install with no gateway to ask: as before, no field", async () => {
+      const body = await read();
+      expect(body.aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
+    });
   });
 });
 
@@ -436,6 +586,7 @@ describe("who may read, and which company's project it is", () => {
     for (const [company, name] of [[B, "beta"], [B, "alpha"]] as const) {
       const task = setupRun(h, company, name, READY({ proposal: PROPOSAL({ setup: [`echo ${CANARY}`], tests: ["npm test"] }) }), company === B && name === "alpha" ? "88888888-8888-4888-8888-888888888888" : "99999999-9999-4999-8999-999999999999");
       evalReport(h, company, name, task, "confirmed");
+      setupApply(h, company, name, { state: "approved", check: "ready" });
       journal(h, company, name, task, 1, { command: `echo ${CANARY}`, exitCode: 1, tail: CANARY });
       h.db.set({ ...setupSkipsKey(company, name), entityType: "PROJECT_SETUP_SKIPS", companyId: company, project: name, skipped: ["linear", "invites", "slackChannel"], revision: 1 });
       h.db.set({ ...projectSettingsKey(company, name), entityType: "PROJECT_SETTINGS", companyId: company, projectName: name, overrides: { model_budget_usd: 99 }, revision: 1, updatedAt: TIME, updatedBy: CAT });
@@ -444,7 +595,7 @@ describe("who may read, and which company's project it is", () => {
     h.db.set({ ...modelSelectionPolicyKey(B), entityType: "MODEL_SELECTION_POLICY", orgId: B, version: 1, revision: 5, rankingVersion: "g3-v1", stepOverrides: {} });
     const seenByA = await h.ok();
     expect(JSON.stringify(seenByA)).not.toContain(CANARY);
-    expect(seenByA.setupRun).toEqual({ state: "needs_you", status: "none" });
+    expect(seenByA.setupRun).toEqual({ state: "needs_you", status: "none", approval: "none" });
     expect(seenByA.evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
     expect(seenByA.aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
     expect(seenByA.firstTask.hasTask).toBe(false);
@@ -453,7 +604,7 @@ describe("who may read, and which company's project it is", () => {
     h.as(CAT, "s-cat");
     expect(await h.call("GET", PATH("alpha"))).toEqual(NOT_FOUND);
     const seenByB = await h.ok(PATH("beta"));
-    expect(seenByB.setupRun.state).toBe("done");
+    expect(seenByB.setupRun).toMatchObject({ state: "done", approval: "approved" });
     expect(seenByB.aiAndSpend).toMatchObject({ source: "project", modelBudgetUsd: 99 });
   });
 
@@ -617,6 +768,7 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
   it("an admin confirms no evals for the finished setup run: the row is done and the first task can start; a repeat writes nothing", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
     expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
     const answer = await h.call("PUT", EVAL_NONE(), { noEvals: true });
     expect(answer).toEqual({ status: 200, body: { project: "alpha", noEvals: true, taskId: task } });
