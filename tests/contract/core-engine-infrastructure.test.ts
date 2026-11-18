@@ -16,6 +16,7 @@ import {
   BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   SERVICE_ROLE_SERVICES, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
+import { CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { CORE_BROKER_QUEUE_ACTIONS, CORE_DISPATCHER_QUEUE_ACTIONS, CORE_DISPATCH_DEAD_LETTERS_ALARM } from "../../infra/lib/core-engine.js";
@@ -97,6 +98,43 @@ describe("the model gateway settings (stack parameters CoreModelGatewayHost and 
     expect(legacyJson.Parameters).not.toHaveProperty("CoreAgentModel");
     const legacyBroker = Object.entries(legacyJson.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
     expect((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
+  });
+});
+
+// L4-AM (DEC 254zzn(2)): the hosted answers model, a stack parameter of its own, for the BROKER only.
+describe("the hosted answers model (stack parameter CoreAnswersModel)", () => {
+  it("is declared empty by default (answers use the agent model), with a Claude-only pattern and a short length", () => {
+    expect(json.Parameters.CoreAnswersModel).toMatchObject({ Default: "", AllowedPattern: CORE_ANSWERS_MODEL_PATTERN, MaxLength: CORE_ANSWERS_MODEL_MAX_LENGTH });
+    expect(CORE_ANSWERS_MODEL_MAX_LENGTH).toBe(39);
+    const pattern = new RegExp(CORE_ANSWERS_MODEL_PATTERN, "u");
+    for (const ok of ["", "claude-haiku-5-5", "claude-sonnet-4-6", `claude-${"a".repeat(32)}`]) expect(pattern.test(ok), ok).toBe(true);
+    for (const bad of ["zai.glm-5", "us.anthropic.claude-haiku-5-5", "Claude-haiku", "claude-", "claude-a,b", "claude-a=b", "claude-a b", "claude-a\n", `claude-${"a".repeat(33)}`, "https://x/claude-a"]) expect(pattern.test(bad), bad).toBe(false);
+    // The stack pattern admits exactly the ids the broker's own check admits (plus empty): no gap between them.
+    for (const value of ["claude-haiku-5-5", "claude-a.b-c", `claude-${"a".repeat(32)}`, "claude-A", "claude-.a"]) expect(pattern.test(value), value).toBe(CORE_CLAUDE_AGENT_MODEL.test(value));
+  });
+
+  it("is packed for the BROKER only (aa), never as a variable of its own, and the dispatcher has no piece of it", () => {
+    expect(packedSettings(brokerVariables).get("aa")).toStrictEqual({ Ref: "CoreAnswersModel" });
+    expect(brokerVariables).not.toHaveProperty(CORE_ANSWERS_MODEL_VARIABLE);
+    expect(packedSettings(dispatcherVariables).has("aa")).toBe(false);
+    expect(dispatcherVariables).not.toHaveProperty(CORE_ANSWERS_MODEL_VARIABLE);
+  });
+
+  it("is used by the broker's environment alone: no IAM statement, no other function, no other resource, in the named and the app's template alike", () => {
+    for (const template of [json, inApp]) {
+      const users = Object.entries(template.Resources).filter(([, resource]) => /"Ref":"CoreAnswersModel"/u.test(JSON.stringify(resource))).map(([id, resource]) => `${id.replace(/[0-9A-F]{8}$/u, "")}:${resource.Type}`);
+      expect(users).toEqual(["Broker:AWS::Lambda::Function"]);
+    }
+  });
+
+  it("is absent from the legacy (production) template", () => {
+    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("CoreAnswersModel");
+    expect(JSON.stringify((legacy.toJSON() as Json).Resources)).not.toContain("CoreAnswersModel");
+  });
+
+  it("is kept across an upgrade and set only by its config key", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("CoreAnswersModel");
+    expect(configKey("coreEngine.answersModel")).toMatchObject({ target: { kind: "stack-parameter", part: "control-plane", parameter: "CoreAnswersModel" }, defaultValue: "" });
   });
 });
 

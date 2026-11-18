@@ -817,14 +817,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // Lead 4 A1/A2: the cost and time report. A task is filed or moved by its starter or a project maintainer: the standing is the setup run's own live read.
           report: { standing: setupRunStanding },
           // Lead 4 J3 + L4-HC: the web start box's path suggestion. Any live role on the project asks (the setup run's standing). The classifier is ONE small call through the same answers gateway path as the
-          // answers (same purpose, same company binding, the company's own key): `answersModel()` is undefined without the gateway (or a Bedrock-only model, or no task-token key), and then every suggestion says
+          // answers (same purpose, same company binding, the company's own key): `answersModel()` is undefined without the gateway (or an answering model that is not a Claude engine name: ROVARA_CORE_ANSWERS_MODEL, else the agent model; or no task-token key), and then every suggestion says
           // the classifier is unavailable (small talk is still answered, free). The hourly counter is stored per company, project and person.
           startSuggest: {
             standing: setupRunStanding,
             route: hostedStartRoute(answersModel),
           },
           // Lead 4 J1: the smart Just answer. Any live role on the project asks (the setup run's standing); the code is the project's own repositories on the company's code host. The model is the gateway's
-          // "answers" purpose (Cloud lane L4-E; L4-AG): the company's own key, its own monthly limit, a fresh answers token per call. No gateway configured (or a Bedrock-only agent model, or no task-token key):
+          // "answers" purpose (Cloud lane L4-E; L4-AG): the company's own key, its own monthly limit, a fresh answers token per call. No gateway configured (or an answering model that is not a Claude engine name, or no task-token key):
           // every answer is the fixed "answers are not set up here yet" outcome.
           answers: {
             model: answersModel(),
