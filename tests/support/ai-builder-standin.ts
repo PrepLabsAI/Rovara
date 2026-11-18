@@ -20,7 +20,6 @@ import type { EvalFinalCheckPlan, EvalFinalCheckPorts } from "../../packages/wor
 import { createEvalGatewayAccess } from "../../packages/worker/src/verification/eval-gateway-access.js";
 import { freshEvalEnvironment } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { createEvalMeter, type EvalModelAccess } from "../../packages/worker/src/verification/eval-model-access.js";
-import { evalModelPathPattern } from "../../packages/worker/src/verification/eval-wiring.js";
 import { createModelMetadataServer } from "../../packages/worker/src/model-helper-metadata.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
 import { createEvalRunner, type EvalSandboxExec, type EvalSandboxRequest } from "../../packages/worker/src/verification/eval-runner.js";
@@ -306,7 +305,7 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
       metadata?.on("request", req => { if ((req.url ?? "").includes("/token")) metadataTokenRequests++; });
       if (metadata !== undefined) await new Promise<void>(resolve => metadata.listen(0, "127.0.0.1", resolve));
       const metadataAddress = metadata === undefined ? "" : `127.0.0.1:${(metadata.address() as { port: number }).port}`;
-      const written = freshEvalEnvironment({ rowId: transport, token: "runtoken0123456789", side: request.side, runs: request.runs as 1 | 2 | 3, ids: request.ids, helperIp: "172.30.1.9" })
+      const written = freshEvalEnvironment({ rowId: transport, token: "runtoken0123456789", side: request.side, runs: request.runs, ids: request.ids, helperIp: "172.30.1.9" })
         .replaceAll("http://rovara-models:8080", base).replaceAll("172.30.1.9:8081", metadataAddress);
       const fromFile = Object.fromEntries(written.split("\n").filter(Boolean).map(line => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as [string, string]).filter(([name]) => name !== "HOME"));
       const env = cleanEnv({ ...fromFile, ...(transport === "vertex" && options.clientProject !== undefined ? { GOOGLE_CLOUD_PROJECT: options.clientProject } : {}) });
