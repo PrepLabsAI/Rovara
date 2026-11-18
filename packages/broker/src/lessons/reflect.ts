@@ -93,7 +93,7 @@ function restrictedBeyondRepos(audience: Audience | undefined): boolean {
 /** The source key of CI failures, as the subject source writes it. */
 const CI_SOURCE_KEY = "ci";
 /** Kinds a person writes. Plans are agent text, and outcomes, CI output and loaded lessons are not people. */
-const PERSON_KINDS: ReadonlySet<string> = new Set(["send_back", "remembered", "human_edit", "close_reason", "review_finding", "intent", "pr_comment", "plan_comment", "design_comment"]);
+const PERSON_KINDS: ReadonlySet<string> = new Set(["send_back", "remembered", "human_edit", "close_reason", "review_finding", "intent", "pr_comment", "plan_comment", "design_comment", "slack_reply"]);
 
 function parseJson(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/iu, "").replace(/\s*```$/u, "");

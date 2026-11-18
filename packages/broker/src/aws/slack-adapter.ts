@@ -18,6 +18,7 @@ import {
   conversationFromSlackThread,
   inboundFromSlackRequest,
   ChannelActionAnswerSchema,
+  THREAD_MESSAGES_MAX,
   slackBlocksOf,
   slackModalOf,
   slackThreadOf,
@@ -450,6 +451,31 @@ export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDepe
           typeof channel.id === "string" && typeof channel.name === "string" && channel.name !== "" ? [{ space: channel.id, name: channel.name.slice(0, 200), private: channel.is_private !== false }] : []);
         const nextCursor = cursorOf(body);
         return { spaces, ...(nextCursor === undefined ? {} : { nextCursor }) };
+      }
+      // Lead 4: one read of a thread's replies for the lessons' Slack source. The space's facts come from the same call's own `conversations.info` (private unless Slack says it is public; shared when Slack says it is
+      // shared with another organisation or workspace; a direct or group direct message when Slack says so), then one page of `conversations.replies`. Nothing is kept here.
+      case "thread_messages": {
+        if (!/^[CG][A-Z0-9]{8,}$/.test(command.space)) throw new Refused("invalid_input", "only a channel's thread can be read");
+        const info = (await slackRead(token, "conversations.info", { channel: command.space }, fetchFn)).channel as { is_private?: unknown; is_im?: unknown; is_mpim?: unknown; is_shared?: unknown; is_ext_shared?: unknown; is_org_shared?: unknown; is_pending_ext_shared?: unknown } | undefined;
+        if (info === undefined || typeof info !== "object") throw new Refused("malformed_channel", "Slack's channel cannot be read");
+        const direct = info.is_im === true || info.is_mpim === true;
+        const shared = info.is_shared === true || info.is_ext_shared === true || info.is_org_shared === true || info.is_pending_ext_shared === true;
+        const body = await slackRead(token, "conversations.replies", { channel: command.space, ts: command.thread, limit: String(THREAD_MESSAGES_MAX + 1) }, fetchFn);
+        if (!Array.isArray(body.messages)) throw new Refused("malformed_messages", "Slack's thread cannot be read");
+        const replies = (body.messages as Array<Record<string, unknown>>).filter((message) => typeof message.ts === "string" && message.ts !== command.thread && message.thread_ts === command.thread);
+        const messages = replies.slice(0, THREAD_MESSAGES_MAX).flatMap((message) => {
+          const id = String(message.ts);
+          if (!/^[0-9]{6,12}\.[0-9]{3,8}$/.test(id)) return [];
+          const userId = typeof message.user === "string" && /^[UW][A-Z0-9]{2,}$/.test(message.user) ? message.user : undefined;
+          const bot = message.bot_id !== undefined || message.app_id !== undefined || message.subtype === "bot_message" || userId === undefined;
+          // A reply that names no team at all is not proved to be this organisation's: it is external (fail closed).
+          const teams = [message.user_team, message.team].filter((team): team is string => typeof team === "string");
+          const external = teams.length === 0 || teams.some((team) => team !== command.tenant);
+          // A plain message has no subtype (a "thread_broadcast" is a plain reply that was also shown in the channel).
+          const plain = message.subtype === undefined || message.subtype === "thread_broadcast";
+          return [{ id, ...(userId === undefined ? {} : { userId }), bot, external, plain, text: typeof message.text === "string" ? message.text.slice(0, 4_000) : "" }];
+        });
+        return { space: { private: info.is_private !== false, shared, direct }, messages, truncated: replies.length > THREAD_MESSAGES_MAX || body.has_more === true };
       }
       case "check": {
         const body = await slackRead(token, "auth.test", {}, fetchFn);

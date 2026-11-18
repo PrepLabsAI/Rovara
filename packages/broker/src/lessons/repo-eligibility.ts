@@ -136,6 +136,8 @@ export function repoVisibilityOf(subject: RepoInputSubject, spans: Iterable<Repo
     const personAuthored = span.authorId !== undefined || (span.authorIds?.length ?? 0) > 0 || span.trust === "member";
     if (!KNOWN_KINDS.has(span.kind)) { blocked.add("unknown_input"); continue; }
     if (span.kind === "loaded_lesson") { blocked.add("loaded_lesson"); continue; }
+    // A reply in a chat thread is a place that is not a repository, whatever place it carries.
+    if (span.kind === "slack_reply") { blocked.add("other_place"); continue; }
     if (TYPED_IN_ROVARA.has(span.kind)) { blocked.add("typed_in_rovara"); continue; }
     if (span.kind === "intent") {
       const placed = placeOfSpan(span);

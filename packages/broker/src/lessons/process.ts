@@ -10,6 +10,7 @@ import { mentionsRepoPlace } from "./project-repo-audience.js";
 import { attributableSources, clearSourcePause, coldSourcesOf, isHeldBySource, projectBrakeOn } from "./sources.js";
 import { lessonValue } from "./value.js";
 import { isCorroborated } from "./value.js";
+import { citesSlackReply, isWeakSlackOnly } from "./weak-source.js";
 import { isMeaningfulAnchor } from "@agentx/contracts";
 import type { LessonDraft } from "./reflect.js";
 import { nextVersion, type ScopeKey } from "./store.js";
@@ -40,6 +41,9 @@ const VERIFY_TIMEOUT_MS = 3000;
  * corroborated tier-0 fact (a measured outcome behind it). A single-source fact waits as a candidate until something backs it up. Nothing is dropped.
  */
 export function earnedAttention(lesson: Lesson, tier: Lesson["tier"], reasons: readonly string[] = []): boolean {
+  // A lesson that rests only on a reply in a chat thread is a weak source: it is in front of people after a SECOND sighting (a second task) and for no other reason (the owner's decision names no measured-result exception) (not a contradiction, a duplicate
+  // or a capability request either: it stays a candidate, kept and not shown, until it is seen twice).
+  if (isWeakSlackOnly(lesson.provenance)) return new Set(lesson.provenance.supportTasks).size >= 2;
   if (lesson.contradictsWith !== undefined) return true;
   // A possible duplicate is in front of people at once: they decide whether it merges, stays beside the other lesson or is rejected.
   if (lesson.possibleDuplicateOf !== undefined) return true;
@@ -172,7 +176,7 @@ export async function settleLesson(deps: ProcessDeps, key: ScopeKey, lessonId: s
     }
 
     // Auto-apply: tier 0, corroborated, not held, not a refinement of an existing lesson, and the policy and mode allow it.
-    if (next.status === "pending" && next.tier === 0 && next.supersedes === undefined && isCorroborated(next.provenance) && !held && next.possibleDuplicateOf === undefined
+    if (next.status === "pending" && next.tier === 0 && next.supersedes === undefined && isCorroborated(next.provenance) && !citesSlackReply(next.provenance) && !held && next.possibleDuplicateOf === undefined
       && options.noAutoApply !== true && next.reviewRequired !== true && approversRequired(0, resolved.approval) === 0 && modeAllows(resolved.mode, "auto_apply")) {
       // The policy is read AGAIN at the moment of go-live: a setting tightened while this settle ran wins.
       const now = await resolveLearning(deps.settings, key.workspaceId, key.project);
