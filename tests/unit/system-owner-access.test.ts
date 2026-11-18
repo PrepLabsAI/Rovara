@@ -33,11 +33,12 @@ async function putTask(w: World, taskId: string, fields: Record<string, unknown>
 const systemTask = (company: OrgId, project: string, purpose: string) => ({ companyId: company, developerId: systemOwnerIdOf(company, project), project, purpose });
 
 describe("the closed table", () => {
-  it("names three purposes, and this phase accepts only the free one", () => {
+  it("names three purposes; the free one and the wiki refresh are live, the repair draft stays named and refused", () => {
     expect(Object.keys(SYSTEM_TASK_PURPOSES).sort()).toEqual(["nightly_run", "setup_agent", "wiki_build"]);
-    expect([...SYSTEM_RUN_KINDS_LIVE]).toEqual(["setup_check", "nightly_check"]);
+    expect([...SYSTEM_RUN_KINDS_LIVE]).toEqual(["setup_check", "nightly_check", "wiki_refresh"]);
     expect(liveSystemKindOf("nightly_run")).toBe("nightly_check");
-    for (const purpose of ["setup_agent", "wiki_build", "task", "", "__proto__", "constructor", "toString", 5, null, undefined, {}]) expect(liveSystemKindOf(purpose), JSON.stringify(purpose) ?? "undefined").toBeUndefined();
+    expect(liveSystemKindOf("wiki_build")).toBe("wiki_refresh");
+    for (const purpose of ["setup_agent", "task", "", "__proto__", "constructor", "toString", 5, null, undefined, {}]) expect(liveSystemKindOf(purpose), JSON.stringify(purpose) ?? "undefined").toBeUndefined();
   });
 });
 
@@ -47,7 +48,7 @@ describe("a system owner's start", () => {
     expect(await w.access.checkStart(principalOf(A, "payments"), "payments", "nightly_run")).toEqual({ allowed: true });
   });
 
-  it.each([["setup_agent"], ["wiki_build"], ["task"], [undefined], ["__proto__"], ["nightly_run "]])("is refused for the purpose %j (an AI purpose waits for P2, and an ordinary task is never a system owner's)", async (purpose) => {
+  it.each([["setup_agent"], ["task"], [undefined], ["__proto__"], ["nightly_run "]])("is refused for the purpose %j (the repair draft waits, and an ordinary task is never a system owner's)", async (purpose) => {
     const verdict = await world().access.checkStart(principalOf(A, "payments"), "payments", purpose);
     expect(verdict).toEqual({ allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED });
   });
@@ -134,7 +135,7 @@ describe("a system owner's step", () => {
     expect((await w.access.checkStep({ taskId: "t1", developerId: systemOwnerIdOf(A, "payments"), project: "payments" })).allowed).toBe(true);
   });
 
-  it.each([["setup_agent"], ["wiki_build"], [undefined], ["task"]])("stops for the purpose %j (an AI purpose waits for P2)", async (purpose) => {
+  it.each([["setup_agent"], [undefined], ["task"]])("stops for the purpose %j (the repair draft waits)", async (purpose) => {
     const w = world();
     const base: Record<string, unknown> = { ...systemTask(A, "payments", "x") };
     delete base["purpose"];
@@ -192,5 +193,70 @@ describe("a system owner's step", () => {
     // The member rules decide: live member with the grant.
     expect(await w.access.checkStep({ taskId: "t1", developerId: MEMBER, project: "payments" })).toEqual({ allowed: true });
     expect(await w.access.checkStep({ taskId: "t1", developerId: OUTSIDER, project: "payments" })).toEqual({ allowed: false, message: NOT_A_MEMBER_HERE });
+  });
+});
+
+describe("the wiki refresh (L4-P2): a system owner's wiki_build task needs marks only the wiki-refresh starter writes", () => {
+  const owner = (project = "payments") => systemOwnerIdOf(A, project);
+  const worldWithMark = (mark?: { taskId: string; unattended: boolean; requestedBy: string }) => {
+    const store = new MemoryDocumentStore();
+    const access = hostedTaskAccess({
+      companyId: A, storage: async () => store, systemRunsOn: () => true, membershipOf: async () => undefined, projectGrant: async () => false,
+    });
+    return { store, access, mark };
+  };
+  const pointer = async (store: MemoryDocumentStore, fields: Record<string, unknown>) => {
+    await store.put({ item: { pk: `ORG#${A}#WIKI_BUILD#payments`, sk: "RUN", entityType: "WIKI_BUILD_RUN", orgId: A, project: "payments", taskId: "t1", requestId: "r", requestedBy: owner(), startedAt: "2026-11-17T08:00:00.000Z", limits: {}, pins: [{ repo: "app", commit: "a".repeat(40) }], plan: [], doneIds: [], ...fields } });
+  };
+
+  // MUTANT origin check: the start is accepted for a wiki_build purpose without the `nightly` origin (a person's build path).
+  it("a start needs the work origin `nightly` (only the wiki-refresh starter sets it); the purpose alone is refused", async () => {
+    const w = worldWithMark();
+    const principal = principalOf(A, "payments");
+    expect(await w.access.checkStart(principal, "payments", "wiki_build", "nightly")).toEqual({ allowed: true });
+    for (const origin of [undefined, "app", "event", "schedule", "chain", "automatic", "NIGHTLY", "nightly "]) {
+      expect(await w.access.checkStart(principal, "payments", "wiki_build", origin), String(origin)).toEqual({ allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED });
+    }
+    // The origin never opens another purpose: the repair draft and an ordinary task stay refused with it.
+    expect((await w.access.checkStart(principal, "payments", "setup_agent", "nightly")).allowed).toBe(false);
+    expect((await w.access.checkStart(principal, "payments", undefined, "nightly")).allowed).toBe(false);
+  });
+
+  // MUTANT mark check: a step of a wiki_build task is accepted on the purpose alone.
+  it("a step goes on only while the project's build pointer names THIS task as the unattended run of this project's system owner", async () => {
+    const w = worldWithMark();
+    await putTask({ ...w, flag: { on: true }, membershipCalls: [] }, "t1", systemTask(A, "payments", "wiki_build"));
+    const step = { taskId: "t1", developerId: owner(), project: "payments" };
+    // No pointer at all: stop.
+    expect(await w.access.checkStep(step)).toEqual({ allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED });
+    // A person's build (not unattended): stop.
+    await pointer(w.store, { unattended: false, requestedBy: MEMBER });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    // Unattended but run for someone other than the project's system owner, or for another task: stop.
+    await pointer(w.store, { unattended: true, requestedBy: MEMBER });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await pointer(w.store, { unattended: true, requestedBy: owner("billing") });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await pointer(w.store, { unattended: true, taskId: "other-task" });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await pointer(w.store, { unattended: "true" });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    // The mark: allowed. And only while the flag is on.
+    await pointer(w.store, { unattended: true });
+    expect(await w.access.checkStep(step)).toEqual({ allowed: true });
+  });
+
+  it("the pointer is read in this company and project only: another company's or project's pointer is no mark", async () => {
+    const w = worldWithMark();
+    await putTask({ ...w, flag: { on: true }, membershipCalls: [] }, "t1", systemTask(A, "payments", "wiki_build"));
+    await w.store.put({ item: { pk: `ORG#${B}#WIKI_BUILD#payments`, sk: "RUN", entityType: "WIKI_BUILD_RUN", orgId: B, project: "payments", taskId: "t1", requestedBy: owner(), unattended: true } });
+    await w.store.put({ item: { pk: `ORG#${A}#WIKI_BUILD#billing`, sk: "RUN", entityType: "WIKI_BUILD_RUN", orgId: A, project: "billing", taskId: "t1", requestedBy: owner(), unattended: true } });
+    expect((await w.access.checkStep({ taskId: "t1", developerId: owner(), project: "payments" })).allowed).toBe(false);
+  });
+
+  it("the free kinds never read a pointer (the nightly run needs no mark)", async () => {
+    const w = worldWithMark();
+    await putTask({ ...w, flag: { on: true }, membershipCalls: [] }, "t1", systemTask(A, "payments", "nightly_run"));
+    expect((await w.access.checkStep({ taskId: "t1", developerId: owner(), project: "payments" })).allowed).toBe(true);
   });
 });

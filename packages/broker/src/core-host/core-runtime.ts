@@ -44,6 +44,8 @@ export interface CoreRuntime {
 /** What the services builder is handed besides the flow: the validated CI mode reader, so merge tracking reads the same mode the task readers do. Undefined when not wired. */
 export interface CoreServiceWiring {
   ciMode?: CheckedCiReporting["ciMode"] | undefined;
+  /** L4-P2: the notice service's live "does this person still administer the project" read for the admins' upkeep notice (`createUpkeepAdministers`). Absent: no upkeep row is delivered. */
+  upkeep?: { administers(orgId: OrgId, developerId: string, project: string): Promise<boolean> } | undefined;
 }
 
 export interface CoreRuntimeOptions {

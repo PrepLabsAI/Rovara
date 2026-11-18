@@ -61,6 +61,21 @@ export function upkeepAvailableFor(flag: CoreSwitch): (companyId: string) => boo
   return (companyId) => switchCovers(flag, companyId);
 }
 
+/**
+ * The standing of an UNATTENDED wiki refresh at each page (`WikiBuildCallbackDeps.upkeepOn`): the company's system runs are effective now (ceiling AND consent) AND the project's own upkeep switch is ON now. It has
+ * no person's standing: withdrawing the consent, switching the project off or taking the ceiling away ends the run at its next page (`access_lost`). Never throws: anything unreadable is "no".
+ */
+export function hostedUpkeepOn(inputs: { gate: { enabled(): boolean | Promise<boolean> }; store: Pick<DocumentStore, "get">; companyId: OrgId }): (project: string) => Promise<boolean> {
+  return async (project) => {
+    try {
+      if ((await inputs.gate.enabled()) !== true) return false;
+      return await upkeepIsOn({ store: inputs.store as DocumentStore, companyId: inputs.companyId }, project);
+    } catch {
+      return false;
+    }
+  };
+}
+
 export interface HostedSystemRunsOptions {
   flow: TaskFlow;
   companyId: OrgId;
@@ -68,6 +83,14 @@ export interface HostedSystemRunsOptions {
   flag: CoreSwitch;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
+  /**
+   * L4-P2: the AI step of the night (the wiki refresh, `createHostedWikiRefresh`) and whether a dollar cap is really enforced on this install (the registered Admission declares it). Absent (or no enforced cap): the
+   * night starts no AI and says `no_cost_cap`, as in P1.
+   */
+  refresh?: UpkeepNightDeps["refresh"] | undefined;
+  enforcesDollars?: boolean | undefined;
+  /** The admins' notice of a pause before a start (`upkeepPauseHooks(...).paused`). Absent: nobody is told. */
+  paused?: UpkeepNightDeps["paused"] | undefined;
 }
 
 export interface HostedSystemRuns {
@@ -91,8 +114,8 @@ export function createHostedSystemRuns(options: HostedSystemRunsOptions): Hosted
     const day = new Date(now()).toISOString().slice(0, 10);
     const nightDeps: UpkeepNightDeps = {
       store, companyId, now,
-      // No dollar cap is enforced for system runs in this phase: the wiki refresh (AI) is not started, and the night says so (`no_cost_cap`).
-      enforces: { dollars: false },
+      // AI starts only where a dollar cap is really enforced AND the refresh starter is wired; otherwise the night says `no_cost_cap` and starts none (the unattended door refuses again without a cap).
+      enforces: { dollars: options.enforcesDollars === true && options.refresh !== undefined },
       // The default branch's head of each repository, as the code host says now. A host that cannot answer is thrown, and the night then counts it as "something changed" (an unreadable head is never "nothing new").
       heads: async (name) => {
         const latest = await deps.projects.latest(name);
@@ -107,8 +130,8 @@ export function createHostedSystemRuns(options: HostedSystemRunsOptions): Hosted
         // A refusal is a night that could not start its check (reported failed); a busy or capped night is not a fault.
         if (answer.outcome === "refused") throw new Error(`system_run_${answer.reason}`);
       },
-      refresh: async () => ({ outcome: "no_cost_cap" }),
-      paused: async () => undefined,
+      refresh: options.refresh ?? (async () => ({ outcome: "no_cost_cap" as const })),
+      paused: options.paused ?? (async () => undefined),
       log,
     };
     return runUpkeepNight(nightDeps, { project });

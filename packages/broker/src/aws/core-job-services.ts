@@ -82,7 +82,7 @@ export interface BrokerCoreServicesOptions {
   people?: MergePeople;
   settings?: CodeSettingsReader;
   summary?: Pick<SummaryDependencies, "facts" | "cost">;
-  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread">;
+  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "upkeep">;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }

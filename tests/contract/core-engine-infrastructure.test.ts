@@ -463,8 +463,8 @@ describe("L1a broker environment derivation", () => {
       CoreSystemRuns: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
       CorePolicyHook: { Default: "", AllowedPattern: "^[ -~]*$", MaxLength: POLICY_HOOK_PARAMETER_MAX_LENGTH },
     });
-    // L4-P1: the system-runs flag is the broker's alone (the dispatcher refuses every access question, so it never reads it).
-    for (const [logicalPrefix, holdsSystemRuns] of [["Broker", true], ["Dispatcher", false]] as const) {
+    // L4-P2: the system-runs flag (the operator's ceiling) is given to BOTH functions: the dispatcher's setup gate before a build can retry a re-check, and that retry must stop when the flag goes off. An environment value only; no IAM.
+    for (const [logicalPrefix, holdsSystemRuns] of [["Broker", true], ["Dispatcher", true]] as const) {
       const fn = Object.entries(inApp.Resources).find(([id, resource]) => id.startsWith(logicalPrefix) && resource.Type === "AWS::Lambda::Function")![1];
       const variables = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
       expect(JSON.stringify(variables).includes("CoreSystemRuns"), logicalPrefix).toBe(holdsSystemRuns);

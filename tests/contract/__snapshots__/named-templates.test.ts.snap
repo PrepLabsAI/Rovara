@@ -7241,7 +7241,11 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Fn::Join": [
                 "",
                 [
-                  "td=",
+                  "sy=",
+                  {
+                    "Ref": "CoreSystemRuns",
+                  },
+                  ",td=",
                   {
                     "Ref": "TestServices",
                   },
