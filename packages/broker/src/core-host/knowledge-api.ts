@@ -75,7 +75,7 @@ export interface KnowledgeApiOptions {
    * Authenticates a request that carries a script token: throws the token refusals (fixed words), or answers who it is. Absent: a script token is refused (script tokens are not served on this install).
    */
   authenticateToken?: ((request: KnowledgeRequest) => Promise<KnowledgeTokenCaller>) | undefined;
-  /** The people to tell, once a day, that one person's tools were served an unusual amount (the company's owners now, as the ids notices are addressed by). Absent or a throw: the audit record alone says it. */
+  /** The people to tell, once a day, that one person's tools were served an unusual amount (the company's owners and admins now, as the ids notices are addressed by). Absent or a throw: the audit record alone says it. */
   adminsOf?: ((companyId: OrgId) => Promise<readonly string[]>) | undefined;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
@@ -148,7 +148,7 @@ export function createKnowledgeApi(options: KnowledgeApiOptions): KnowledgeApi {
     const { limits, counter } = knowledgeReadStores(runtime.documents, options.now);
     const made = createKnowledgeServer({
       companyId, store: runtime.documents, now: options.now, runtime, limits, counter,
-      // The display names a unit that leaves Rovara must not hold: the person asking, the people of the units asked about, the project's approvers (its maintainers and the company's owners), and the whole roster where the port
+      // The display names a unit that leaves Rovara must not hold: the person asking, the people of the units asked about, the project's approvers (its maintainers and the company's owners and admins), and the whole roster where the port
       // lists it. A list that cannot be completed, a name that cannot be read, or too many people throws (nothing is returned).
       names: async (developerId: string, key: ScopeKey, found: readonly Lesson[]) => {
         const ids = new Set<string>([developerId]);
