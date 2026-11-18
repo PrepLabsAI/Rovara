@@ -338,16 +338,16 @@ describe("untrusted text", () => {
     const { h, dispatcher } = await setup({ file: FILE, company: [RULES] });
     const { workspace } = await startedAndPrepared(h, dispatcher);
     const good = workspace.standingPin as unknown as PinnedStanding;
-    const refuse = async (pinned: unknown) => expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: pinned as never })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(PINNED_STANDING_UNREADABLE) as string });
+    const refuse = async (pinned: unknown) => expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(PINNED_STANDING_UNREADABLE) as string });
     await refuse({ ...good, extra: "x" });
     await refuse({ company: "not a snapshot" });
     await refuse({ playbook: { commit: "not-a-sha", file: good.playbook!.file } });
     await refuse({ playbook: { commit: good.playbook!.commit, file: { version: 1, rules: "x".repeat(4_001) } } });
     await refuse({ playbook: { commit: good.playbook!.commit, file: { version: 2 } } });
-    await expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { company: { version: "1", rules: Array.from({ length: 31 }, () => ({ text: "r", priority: "required" })) } } as never })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    await expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { company: { version: "1", rules: [{ text: "y".repeat(601), priority: "required" }] } } as never })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { company: { version: "1", rules: Array.from({ length: 31 }, () => ({ text: "r", priority: "required" })) } } })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { company: { version: "1", rules: [{ text: "y".repeat(601), priority: "required" }] } } })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     // Hidden characters in a stored file are removed again at the dispatcher.
-    const hidden = (await dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { playbook: { commit: good.playbook!.commit, file: { version: 1, rules: "A‮B​C" } } } as never }))!;
+    const hidden = (await dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { playbook: { commit: good.playbook!.commit, file: { version: 1, rules: "A‮B​C" } } } }))!;
     expect(hidden.text).toContain("> ABC");
   });
 
