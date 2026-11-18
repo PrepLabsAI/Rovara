@@ -18,7 +18,8 @@ import {
 } from "../../../packages/broker/src/lessons/skills.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import { COMPANY, createHarness, definition, type Harness } from "../../support/task-flow-harness.js";
-import { draft, lessonRecord } from "../lessons/lesson-helpers.js";
+import { draft, lessonRecord, wideAudience } from "../lessons/lesson-helpers.js";
+import { withLessonAudiences } from "../../../packages/broker/src/lessons/task-audience.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));
 
@@ -157,6 +158,17 @@ describe("the draft is made by code from the lesson's own words", () => {
     expect(await draftSkillFromLesson(w.deps, KEY, { lessonId: lesson.id, by: "ann" })).toMatchObject({ ok: true });
     expect(await draftSkillFromLesson(w.deps, KEY, { lessonId: lesson.id, by: "bob" })).toEqual({ ok: false, code: "already_a_skill" });
     expect(await listSkills(w.deps, KEY)).toHaveLength(1);
+  });
+
+  it("a procedure learned from a task a person on the project may not open is not made a project's skill", async () => {
+    const w = await world();
+    const lesson = procedure(w, { provenance: { ...draft().provenance, authors: ["ann", "bob"], supportTasks: ["task-hidden"], measured: false, audience: { kind: "project" } } });
+    await put(w, lesson);
+    await used(w, lesson.id, 10);
+    const hidden = withLessonAudiences({ read: async (_org, ids) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org, ids) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied: new Set(["bob"]) })])) });
+    const deps: SkillDeps = { ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: hidden } };
+    expect(await draftSkillFromLesson(deps, KEY, { lessonId: lesson.id, by: "ann" })).toEqual({ ok: false, code: "not_project_wide" });
+    expect(await listSkills(w.deps, KEY)).toHaveLength(0);
   });
 
   it("a name that is taken by another skill gets a short suffix from the lesson's id; a chosen name that is taken is refused", async () => {
