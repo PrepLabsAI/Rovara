@@ -23,6 +23,8 @@ export interface SecondReviewStartInput {
 }
 
 export interface SecondReviewStart {
+  /** Hosted connectivity refusal, written to the operation timeline with its dispatch. */
+  firstEvent?: string;
   /** The field for the worker payload (absent when nothing is to be run). */
   field?: SecondReviewerPayload;
   /** What to record on the operation (absent only when there is nothing to say: feature off, mode off, not a code review). */

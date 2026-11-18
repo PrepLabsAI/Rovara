@@ -7,6 +7,7 @@
 // says what Cloud's side must answer).
 import { z } from "zod";
 import { ModelSelectionStateSchema } from "./app-model-selection.js";
+import { OrgIdSchema } from "./company-scope.js";
 import type { ModelIdentifier } from "./models-node.js";
 
 /** A model name as the gateway serves it: a Claude engine name or a Bedrock id. No path, space, quote or control character. */
@@ -21,8 +22,15 @@ export type OfferedAgentModel = z.infer<typeof OfferedAgentModelSchema>;
 export const OfferedAgentModelsSchema = z.object({
   version: z.literal(1),
   models: z.array(OfferedAgentModelSchema).min(1).max(OFFERED_AGENT_MODELS_MAX),
+  /** Gateway attestation from this company's connected providers and existing company budget. Absent: no hosted reviewer authority. */
+  reviewerAccess: z.object({
+    companyId: OrgIdSchema,
+    companyLimitUsd: z.number().finite().min(0).max(1_000_000),
+    models: z.array(z.object({ model: z.string().regex(AGENT_MODEL_NAME), provider: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u) }).strict()).max(OFFERED_AGENT_MODELS_MAX),
+  }).strict().optional(),
 }).strict().superRefine((list, context) => {
   if (new Set(list.models.map((entry) => entry.model)).size !== list.models.length) context.addIssue({ code: "custom", path: ["models"], message: "a model is listed once" });
+  if (list.reviewerAccess !== undefined && (new Set(list.reviewerAccess.models.map((entry) => entry.model)).size !== list.reviewerAccess.models.length || list.reviewerAccess.models.some((entry) => !list.models.some((offered) => offered.model === entry.model)))) context.addIssue({ code: "custom", path: ["reviewerAccess"], message: "connected models must be distinct offered models" });
 });
 export type OfferedAgentModels = z.infer<typeof OfferedAgentModelsSchema>;
 
