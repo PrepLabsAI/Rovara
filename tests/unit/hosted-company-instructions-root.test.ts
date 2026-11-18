@@ -28,7 +28,7 @@ const signer: TokenSigner = {
 };
 const PROJECT = { name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.", repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }] };
 const GATEWAY_ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: "claude-sonnet-5-5" };
-const cidOf = (init: RequestInit | undefined): string => JSON.parse(Buffer.from(String((init?.headers as Record<string, string>)["authorization"]).split(".")[1]!, "base64url").toString()).cid as string;
+const cidOf = (init: RequestInit | undefined): string => (JSON.parse(Buffer.from(String((init?.headers as Record<string, string>)["authorization"]).split(".")[1]!, "base64url").toString()) as { cid: string }).cid;
 
 /** Cloud's answers by company: A has two approved rules, B one, C none. The gateway answers for the token's company only. */
 const stored: Record<string, { version: string; rules: { text: string; priority: "required" | "preferred" }[] }> = {
