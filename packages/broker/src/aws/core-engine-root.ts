@@ -161,6 +161,11 @@ export interface BrokerCoreRootInputs {
    */
   lessonsLearning?: (companyId: OrgId) => CoreLessonsOptions["learning"];
   /**
+   * The lessons' Slack source for one company (`hostedLessonsSlack`, aws/hosted-slack-thread.ts, L4-HW8): which company a Slack workspace is (the reader never takes "every tenant is yours" on an install of many
+   * companies) and the one signed `thread_messages` command to the deployment's Slack adapter. Absent: no Slack source, as before.
+   */
+  lessonsSlack?: (companyId: OrgId) => { companyOf: NonNullable<CoreLessonsOptions["channelCompanyOf"]>; command: NonNullable<CoreLessonsOptions["slackThreadCommand"]> };
+  /**
    * Optional explicit CI reader. Otherwise the root adapts policySource (D1 today when no source was supplied).
    * The runtime validates this reader and passes the same checked function to merge tracking.
    */
@@ -689,6 +694,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           lessons = createCoreLessons({
             flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
             ...((learning) => (learning === undefined ? {} : { learning }))(learningOf(companyId)),
+            ...((slack) => (slack === undefined ? {} : { channelCompanyOf: slack.companyOf, slackThreadCommand: slack.command }))(inputs.lessonsSlack?.(companyId)),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;
               try { await app.runtimeFor(other); } catch { return undefined; }
