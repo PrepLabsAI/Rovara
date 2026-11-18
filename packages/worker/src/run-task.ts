@@ -52,6 +52,7 @@ import { pinnedSkills, withStepTimeout, type AgentSkillFile } from "./agent-step
 import { loadedKnowledgePayload } from "./knowledge/manifest.js";
 import { LEARNED_LOAD_REPORT_FIELD, type NightlyResultCallbackBody, type SecondReviewContext, type SecondReviewResult } from "@agentx/contracts";
 import { prepareLearnedContext, withLearnedBlock } from "./learned-run.js";
+import { KNOWLEDGE_USE_REPORT_FIELD, createKnowledgeStep } from "./knowledge-run.js";
 import { WIKI_READ_REPORT_FIELD, prepareWikiForStep } from "./wiki-agent.js";
 import { placeEvalFiles } from "./eval-files.js";
 import { runAgentStep, type AgentStepResult, type RunAgentStepInput } from "./agent-run/run-agent-step.js";
@@ -1006,6 +1007,12 @@ async function runTask(
       });
     },
   };
+  // Lead 4 L4-AK2: this step's knowledge record and look-up tools, built before the model session opens (its tool list is fixed then). The lessons that survive the base-commit check arm it later.
+  // Each change to the use report is told to the broker (ids only); a failure to send one loses only a counter.
+  const knowledgeStep = createKnowledgeStep({
+    raw: invocation.payload.knowledgeContext, mode: payloadMode, rootPath: canonicalRoot, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase),
+    onReport: (report) => { void emit("progress", { [KNOWLEDGE_USE_REPORT_FIELD]: report }).catch(() => undefined); },
+  });
   let session: PiSessionHandle;
   if (registered) {
     session = await openRegisteredWorkspacePiSession(
@@ -1024,6 +1031,7 @@ async function runTask(
         ...stepSession,
         ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
         ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
+        ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
         compaction,
       },
       dependencies.piAdapter,
@@ -1040,6 +1048,7 @@ async function runTask(
         ...stepSession,
         ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
         ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
+        ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
         compaction,
       },
       dependencies.piAdapter,
@@ -1195,6 +1204,7 @@ async function runTask(
   const unsubscribe = session.subscribe((event) => {
     monitor.observe(event);
     noteWikiRead(event);
+    knowledgeStep?.observe(event);
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(stubContextEvent(event)));
     fileChanges.observe(event);
     activeFindings.observe(event);
@@ -1244,7 +1254,10 @@ async function runTask(
     if (wiki !== undefined) await emit("progress", { [WIKI_READ_REPORT_FIELD]: wiki.report }).catch(() => undefined);
     // Stop & redirect (steer-invocation.ts): the owner's instruction that stopped the previous run is taken from the owner and framed after the broker's prompt (coding only; absent for every other step).
     // The wiki's index is an untrusted-data block in the task prompt, beside the lessons' (never in the system prompt's project-instructions slot); reviewers read the same block.
-    const memorySection = [learned.section, wiki?.block ?? ""].filter((part) => part !== "").join("\n\n");
+    // Lead 4 L4-AK2: with a knowledge briefing the lessons sit inside its one frame; without one the plain lessons block stands, byte for byte as before. The report of what was given goes first.
+    const knowledgeBlock = knowledgeStep === undefined ? "" : knowledgeStep.arm(learned.context);
+    if (knowledgeStep !== undefined) await emit("progress", { [KNOWLEDGE_USE_REPORT_FIELD]: knowledgeStep.useReport() }).catch(() => undefined);
+    const memorySection = [knowledgeBlock === "" ? learned.section : knowledgeBlock, wiki?.block ?? ""].filter((part) => part !== "").join("\n\n");
     const taskPrompt = withLearnedBlock(ownerRedirectPrompt(invocation.payload.prompt, invocation.payload.ownerRedirect, payloadMode === "IMPLEMENT" ? "IMPLEMENT" : undefined, dependencies.cancellationController, invocation.operationId), memorySection)
       + (answerSpec === undefined ? "" : `\n\n${answerToolInstruction(answerSpec.name)}`);
     let outcome: TaskUsageOutcome = "FAILED";
@@ -1939,6 +1952,8 @@ async function runTask(
       if (noChange !== undefined && !completedRetainedPrefix) throw noChange;
       const warning = fileChanges.emptyDiffWarning(changed);
       if (warning !== undefined) await emit("progress", { message: warning });
+      // The use report as the step ends: which files it changed now overlap which units' areas (the broker keeps the last one per operation).
+      if (knowledgeStep !== undefined) await emit("progress", { [KNOWLEDGE_USE_REPORT_FIELD]: knowledgeStep.useReport() }).catch(() => undefined);
       outcome = "SUCCEEDED";
       const checks = compactCheckReport(finalChecks());
       const workflowRepositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);

@@ -2,13 +2,15 @@
 // checks that they are joined to what `rovara up` has, with the install's one owner, the document store and the queue point.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LEARNED_CONTEXT_FEATURE, change, companyScoped, type ApprovalProof, type Approvers, type CommitIdentity, type ExternalAccountRef, type IdentityProvider } from "@agentx/contracts";
+import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, change, companyScoped, type ApprovalProof, type Approvers, type CommitIdentity, type ExternalAccountRef, type IdentityProvider } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createMemoryModelKeyStore } from "../../packages/broker/src/ports/model-key-stores.js";
 import { builtinModelProviderBook } from "../../packages/broker/src/local/model-proxy/index.js";
 import { LESSON_LOAD_DEADLINE_MS, createLocalLessons, type LocalLessons } from "../../packages/broker/src/local/app/lessons.js";
 import { resolveLearning, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
+import { readKnowledgeDelivery, readKnowledgeUseReport } from "../../packages/broker/src/lessons/knowledge-use.js";
+import type { KnowledgeSources } from "../../packages/broker/src/lessons/knowledge-brief.js";
 import { localLessonsEnabled } from "../../packages/broker/src/lessons/switch.js";
 import { newRepoFileState } from "../../packages/broker/src/lessons/repo-file-state.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -64,7 +66,7 @@ function identityWithAnn(): IdentityProvider {
   };
 }
 
-async function world(options: { identity?: IdentityProvider; defaultSwitch?: boolean; codeHost?: boolean; codeHostObject?: unknown; host?: object; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers } = {}): Promise<World> {
+async function world(options: { identity?: IdentityProvider; defaultSwitch?: boolean; codeHost?: boolean; codeHostObject?: unknown; host?: object; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers; knowledge?: KnowledgeSources } = {}): Promise<World> {
   const h = createHarness({ audit: "recording" });
   await h.registerProject({ ...definition, repositories: [{ ...definition.repositories[0]!, url: REPOSITORY }] });
   const owner = localOwnerPrincipal({ companyId: COMPANY });
@@ -82,7 +84,7 @@ async function world(options: { identity?: IdentityProvider; defaultSwitch?: boo
     audit: h.deps.audit, admission: h.deps.admission, metering: createPriceTableMetering({ currency: "USD", models: {} }),
     approvers: options.approvers ?? createLocalOwnerApprovers({ owner, verifySession: (token) => token === PROOF_TOKEN }), identity: options.identity ?? identityWithAnn(),
     model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: providerFetch(prompts, options.candidates ?? (() => [])) },
-    ...(options.defaultSwitch === true ? {} : { enabled: () => enabled }), now: () => h.clock.now, log: (entry) => { logs.push(JSON.stringify(entry)); },
+    ...(options.defaultSwitch === true ? {} : { enabled: () => enabled }), ...(options.knowledge === undefined ? {} : { knowledge: options.knowledge }), now: () => h.clock.now, log: (entry) => { logs.push(JSON.stringify(entry)); },
   });
   const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
   return { h, lessons, handlers, taskId: task.taskId, workspaceId: task.workspaceId, key: { workspaceId: COMPANY, project: "payments" }, prompts, logs, setEnabled: (value) => { enabled = value; } };
@@ -873,5 +875,123 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
     await off.w.lessons.noteHumanEdit(off.push);
     await off.w.lessons.tick();
     expect(off.w.prompts).toEqual([]);
+  });
+});
+
+describe("the knowledge briefing and look-up (lead 4 L4-AK2)", () => {
+  const BOTH = [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE];
+  const scoped = (id: string, over: Parameters<typeof lessonRecord>[0] = {}) => active({ id, scope: { repos: ["demo"], paths: ["src/health/**"] }, stages: ["UNDERSTAND", "PLAN", "IMPLEMENT"], type: "convention", title: "A health endpoint returns 200", description: "", body: "Add a health endpoint that returns 200 and nothing else.", ...over });
+  const flaky = { facts: async () => [{ id: "flaky00001", statement: "Known flaky on the base: tests/a.test.ts.", paths: [] }] };
+
+  it("gives a worker that lists the feature the look-up and the more line, and records ids only for the report check", async () => {
+    const w = await world();
+    await put(w, scoped("les_health001"), scoped("les_health002", { scope: { repos: ["demo"], paths: ["src/queue/**"] }, title: "Prefer tabs in Go files", body: "Use tabs when editing Go source." }));
+    const loaded = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-know", workflowMode: "PLAN", features: BOTH });
+    expect(loaded.learnedContext?.lessons.length).toBeGreaterThan(0);
+    expect(loaded.knowledgeContext?.pull?.units.map((u) => u.id).sort()).toEqual(["les_health001", "les_health002"]);
+    // The queue lesson does not fit this task, so it is not pushed: it is "more", in its own area.
+    expect(loaded.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_health001"]);
+    expect(loaded.knowledgeContext?.more?.areas).toEqual([{ label: "src/queue/", units: 1 }]);
+    const record = await readKnowledgeDelivery(w.h.store, COMPANY, "op-know");
+    expect(record).toMatchObject({ stage: "PLAN", project: "payments", taskId: w.taskId });
+    expect(record?.pulled).toEqual(expect.arrayContaining(["L-les_health001", "L-les_health002"]));
+    expect(JSON.stringify(record)).not.toContain("retry");
+  });
+
+  it("an older worker (no knowledge feature) is sent the lessons exactly as before and no knowledge context, and no record is made", async () => {
+    const w = await world();
+    await put(w, scoped("les_health001"));
+    const loaded = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-old", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
+    expect(loaded.knowledgeContext).toBeUndefined();
+    expect(loaded.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_health001"]);
+    expect(await readKnowledgeDelivery(w.h.store, COMPANY, "op-old")).toBeUndefined();
+    expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-none", workflowMode: "PLAN", features: [KNOWLEDGE_CONTEXT_FEATURE] })).toEqual({});
+  });
+
+  it("the plan check's lessons are part of the briefing: an older worker is sent exactly what it always was", async () => {
+    const w = await world();
+    await put(w, scoped("les_health001", { type: "review_check", tier: 2, stages: ["PLAN_CRITIQUE", "REVIEW"], approvals: [{ approvalId: "a1", by: "local-owner", at: 1, mode: "one" }, { approvalId: "a2", by: "ann", at: 1, mode: "second_person" }] }));
+    expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-pc-old", workflowMode: "PLAN_CRITIQUE", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
+  });
+
+  it("measured facts come from the facts port, in Build only (not in Plan)", async () => {
+    const w = await world({ knowledge: flaky });
+    await put(w, scoped("les_health001"));
+    const build = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-build", workflowMode: "IMPLEMENT", features: BOTH });
+    expect(build.knowledgeContext?.facts?.map((f) => f.id)).toEqual(["flaky00001"]);
+    const plan = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-plan2", workflowMode: "PLAN", features: BOTH });
+    expect(plan.knowledgeContext?.facts).toBeUndefined();
+  });
+
+  it("a facts port that is slow or fails never holds up or removes the lessons", async () => {
+    const hang = await world({ knowledge: { facts: () => new Promise(() => undefined) } });
+    await put(hang, scoped("les_health001"));
+    const slow = await hang.lessons.learnedFor({ workspaceId: hang.workspaceId, operationId: "op-hang", workflowMode: "IMPLEMENT", features: BOTH });
+    expect(slow.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_health001"]);
+    expect(slow.knowledgeContext?.facts).toBeUndefined();
+    const broken = await world({ knowledge: { facts: async () => { throw new Error("down"); } } });
+    await put(broken, scoped("les_health001"));
+    expect((await broken.lessons.learnedFor({ workspaceId: broken.workspaceId, operationId: "op-brk", workflowMode: "IMPLEMENT", features: BOTH })).learnedContext?.lessons).toHaveLength(1);
+  });
+
+  it("a fix round's correction words pick the lessons again (they rank; they are never stored or shown)", async () => {
+    const w = await world();
+    await put(w, scoped("les_health001", { scope: {}, title: "Quokka handling", description: "", body: "Quokka cases need care in the quokka module.", type: "convention" }));
+    // The task is about a health endpoint: an unscoped lesson about quokkas does not pass the fit floor ...
+    const plain = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-fix0", workflowMode: "IMPLEMENT", features: BOTH });
+    expect(plain.learnedContext?.lessons.map((l) => l.id) ?? []).toEqual([]);
+    // ... but the correction of a fix round is about quokkas, so the round picks again by it.
+    const fix = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-fix1", workflowMode: "IMPLEMENT", features: BOTH, fix: { text: "CI failed: the quokka module test in src/quokka/handler.ts" } });
+    expect(fix.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_health001"]);
+    expect(JSON.stringify(fix)).not.toContain("CI failed");
+  });
+
+  describe("the worker's use report", () => {
+    const report = (ids: string[], over: Record<string, unknown> = {}) => ({ knowledgeUseReport: { v: 1, stage: "PLAN", reported: true, units: ids.map((id) => ({ id, kind: "lesson", given: "pull", areaTouched: false, used: true })), ...over } });
+    const send = (w: World, op: string, payload: unknown) => w.lessons.onEvents({ workspaceId: w.workspaceId, id: op }, [{ type: "progress", payload }]);
+
+    it("is kept for the operation it was delivered for, with ids the step was not given removed", async () => {
+      const w = await world();
+      await put(w, scoped("les_health001"));
+      await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-rep", workflowMode: "PLAN", features: BOTH });
+      await send(w, "op-rep", report(["L-les_health001", "L-les_notgiven1"]));
+      const kept = await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep");
+      expect(kept?.units.map((u) => u.id)).toEqual(["L-les_health001"]);
+      expect(kept).toMatchObject({ project: "payments", taskId: w.taskId, stage: "PLAN" });
+    });
+
+    it("a report for an operation with no delivery record, for another stage, or malformed, is dropped whole", async () => {
+      const w = await world();
+      await put(w, scoped("les_health001"));
+      await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-rep", workflowMode: "PLAN", features: BOTH });
+      await send(w, "op-never-delivered", report(["L-les_health001"]));
+      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-never-delivered")).toBeUndefined();
+      await send(w, "op-rep", report(["L-les_health001"], { stage: "IMPLEMENT" }));
+      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep")).toBeUndefined();
+      await send(w, "op-rep", report(["L-les_health001"], { extra: "field" }));
+      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep")).toBeUndefined();
+      await send(w, "op-rep", { knowledgeUseReport: "text the agent wrote" });
+      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep")).toBeUndefined();
+    });
+
+    it("the latest report of an operation replaces the one before, and another company cannot read it", async () => {
+      const w = await world();
+      await put(w, scoped("les_health001"));
+      await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-rep", workflowMode: "PLAN", features: BOTH });
+      await send(w, "op-rep", report(["L-les_health001"]));
+      await send(w, "op-rep", report(["L-les_health001"], { reported: false, units: [] }));
+      expect((await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep"))?.units).toEqual([]);
+      expect(await readKnowledgeUseReport(w.h.store, "org_bbbbbbbbbbbbbbbbbbbb", "op-rep")).toBeUndefined();
+      expect(await readKnowledgeDelivery(w.h.store, "org_bbbbbbbbbbbbbbbbbbbb", "op-rep")).toBeUndefined();
+    });
+
+    it("moves no lesson counter (the credit is its own lane)", async () => {
+      const w = await world();
+      await put(w, scoped("les_health001"));
+      await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-rep", workflowMode: "PLAN", features: BOTH });
+      const before = JSON.stringify((await w.lessons.runtime.store.get(w.key, "les_health001"))?.counters);
+      await send(w, "op-rep", report(["L-les_health001"]));
+      expect(JSON.stringify((await w.lessons.runtime.store.get(w.key, "les_health001"))?.counters)).toBe(before);
+    });
   });
 });
