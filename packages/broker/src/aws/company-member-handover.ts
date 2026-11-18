@@ -27,7 +27,7 @@ type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 type Client = { send(command: unknown): Promise<unknown> };
 
 /** Total bounds of one hand-over: rows read per list, open tasks looked at, and DynamoDB's own transaction size. */
-export const HANDOVER_LIMITS = { directoryRows: 2_000, taskRows: 5_000, openTasks: 200, transactionSteps: 100 } as const;
+export const HANDOVER_LIMITS = { directoryRows: 2_000, taskRows: 5_000, involvedRows: 1_000, openTasks: 200, transactionSteps: 100 } as const;
 /** Point reads run this many at a time. */
 const READ_BATCH = 25;
 /** Fixed words: the hand-over does not fit in one transaction, or one of its lists is past its bound. Nothing has been removed when this is said. */
@@ -190,10 +190,10 @@ async function openTasks(ctx: HandOverContext, companyId: OrgId, leaverId: strin
   for (const row of await rows(ctx, `DEVELOPER#${leaverId}`, "TASK#", HANDOVER_LIMITS.taskRows)) {
     if (row["status"] !== "CLOSED" && typeof row["taskId"] === "string" && TASK_ID.test(row["taskId"])) ids.add(row["taskId"]);
   }
-  for (const row of await rows(ctx, involvedPartition(companyId, leaverId), "TASK#", HANDOVER_LIMITS.taskRows)) {
+  // Involved rows carry no status (one can outlive its task's close): each is read live below, and only OPEN tasks count toward the open-task bound.
+  for (const row of await rows(ctx, involvedPartition(companyId, leaverId), "TASK#", HANDOVER_LIMITS.involvedRows)) {
     if (typeof row["taskId"] === "string" && TASK_ID.test(row["taskId"])) ids.add(row["taskId"]);
   }
-  if (ids.size > HANDOVER_LIMITS.openTasks) throw new HandOverTooBig();
   const tasks: DeveloperTaskRecord[] = [];
   const sorted = [...ids].sort();
   const read = await inBatches(sorted, (taskId) => get(ctx, { pk: `DEVTASK#${taskId}`, sk: "META" }));
@@ -202,6 +202,7 @@ async function openTasks(ctx: HandOverContext, companyId: OrgId, leaverId: strin
     if (task === undefined || task["taskId"] !== taskId || task["entityType"] !== "DEVELOPER_TASK" || task["closedAt"] !== undefined || task["status"] === "CLOSED" || !recordInCompany(task, companyId)) continue;
     tasks.push(task as unknown as DeveloperTaskRecord);
   }
+  if (tasks.length > HANDOVER_LIMITS.openTasks) throw new HandOverTooBig();
   return tasks;
 }
 
