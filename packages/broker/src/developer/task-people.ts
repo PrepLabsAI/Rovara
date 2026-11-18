@@ -10,6 +10,7 @@ import {
   taskPersonNameFallback, taskPersonRowKeys, type TaskPeopleEntry,
 } from "./task-person-rows.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
+import { involvedRowDelete, involvedRowPut } from "../core/task-flow/involved.js";
 
 export type TaskRole = "owner" | "commenter" | "viewer";
 export type StoredTaskRole = TaskRole | "denied";
@@ -497,6 +498,25 @@ function mutationInput(input: ChangeTaskPeopleInput): void {
   }
 }
 
+/**
+ * Web task channel (involved wiring): the person's "tasks I'm involved in" pointer, kept in the SAME transaction as the People change so the row and the list never disagree. A person who is an owner
+ * after the change (added as owner, promoted, or taking ownership) gets the row `ORG#<company>#INVOLVED#<person>` / `TASK#<createdAt>#<taskId>`; any other role (commenter, viewer, denied) deletes it. The
+ * list and the decision cards read only owners (the live owner rule), so only owners have rows. Core tasks only: the row is in the TASK'S company (`companyId` of its record; a task without one is a
+ * legacy task and has no involved list), and never for the task's own person (their own list has it). The row is a pointer and grants nothing; the reader re-checks the live task and access.
+ */
+function involvedStep(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, developerId: string, role: StoredTaskRole): TransactItem | undefined {
+  const companyId = (task as unknown as { companyId?: unknown }).companyId;
+  if (typeof companyId !== "string" || developerId === task.developerId) return undefined;
+  const row = { companyId, personId: developerId, taskId: task.taskId, createdAt: task.createdAt };
+  try {
+    if (role === "owner") return { Put: { TableName: deps.tableName, Item: involvedRowPut(row, new Date(deps.now()).toISOString()).item } };
+    return { Delete: { TableName: deps.tableName, Key: involvedRowDelete(row).key } };
+  } catch {
+    // A task whose company or creation time is not a valid id has no involved row; the list is a convenience and the People change itself stands.
+    return undefined;
+  }
+}
+
 async function commitMutation(
   deps: TaskPeopleDependencies,
   task: DeveloperTaskRecord,
@@ -516,6 +536,7 @@ async function commitMutation(
   const request = { ...requestKey(task.taskId, requestId), entityType: "TASK_PEOPLE_REQUEST", schemaVersion: 1, requestId, actorDeveloperId: caller.developerId, kind, payload, outcome, createdAt };
   const event = { ...eventKey(task.taskId, requestId), entityType: "TASK_PEOPLE_EVENT", schemaVersion: 1, requestId, actorDeveloperId: caller.developerId, targetDeveloperId, beforeRole, afterRole, createdAt };
   if (!Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string") return denied();
+  const involved = involvedStep(deps, task, targetDeveloperId, afterRole);
   const items: TransactItem[] = [
     { Update: {
       TableName: deps.tableName, Key: peopleKey(task.taskId),
@@ -534,6 +555,7 @@ async function commitMutation(
     } },
     { Put: { TableName: deps.tableName, Item: event, ConditionExpression: "attribute_not_exists(pk)" } },
     { Put: { TableName: deps.tableName, Item: request, ConditionExpression: "attribute_not_exists(pk)" } },
+    ...(involved === undefined ? [] : [involved]),
     ...(notification === undefined ? [] : [{ Put: { TableName: deps.tableName, Item: {
       pk: taskPk(task.taskId), sk: `PEOPLE_NOTIFY#${requestId}`, entityType: "TASK_PEOPLE_NOTIFICATION", schemaVersion: 1,
       taskId: task.taskId, requestId, targetDeveloperId, slackUserId: notification.slackUserId, role: notification.role,

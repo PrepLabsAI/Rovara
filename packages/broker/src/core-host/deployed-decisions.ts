@@ -34,6 +34,7 @@ import { createPlaybookService, type PlaybookService } from "../core/playbook/se
 import { createCodeHostPlaybookSource } from "../core/playbook/source.js";
 import type { SessionCompanyRole, SessionMembers, SessionPerson, SessionProjectRole } from "../core/sessions/access.js";
 import { developerIdOf } from "../core/sessions/create.js";
+import { involvedTaskIds } from "../core/task-flow/involved.js";
 import { listTasks, readTask } from "../core/task-flow/reads.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
@@ -392,7 +393,7 @@ export function deployedDevWiringParts(inputs: DeployedDevWiringInputs): Pick<Co
   const playbook = deployedPlaybook({ runtime: inputs.runtime, registry: inputs.registry, codeSettings: inputs.codeSettings });
   return {
     members: deployedSessionMembers(inputs.runtime.companyId, inputs.people),
-    ...(inputs.decisionProofs === undefined ? {} : { decisions: deployedDecisionCards({ runtime: inputs.runtime, registry: inputs.registry, people: inputs.people, proofs: inputs.decisionProofs, ...(inputs.log === undefined ? {} : { log: inputs.log }) }) }),
+    ...(inputs.decisionProofs === undefined ? {} : { decisions: deployedDecisionCards({ runtime: inputs.runtime, registry: inputs.registry, people: inputs.people, proofs: inputs.decisionProofs, involvedTaskIds: (caller) => involvedTaskIds(inputs.runtime.flow.deps, caller.principal), ...(inputs.log === undefined ? {} : { log: inputs.log }) }) }),
     ...(playbook === undefined ? {} : { playbook }),
   };
 }
