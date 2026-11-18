@@ -41,7 +41,7 @@ async function rowStore(rows: StoredDocument[], options: { runs?: Run[]; company
     await memory.put({ item: { ...workspaceKey(owner, WS), entityType: "WORKSPACE", id: WS, companyId: owner, orgId: owner } });
     for (const run of options.runs ?? HEALTHY) {
       at += 1;
-      await memory.put({ item: { ...operationKey(owner, WS, run.id), entityType: "OPERATION", id: run.id, companyId: owner, kind: run.kind ?? "task", workflowMode: run.workflowMode, status: run.status, ...(run.machineless === true ? {} : { machineId: "machine-1" }), createdAt: `2026-11-18T07:00:${String(at).padStart(2, "0")}.000Z`, fence: at, ...(run.usageUnflushed === true ? { usageUnflushed: true } : {}) } });
+      await memory.put({ item: { ...operationKey(owner, WS, run.id), entityType: "OPERATION", id: run.id, companyId: owner, kind: run.kind ?? "task", ...(run.workflowMode === undefined ? {} : { workflowMode: run.workflowMode }), status: run.status, ...(run.machineless === true ? {} : { machineId: "machine-1" }), createdAt: `2026-11-18T07:00:${String(at).padStart(2, "0")}.000Z`, fence: at, ...(run.usageUnflushed === true ? { usageUnflushed: true } : {}) } });
       if (run.booked !== "none" && run.booked !== "checkpoint") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage:${run.id}:abc`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
       if (run.booked === "checkpoint") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage-checkpoint:${run.id}:abc`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
     }
@@ -99,7 +99,7 @@ describe("the hosted task spend reader (L4-TSU)", () => {
   it("a row that names another company or another task is no figure for this one", async () => {
     for (const over of [{ companyId: B }, { taskId: OTHER_TASK }, { companyId: undefined }, { taskId: undefined }]) {
       const reasons: TaskSpendRefusal[] = [];
-      const { spend } = await world([total(A, TASK, over)], (reason) => reasons.push(reason));
+      const { spend } = await world([total(A, TASK, over)], (reason) => { reasons.push(reason); });
       await expect(spend(TASK), JSON.stringify(over)).rejects.toThrow(TASK_SPEND_UNKNOWN);
       expect(reasons).toEqual(["other_owner"]);
     }
@@ -123,14 +123,14 @@ describe("the hosted task spend reader (L4-TSU)", () => {
     ];
     for (const [label, rows, reason] of cases) {
       const seen: TaskSpendRefusal[] = [];
-      const { spend } = await world(rows, (r) => seen.push(r));
+      const { spend } = await world(rows, (r) => { seen.push(r); });
       await expect(spend(TASK), label).rejects.toThrow(TASK_SPEND_UNKNOWN);
       expect(seen, label).toEqual([reason]);
     }
     // a store that fails
     const seen: TaskSpendRefusal[] = [];
-    const broken = createCompanyTaskSpend({ store: { get: async () => { throw new Error("DynamoDB said secret-detail-xyz"); } } as never, companyId: A, refused: (r) => seen.push(r) });
-    const fault = await broken(TASK).catch((error: unknown) => error as Error);
+    const broken = createCompanyTaskSpend({ store: { get: async () => { throw new Error("DynamoDB said secret-detail-xyz"); } } as never, companyId: A, refused: (r) => { seen.push(r); } });
+    const fault = await broken(TASK).then(() => new Error("no refusal"), (error: unknown) => error as Error);
     expect(fault.message).toBe(TASK_SPEND_UNKNOWN);
     expect(seen).toEqual(["storage_unavailable"]);
     expect(JSON.stringify([fault.message, seen])).not.toContain("secret-detail");
@@ -173,7 +173,7 @@ describe("the hosted task spend reader (L4-TSU)", () => {
     const later = await world([], (() => Promise.reject(new Error("log is down"))));
     await expect(later.spend(TASK)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     const seen: string[] = [];
-    const quiet = await world([total(A, TASK, { unpricedEntries: 2 })], (reason) => seen.push(reason));
+    const quiet = await world([total(A, TASK, { unpricedEntries: 2 })], (reason) => { seen.push(reason); });
     await expect(quiet.spend(TASK)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     expect(JSON.stringify(seen)).not.toContain(TASK);
     expect(JSON.stringify(seen)).not.toContain(A);
@@ -182,7 +182,7 @@ describe("the hosted task spend reader (L4-TSU)", () => {
   describe("a run whose usage the total does not hold yet is no complete figure", () => {
     const refusedFor = async (runs: Run[], over: Parameters<typeof rowStore>[1] = {}) => {
       const seen: TaskSpendRefusal[] = [];
-      const { spend } = await world([total(A, TASK)], (r) => seen.push(r), { runs, ...over });
+      const { spend } = await world([total(A, TASK)], (r) => { seen.push(r); }, { runs, ...over });
       const answer = await spend(TASK).then((value) => value, () => "refused" as const);
       return { answer, seen };
     };
