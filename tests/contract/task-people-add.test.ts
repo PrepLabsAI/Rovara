@@ -232,6 +232,25 @@ describe("add (POST people/add) through propose -> confirm", () => {
     await expect(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, input)).resolves.toStrictEqual(first);
   });
 
+  it.each([3, 4])("refuses another owner's request ID before registration with expected People revision %s", async (revision) => {
+    const h = harness();
+    await addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "owner" });
+    await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, REQUEST);
+    h.identityDeps.uuid = () => "88888888-8888-4888-8888-888888888888";
+    const before = structuredClone(h.db.find(() => true));
+    const register = vi.spyOn(h.deps, "registerTaskWebPerson");
+
+    const error = await errorOf(addTaskWebPerson(h.deps, WREN_CALLER, TASK_A, {
+      requestId: REQUEST, expectedPeopleRevision: revision, developerId: IVY_ID, role: "viewer",
+    }));
+
+    expect(error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(error.message).toBe("IDEMPOTENCY_CONFLICT: this People request ID was already used");
+    expect(register).not.toHaveBeenCalled();
+    expect(h.db.find((item) => item.developerId === IVY_ID)).toEqual([]);
+    expect(h.db.find(() => true)).toStrictEqual(before);
+  });
+
   it.each([
     ["a member of another company (even with a grant on a same-named project)", BRYN_ID],
     ["a person with a revoked sign-in", NOOR_ID],
@@ -273,16 +292,21 @@ describe("add (POST people/add) through propose -> confirm", () => {
 
   it("refuses a stale People revision, and writes no PERSON row for it (the revision is checked before registering)", async () => {
     const h = harness();
+    const before = structuredClone(h.db.find(() => true));
+    const register = vi.spyOn(h.deps, "registerTaskWebPerson");
     expect((await errorOf(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 2, developerId: WREN_ID, role: "commenter" }))).code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(register).not.toHaveBeenCalled();
     expect(h.db.find((item) => item.developerId === WREN_ID)).toEqual([]);
+    expect(h.db.find(() => true)).toStrictEqual(before);
   });
 
   it("still answers a replay of a committed request after the People revision moved on", async () => {
     const h = harness();
     const input = { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "commenter" as const };
     await addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, input);
-    await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, REQUEST);
-    await expect(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, input)).resolves.toMatchObject({ status: "COMMITTED" });
+    const committed = await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, REQUEST);
+    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4 });
+    await expect(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, input)).resolves.toStrictEqual(committed);
   });
 
   it("takes only owner, commenter or viewer (removal stays role `denied` through people/role)", () => {
