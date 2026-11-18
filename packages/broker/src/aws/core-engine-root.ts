@@ -316,6 +316,16 @@ export function setupRunStandingFrom(people: { membershipOf: (personId: string) 
   };
 }
 
+/**
+ * L4-P1 (owner DEC 254zzl): puts the company's SystemRuns gate on its task flow. A hosted runtime ALWAYS gets one (flag off = `enabled()` false), because an ABSENT gate means ON (the laptop's rule) and every
+ * hosted company would then get Rovara's automatic re-checks. The root calls this for every company's runtime, whether or not the flag covers it; tests/unit/system-runs-hosted-gate.test.ts holds both the function and the call.
+ */
+export function hostedSystemRunsFor(deps: { systemRuns?: { enabled(): boolean } }, companyId: string, flag: Parameters<typeof systemRunsGateOf>[0]): { enabled(): boolean } {
+  const gate = systemRunsGateOf(flag, companyId);
+  deps.systemRuns = gate;
+  return gate;
+}
+
 export function hostedTaskAccess(inputs: {
   membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
   /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
@@ -592,7 +602,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           }
         }
         // L4-P1: the company's SystemRuns flag, on the flow itself (the free re-check at task start stands behind it), and the system starter and the upkeep night where the flag covers the company (nothing is built otherwise).
-        flow.deps.systemRuns = systemRunsGateOf(systemRunsFlag.value, companyId);
+        hostedSystemRunsFor(flow.deps, companyId, systemRunsFlag.value);
         const systemRuns = createHostedSystemRuns({ flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
