@@ -1,6 +1,6 @@
 // L10: a read-only learned input for ONE company's dispatcher runtime. L6 composes this
 // with hostedDispatcherFlow. The workspace record, never the job payload, vouches for scope.
-import { AgentXNameSchema, LEARNED_CONTEXT_FEATURE, OrgIdSchema, agentXError, codeRepositoriesOf, lessonSetKey, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { AgentXNameSchema, KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_PULL_MAX_UNITS, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, OrgIdSchema, agentXError, codeRepositoriesOf, lessonSetKey, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { z } from "zod";
 import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
@@ -13,7 +13,8 @@ import { documentLearningSettings } from "../../lessons/document-settings.js";
 import { documentLessonVectors } from "../../lessons/document-vectors.js";
 import { createHostedLessonParts, type HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
-import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, selectLessons } from "../../lessons/load.js";
+import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, PUSH_FIT_FLOOR, selectLessons } from "../../lessons/load.js";
+import { buildKnowledgeContext, pullable } from "../../lessons/knowledge-brief.js";
 import { readVisible } from "../../lessons/read-visible.js";
 import { modeAllows, resolveLearning, resolveLoadBudget, whyLearningOff } from "../../lessons/policy.js";
 import { workspaceCompanyReader } from "./workspace-company.js";
@@ -21,6 +22,9 @@ import { workspaceCompanyReader } from "./workspace-company.js";
 export const DISPATCHER_LESSONS_UNAVAILABLE = "the dispatcher cannot read lessons for this workspace";
 /** ONE budget for the workspace, task, project, settings, lesson heads and live audience reads. */
 export const DISPATCHER_LESSONS_LIMITS = { reads: 128, items: 512, bytes: 1_048_576, lessons: 100 } as const;
+/** The look-up's own share of the reads: it runs after the lessons, and a look-up that would pass this share is left out; it can never fail the lessons. */
+export const DISPATCHER_PULL_READS = 40;
+class PullBudgetSpent extends Error {}
 type Learned = NonNullable<TaskFlowDeps["learned"]>;
 function refuse(): never { throw agentXError("RUNTIME_UNAVAILABLE", DISPATCHER_LESSONS_UNAVAILABLE); }
 const Request = z.object({ workspaceId: z.uuid(), operationId: z.uuid(), workflowMode: z.enum(["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW", "SETUP_DRAFT", "SETUP_AGENT", "WIKI_BUILD", "SPEC_WRITE"]).optional(), features: z.array(z.string().max(100)).max(64) });
@@ -51,8 +55,12 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = Date.now() + LESSON_LOAD_DEADLINE_MS;
     const check = (): void => { if (stopped || failed || Date.now() >= deadline) refuse(); };
+    // The look-up (lead 4 L4-AK2) runs on a share of its own: past it a read throws HERE, before it is counted, so the look-up ends without failing the lessons' budget.
+    let pulling = false;
+    let pullReads = 0;
     const read = async <T>(work: () => Promise<T>, count = 1): Promise<T> => {
       check();
+      if (pulling && ++pullReads > DISPATCHER_PULL_READS) throw new PullBudgetSpent();
       reads++; items += count;
       if (reads > DISPATCHER_LESSONS_LIMITS.reads || items > DISPATCHER_LESSONS_LIMITS.items) { failed = true; refuse(); }
       try {
@@ -69,7 +77,7 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       if (!Array.isArray(input?.features) || input.features.length > 64) refuse();
       const request = Request.safeParse(input);
       if (!request.success || !OrgIdSchema.safeParse(options.companyId).success) refuse();
-      if (request.data.workflowMode === undefined || !["UNDERSTAND", "PLAN", "IMPLEMENT", "REVIEW"].includes(request.data.workflowMode) || !request.data.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
+      if (request.data.workflowMode === undefined || !["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(request.data.workflowMode) || !request.data.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
       const memo = new Map<string, Promise<StoredDocument | undefined>>();
       const client = { send: async (command: GetCommand) => {
         const answer = await read(() => options.documentClient.send(command));
@@ -137,17 +145,38 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       const visible = await readVisible({ access: parts.access, key: { workspaceId: company, project: task.project }, viewer: undefined, lessons: all, where: "load", running: { taskId: task.taskId } });
       const project = await createStoreProjectSource(store, company).revision(task.project, task.startingRevision);
       if (project === undefined) refuse();
-      const stage = request.data.workflowMode as "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "REVIEW";
+      const stage = request.data.workflowMode as "UNDERSTAND" | "PLAN" | "PLAN_CRITIQUE" | "IMPLEMENT" | "REVIEW";
       const selected = await selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
         key: { workspaceId: company, project: task.project }, stage, resolved,
         active: visible.filter((lesson) => lesson.status === "active" && lesson.expiresAt > now() && !hasStaleCitation(lesson)),
         intent: [task.title, task.requestText?.slice(0, 600) ?? ""].join("\n"),
         repos: codeRepositoriesOf(project.definition).map((repo) => repo.name), files: [], languages: [],
         reader: { running: { taskId: task.taskId } }, where: "load", budget: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }),
+        ...(request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) ? { fitFloor: PUSH_FIT_FLOOR } : {}),
       });
       check();
       if (!selected.ok || !selected.complete) refuse();
-      return selected.chosen.length === 0 ? {} : { learnedContext: { v: 1, setVersion: set.data.setVersion, stage, lessons: selected.chosen } };
+      // The knowledge briefing (lead 4 L4-AK2) for a worker that lists it: the look-up's lessons on their own read share, and no facts or skill names (this reader has no source for them). Anything that goes wrong here is no
+      // briefing, never a refused load. This reader writes nothing, so it leaves no delivery record: a use report for such a step cannot be checked and is not kept.
+      let knowledgeContext: ReturnType<typeof buildKnowledgeContext>;
+      if (request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) && KNOWLEDGE_STAGE_PARTS[stage].pull) {
+        pulling = true;
+        try {
+          const wider = await selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
+            key: { workspaceId: company, project: task.project }, stage, resolved,
+            active: visible.filter((lesson) => lesson.status === "active" && lesson.expiresAt > now() && !hasStaleCitation(lesson)),
+            intent: [task.title, task.requestText?.slice(0, 600) ?? ""].join("\n"),
+            repos: codeRepositoriesOf(project.definition).map((repo) => repo.name), files: [], languages: [],
+            reader: { running: { taskId: task.taskId } }, where: "load", budget: { lessons: Math.min(KNOWLEDGE_PULL_MAX_UNITS, DISPATCHER_LESSONS_LIMITS.lessons), bytes: 256 * 1024 }, prefilter: async (eligible) => eligible.filter(pullable),
+          });
+          if (wider.ok && !failed) knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, pull: wider.picked, pullLeftOut: 0 });
+        } catch { knowledgeContext = undefined; } finally { pulling = false; }
+        if (failed) refuse();
+      }
+      return selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
+        ...(selected.chosen.length === 0 ? {} : { learnedContext: { v: 1, setVersion: set.data.setVersion, stage, lessons: selected.chosen } }),
+        ...(knowledgeContext === undefined ? {} : { knowledgeContext }),
+      };
     };
     try {
       return await Promise.race([run(), new Promise<never>((_resolve, reject) => {

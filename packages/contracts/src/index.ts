@@ -277,6 +277,7 @@ export * from "./app-service-status.js";
 // Learning v2 (L4): lesson text hygiene and the learnedContext payload.
 export * from "./lesson-text.js";
 export * from "./learned-context.js";
+export * from "./knowledge-context.js";
 export * from "./lesson-citation.js";
 export * from "./code-identifiers.js";
 export * from "./decision-cards.js";

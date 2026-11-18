@@ -69,6 +69,8 @@ import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalFlakyChecks } from "./flaky-checks.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
+import { flakyFactsPort } from "../../lessons/knowledge-facts.js";
+import { baseFlakyTests } from "../../core/test-env/base-flaky.js";
 import { createLessonRoutes } from "./lessons-routes.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
@@ -605,6 +607,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
   const lessonNames = registry.names("learning");
   const lessons = createLocalLessons({
+    // Lead 4 L4-AK2: the measured facts of the knowledge briefing: the base's known-flaky tests.
+    knowledge: { facts: flakyFactsPort((task) => baseFlakyTests(testEnvironment.deps, task)) },
     flow: flow.deps, registry, companyId, owner, blobs, milestones, audit: registry.require("audit-sink"), admission: registry.require("admission"), metering: registry.require("metering"), approvers: registry.require("approvers"), identity: registry.require("identity"),
     model: { choice: chosen, keys, providers, endpoints: options.modelProviderEndpoints, fetch: options.askFetch },
     learning: lessonNames.length === 0 ? undefined : registry.get("learning", lessonNames.find((name) => name !== "local") ?? lessonNames[0]!),

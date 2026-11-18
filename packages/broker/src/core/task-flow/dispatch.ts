@@ -10,7 +10,7 @@ import {
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
-  EVAL_PLAN_DELIVERY_ACTION, EVAL_ROUND_FEATURE,
+  EVAL_PLAN_DELIVERY_ACTION, EVAL_ROUND_FEATURE, KNOWLEDGE_CONTEXT_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
@@ -330,8 +330,12 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   }
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {
-    const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features }).catch(() => undefined);
+    // A fix round (a build with `workflowFix`) hands the correction's words over so the lessons are picked again by them; the text only ranks and is never stored.
+    const fixText = spec.payload["workflowFix"] !== undefined && typeof spec.payload["prompt"] === "string" ? spec.payload["prompt"] : undefined;
+    const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features, ...(fixText === undefined ? {} : { fix: { text: fixText.slice(0, 4000) } }) }).catch(() => undefined);
     if (learned?.learnedContext !== undefined) payload = { ...payload, learnedContext: learned.learnedContext };
+    // The knowledge briefing and look-up go only to a worker that lists the feature (an older worker is sent the lessons alone), whatever a reader answered.
+    if (learned?.knowledgeContext !== undefined && features.includes(KNOWLEDGE_CONTEXT_FEATURE)) payload = { ...payload, knowledgeContext: learned.knowledgeContext };
   }
   // The project's wiki, when its switch is on (lead 4 A1): built now from the task's own project, for a worker that lists the feature; none otherwise.
   const wikiContext = await wikiContextForStep(deps, workspace, operation, features);
@@ -402,17 +406,22 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   }
   const parsed = WorkerInvocationSchema.safeParse(draft);
   if (parsed.success) {
-    if (draft.payload["wikiContext"] === undefined || !invocationTooBigForWiki(parsed.data)) return parsed.data;
-    // The step is already large: the wiki is what is left out, so it is never the reason a worker refuses the body.
+    if ((draft.payload["wikiContext"] === undefined && draft.payload["knowledgeContext"] === undefined) || !invocationTooBigForWiki(parsed.data)) return parsed.data;
+    // The step is already large: the wiki is what is left out, so it is never the reason a worker refuses the body. If it is still large, the knowledge look-up goes too (the lessons never do).
     const { wikiContext: _wiki, ...withoutWiki } = draft.payload;
     void _wiki;
-    const slim = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutWiki });
+    let slim = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutWiki });
+    if (slim.success && invocationTooBigForWiki(slim.data) && withoutWiki["knowledgeContext"] !== undefined) {
+      const { knowledgeContext: _knowledge, ...withoutKnowledge } = withoutWiki;
+      void _knowledge;
+      slim = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutKnowledge });
+    }
     return slim.success ? slim.data : parsed.data;
   }
   // Lessons and the wiki never block a step: a learned or wiki context the worker's schema does not take is dropped, and the step is built without it.
-  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined) {
-    const { learnedContext: _dropped, wikiContext: _droppedWiki, ...withoutMemory } = draft.payload;
-    void _dropped; void _droppedWiki;
+  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined || draft.payload["knowledgeContext"] !== undefined) {
+    const { learnedContext: _dropped, wikiContext: _droppedWiki, knowledgeContext: _droppedKnowledge, ...withoutMemory } = draft.payload;
+    void _dropped; void _droppedWiki; void _droppedKnowledge;
     const retried = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutMemory });
     if (retried.success) return retried.data;
   }
