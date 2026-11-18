@@ -2816,11 +2816,11 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     }
 
     it("sends back while the task's spend plus one more round fits the cap, and stops (asks the owner) one micro-dollar past it", async () => {
-      // cap $15, one round estimated at $3: $12.00 still fits, $12.000001 does not
-      const fits = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 12_000_000); });
+      // cap $15, the round estimated at the most that fits (at most $3), and never tried with less than $0.25 left: $14.75 still fits, $14.750001 does not
+      const fits = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 14_750_000); });
       expect(autoFixes(fits)).toHaveLength(1);
       expect(fits.autofixAsk).toBeUndefined();
-      const over = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 12_000_001); });
+      const over = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 14_750_001); });
       expect(autoFixes(over)).toHaveLength(0);
       expect(over.workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
       expect(over.autofixAsk).toMatchObject({ reason: "spend-cap" });
@@ -2848,7 +2848,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
       expect(own.autofixAsk).toBeUndefined();
       // and the other way round: this task's own big spend binds even when everything else is small, and another company's small row never stands in for a missing one
       const bound = await blockedWith(async (taskId, put) => {
-        await put(IMPLICIT_COMPANY_ID, taskId, 14_000_000);
+        await put(IMPLICIT_COMPANY_ID, taskId, 14_800_000);
         await put(OTHER_COMPANY, taskId, 100_000);
       });
       expect(autoFixes(bound)).toHaveLength(0);
@@ -2875,6 +2875,48 @@ describe("rovara up: the reviews and checks are read against the code and the ru
       }
     });
 
+    // L4-TA6b (owner DEC 254zzz89): the round is estimated at min($3, what is left under the live cap); it is tried while at least $0.25 is left and asked about below that.
+    describe("the round is fitted to the room under the live cap (L4-TA6b)", () => {
+      const cap = (taskCapMicros: number) => (store: Parameters<typeof hostedTaskCapUsd>[0]["store"]) => hostedTaskCapUsd({ store, companyId: IMPLICIT_COMPANY_ID, settings: { allowedCompanies: "all", taskCapMicros, companyDayCapMicros: 25_000_000 } });
+      const at = (micros: number) => async (taskId: string, put: Put) => { await put(IMPLICIT_COMPANY_ID, taskId, micros); };
+
+      it("a $1 cap with nothing spent gets one bounded round (it used to ask at once: $3 never fit $1)", async () => {
+        const record = await blockedWith(at(0), { cap: cap(1_000_000) });
+        expect(autoFixes(record)).toHaveLength(1);
+        expect(record.autofixAsk).toBeUndefined();
+        expect(record.workflow).toMatchObject({ stage: "IMPLEMENT" });
+      });
+
+      it("a $1 cap with $0.80 spent has $0.20 left, under the $0.25 floor: nothing is sent back and the owner is asked in the existing words", async () => {
+        const record = await blockedWith(at(800_000), { cap: cap(1_000_000) });
+        expect(autoFixes(record)).toHaveLength(0);
+        expect(record.autofixAsk).toMatchObject({ reason: "spend-cap" });
+        // and exactly at the floor ($0.75 spent, $0.25 left) one round is tried
+        const floor = await blockedWith(at(750_000), { cap: cap(1_000_000) });
+        expect(autoFixes(floor)).toHaveLength(1);
+      });
+
+      it("a $10 cap sends back as before (the round is still estimated at $3 while there is room)", async () => {
+        const record = await blockedWith(at(1_000_000), { cap: cap(10_000_000) });
+        expect(autoFixes(record)).toHaveLength(1);
+        expect(record.autofixAsk).toBeUndefined();
+      });
+
+      it("an unknown cap still asks (inputs-missing), however little has been spent", async () => {
+        const record = await blockedWith(at(0), { cap: () => async () => undefined });
+        expect(autoFixes(record)).toHaveLength(0);
+        expect(record.autofixAsk).toMatchObject({ reason: "inputs-missing" });
+      });
+
+      it("the round's gate and the move's own guard read the same fitted figure: a round that fits is committed, never refused by the guard (no 'needs-a-person' ask)", async () => {
+        for (const spentMicros of [0, 100_000, 999_999 - 250_000, 750_000]) {
+          const record = await blockedWith(at(spentMicros), { cap: cap(1_000_000) });
+          expect(autoFixes(record), String(spentMicros)).toHaveLength(1);
+          expect(record.autofixAsk, String(spentMicros)).toBeUndefined();
+        }
+      });
+    });
+
     // L4-TA6: automatic fixing is held to the task's LIVE cap (what Admission and the run stop enforce), never to its own $15 default.
     describe("held to the task's live cap (L4-TA6)", () => {
       const hostedCap = (taskCapMicros: number, over: { companyId?: string; projectTaskCap?: (companyId: string, project: string) => Promise<number | undefined> } = {}) =>
@@ -2891,11 +2933,11 @@ describe("rovara up: the reviews and checks are read against the code and the ru
         expect(autoFixes(wide)).toHaveLength(1);
       });
 
-      it("the cap is the live one at the boundary: spend plus one more round (estimated $3) at most the cap sends back, one micro-dollar more asks", async () => {
-        const fits = await blockedWith(at(2_000_000), { cap: hostedCap(5_000_000) });
+      it("the cap is the live one at the boundary: a round fits while at least $0.25 is left under it, one micro-dollar less asks", async () => {
+        const fits = await blockedWith(at(4_750_000), { cap: hostedCap(5_000_000) });
         expect(autoFixes(fits)).toHaveLength(1);
         expect(fits.autofixAsk).toBeUndefined();
-        const over = await blockedWith(at(2_000_001), { cap: hostedCap(5_000_000) });
+        const over = await blockedWith(at(4_750_001), { cap: hostedCap(5_000_000) });
         expect(autoFixes(over)).toHaveLength(0);
         expect(over.autofixAsk).toMatchObject({ reason: "spend-cap" });
       });
@@ -2904,19 +2946,21 @@ describe("rovara up: the reviews and checks are read against the code and the ru
         const lowered = await blockedWith(at(2_500_000), { cap: hostedCap(5_000_000, { projectTaskCap: async () => 2_000_000 }) });
         expect(autoFixes(lowered)).toHaveLength(0);
         expect(lowered.autofixAsk).toMatchObject({ reason: "spend-cap" });
-        const higher = await blockedWith(at(2_000_000), { cap: hostedCap(5_000_000, { projectTaskCap: async () => 900_000_000 }) });
+        const fitsLowered = await blockedWith(at(1_750_000), { cap: hostedCap(5_000_000, { projectTaskCap: async () => 2_000_000 }) });
+        expect(autoFixes(fitsLowered)).toHaveLength(1);
+        const higher = await blockedWith(at(4_750_000), { cap: hostedCap(5_000_000, { projectTaskCap: async () => 900_000_000 }) });
         expect(autoFixes(higher)).toHaveLength(1);
-        const higherOver = await blockedWith(at(2_000_001), { cap: hostedCap(5_000_000, { projectTaskCap: async () => 900_000_000 }) });
+        const higherOver = await blockedWith(at(4_750_001), { cap: hostedCap(5_000_000, { projectTaskCap: async () => 900_000_000 }) });
         expect(autoFixes(higherOver)).toHaveLength(0);
       });
 
       it("an install's own automatic-fixing cap may lower the live cap but never raise it", async () => {
-        // live $12, own cap $4: $2 + $3 is over $4
-        const lowered = await blockedWith(at(2_000_000), { cap: hostedCap(12_000_000), autofix: { capUsd: 4 } });
+        // live $12, own cap $4: $3.80 spent leaves $0.20 under $4
+        const lowered = await blockedWith(at(3_800_000), { cap: hostedCap(12_000_000), autofix: { capUsd: 4 } });
         expect(autoFixes(lowered)).toHaveLength(0);
         expect(lowered.autofixAsk).toMatchObject({ reason: "spend-cap" });
         // live $5, own cap $100: still $5
-        const raised = await blockedWith(at(2_000_001), { cap: hostedCap(5_000_000), autofix: { capUsd: 100 } });
+        const raised = await blockedWith(at(4_800_000), { cap: hostedCap(5_000_000), autofix: { capUsd: 100 } });
         expect(autoFixes(raised)).toHaveLength(0);
         expect(raised.autofixAsk).toMatchObject({ reason: "spend-cap" });
         // an own cap that is not a number is no cap: asks (never read as the live cap alone)
@@ -2945,7 +2989,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
       });
 
       it("also holds a retry of a lost run to the live cap, and asks at once when the cap is unknown", async () => {
-        for (const [label, cap, reason] of [["over the cap", hostedCap(2_000_000), "spend-cap"], ["unknown", () => async () => undefined, "inputs-missing"]] as const) {
+        for (const [label, cap, reason] of [["over the cap", hostedCap(300_000), "spend-cap"], ["unknown", () => async () => undefined, "inputs-missing"]] as const) {
           const h = await launch();
           const store = h.runtime.registry.require("storage");
           h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
@@ -2969,8 +3013,8 @@ describe("rovara up: the reviews and checks are read against the code and the ru
         const cap = (await h.runtime.app.flow.deps.taskCapUsd!(record))!;
         expect(cap).toBe(taskLimitUsd(record));
         expect(cap).toBeLessThan(15);
-        // spend that fits the $15 default but not the live limit: no send back
-        h.runtime.app.flow.deps.taskSpendUsd = async () => cap - 2.5;
+        // spend that fits the $15 default but leaves less than $0.25 under the live limit: no send back
+        h.runtime.app.flow.deps.taskSpendUsd = async () => cap - 0.2;
         await h.callback(review, "result", reviewsOf(review, "d".repeat(40), "findings"));
         const held = await taskRecord(h, taskId);
         expect(autoFixes(held)).toHaveLength(0);
@@ -2978,7 +3022,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
         // and the same spend under a run limit that is switched off is the install's own default: it sends back
         const free = await launch({ environment: { ROVARA_RUN_LIMIT: "0" } });
         expect(free.runtime.app.flow.deps.taskCapUsd).toBeUndefined();
-        free.runtime.app.flow.deps.taskSpendUsd = async () => cap - 2.5;
+        free.runtime.app.flow.deps.taskSpendUsd = async () => cap - 0.2;
         const freed = await toReview(free);
         await free.callback(freed.review, "result", reviewsOf(freed.review, "d".repeat(40), "findings"));
         expect(autoFixes(await taskRecord(free, freed.taskId))).toHaveLength(1);
