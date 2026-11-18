@@ -52,11 +52,11 @@ const projectOf = (name = "payments", extra: Partial<ProjectDefinition> = {}): P
 
 interface World { h: Harness; model: FakeHostModel; host: FakeCodeHost; project: ProjectDefinition; modelRoute: ReturnType<typeof vi.fn> }
 
-async function world(options: { companyId?: OrgId; project?: ProjectDefinition; snapshot?: boolean; files?: Record<string, string>; backend?: Parameters<typeof createHarness>[0] extends infer O ? (O extends { backend?: infer B } ? B : never) : never; understandFirst?: boolean } = {}): Promise<World> {
+async function world(options: { companyId?: OrgId; project?: ProjectDefinition; snapshot?: boolean; files?: Record<string, string>; backend?: Parameters<typeof createHarness>[0] extends infer O ? (O extends { backend?: infer B } ? B : never) : never; understandFirst?: boolean; audit?: "recording" } = {}): Promise<World> {
   const modelRoute = vi.fn(async () => undefined);
   const h = createHarness({
     understandFirst: options.understandFirst ?? false, machines: { startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] },
-    ...(options.companyId === undefined ? {} : { companyId: options.companyId }), ...(options.backend === undefined ? {} : { backend: options.backend }),
+    ...(options.audit === undefined ? {} : { audit: options.audit }), ...(options.companyId === undefined ? {} : { companyId: options.companyId }), ...(options.backend === undefined ? {} : { backend: options.backend }),
   });
   const project = options.project ?? projectOf();
   await h.registerProject(project);
@@ -263,6 +263,76 @@ async function readyCheckMark(w: World): Promise<{ workspaceId: string; revision
   await finishCheck(w.h, check.workspaceId, { status: "SUCCEEDED" });
   return check.mark;
 }
+
+describe("the company's system-runs switch (DEC 254zzl: hosted default off)", () => {
+  it("off: nothing is started, nothing is spent, the task starts normally, and its page says quietly that the setup may be out of date", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: () => false };
+    w.model.commit("main", { "package-lock.json": "lock-2", "docker-compose.yml": "services: { db: {} }" });
+    const task = await startTask(w);
+    expect(task.status).toBe("STARTING");
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
+    expect(await w.h.store.get(recheckCurrentKey(w.h.deps.companyId, "payments"))).toBeUndefined();
+    expect((await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.h.deps.companyId, "payments")).used).toBe(0);
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "released", recheckKey: "", noRecheck: { classes: ["lockfile", "compose"], reason: "off" } });
+    const line = "Setup may be out of date after dependency files and a compose file changed.";
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe(line);
+    expect((await taskViewOf(w.h.deps, (await readTask(w.h.deps, task.taskId))!)).setupRecheck).toBe(line);
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    expect(await stagedPreparations(w.h)).toBe(1);
+    expect(w.modelRoute).not.toHaveBeenCalled();
+  });
+
+  it("off: no drift says nothing at all, and a comparison that cannot be told says it without naming a change", async () => {
+    const quiet = await world();
+    quiet.h.deps.systemRuns = { enabled: () => false };
+    const calm = await startTask(quiet);
+    expect(await linkOf(quiet, calm.taskId)).toBeUndefined();
+    expect(await setupRecheckLineOf(quiet.h.deps, "payments", calm.taskId)).toBeUndefined();
+    const w = await world({ snapshot: false });
+    w.h.deps.systemRuns = { enabled: () => false };
+    await w.h.store.put({ item: { ...projectMetaKey(w.h.deps.companyId, "payments"), entityType: "PROJECT_META" } });
+    await w.h.store.update({ key: projectMetaKey(w.h.deps.companyId, "payments"), ops: [{ op: "set", path: ["setupCheck"], value: (await readyCheckMark(w)) as unknown as JsonValue }] });
+    const task = await startTask(w);
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Setup may be out of date.");
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
+  });
+
+  it("on (the hosted flag set) and absent (the laptop) both re-check; switching it on later starts re-checks again", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: () => false };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
+    w.h.deps.systemRuns = { enabled: () => true };
+    const task = await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toHaveLength(1);
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "pending" });
+    delete w.h.deps.systemRuns;
+    w.model.commit("main", { "package-lock.json": "lock-3" });
+    await finishCheck(w.h, (await rechecksOf(w.h.store, w.h.deps.companyId, "payments"))[0]!.check.workspaceId, { status: "SUCCEEDED" });
+    await advanceCurrentRecheck(w.h.deps, "payments");
+    await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toHaveLength(2);
+  });
+
+  it("a re-check is the company's and the project's: its place in the cap and its audit event name them, and the actor is Rovara, not a person", async () => {
+    const w = await world({ audit: "recording" });
+    w.h.deps.systemRuns = { enabled: () => true };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    await startTask(w);
+    const [row] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+    const claim = await w.h.store.get({ pk: `ORG#${w.h.deps.companyId}#PROJECT#payments`, sk: `AUTOMATIC_RUNS#RUN#setup-recheck-${row!.key}-1` });
+    expect(claim).toMatchObject({ orgId: w.h.deps.companyId, project: "payments", job: "scheduled_check" });
+    expect(row).toMatchObject({ orgId: w.h.deps.companyId, project: "payments", check: { startedBy: systemOwnerIdOf(w.h.deps.companyId, "payments") } });
+    const events = w.h.audit.filter((event) => event.action === "setup_recheck.started");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ companyId: w.h.deps.companyId, actor: { type: "system", id: "rovara" }, subject: { type: "project", id: "payments" }, details: { job: "scheduled_check", attempt: 1 } });
+    // The check's own workspace is the company's and the project's too (what machine time is booked by).
+    const workspace = await readWorkspace(w.h.deps, row!.check.workspaceId);
+    expect(workspace).toMatchObject({ companyId: w.h.deps.companyId, projectName: "payments" });
+  });
+});
 
 describe("once per commit, and the monthly cap", () => {
   it("two tasks on one commit share one re-check and one place in the cap; a new commit is a new re-check", async () => {

@@ -101,6 +101,12 @@ async function driftAtStart(deps: TaskFlowDeps, input: { project: string; taskId
   if (read.status === "not_checked") { log(deps, { event: "setup_drift.not_checked", taskId }); return stored === undefined ? [] : [uncheckedLink(deps, project, taskId, [])]; }
   const drift = compareSetupSnapshot(stored, read.repositories, allowedHostsOf(definition));
   if (drift.drift === "none") { log(deps, { event: "setup_drift.none", taskId }); return []; }
+  // DEC 254zzl: with the company's system runs OFF (hosted default) Rovara starts nothing by itself. The comparison above only read names, so it still says quietly that the setup may be out of date; the task starts
+  // normally, and a person starts "Re-check setup". The laptop has no such switch (absent: on).
+  if (deps.systemRuns?.enabled() === false) {
+    log(deps, { event: "setup_drift.system_runs_off", taskId, classes: drift.drift === "changed" ? drift.classes.length : 0 });
+    return [uncheckedLink(deps, project, taskId, drift.drift === "changed" ? drift.classes : [], "off")];
+  }
   const commits = commitsOf(read.repositories);
   // No commit to pin means no stable identity for a re-check: the task goes on, and a later start tries again.
   if (commits === undefined) { log(deps, { event: "setup_drift.not_checked", taskId }); return [uncheckedLink(deps, project, taskId, drift.drift === "changed" ? drift.classes : [])]; }
@@ -128,8 +134,8 @@ async function runningRecheckOf(deps: TaskFlowDeps, project: string, revision: n
 }
 
 /** The link of a task whose re-check could not be made: nothing to wait on (released at once), and the quiet note on its page. */
-function uncheckedLink(deps: TaskFlowDeps, project: string, taskId: string, classes: SetupDriftClass[]): TransactItem {
-  const row: DriftTaskRow = { entityType: "SETUP_DRIFT_TASK", orgId: deps.companyId, project, taskId, recheckKey: "", state: "released", at: iso(deps), releasedAt: iso(deps), noRecheck: { classes } };
+function uncheckedLink(deps: TaskFlowDeps, project: string, taskId: string, classes: SetupDriftClass[], reason?: "off"): TransactItem {
+  const row: DriftTaskRow = { entityType: "SETUP_DRIFT_TASK", orgId: deps.companyId, project, taskId, recheckKey: "", state: "released", at: iso(deps), releasedAt: iso(deps), noRecheck: { classes, ...(reason === undefined ? {} : { reason }) } };
   return putRow(driftTaskKey(deps.companyId, project, taskId), row.entityType, { ...row, ...expiry(deps) });
 }
 
@@ -153,7 +159,7 @@ async function ensureRecheck(deps: TaskFlowDeps, input: { project: string; defin
       putRow(recheckRowKey(orgId, project, key), row.entityType, { ...row, ...expiry(deps) }),
       overwriteRow(recheckCurrentKey(orgId, project), "SETUP_RECHECK_CURRENT", { orgId, project, key, ...expiry(deps) }),
       ...started.items,
-      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, key), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { attempt: 1, classes: input.classes } }),
+      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, key), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 1, classes: input.classes } }),
     ]);
     if (!result.applied) {
       // Another start put the same re-check there first: the task joins that one. The place in the cap is that start's (the claim is one per re-check, so this call's claim WAS its own), and only a start that
@@ -276,7 +282,7 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
     const result = await deps.store.transact([
       { kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("attempt", 2), change.set("check", { ...started.mark })], condition: still },
       ...started.items,
-      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, row.key, "2"), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { attempt: 2, classes: row.classes } }),
+      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, row.key, "2"), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 2, classes: row.classes } }),
     ]);
     if (!result.applied) {
       // The claim is one per re-check and attempt, so another caller's live second attempt holds it too: it goes back only when no second attempt was left behind.
