@@ -162,12 +162,19 @@ const readBody = (request: IncomingMessage): Promise<Buffer> => new Promise((res
 });
 
 export async function createStandInWorld(options: StandInWorldOptions = {}): Promise<StandInWorld> {
-  const transport = options.transport ?? "gemini";
   const repo = await createStandInRepo();
+  let fake: FakeVertex | undefined;
+  try { return await buildWorld(options, repo, started => { fake = started; }); }
+  catch (error) { await fake?.stop(); await rm(repo.root, { recursive: true, force: true }); throw error; }
+}
+
+async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFake: (fake: FakeVertex) => void): Promise<StandInWorld> {
+  const transport = options.transport ?? "gemini";
   const candidate = repo.candidate(options.patch, "candidate");
   const baseDir = await checkout(repo, repo.baseSha, "base");
   const candidateDir = await checkout(repo, candidate.commitSha, "candidate");
   const fake = await startFakeVertex(baseDir);
+  onFake(fake);
   const frames: StandInWorld["frames"] = [];
   const current = { side: "old" as "old" | "new" };
   const sides: StandInWorld["sides"] = [];
