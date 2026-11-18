@@ -90,7 +90,7 @@ export const LearningSourceRowSchema = z.object({
   key: z.enum(LEARNING_SOURCE_KEYS), label: z.string().min(1).max(80), detail: z.string().min(1).max(160),
   /** The last 30 days. seen: lessons Rovara drafted from this source. suggested: of those, the ones that reached a person (or went live). kept: of those, the ones a person approved or that are in use. */
   seen: Count, suggested: Count, kept: Count,
-  /** Paused by a person: new suggestions from this source wait until it is resumed. Nothing is deleted. */
+  /** Paused by a person: Rovara does not read this source while it is paused. Nothing from the paused time is collected or kept, and resuming starts again from then. Lessons already made are not deleted. */
   paused: z.boolean(),
   /** One real example of what this source produced: the newest lesson this person may read. */
   example: z.object({ lessonId: z.string().regex(/^[A-Za-z0-9_-]{4,64}$/u), title: z.string().max(80) }).strict().optional(),

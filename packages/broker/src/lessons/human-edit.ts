@@ -17,9 +17,11 @@ import { newTaskFailureTally, withFailuresCountedOnce, type TaskFailureTally } f
 import { attachCapLadder, noteTaskHeld, readTaskHeld } from "./task-held.js";
 import type { ProcessDeps } from "./process.js";
 import { isEvalRunMark } from "./eval-run.js";
+import { pausedKindsFor, withoutPausedSpans } from "./paused-kinds.js";
 import { reflectSubject, type ReflectDeps } from "./reflect.js";
 import type { EvidenceSpan, ReflectSubject } from "./reflect-input.js";
-import type { LearnResult, TaskSubjectSource } from "./task-end.js";
+import type { LessonStore } from "./store.js";
+import { withoutPausedEvidence, type LearnResult, type TaskSubjectSource } from "./task-end.js";
 import { buildTaskReflectSubject } from "./task-subject.js";
 
 export interface HumanEditExtractorDeps {
@@ -63,11 +65,17 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       if (input.authors.length > MAX_EDIT_AUTHORS) return none;
       const learning = await resolveLearning(deps.settings, input.workspaceId, input.project);
       if (!modeAllows(learning.mode, "reflect")) return { ...none, off: true };
+      // Lead 4 L4-LP3Wc: "Edits to Rovara's pull requests" paused: a stop. The edit's lines are not read, no author is looked up, no model is called, and nothing is kept (the pull request's comments reflection of the task is the other row's).
+      const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: input.project });
+      if (paused.has("human_edit")) return { ...none, off: true };
       await onActive();
-      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, context: "human_edit" });
+      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, context: "human_edit", ...(paused.size === 0 ? {} : { skip: paused }) });
       if (base === undefined || base.facts.workspaceId !== input.workspaceId || base.facts.project !== input.project || base.facts.taskId !== input.taskId) return none;
       // An edit to an eval or replay run's pull request teaches nothing; refused before any author is looked up.
       if (isEvalRunMark(base.facts.rest.evalRun)) return none;
+      // Edits stopped at any time while the task was alive are not read after a resume either (`paused-kinds.ts`); read again now that the task's life is known.
+      const during = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: input.project }, base.lifetime ?? "unknown");
+      if (during.has("human_edit")) return none;
       // Every author, now. Asking all of them (no short cut) so a check that cannot tell is never hidden by an earlier answer.
       let allowed = true;
       for (const developerId of input.authors) {
@@ -77,7 +85,7 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       }
       if (!allowed) return none;
       const editSpans = input.files.map((file) => editSpan(file, input));
-      const context = (base.facts.rest.spans ?? []).filter((span) => CONTEXT_KINDS.has(span.kind));
+      const context = withoutPausedSpans((base.facts.rest.spans ?? []).filter((span) => CONTEXT_KINDS.has(span.kind)), during);
       const links = [...new Set([...(base.facts.rest.links ?? []), input.link])];
       const subject: ReflectSubject = buildTaskReflectSubject({
         ...base.facts, sendBacks: [],
@@ -125,6 +133,8 @@ export interface HumanEditWorkDeps {
   /** The Team record's `humanEdit.run(job, { leased: true })`: proves the authors, reads the compare live and hands it to the extractor once. */
   run(job: HumanEditJob): Promise<"handed_on" | "skipped">;
   settings: LearningSettingsReader;
+  /** The lessons store, to read what a person stopped. */
+  store: Pick<LessonStore, "flags">;
 }
 
 /**
@@ -138,6 +148,8 @@ export async function learnFromHumanEdit(deps: HumanEditWorkDeps, job: HumanEdit
   try {
     const learning = await resolveLearning(deps.settings, job.repo.workspaceId, job.project);
     if (!modeAllows(learning.mode, "reflect")) return { status: "off", retry: false };
+    // Lead 4 L4-LP3Wc: edits stopped: the code host's compare is not read at all (fail closed).
+    if ((await pausedKindsFor(deps.store, { workspaceId: job.repo.workspaceId, project: job.project })).has("human_edit")) return { status: "off", retry: false };
     const handed = await deps.run(job);
     return { status: handed === "handed_on" ? "reflected" : "no_facts", retry: false };
   } catch (error) {

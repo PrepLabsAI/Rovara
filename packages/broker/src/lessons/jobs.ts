@@ -6,6 +6,7 @@
 //     trial lesson that earned it to stable (`lessonsPromoteJob`: 14 days live, 3 loads, no thumbs-down), because a lesson that is never loaded again would otherwise wait for a load that never comes.
 //     Before that it moves lessons past their expiry (and pending ones nobody decided in time) to `expired` (`lessonsExpireJob`), so an expired lesson is never promoted or published.
 // Both are bounded (projects, tasks, time) and a failure of one project never stops the others.
+import { pausedKindsFor } from "./paused-kinds.js";
 import { createHash } from "node:crypto";
 import { OrgIdSchema, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { modeAllows, resolveLearning, type LearningSettingsReader } from "./policy.js";
@@ -86,12 +87,15 @@ export async function lessonsRevertJob(deps: LessonsJobDeps, orgId: string, proj
   if (!org.success || deps.queue === undefined || deps.reverts === undefined) return { revertsEnqueued: 0 };
   const workspaceId: OrgId = org.data;
   const started = deps.now();
+  const stopStore = deps.maintain?.store ?? deps.counters?.store;
   let enqueued = 0, failed = 0, truncated = 0, capped = 0;
   for (const project of projects.slice(0, MAX_PROJECTS_PER_JOB)) {
     if (deps.now() - started > budgetMs) break;
     try {
       // The worker checks the mode too; asking here keeps a project with learning off from sending anything.
       if (!modeAllows((await resolveLearning(deps.settings, orgId, project)).mode, "reflect")) continue;
+      // Lead 4 L4-LP3Wc: "After merge" stopped: no revert is looked for or queued (fail closed: an unreadable flag store stops it).
+      if (stopStore !== undefined && (await pausedKindsFor(stopStore, { workspaceId, project })).has("outcome")) continue;
       const found = await deps.reverts.since(workspaceId, project, deps.now() - REVERT_WINDOW_MS);
       // A project cut off by the page limit says so in one fixed line, the project only as a hash.
       if (found.truncated) { truncated += 1; deps.log("lessons_job.revert_window_truncated", { project: createHash("sha256").update(`${orgId}\u0000${project}`).digest("hex").slice(0, 12) }); }

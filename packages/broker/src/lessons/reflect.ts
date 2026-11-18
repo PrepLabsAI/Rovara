@@ -13,8 +13,9 @@ import { NO_REASON_TEXT } from "./task-subject.js";
 import { lessonClaimsSupported } from "./trial.js";
 import {
   LessonCandidateSchema, ReflectorOutputSchema, MAX_READ_FROM, distinctIds, idIn, minTrust, narrowestAudience, normId, normSource, sameId,
-  type Audience, type LessonCitation, type LessonProvenance, type LessonScope, type LessonStage, type LessonType, type TrustClass,
+  type Audience, type LessonCitation, type LessonProvenance, type LessonScope, type LessonStage, type LessonType, type SpanKind, type TrustClass,
 } from "./types.js";
+import { withoutPausedSpans } from "./paused-kinds.js";
 
 /** An outcome event and the person who caused it: whoever reverted, sent back, or pushed the revision that failed CI. */
 export interface OutcomeEvent { kind: "revert" | "send_back" | "ci_failure"; actor: string | undefined }
@@ -54,6 +55,11 @@ export interface ReflectDeps {
   pause?: LessonsPauseStore;
   /** The task's running total of model holds (`TaskFailureTally.heldUsd`): the reflection adds its hold, so the outcome judge that comes after it shares Public's one per-task cap. Absent: nothing is added. */
   taskBudget?: { heldUsd: number; reserve?: ((usd: number) => Promise<boolean>) | undefined };
+  /**
+   * Lead 4 L4-LP3Wc: the kinds of evidence a person paused for the project, read live (`pausedKindsFor`, which fails closed). `reflectSubject` leaves their spans out before anything is built or sent: the last line behind the places that
+   * gather spans (a path that forgot to filter still reads nothing paused). Absent: none is paused (a test, or a runtime with no store).
+   */
+  pausedKinds?: (key: { workspaceId: string; project: string }) => Promise<ReadonlySet<SpanKind>>;
 }
 
 const MAX_OUTPUT_TOKENS = 1800;
@@ -124,7 +130,9 @@ export async function reflectSubject(deps: ReflectDeps, subject: ReflectSubject,
   const inherited = [...new Set(subject.inheritedTasks ?? [])].filter((id) => id !== subject.id);
   if (inherited.length > 50) { deps.metrics?.count("learning.reflect_ineligible", { reason: "inherited_overflow" }); return none("ineligible", "inherited_overflow"); }
 
-  const input = buildReflectorInput(subject);
+  // A pause is a stop: the spans of a paused kind are not read, so they never reach the prompt, the trust or the audience of anything (read live, before any model call).
+  const paused = deps.pausedKinds === undefined ? undefined : await deps.pausedKinds({ workspaceId: subject.workspaceId, project: subject.project });
+  const input = buildReflectorInput(paused === undefined || paused.size === 0 ? subject : { ...subject, spans: withoutPausedSpans(subject.spans, paused) });
   if (!input.eligible) {
     deps.metrics?.count("learning.reflect_ineligible", { reason: input.reason });
     return none("ineligible", input.reason);

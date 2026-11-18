@@ -38,7 +38,13 @@ export interface LoadManifest {
 }
 export interface PendingOutcome { key: string; workspaceId: string; project: string; lessonId: string; taskId: string; dueAt: number }
 /** A source paused by spike detection: its lessons are collected but held until a maintainer resumes the source. */
-export interface ProjectFlags { pausedSources?: Record<string, { at: number; reason: string }>; volumeAlertedAt?: number }
+export interface ProjectFlags {
+  pausedSources?: Record<string, { at: number; reason: string }>; volumeAlertedAt?: number;
+  /** Lead 4 L4-LP3Wc: the kinds of evidence a PERSON stopped from "Where Rovara learns from" (a span kind each, with the time it was stopped). Kept apart from `pausedSources` (the flood guard's holds on a source) so neither can take the other's key. */
+  stoppedKinds?: Record<string, { at: number }>;
+  /** The stops that were lifted, newest last, at most `MAX_STOP_WINDOWS`: evidence of a task that was alive during one is not read after the resume (nothing from the stopped time comes back). */
+  stopWindows?: Array<{ kind: string; from: number; to: number }>;
+}
 export interface SetSnapshot { setVersion: number; at: number; members: Array<{ id: string; version: number }> }
 
 export interface LessonStore {

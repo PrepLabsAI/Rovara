@@ -17,7 +17,7 @@
 //   POST /v1/dev/projects/{project}/lessons/mode/trial-offer            { decision: accept | not_now }       the earned-trust offer (`lessons/earned-trust.ts`): who may change the mode answers it
 //   GET  /v1/dev/projects/{project}/lessons/areas[?repo=&folder= | ?whole=1]                                 lead 4 L4-LP3W: the approved lessons by code area (a tree), and the lessons anchored at one node (`lessons/area-index.ts`)
 //   GET  /v1/dev/projects/{project}/lessons/learning-sources                                                 lead 4 L4-LP3W: "Where Rovara learns from": a row per kind of source with seen / suggested / kept (30 days), one example, paused or not
-//   PUT  /v1/dev/projects/{project}/lessons/learning-sources/{key}      { paused: boolean }                  pause or resume one row (who may set the mode may; audited before the change; holds, deletes nothing)
+//   PUT  /v1/dev/projects/{project}/lessons/learning-sources/{key}      { paused: boolean }                  pause or resume one row (who may set the mode may; audited before the change; a paused source is not read at all: nothing is collected, stored or paid for, and resuming starts again from then)
 //   GET  /v1/dev/projects/{project}/lessons/weekly-summary                                                   whether the weekly lessons summary goes to the chats (`lessons/digest-notice.ts`; off by default)
 //   PUT  /v1/dev/projects/{project}/lessons/weekly-summary              { on: boolean }                      who may set the mode sets it; audited before the write
 //
@@ -328,7 +328,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       const body = bodyOf(LearningSourcePauseBodySchema, request.body, "pause takes paused: true or false");
       if (!(await mayChange())) throw agentXError("FORBIDDEN", SOURCE_NEEDS_ADMIN);
       let outcome: Awaited<ReturnType<typeof setLearningSourcePause>>;
-      try { outcome = await setLearningSourcePause({ process: runtime.process, store: runtime.store, audit: runtime.audit, now: options.now }, where, personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+      try { outcome = await setLearningSourcePause({ store: runtime.store, audit: runtime.audit, now: options.now }, where, personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
       if (!outcome.ok) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
       log("learning_source_set", { companyId, paused: outcome.paused });
       return { project, key: sourceKey.data, paused: outcome.paused };

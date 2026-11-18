@@ -5,16 +5,16 @@
 //   suggested  of those, the ones that reached a person or went live (pending, active, stale, retired, rejected, expired)
 //   kept       of those, the ones a person approved or that are in use (active, stale)
 // Everything counted or named passes `readVisibleRanked` for THIS reader first: a lesson from a place the reader cannot see is not counted and is never the example (a count must not reveal what it hides).
-// PAUSE holds, it does not stop reading: a paused kind is recorded in the project's paused sources as `kind:<span kind>`; a lesson resting on that kind of evidence is held (collected, not queued for people, not applied)
-// until a person resumes it, and resuming re-settles what was held (nothing goes live from there). It deletes nothing. The same mechanism the flood guard uses for a spiking source (`sources.ts`).
+// PAUSE STOPS (owner 2026-11-18): a stopped kind is recorded in the project's flags (`stoppedKinds`, one entry per span kind), and while it is paused Rovara does not read that kind of evidence at all: nothing is gathered,
+// nothing is stored, no model is called for it (`paused-kinds.ts` and the places that gather spans). Resuming starts again from that moment: nothing from the paused time comes back, and nothing is re-settled.
+// The counts below are of lessons that already exist; a paused row stops growing.
 import { LEARNING_SOURCE_KEYS, LEARNING_SOURCE_WORDS, cleanLessonText, type LearningSourceKey, type LearningSourcesAnswer } from "@agentx/contracts";
 import { requireAudit } from "./policy.js";
 import type { LessonAuditSink } from "./ports.js";
-import { resumeAndResettle, type ProcessDeps } from "./process.js";
 import { readVisibleRanked, type LessonLog } from "./read-visible.js";
 import type { AccessCheckPort } from "./access-port.js";
 import type { ApproverDirectory } from "./ports.js";
-import { pausedKey } from "./sources.js";
+import { MAX_STOP_WINDOWS, pausedKindsOfFlags } from "./paused-kinds.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import { idIn, type Lesson, type SpanKind } from "./types.js";
 import { createLessonLiveReader, LESSON_LIVE_TIMEOUT_MS } from "./live-visibility.js";
@@ -34,7 +34,6 @@ export const SOURCES_HEADS_MAX = 1000;
 const SOURCES_DEADLINE_MS = 12_000;
 const SUGGESTED: ReadonlySet<Lesson["status"]> = new Set(["pending", "active", "stale", "retired", "rejected", "expired"]);
 const KEPT: ReadonlySet<Lesson["status"]> = new Set(["active", "stale"]);
-export const pauseKeyOf = (kind: SpanKind): string => `kind:${kind}`;
 
 export interface LearningSourcesDeps { store: LessonStore; directory: ApproverDirectory; access: AccessCheckPort; now: () => number; log?: LessonLog }
 
@@ -49,7 +48,7 @@ export async function buildLearningSources(deps: LearningSourcesDeps, caller: { 
   const deadlineAt = Date.now() + SOURCES_DEADLINE_MS;
   const live = createLessonLiveReader({ port: deps.access.taskVisibility, key, where: "view", log: deps.log, timeoutMs: () => Math.max(1, Math.min(LESSON_LIVE_TIMEOUT_MS, deadlineAt - Date.now())) });
   const read = await readVisibleRanked({ access: deps.access, key, viewer, where: "view", log: deps.log, live, ranked, pageSize: 50, enough: () => false, deadlineAt });
-  const flags = await deps.store.flags(key);
+  const pausedNow = pausedKindsOfFlags(await deps.store.flags(key));
   const sources = LEARNING_SOURCE_KEYS.map((sourceKey) => {
     const kinds = new Set<SpanKind>(SOURCE_KINDS[sourceKey]);
     const mine = read.kept.filter((lesson) => lesson.provenance.sourceKinds.some((kind) => kinds.has(kind)));
@@ -60,7 +59,7 @@ export async function buildLearningSources(deps: LearningSourcesDeps, caller: { 
     const words = LEARNING_SOURCE_WORDS[sourceKey];
     return {
       key: sourceKey, label: words.label, detail: words.detail, seen: mine.length, suggested: suggested.length, kept: kept.length,
-      paused: SOURCE_KINDS[sourceKey].every((kind) => pausedKey(flags, pauseKeyOf(kind)) !== undefined),
+      paused: SOURCE_KINDS[sourceKey].every((kind) => pausedNow.has(kind)),
       ...(example === undefined ? {} : { example: { lessonId: example.id, title: cleanLessonText(example.title, 80).replace(/\s*[\n\u2028\u2029]\s*/gu, " ") } }),
     };
   });
@@ -71,26 +70,31 @@ export async function buildLearningSources(deps: LearningSourcesDeps, caller: { 
 export type PauseSourceOutcome = { ok: true; paused: boolean; changed: boolean } | { ok: false; code: "audit_unavailable" };
 
 /**
- * A person pauses or resumes one row. Pausing records the person's action FIRST (no record, no change) and then holds every kind of the row; resuming clears each kind's hold and re-settles the lessons that were held
- * (`resumeAndResettle`: none goes live from here). Idempotent. Who may do it is the caller's check (a project admin, or a company owner or admin, read live).
+ * A person pauses or resumes one row. Pausing records the person's action FIRST (no record, no change) and then stops every kind of the row; resuming records first too and then clears each kind's stop. A resume
+ * re-settles nothing and brings nothing back: what was not read while paused does not exist. Idempotent. Who may do it is the caller's check (a project admin, or a company owner or admin, read live).
  */
-export async function setLearningSourcePause(deps: { process: ProcessDeps; store: LessonStore; audit: LessonAuditSink; now: () => number }, key: ScopeKey, actor: string, sourceKey: LearningSourceKey, paused: boolean): Promise<PauseSourceOutcome> {
-  const flags = await deps.store.flags(key);
+export async function setLearningSourcePause(deps: { store: LessonStore; audit: LessonAuditSink; now: () => number }, key: ScopeKey, actor: string, sourceKey: LearningSourceKey, paused: boolean): Promise<PauseSourceOutcome> {
   const kinds = SOURCE_KINDS[sourceKey];
-  const held = kinds.map((kind) => pausedKey(flags, pauseKeyOf(kind)) !== undefined);
+  const stopped = pausedKindsOfFlags(await deps.store.flags(key));
   if (paused) {
-    if (held.every(Boolean)) return { ok: true, paused: true, changed: false };
+    if (kinds.every((kind) => stopped.has(kind))) return { ok: true, paused: true, changed: false };
     if (!(await requireAudit(deps.audit, { action: "lesson.learning_source_switched", workspaceId: key.workspaceId, project: key.project, actor, facts: { source: sourceKey, paused: true } }))) return { ok: false, code: "audit_unavailable" };
     const at = deps.now();
-    // Re-read just before the write so a hold another change made in between is kept.
+    // Re-read just before the write so a stop another change made in between is kept.
     const latest = await deps.store.flags(key);
-    const next = { ...(latest.pausedSources ?? {}) };
-    for (const kind of kinds) if (pausedKey(latest, pauseKeyOf(kind)) === undefined) next[pauseKeyOf(kind)] = { at, reason: "person" };
-    await deps.store.setFlags(key, { ...latest, pausedSources: next });
+    const next = { ...(latest.stoppedKinds ?? {}) };
+    for (const kind of kinds) if (next[kind] === undefined) next[kind] = { at };
+    await deps.store.setFlags(key, { ...latest, stoppedKinds: next });
     return { ok: true, paused: true, changed: true };
   }
-  if (!held.some(Boolean)) return { ok: true, paused: false, changed: false };
+  if (!kinds.some((kind) => stopped.has(kind))) return { ok: true, paused: false, changed: false };
   if (!(await requireAudit(deps.audit, { action: "lesson.learning_source_switched", workspaceId: key.workspaceId, project: key.project, actor, facts: { source: sourceKey, paused: false } }))) return { ok: false, code: "audit_unavailable" };
-  for (const kind of kinds) await resumeAndResettle(deps.process, key, pauseKeyOf(kind), actor);
+  const latest = await deps.store.flags(key);
+  const to = deps.now();
+  const rest = { ...(latest.stoppedKinds ?? {}) };
+  // The stopped time stays on record as a window, so evidence of a task that was alive during it is not read after the resume.
+  const lifted = kinds.flatMap((kind) => { const entry = rest[kind]; return entry === undefined ? [] : [{ kind, from: entry.at, to }]; });
+  for (const kind of kinds) delete rest[kind];
+  await deps.store.setFlags(key, { ...latest, stoppedKinds: rest, stopWindows: [...(latest.stopWindows ?? []), ...lifted].slice(-MAX_STOP_WINDOWS) });
   return { ok: true, paused: false, changed: true };
 }

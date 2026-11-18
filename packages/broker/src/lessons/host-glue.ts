@@ -43,6 +43,7 @@ import { createHumanEditRun, type HumanEditRunDeps } from "./human-edit-work.js"
 import type { HumanEditSink } from "../core/merge/seams.js";
 import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps } from "./task-end.js";
 import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "./used-in-pr.js";
+import { pausedKindsFor } from "./paused-kinds.js";
 import { planLoadFacts } from "./plan-facts.js";
 import { LESSON_USE_KEEP_SECONDS } from "./use-count.js";
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
@@ -285,7 +286,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   const claims = documentReflectClaims({ store: flow.store, keysOutcome: async () => "clear" });
   const learning: TaskLearningDeps = {
     source: input.sources.source, rows: input.sources.rows, settings: runtime.settings,
-    reflect: { model: runtime.judgeModel, spend: runtime.spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause },
+    reflect: { model: runtime.judgeModel, spend: runtime.spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause, pausedKinds: (key) => pausedKindsFor(runtime.store, key) },
     process: runtime.process, counters: runtime.counters, log: (event, fields) => log(event, fields),
     // The "same mistake twice" measure's log (no text): only this company's tasks, in this company's partition.
     correctionLog: async (entry) => {
@@ -361,13 +362,19 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     const task = await ownTask(taskId).catch(() => undefined);
     if (task === undefined) return;
     // Phase 0 (measure only): the revert is one row of the project's clean-merge count (`measure.ts`), under the same rule as the merged row (the project's mode reflects); the sink never throws.
+    // Batch 17: the measure row is a count (ids never shown) and is not a learning source, so it is kept like the merged row; the "After merge" stop below gates everything learned from the revert.
+    let outcomeStopped: boolean;
+    try { outcomeStopped = (await pausedKindsFor(runtime.store, { workspaceId: companyId, project: task.project })).has("outcome"); } catch { outcomeStopped = true; }
     try {
       if (modeAllows((await resolveLearning(runtime.settings, companyId, task.project)).mode, "reflect")) {
         await runtime.load.measure?.reverted({ workspaceId: companyId, project: task.project, taskId: task.taskId, at: now() });
         // The lessons the task loaded go "under question" only where the revert's files are in the lesson's own code area: a separate evidence row, no lesson is changed or scored (`revert-question.ts`).
-        if (revert !== undefined) await markLessonsUnderQuestion({ lessons: runtime.store, docs: flow.store, companyId, now }, { project: task.project, taskId: task.taskId, via: revert.via, files: revert.files });
+        // Lead 4 L4-LP3Wc: not while "After merge" is stopped (nothing of the revert is kept).
+        if (revert !== undefined && !outcomeStopped) await markLessonsUnderQuestion({ lessons: runtime.store, docs: flow.store, companyId, now }, { project: task.project, taskId: task.taskId, via: revert.via, files: revert.files });
       }
     } catch { /* information only */ }
+    // Lead 4 L4-LP3Wc: "After merge" paused: nothing is queued about the revert (a stop: it is not read, and nothing of it is kept).
+    if (outcomeStopped) return;
     try { await (await sender()).send({ orgId: companyId, taskId, outcome: "reverted", requestId: randomUUID() }); } catch { log("revert_not_queued"); }
   }
 
@@ -378,6 +385,8 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       // The task is read now and must be this company's: the message's company is the task's own, never a caller's claim.
       const task = await ownTask(taskId);
       if (task === undefined || task.workflow === undefined || task.closedAt !== undefined) return;
+      // Lead 4 L4-LP3Wc: "Decisions in tasks" paused: the send-back is not read and no reflection is queued for it (a stop, not a hold).
+      if ((await pausedKindsFor(runtime.store, { workspaceId: companyId, project: task.project })).has("send_back")) return;
       const sentBack = task.workflow.decisions.filter(isHumanSendBack);
       const round = sentBack.length;
       const latest = sentBack.at(-1);

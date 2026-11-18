@@ -532,6 +532,33 @@ describe("what a finished task tells lessons", () => {
     expect(await rows.sendBack({ workspaceId: COMPANY, project: "payments", taskId: w.taskId, requestId: randomUUID() })).toBeUndefined();
   });
 
+  it("a paused kind is not gathered at all: no host call for comments, no send-back id, no close reason; other kinds are read as before (L4-LP3Wc)", async () => {
+    const w = await world();
+    await w.h.store.update({ key: taskKey(w.taskId), ops: [
+      change.set(["workflow", "pullRequests"], [{ repositoryId: "demo", number: 7, url: "https://github.com/example/demo/pull/7", candidateDigest: "d".repeat(64), required: true, state: "MERGED" }]),
+      change.set(["workflow", "outcome"], "MERGED"),
+      change.set(["workflow", "decisions"], [{ requestId: randomUUID(), workflowRevision: 1, decision: "REQUEST_CHANGES", actorId: "owner", actorRole: "TASK_OWNER", reason: "Use the helper", source: "SEND_BACK" }, { requestId: randomUUID(), workflowRevision: 1, decision: "REJECT", actorId: "owner", actorRole: "TASK_OWNER", reason: "Close it, wrong approach", source: "CLOSE" }]),
+    ] });
+    let hostCalls = 0;
+    const counting = { ...host({ writer: { permission: "write", accountType: "person" } }), async feedback() { hostCalls += 1; return { changeRequest: { headTreeRevision: "c".repeat(40) }, comments: [{ id: "1", kind: "review_comment", url: "", author: "writer", updatedAt: "2026-11-09T10:00:00Z", body: "Use withRetry here", path: "src/a.ts", line: 3 }], threads: [] }; } };
+    const { source } = createLocalLessonSources({ flow: w.h.deps, companyId: COMPANY, ownerId: "local-owner", repos: repos(repo(counting)), now: () => w.h.clock.now });
+    const free = await source.read({ workspaceId: COMPANY, taskId: w.taskId });
+    expect(hostCalls).toBe(1);
+    expect((free!.facts.rest.spans ?? []).map((span) => span.kind).sort()).toEqual(["close_reason", "intent", "pr_comment"]);
+    expect(free!.sendBackRequestIds).toHaveLength(1);
+    // Review comments paused: the code host is not asked, and no comment span or change request exists. The other kinds are read as before.
+    hostCalls = 0;
+    const noComments = await source.read({ workspaceId: COMPANY, taskId: w.taskId, skip: new Set(["pr_comment", "review_finding"]) });
+    expect(hostCalls).toBe(0);
+    expect((noComments!.facts.rest.spans ?? []).map((span) => span.kind).sort()).toEqual(["close_reason", "intent"]);
+    expect(noComments!.sendBackRequestIds).toHaveLength(1);
+    // Decisions in tasks paused: no send-back id and no close reason; the comments are read.
+    const noDecisions = await source.read({ workspaceId: COMPANY, taskId: w.taskId, skip: new Set(["send_back", "close_reason"]) });
+    expect(hostCalls).toBe(1);
+    expect(noDecisions!.sendBackRequestIds).toEqual([]);
+    expect((noDecisions!.facts.rest.spans ?? []).map((span) => span.kind).sort()).toEqual(["intent", "pr_comment"]);
+  });
+
   describe("a findings answer's reason is code's summary, not the person's words", () => {
     const FINDINGS_REASON = "1 accepted, 2 to fix";
     const decisionOf = (requestId: string) => ({ requestId, workflowRevision: 1, decision: "REQUEST_CHANGES", actorId: "owner", actorRole: "TASK_OWNER", reason: FINDINGS_REASON, source: "FINDINGS" });
