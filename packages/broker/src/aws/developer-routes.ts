@@ -1481,14 +1481,15 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
 
 /**
  * Audit gap 11c: the checklist's Linear row reads the project's picked Linear team (linear-connect-routes.ts's `teamPick`, the company's own pick row) where the install wires Linear and has a company
- * layer; elsewhere the row stays optional, as before. A pick is shown by its id and name only (the contract's bounds); a read that fails is the checklist's fixed unreadable answer.
+ * layer, while the company's Linear connection is connected; elsewhere the row stays optional, as before. A pick is shown by its id and name only (the contract's bounds); a read that fails is the checklist's fixed unreadable answer.
  */
 function linearTeamReader(deps: DeveloperRouteDependencies, companyId: string | undefined, project: string): { linearTeam?: () => Promise<{ id: string; name?: string } | undefined> } {
   const connections = deps.developer.linearConnect?.connections;
   if (connections === undefined || companyId === undefined) return {};
   return { linearTeam: async () => {
-    const pick = await connections.teamPick(companyId, project);
-    if (pick === undefined) return undefined;
+    // A pick counts only while the company's Linear connection is live: a disconnected or needs-reconnect workspace leaves the row not done (its pick may outlive the connection).
+    const [connection, pick] = await Promise.all([connections.connection(companyId), connections.teamPick(companyId, project)]);
+    if (pick === undefined || connection?.status !== "connected") return undefined;
     const name = pick.teamName.trim().slice(0, 200);
     return { id: pick.teamId, ...(name === "" ? {} : { name }) };
   } };

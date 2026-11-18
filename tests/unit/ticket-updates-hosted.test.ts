@@ -153,8 +153,10 @@ describe("changing: a company owner or admin, or the project's administrator; a 
     const requestId = randomUUID();
     await put(w, OWNER, "beacon", { requestId, settings: DECISIONS });
     expect(await put(w, OWNER, "beacon", { requestId, settings: DECISIONS })).toMatchObject({ status: 200, body: { settings: DECISIONS } });
-    expect((await put(w, OWNER, "beacon", { requestId, settings: { ...DECISIONS, level: "full" } })).status).toBe(400);
+    expect(await put(w, OWNER, "beacon", { requestId, settings: { ...DECISIONS, level: "full" } })).toEqual({ status: 400, body: { error: { code: "CONFIG_INVALID", message: TICKET_UPDATES_WORDS.requestIdReused } } });
     expect((await readTicketUpdates({ store: w.store, now: () => T0 }, COMPANY_A, "beacon")).revision).toBe(1);
+    // The refused reuse records nothing: the trail holds the one change (the replay is the same event id, kept once by the sink).
+    expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(1);
   });
 });
 
