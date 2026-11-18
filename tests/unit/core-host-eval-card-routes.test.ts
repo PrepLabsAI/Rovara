@@ -1,6 +1,7 @@
 // L4-EVC (DEC 254zzz20 D5, D8): the hosted eval card routes on the deployed API (setup-run-routes.ts): GET eval (the card, dollars only), POST eval-approve (the confirm AND the spend approval in one
-// act: a fresh step-up, the live owner/admin/maintainer rule, the dollars the person saw) (the dollar card; eval-decide and the opt-in eval-health are a second PR). Through the real hosted approvers point, the
+// act: a fresh step-up, the live owner/admin/maintainer rule, the dollars the person saw), POST eval-decide (a waiting item), POST eval-health (the opt-in). Through the real hosted approvers point, the
 // real decision gate and the real eval spend subject over the company's own store.
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -11,6 +12,8 @@ import { createHostedSetupApproval } from "../../packages/broker/src/core-host/s
 import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { evalSpendKey, readEvalSpendRecord } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
+import { deployedSessionMembers } from "../../packages/broker/src/core-host/deployed-decisions.js";
+import { evalHealthState, readEvalHealthRequest } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
 import { readEvalDiscovery } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { CAP, company, filesOf, gitReader, project as PROJECT, reportOf } from "../support/eval-card-world.js";
@@ -112,7 +115,7 @@ describe("GET eval: the card", () => {
   it("answers 'not available' where the deployment wires no eval card", async () => {
     const { person, call } = await hosted({ evalWiring: false });
     expect((await call(get(`${RUN}/eval`), person("p-admin", FAKE_COMPANY, "admin"))).body).toEqual({ error: { code: "NOT_FOUND", message: EVAL_APPROVAL_UNAVAILABLE } });
-    expect((await call(post(`${RUN}/eval-approve`, {}), person("p-admin", FAKE_COMPANY, "admin"))).body).toEqual({ error: { code: "NOT_FOUND", message: EVAL_APPROVAL_UNAVAILABLE } });
+    expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 1 }), person("p-admin", FAKE_COMPANY, "admin"))).body).toEqual({ error: { code: "NOT_FOUND", message: EVAL_APPROVAL_UNAVAILABLE } });
   });
   it("shows nothing of another company's eval (two companies)", async () => {
     const { person, call, reported } = await hosted();
@@ -188,12 +191,65 @@ describe("POST eval-approve: one approval", () => {
   });
 });
 
-describe("the deferred routes are not served here", () => {
-  it("eval-decide and eval-health are not routes of this slice", async () => {
-    const { person, call } = await hosted();
-    for (const tail of ["eval-decide", "eval-health"]) {
-      const answered = await call(post(`${RUN}/${tail}`, {}), person("p-admin", FAKE_COMPANY, "admin")).catch((e: Error) => e);
-      expect(answered instanceof Error || (answered as { status: number }).status === 404).toBe(true);
-    }
+describe("POST eval-decide: a waiting item", () => {
+  async function waiting() {
+    const h = await hosted();
+    await h.reported(FAKE_COMPANY);
+    return { ...h, admin: h.person("p-admin", FAKE_COMPANY, "admin") };
+  }
+  it("approves or rejects the waiting item by the offer the card showed, with a fresh step-up and the live rule; a stale digest is refused", async () => {
+    const h = await waiting();
+    // Seed a waiting item through the broker's own confirm (no approve).
+    const { confirmEvalDiscovery } = await import("../../packages/broker/src/core/setup-agent/eval-discovery.js");
+    const card = (await h.call(get(`${RUN}/eval`), h.admin)).body as { report: { taskId: string; reportDigest: string } };
+    const approval = h.wirings.get(FAKE_COMPANY)!.approval!;
+    await confirmEvalDiscovery({ store: h.world.store, companyId: FAKE_COMPANY, now: () => h.world.clock.now, members: approval.evalMembers, monthlyCap: async () => CAP, readFile: (...a) => h.reader.read!(...a),
+      latest: async () => ({ revision: 1, definition: definition(PROJECT) as never }) }, PROJECT, { taskId: card.report.taskId, reportDigest: card.report.reportDigest, selection: "evals/demo", paths: ["evals/demo/q1.txt", "evals/demo/q2.txt"] }, h.admin.principal);
+    const after = (await h.call(get(`${RUN}/eval`), h.admin)).body as { state: string; spend: { approval: { requestId: string; revision: number; artifactDigest: string } } };
+    expect(after.state).toBe("waiting");
+    const offer = after.spend.approval;
+    const stale = await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: "f".repeat(64) } }), h.admin);
+    expect(stale.status).toBeGreaterThanOrEqual(400);
+    expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("waiting");
+    const dev = h.person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
+    expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), dev)).status).toBe(403);
+    const lapsed = h.person("p-lapsed", FAKE_COMPANY, "admin", {}, 3_600_000);
+    expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), lapsed)).body).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
+    const done = await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), h.admin);
+    expect(done.status, done.raw).toBe(200);
+    expect(done.body).toEqual({ project: PROJECT, decision: "approved" });
+    expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("approved");
+    expect(h.audit.find((e) => e.action === "eval.spend_decision_requested")).toMatchObject({ actor: { id: "p-admin" }, details: { outcome: "approve" } });
+  });
+});
+
+describe("POST eval-health: the opt-in", () => {
+  it("records a person's yes and runs nothing; approving alone never does", async () => {
+    const { world, person, call, reported, audit } = await hosted();
+    await reported(FAKE_COMPANY);
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    expect((await call(post(`${RUN}/eval-approve`, await approveBody(call, admin)), admin)).status).toBe(200);
+    const store = { store: world.store, companyId: FAKE_COMPANY };
+    expect(await evalHealthState(store, PROJECT)).toBe("none");
+    const card = (await call(get(`${RUN}/eval`), admin)).body as { health: { label: string; cost: string; seenCostMicros: number; state: string } };
+    expect(card.health).toMatchObject({ label: "Check my evals now (about $0.60)", cost: "$0.60", state: "none" });
+    const requestId = randomUUID();
+    const yes = await call(post(`${RUN}/eval-health`, { requestId, seenCostMicros: card.health.seenCostMicros }), admin);
+    expect(yes.status, yes.raw).toBe(200);
+    expect(yes.body).toEqual({ project: PROJECT, requested: true, duplicate: false, cost: "$0.60" });
+    expect(audit.find((e) => e.action === "eval.health_requested")).toMatchObject({ actor: { id: "p-admin" }, details: { requestId } });
+    const members = deployedSessionMembers(FAKE_COMPANY, { membershipOf: async () => ({ companyId: FAKE_COMPANY, role: "admin" as OrgRole }), projectGrantRole: async () => undefined });
+    expect(await evalHealthState({ ...store, members }, PROJECT)).toBe("requested");
+    expect(await readEvalHealthRequest({ ...store, members }, PROJECT)).toMatchObject({ requestId, state: "requested", estimateMicros: 600_000 });
+  });
+  it("is refused for a project user, for a stale cost and before any approval", async () => {
+    const { person, call, reported } = await hosted();
+    await reported(FAKE_COMPANY);
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 600_000 }), admin)).body).toMatchObject({ error: { code: "CHANGE_STALE" } });
+    await call(post(`${RUN}/eval-approve`, await approveBody(call, admin)), admin);
+    expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 1 }), admin)).body).toMatchObject({ error: { code: "CHANGE_STALE" } });
+    expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 600_000 }), person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" }))).body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
+    expect((await call(post(`${RUN}/eval-health`, { requestId: "x", seenCostMicros: 600_000 }), admin)).status).toBe(400);
   });
 });
