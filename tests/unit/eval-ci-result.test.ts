@@ -169,12 +169,22 @@ describe("the named check landed", () => {
     const writes: string[] = [];
     const update = model.update.bind(model);
     model.update = (id, patch) => { writes.push(Object.keys(patch).join(",")); return update(id, patch); };
+    // Once told for the run, a later pass does not even read the description again.
+    const reads: string[] = [];
+    const repository = deps.repository;
+    deps.repository = async (...args) => {
+      const home = await repository(...args);
+      if (home === undefined) return home;
+      const getChangeRequest = home.codeHost.getChangeRequest.bind(home.codeHost);
+      return { ...home, codeHost: Object.assign(Object.create(home.codeHost) as typeof home.codeHost, { getChangeRequest: (...call: Parameters<typeof getChangeRequest>) => { reads.push("read"); return getChangeRequest(...call); } }) };
+    };
     setChecks(w, [unit, evals(), { name: "lint", state: "pending", required: false, url: "", runId: "12" }]);
     w.now.value += 5 * MIN;
     await trackTask(deps, TASK_ID);
     w.now.value += 5 * MIN;
     await trackTask(deps, TASK_ID);
     expect(writes).toEqual([]);
+    expect(reads).toEqual([]);
     expect(evalLines(body(w))).toHaveLength(1);
   });
   it("is told again for a re-run, replacing the line (never two)", async () => {
@@ -311,14 +321,14 @@ describe("the description is written carefully", () => {
     const keys = await workspaceKeys({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1");
     const key = pullRequestRecordKey(keys.workspaceKey, "app", w.prs[0]!.number);
     const record = { ...key, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", repositoryUrl: "https://github.com/acme/app", number: w.prs[0]!.number, url: "u", state: "open", headBranch: "b", baseBranch: "main", expectedHeadCommit: w.prs[0]!.head, title: "t", body: bodyOf(), createdByOperationId: "op", updatedAt: new Date(CLOCK).toISOString() };
-    await w.store.put({ item: record as never });
+    await w.store.put({ item: record });
     setChecks(w, [unit, evals()]);
     await trackTask(deps, TASK_ID);
     expect((await pullRequestRecordOf({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1", "app", w.prs[0]!.number))?.body).toBe(body(w));
     // A person's edit (the record no longer matches the host): the line goes in the host's text, the record stays as Rovara wrote it.
     const second = await world(settings());
     const secondKey = pullRequestRecordKey((await workspaceKeys({ store: second.w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1")).workspaceKey, "app", second.w.prs[0]!.number);
-    await second.w.store.put({ item: { ...record, ...secondKey, body: `${bodyOf()}\nrovara wrote this` } as never });
+    await second.w.store.put({ item: { ...record, ...secondKey, body: `${bodyOf()}\nrovara wrote this` } });
     setChecks(second.w, [unit, evals()]);
     await trackTask(second.deps, TASK_ID);
     expect((await pullRequestRecordOf({ store: second.w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1", "app", second.w.prs[0]!.number))?.body).toBe(`${bodyOf()}\nrovara wrote this`);
@@ -348,6 +358,47 @@ describe("the description is written carefully", () => {
   });
 });
 
+describe("the line follows the head and the settings", () => {
+  it("a new head starts again: the old head's line is taken out and its entry is not carried over", async () => {
+    const { w, deps } = await world(settings());
+    setChecks(w, [unit, evals()]);
+    await trackTask(deps, TASK_ID);
+    expect(evalLines(body(w))).toHaveLength(1);
+    const model = w.prs[0]!.model;
+    const branch = model.changeRequests[0]!.sourceBranch;
+    const next = model.commit(branch, { "src/b.ts": "export const b = 2;\n" });
+    model.setChecks(next, [unit]);
+    w.now.value += 5 * MIN;
+    await trackTask(deps, TASK_ID);
+    const stored = await item(w);
+    expect(stored.headSha).toBe(next);
+    expect(stored.ciEval).toMatchObject({ state: "waiting" });
+    expect(stored.ciEval?.announced).toBeUndefined();
+    expect(evalLines(body(w))).toEqual([]);
+  });
+  it("un-naming the check drops the entry and leaves the description as it is", async () => {
+    const { w, deps } = await world(settings());
+    setChecks(w, [unit, evals()]);
+    await trackTask(deps, TASK_ID);
+    expect((await item(w)).ciEval).toBeDefined();
+    (deps as { ciEvidence?: unknown }).ciEvidence = () => ({ ...DEFAULT_CI_EVIDENCE_SETTINGS });
+    w.now.value += 5 * MIN;
+    await trackTask(deps, TASK_ID);
+    expect((await item(w)).ciEval).toBeUndefined();
+    expect((await item(w)).ciEvalSince).toBeUndefined();
+  });
+  it("is never written to a pull request that is not open", async () => {
+    const { w } = await world(settings());
+    const model = w.prs[0]!.model;
+    model.update(model.changeRequests[0]!.id, { state: "closed" });
+    const ref = { repository: { url: "https://github.com/acme/app" }, id: String(w.prs[0]!.number), url: model.crUrl(String(w.prs[0]!.number)) };
+    const host = (await w.host.repository("web", 1, "app", IMPLICIT_COMPANY_ID))!.codeHost;
+    const sink = { host, store: w.store, companyId: IMPLICIT_COMPANY_ID, workspaceId: "ws-1", repositoryId: "app", number: w.prs[0]!.number, ref, scope: { orgId: IMPLICIT_COMPANY_ID }, now: () => CLOCK };
+    expect(await writeEvalDescription(sink, evalCiLine({ outcome: "passed" }))).toBe("not_open");
+    expect(body(w)).toBe(bodyOf());
+  });
+});
+
 describe("company scoping", () => {
   it("asks for the settings of the task it follows, and reads the check's run and report under that company's scope only", async () => {
     const { w, deps, fake, asked } = await world(settings());
@@ -373,7 +424,7 @@ describe("company scoping", () => {
     const { w } = await world(settings());
     const theirs = pullRequestRecordKey((await workspaceKeys({ store: w.store, companyId: OTHER_ORG }, "ws-1")).workspaceKey, "app", w.prs[0]!.number);
     expect(theirs).not.toEqual(pullRequestRecordKey((await workspaceKeys({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1")).workspaceKey, "app", w.prs[0]!.number));
-    await w.store.put({ item: { ...theirs, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", number: w.prs[0]!.number, body: bodyOf(), updatedAt: "2026-11-09T10:00:00.000Z" } as never });
+    await w.store.put({ item: { ...theirs, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", number: w.prs[0]!.number, body: bodyOf(), updatedAt: "2026-11-09T10:00:00.000Z" } });
     const ref = { repository: { url: "https://github.com/acme/app" }, id: String(w.prs[0]!.number), url: w.prs[0]!.model.crUrl(String(w.prs[0]!.number)) };
     const host = (await w.host.repository("web", 1, "app", IMPLICIT_COMPANY_ID))!.codeHost;
     const wrote = await writeEvalDescription({ host, store: w.store, companyId: IMPLICIT_COMPANY_ID, workspaceId: "ws-1", repositoryId: "app", number: w.prs[0]!.number, ref, scope: { orgId: IMPLICIT_COMPANY_ID }, now: () => CLOCK }, evalCiLine({ outcome: "passed" }));
@@ -388,9 +439,11 @@ describe("the tracking service passes the settings port and the report parser on
     const w = await serviceHost({ repositories: ["app"] });
     const common = { flow: w.h.deps, registry: w.registry, companyId: SERVICE_ORG, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }), people: w.people, settings: fixedCodeSettings({ allowSelfApproval: true, mergeMethod: "squash", codeReviewers: [], revision: 1 }), now: () => w.clock.ms };
     const ciEvidence = (): unknown => settings();
-    const given = createMergeTrackingService({ ...common, ciEvidence, reportParser: parsePipelineReport });
-    expect(given.deps.ciEvidence).toBe(ciEvidence);
-    expect(given.deps.reportParser).toBe(parsePipelineReport);
+    const given = createMergeTrackingService({ ...common, ciEvidence: () => ciEvidence(), reportParser: (text) => parsePipelineReport(text) });
+    expect(typeof given.deps.ciEvidence).toBe("function");
+    expect(typeof given.deps.reportParser).toBe("function");
+    expect(given.deps.ciEvidence?.({} as never)).toMatchObject({ evalCheck: { name: "evals" } });
+    expect(given.deps.reportParser?.("not a report")).toEqual({ kind: "not_report" });
     const none = createMergeTrackingService(common);
     expect(Object.hasOwn(none.deps, "ciEvidence")).toBe(false);
     expect(Object.hasOwn(none.deps, "reportParser")).toBe(false);
