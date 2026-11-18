@@ -120,6 +120,24 @@ describe("what it lists", () => {
     expect(code).toMatchObject({ pinnedVersion: 1, currentVersion: 1, latestVersion: 2, updateAvailable: { from: 1, to: 2 }, access: "manage", status: "active" });
   });
 
+  it("a project-owned agent (the shape hosted staging stores for every one of company A's agents, live test run 2) is listed with its project owner, never a 503; it is no one's own agent", async () => {
+    const w = await seeded();
+    const made = await w.agents(A).create({ orgId: A, name: "Project agent", by: ADA });
+    await w.store.update({ key: agentKey(A, made.agentId, "META"), ops: [change.set(["owner"], { kind: "project", project: "demo-tasklog" })] });
+    const answer = await w.get(A, "owner");
+    expect(answer.status).toBe(200);
+    expect(AgentDirectoryResponseSchema.safeParse(answer.body).success).toBe(true);
+    expect(rows(answer).find((row) => row.name === "Project agent")).toMatchObject({ owner: { kind: "project", project: "demo-tasklog" }, needsLaterConnectors: AGENT_CANT_RUN_ON_HOSTED });
+    expect(names(await w.get(A, "owner", "scope=mine", ADA))).toEqual(["Release notes A"]);
+    // A project owner whose name is not a project name is unreadable: the whole answer is the fixed 503, never a shorter list.
+    await w.store.update({ key: agentKey(A, made.agentId, "META"), ops: [change.set(["owner"], { kind: "project", project: "../Not A Name" })] });
+    const bad = await w.get(A, "owner");
+    expect(bad.status).toBe(503);
+    expect(bad.raw).not.toContain("Not A Name");
+    // Another company's reader never sees it.
+    expect(names(await w.get(B, "owner"))).not.toContain("Project agent");
+  });
+
   it("an archived agent is shown as archived", async () => {
     const w = world();
     const made = await w.agents(A).create({ orgId: A, name: "Old one", by: ADA });
