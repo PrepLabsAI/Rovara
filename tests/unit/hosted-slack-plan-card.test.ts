@@ -14,6 +14,7 @@ import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broke
 import { hostedDecisionService, type DeployedPeople } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { hostedThreadHandler, hostedThreadNotification } from "../../packages/broker/src/core-host/thread-notification.js";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
+import type { StartExtrasInput } from "../../packages/broker/src/core/task-flow/deps.js";
 import { ticketSessionStartExtras } from "../../packages/broker/src/aws/hosted-intake.js";
 import { hostedSlackThreads } from "../../packages/broker/src/aws/slack-thread-channel.js";
 import { readApprovalCard } from "../../packages/broker/src/core/channel/cards.js";
@@ -276,9 +277,9 @@ describe("what needs a person also reaches the hosted thread", () => {
 
   it("the notice service sees the company's Slack as a chat (it saw none before), and the thread is the one the task was started from, named by the person's session id", async () => {
     const w = await sweepWorld();
-    expect(w.notification.registry!.names("channel")).toEqual([SLACK_CHANNEL]);
-    expect(w.notification.registry!.get("channel", SLACK_CHANNEL)).toBeDefined();
-    expect(w.notification.registry!.names("email")).toEqual(w.registry.names("email"));
+    expect(w.notification.registry.names("channel")).toEqual([SLACK_CHANNEL]);
+    expect(w.notification.registry.get("channel", SLACK_CHANNEL)).toBeDefined();
+    expect(w.notification.registry.names("email")).toEqual(w.registry.names("email"));
     expect(await w.notification.thread!(ORG, w.sessionId)).toEqual({ conversation: CONVERSATION, personId: w.developerId });
     // The thread's own "done" line is the milestones' where they run; without them the notice service tells it.
     expect(w.notification.doneToldInThread!()).toBe(true);
@@ -334,7 +335,7 @@ describe("what needs a person also reaches the hosted thread", () => {
 });
 
 describe("a start from a chat thread gets its session (the plan card and the notices are told through it)", () => {
-  const input = (client: string, ticket = false) => ({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", project: "payments", title: "Add a retry", principal: principalOf("dev-a"), client, receivedAt: "2026-11-15T10:00:00.000Z", ...(ticket ? { ticket: { system: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" } } : {}) });
+  const input = (client: string, ticket = false): StartExtrasInput => ({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", project: "payments", title: "Add a retry", workspaceId: "ws-1", principal: principalOf("dev-a"), client, receivedAt: "2026-11-15T10:00:00.000Z", ...(ticket ? { ticket: { system: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" } } : {}) });
   it("only a start from Slack, only where chat threads are served; a web start and a start with no chat seam get nothing (as before)", () => {
     const chat = ticketSessionStartExtras(ORG, { chatThreads: true });
     expect(chat(input("slack")).sessionId).toBe(taskSessionId(input("slack").taskId));
@@ -363,6 +364,14 @@ describe("the thread's moments are written for a session that follows a thread, 
     await ticketMomentsOnChange({ store: w.store, milestones, now: () => w.fake.clock.now, follows: async () => true, ticketBindings: false })(change);
     expect((await planRows()).length).toBeGreaterThan(0);
   });
+
+  it("a table that serves one company writes nothing for another company's task", async () => {
+    const w = await world();
+    const milestones = createDocumentMilestones({ store: w.store, now: () => w.fake.clock.now });
+    const change = { orgId: ORG, sessionId: w.sessionId, session: { subject: { kind: "task", taskId: w.task.taskId } }, summary: { display: { state: "needs_you" } }, ended: false } as never;
+    await ticketMomentsOnChange({ store: w.store, milestones, now: () => w.fake.clock.now, follows: async () => true, ticketBindings: false, companyId: OTHER })(change);
+    expect((await w.store.query({ pk: `DEVTASK#${w.task.taskId}` })).items.filter((item) => JSON.stringify(item).includes("plan_ready"))).toEqual([]);
+  });
 });
 
 describe("the wiring (guards on the source, beside the behaviour above)", () => {
@@ -386,7 +395,7 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
     expect(source).not.toMatch(/gate\.decide|gate\.verify/u);
     const jobs = read("packages/broker/src/aws/core-job-services.ts");
     expect(jobs).toContain("options.threadMoments === true && deps.milestones !== undefined");
-    expect(jobs).toContain("ticketBindings: false");
+    expect(jobs).toContain("ticketBindings: false, companyId");
   });
 });
 
