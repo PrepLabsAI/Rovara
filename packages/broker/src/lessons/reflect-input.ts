@@ -89,7 +89,7 @@ export const MAX_SPANS = 100;
 export const MAX_INPUT_CHARS = 20_000;
 /** Kinds whose text is a person's own words, so a quote inside them has another author. */
 const FREE_TEXT: ReadonlySet<SpanKind> = new Set(["intent", "plan", "send_back", "review_finding", "remembered", "close_reason", "fact", "ci_failure", "pr_comment", "plan_comment", "design_comment"]);
-const PRIORITY: Record<SpanKind, number> = { remembered: 0, human_edit: 1, send_back: 2, plan_comment: 2, design_comment: 2, pr_comment: 3, close_reason: 4, review_finding: 5, fact: 6, outcome: 7, ci_failure: 8, plan: 9, intent: 10, loaded_lesson: 11 };
+const PRIORITY: Record<SpanKind, number> = { remembered: 0, human_edit: 1, send_back: 2, plan_comment: 2, design_comment: 2, pr_comment: 3, close_reason: 4, review_finding: 5, fact: 6, outcome: 7, ci_failure: 8, plan: 9, intent: 10, loaded_lesson: 11, ticket_comment: 12 };
 /** A comment that led to a change ranks with a send-back (a person said what was wrong and the code changed); one that did not ranks after the close reason. */
 const rankOf = (span: EvidenceSpan): number => (span.kind === "pr_comment" && span.ledToChange === true ? PRIORITY.send_back : PRIORITY[span.kind]);
 

@@ -57,7 +57,7 @@ export function kindsStoppedDuringTask(flags: ProjectFlags, life: TaskLifetime |
 }
 
 /** What a read of the project's stopped kinds answers when the store cannot be read: every kind that a person can stop (read nothing). */
-export const ALL_PAUSABLE_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>(["send_back", "close_reason", "pr_comment", "review_finding", "human_edit", "remembered", "outcome", "ci_failure"]);
+export const ALL_PAUSABLE_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>(["send_back", "close_reason", "pr_comment", "review_finding", "human_edit", "remembered", "outcome", "ci_failure", "ticket_comment"]);
 
 /**
  * The kinds not to read for the project now, read live: those stopped now and, when `life` is given, those stopped at any time during the task's life. Never throws: an unreadable store answers "all of them" (fail closed).

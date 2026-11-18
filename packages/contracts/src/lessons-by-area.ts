@@ -75,7 +75,7 @@ export type TeamLessonsAnswer = z.infer<typeof TeamLessonsAnswerSchema>;
 // ---- "Where Rovara learns from" ------------------------------------------------------------------------------------------------------------------------------------------------
 
 /** The kinds of source one row stands for, in the order the list shows them. The words are fixed here, never taken from stored text. */
-export const LEARNING_SOURCE_KEYS = ["task_decisions", "review_comments", "pr_edits", "remember", "after_merge", "ci"] as const;
+export const LEARNING_SOURCE_KEYS = ["task_decisions", "review_comments", "pr_edits", "remember", "after_merge", "ci", "tickets"] as const;
 export type LearningSourceKey = (typeof LEARNING_SOURCE_KEYS)[number];
 export const LEARNING_SOURCE_WORDS: Readonly<Record<LearningSourceKey, { label: string; detail: string }>> = {
   task_decisions: { label: "Decisions in tasks", detail: "Send-backs and close reasons" },
@@ -84,6 +84,7 @@ export const LEARNING_SOURCE_WORDS: Readonly<Record<LearningSourceKey, { label: 
   remember: { label: "Things people ask Rovara to remember", detail: "Notes people write on purpose" },
   after_merge: { label: "After merge", detail: "Reverts and what happened to merged work" },
   ci: { label: "Failing checks", detail: "Test and build failures. No log text is kept" },
+  tickets: { label: "Ticket comments", detail: "Comments on the tickets Rovara works from" },
 };
 
 export const LearningSourceRowSchema = z.object({
