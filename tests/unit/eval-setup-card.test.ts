@@ -187,6 +187,18 @@ describe("a changed eval set (D6)", () => {
     expect(answer.evalSpend).toMatchObject({ state: "waiting", card: { needsApproval: "Needs approval: your eval set grew past the approved $1.80" } });
     expect(w.approved).toHaveLength(1);
   });
+  it("the preview says 'inside' only for the approved suite with the same model and command: a second suite, a changed model or a changed command read as changed", async () => {
+    const { w } = await approvedOnce();
+    const sameSet = await w.run(filesOf(2), reportOf(2));
+    expect((await sameSet.card()).suites[0]!.versusApproved).toEqual({ within: true, words: "Inside the approved cost. A change to the model, judge or command asks again." });
+    const otherSelection = await w.run(filesOf(2), reportOf(2, { selection: "evals/other" }));
+    expect((await otherSelection.card()).suites[0]!.versusApproved).toEqual({ within: false, words: "Needs approval: the model, judge or command of your eval changed" });
+    const otherModel = await w.run(filesOf(2), reportOf(2, { model: "gemini-2.5-pro", modelVersion: "gemini-2.5-pro-001" }));
+    expect((await otherModel.card()).suites[0]!.versusApproved).toMatchObject({ within: false });
+    const c = { ...command, args: ["evals/run.js", "--fast", "--out", "rovara-measures.json"] };
+    const otherCommand = await w.run(filesOf(2), reportOf(2, { command: c, commandFingerprint: evalCommandFingerprintOf(c, reportPath) }));
+    expect((await otherCommand.card()).suites[0]!.versusApproved).toMatchObject({ within: false });
+  });
   it("the new card, approved, runs again with the new dollars and a new limit", async () => {
     const { w } = await approvedOnce();
     const second = await w.run(filesOf(3), reportOf(3));

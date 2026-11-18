@@ -211,6 +211,10 @@ describe("POST eval-decide: a waiting item", () => {
     const stale = await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: "f".repeat(64) } }), h.admin);
     expect(stale.status).toBeGreaterThanOrEqual(400);
     expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("waiting");
+    // An offer id the card did not show (right shape, another digest) is refused before any proof is made.
+    const foreign = await h.call(post(`${RUN}/eval-decide`, { requestId: `eval-${"a".repeat(40)}-${offer.revision}`, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), h.admin);
+    expect(foreign.body).toMatchObject({ error: { code: "CHANGE_STALE" } });
+    expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("waiting");
     const dev = h.person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
     expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), dev)).status).toBe(403);
     const lapsed = h.person("p-lapsed", FAKE_COMPANY, "admin", {}, 3_600_000);
@@ -224,6 +228,14 @@ describe("POST eval-decide: a waiting item", () => {
 });
 
 describe("POST eval-health: the opt-in", () => {
+  it("a project reader sees the approved card but no health block", async () => {
+    const { person, call, reported } = await hosted();
+    await reported(FAKE_COMPANY);
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    await call(post(`${RUN}/eval-approve`, await approveBody(call, admin)), admin);
+    expect((await call(get(`${RUN}/eval`), admin)).body["health"]).toBeDefined();
+    expect((await call(get(`${RUN}/eval`), person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" }))).body["health"]).toBeUndefined();
+  });
   it("is not offered where no health runner reads the yes: no button on the card, and the route says it is not available", async () => {
     const { person, call, reported } = await hosted({ healthRuns: false });
     await reported(FAKE_COMPANY);

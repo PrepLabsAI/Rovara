@@ -42,7 +42,7 @@ import { EvalDiscoveryConfirmBodySchema } from "@agentx/contracts";
 import { readEvalCard } from "../core/setup-agent/eval-card.js";
 import { confirmEvalDiscovery, type EvalDiscoveryConfirmDeps } from "../core/setup-agent/eval-discovery.js";
 import { EvalHealthRequestBodySchema, requestEvalHealthCheck } from "../core/setup-agent/eval-health-request.js";
-import { EVAL_SPEND_KIND } from "../core/setup-agent/eval-spend.js";
+import { EVAL_SPEND_KIND, readEvalSpendRecord } from "../core/setup-agent/eval-spend.js";
 import { SetupAgentStartBodySchema, SetupAgentStopBodySchema, getSetupAgent, readState, startSetupAgent, stopSetupAgent, type SetupAgentDeps } from "../core/setup-agent/agent.js";
 import type { SetupApplyDeps } from "../core/setup-agent/apply.js";
 import { SETUP_APPLY_KIND, SetupConfirmBodySchema, confirmSetupAgent, discardSetupApply, readSetupApply, setupCandidateRisk, waitingSetupApply } from "../core/setup-agent/apply.js";
@@ -66,6 +66,7 @@ export const SETUP_RUN_AUDIT_UNAVAILABLE = "The record of this change could not 
 export const SETUP_APPROVAL_UNAVAILABLE = "Approving a project's setup isn't available on this install yet.";
 export const SETUP_NOTHING_WAITING = "There is no setup waiting for a decision. Open the project's setup again.";
 export const SETUP_DECIDE_ON_A_PAGE = "A setup is decided right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
+export const EVAL_DECIDE_STALE = "That eval approval changed since you looked. Read it again.";
 export const EVAL_APPROVAL_UNAVAILABLE = "Approving an eval's spend isn't available on this install yet.";
 export const SETUP_NO_HOST_WAITING = "That website is not waiting for a decision any more. Open the project's setup again.";
 export const SETUP_PROOF_UNAVAILABLE = "Your approval could not be proved just now, so nothing was decided. Try again.";
@@ -459,6 +460,9 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
       if (tail === "eval-decide") {
         const body = parsed(EvalDecideBodySchema, raw);
+        // The offer is the waiting item's own (its digest and revision), never an id the card did not show.
+        const waiting = await readEvalSpendRecord({ store: flow.store, companyId }, project);
+        if (waiting === undefined || body.requestId !== `eval-${waiting.digest.slice(0, 40)}-${String(waiting.revision)}`) throw agentXError("CHANGE_STALE", EVAL_DECIDE_STALE);
         await recorded(input, auditEvent(input, "eval.spend_decision_requested", `eval.decide:${companyId}:${project}:${personId}:${stamp}`, project, basis, { outcome: body.outcome }));
         await decideEvalItem(input, approval, project, body, stepUp, input.principal);
         return json(200, { project, decision: body.outcome === "approve" ? "approved" : "rejected" });

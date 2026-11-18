@@ -5,6 +5,7 @@ import type { DocumentStore, OrgId, Principal } from "@agentx/contracts";
 import { developerIdOf } from "../sessions/create.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
+import { evalCommandFingerprintOf } from "@agentx/contracts";
 import { evalEstimateOf, evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
 import { evalHealthState } from "./eval-health-request.js";
 import { readEvalSpendItem, readEvalSpendRecord, roleFor } from "./eval-spend.js";
@@ -64,17 +65,21 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
       const dollars = evalProposalDollars(suite.questions.length, suite, monthlyCap);
       if (dollars === undefined) continue;
       const { estimate } = evalEstimateOf(suite.questions.length, suite);
-      const within = standing?.dollars !== undefined && dollars.perCheckHighMicros <= standing.dollars.perCheckHighMicros && estimate.calls <= standing.budget.maximum.calls && estimate.costMicros <= standing.budget.maximum.costMicros;
+      // "Inside" is said only for the approved suite itself, with the same model, version, row and command (what a card can see without reading files); a different suite or envelope reads as changed. The judge is
+      // checked at the confirm, so the words say the cost is inside and that a changed model, judge or command asks again.
+      const sameSuite = standing !== undefined && suite.selection === standing.selection && suite.model === standing.inputs.model && suite.modelVersion === standing.inputs.modelVersion
+        && suite.catalogRowId === standing.inputs.catalogRowId && evalCommandFingerprintOf(suite.command, suite.report) === standing.inputs.commandFingerprint;
+      const within = sameSuite && standing?.dollars !== undefined && dollars.perCheckHighMicros <= standing.dollars.perCheckHighMicros && estimate.calls <= standing.budget.maximum.calls && estimate.costMicros <= standing.budget.maximum.costMicros;
       suites.push({ selection: suite.selection, files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
         seen: { perCheckHighMicros: dollars.perCheckHighMicros, monthlyCapMicros: dollars.monthlyCapMicros },
-        ...(standing?.dollars === undefined ? {} : { versusApproved: within ? { within: true, words: "Still inside what you approved: no new approval needed" } : { within: false, words: evalAsksAgainWords({ reason: "grew", approvedHighMicros: standing.dollars.perCheckHighMicros }) } }) });
+        ...(standing?.dollars === undefined ? {} : { versusApproved: within ? { within: true, words: "Inside the approved cost. A change to the model, judge or command asks again." } : { within: false, words: evalAsksAgainWords({ reason: sameSuite ? "grew" : "changed", approvedHighMicros: standing.dollars.perCheckHighMicros }) } }) });
     }
   }
   const state: EvalCardView["state"] = found?.state === "reported" ? "propose"
     : item === undefined ? (found === undefined ? "none" : "waiting")
       : item.state === "waiting" ? "waiting" : item.state === "approved" ? "approved" : item.state === "rejected" ? "rejected" : "renew";
   const card = item?.card;
-  const health = deps.healthRuns === true && item?.state === "approved" && card !== undefined && record !== undefined
+  const health = deps.healthRuns === true && role !== undefined && item?.state === "approved" && card !== undefined && record !== undefined
     ? { state: await evalHealthState(table, project), label: card.healthRun.label, cost: card.healthRun.cost, seenCostMicros: record.plan.estimate.costMicros }
     : undefined;
   return {
