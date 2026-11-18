@@ -27,7 +27,7 @@ const CORE = { engine: "core", areas: { flow: "core", build: "core", merge: "cor
 beforeAll(async () => { await loadSlackBroker(); });
 
 /** A company-mode broker (one Slack workspace of company A, one linked person) over a fake core entry that records each reply it is given. */
-async function world(options: { entry?: Partial<CoreTaskEntry> | null; stamp?: boolean; guard?: Record<string, unknown> | null; company?: string } = {}) {
+async function world(options: { entry?: "none" | "no-thread-input"; stamp?: boolean; guard?: Record<string, unknown> | null; company?: string } = {}) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
   const store = new MemoryDocumentStore();
   const company = options.company ?? A;
@@ -39,16 +39,17 @@ async function world(options: { entry?: Partial<CoreTaskEntry> | null; stamp?: b
   const answerWith: { value: ChatThreadInputResult | Error } = { value: { outcome: "captured", notice: "note_saved" } };
   const entry: CoreTaskEntry = {
     route: vi.fn(async () => undefined),
-    threadInput: vi.fn(async (caller, input) => {
-      calls.push({ caller, input: input as unknown as Record<string, unknown> });
-      if (answerWith.value instanceof Error) throw answerWith.value;
-      return answerWith.value;
+    ...(options.entry === "no-thread-input" ? {} : {
+      threadInput: vi.fn(async (caller, input) => {
+        calls.push({ caller, input: input as unknown as Record<string, unknown> });
+        if (answerWith.value instanceof Error) throw answerWith.value;
+        return answerWith.value;
+      }),
     }),
-    ...(options.entry ?? {}),
   };
   const module = await loadSlackBroker();
   const handler = module.createAwsBrokerHandler({ ...h.brokerInput, store, workspaces, companies: { companyOf: async (id: string) => (id === PERSON ? company : undefined) },
-    developer: { ...h.brokerInput.developer!, slackTeamId: "T0OTHER000", ...(options.entry === null ? {} : { coreTasks: entry }) } } as never);
+    developer: { ...h.brokerInput.developer!, slackTeamId: "T0OTHER000", ...(options.entry === "none" ? {} : { coreTasks: entry }) } } as never);
   if (options.stamp !== false) h.db.set({ ...engineStampKey(TASK), coreEngine: CORE });
   if (options.guard !== null) {
     h.db.set({
@@ -147,7 +148,7 @@ describe("a reply the core is never asked about", () => {
   });
 
   it("an install with no core entry (or one that takes no thread input) refuses as the old path always did, with nothing written", async () => {
-    for (const entry of [null, { threadInput: undefined }] as const) {
+    for (const entry of ["none", "no-thread-input"] as const) {
       const w = await world({ entry });
       expect(JSON.parse((await w.note()).body)).toEqual({ outcome: "refused" });
     }
