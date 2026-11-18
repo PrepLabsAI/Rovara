@@ -170,6 +170,21 @@ describe("a task keeps the rules it started under (the pin)", () => {
     expect(pinTwo?.playbook?.file.rules).toContain("RULES-TWO");
   });
 
+  it("a pinned task never reads the company's rules or the file live, even where the seam has both sources: the pin wins over a newer live answer", async () => {
+    const { h, broker, model } = await setup({ file: FILE, company: [RULES] });
+    h.deps.standingInstructions = broker;
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true });
+    const pin = ((await h.store.get(workspaceKey(COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord).standingPin;
+    const newer = fakeCompanyInstructionsSource([{ version: "99", rules: [{ text: "LIVE-NEWER-RULE", priority: "required" }] }]);
+    model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: LIVE-NEWER-FILE" });
+    const withSources = createStandingInstructions({ companyId: COMPANY, company: newer, pinsContent: true });
+    const block = (await withSources.forOperation({ project: "payments", mode: "PLAN", pinned: pin }))!;
+    expect(block.company?.version).toBe("3");
+    expect(block.text).not.toContain("LIVE-NEWER-RULE");
+    expect(block.text).toContain("PROJECT-RULE");
+    expect(newer.asked).toEqual([]);
+  });
+
   it("a task that starts with no How we work file and no company rules pins nothing, and its steps carry no block", async () => {
     const { h, dispatcher } = await setup({});
     const { workspace, machineId } = await startedAndPrepared(h, dispatcher);
