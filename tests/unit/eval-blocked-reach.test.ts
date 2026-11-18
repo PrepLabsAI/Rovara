@@ -76,11 +76,15 @@ describe("a sealed eval that tried to reach something else is named, in fixed wo
 });
 
 describe("review fixes: model route, causes and cost", () => {
-  it("a connection to a model host (any catalog host, or an Azure suffix) is the model route, never 'blocked'", () => {
-    for (const host of ["api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "us-central1-aiplatform.googleapis.com", "myres.openai.azure.com"]) {
-      expect(run(`Error: getaddrinfo ENOTFOUND ${host}`), host).toMatchObject({ code: "exited" });
+  it("a connection to a model host (a host the sandbox pinned to the helper, or a pinned suffix) is the model route, never 'blocked'", () => {
+    const modelRoute = { hosts: ["api.openai.com", "api.anthropic.com", "gateway.customer.example"], suffixes: ["openai.azure.com"] };
+    const named = (output: string) => diagnoseEvalFailure({ phase: "run", exitCode: 1, output, modelRoute });
+    for (const host of ["api.openai.com", "api.anthropic.com", "gateway.customer.example", "generativelanguage.googleapis.com", "us-central1-aiplatform.googleapis.com", "myres.openai.azure.com", "API.OpenAI.com"]) {
+      expect(named(`Error: getaddrinfo ENOTFOUND ${host}`), host).toMatchObject({ code: "exited" });
     }
-    expect(run("requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.openai.com', port=443): Max retries exceeded (Caused by NameResolutionError(\"Failed to resolve 'api.openai.com'\"))").code).toBe("exited");
+    expect(named("requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.openai.com', port=443): Max retries exceeded (Caused by NameResolutionError(\"Failed to resolve 'api.openai.com'\"))").code).toBe("exited");
+    // Not on the route: still named. A route is only ever an exclusion.
+    expect(named("Error: getaddrinfo ENOTFOUND api.example.com").code).toBe("blocked_connection");
   });
 
   it("a pool line with another cause (a read timeout, an SSL error) and a connection reset are not 'blocked'", () => {

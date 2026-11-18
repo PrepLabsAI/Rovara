@@ -708,7 +708,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         const reportTarget = join(checkout, config.report.cwd, config.report.argument);
         const readReport = (notBeforeMs: number) => readContainedReport({ root: checkout, cwd: config.report.cwd, argument: config.report.argument, maxBytes: TEST_REPORT_MAX_BYTES, notBeforeMs });
         /** A run that left no readable report AND did not end well is a failed eval with a named cause; one that ended well without a report reads as it always did (no measures file). */
-        const failed = (run: Awaited<ReturnType<typeof sealedRun>>): EvalSandboxRunFailure => new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "run", exitCode: run.code, timedOut: run.timedOut, output: run.output, secrets }));
+        const failed = (run: Awaited<ReturnType<typeof sealedRun>>): EvalSandboxRunFailure => new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "run", exitCode: run.code, timedOut: run.timedOut, output: run.output, secrets, modelRoute: { hosts: block.block.hosts, suffixes: block.block.suffixesNotBlockedByName } }));
         const firstRun = await sealedRun(input.runs);
         const firstRead = await readReport(firstRun.notBeforeMs);
         let notBeforeMs = firstRun.notBeforeMs;
