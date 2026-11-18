@@ -212,6 +212,33 @@ describe("runDesignReview: model keys and tools", () => {
     expect(() => runtimeFor({ purpose: "reviewer", keySlot: "slot-other", model: { provider: "p", modelId: "strong" }, system: "s", tools: [] })).toThrow(/slot/);
   });
 
+  it("ends a reviewer on a gateway 401 without another turn or a replacement session", async () => {
+    const { binding, deliveries } = await setup(["critic"], false);
+    const refused = failedTurn({ stopReason: "error", errorMessage: "Anthropic request failed; HTTP 401 authentication_error", provider: "anthropic" })!;
+    const { ports, opened } = fakePorts({ answers: { "slot-critic": [refused, block([finding("1")])] } }, deliveries);
+    const result = await runDesignReview(binding, ports);
+    expect(result.reviewers[0]).toMatchObject({ status: "no_result", failure: "model_failed" });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.prompts).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ aborted: true, disposed: true });
+    expect(result.findings).toEqual([]);
+  });
+
+  it("keeps the first slot key evidence after token refresh and does not renew just to report it", async () => {
+    const { binding } = await setup(["critic"]);
+    let now = Date.now(), asks = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const runtimeFor = slotRuntimeFor({ controlPlaneUrl: "https://broker.invalid", capability: "fake", proxyUrl: "https://proxy.invalid", binding, environment: {},
+        fetch: async () => Response.json({ baseUrl: "https://proxy.invalid", apiKey: `slot-token-${++asks}`, expiresAt: now + 120_000 }) });
+      const critic = runtimeFor({ purpose: "reviewer", keySlot: "slot-critic", model: { provider: "p", modelId: "strong" }, system: "s", tools: [] });
+      expect(await critic.keyId!()).toBe(modelKeyIdOf("slot-token-1"));
+      now += 140_000;
+      expect(await critic.keyId!()).toBe(modelKeyIdOf("slot-token-1"));
+      expect(asks).toBe(1);
+    } finally { clock.mockRestore(); }
+  });
+
   it("modelAccessSource without a slot asks the operation's own key, as before", async () => {
     const urls: string[] = [];
     const fetchStub = (async (url: string) => { urls.push(url); return new Response(JSON.stringify({ baseUrl: "https://p.invalid", apiKey: "k", expiresAt: Date.now() + 3_600_000 })); }) as typeof fetch;

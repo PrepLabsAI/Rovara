@@ -1609,15 +1609,25 @@ async function runTask(
         const designReview = dependencies.designReview;
         if (designReview === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this worker cannot run a design review");
         monitor.stop();
-        await runDesignReviewOperation({
-          binding: designReviewBinding, artifactSink,
-          ports: {
-            loadPacket: designReview.loadPacket,
-            openSession: createReviewSessionOpener({ rootPath: dependencies.rootPath, ...reviewFileToolsOf(fileTools), runtimeFor: designReview.runtimeFor(designReviewBinding), onDiagnostic, ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }), ...(companyStandingInstructions === undefined ? {} : { standingInstructions: companyStandingInstructions }) }),
-            progress: async (message) => { await emit("progress", { message }); },
-          },
-          options: { signal: verificationStop.signal },
-        });
+        const reviewerUsage: Promise<void>[] = [];
+        try {
+          await runDesignReviewOperation({
+            binding: designReviewBinding, artifactSink,
+            ports: {
+              loadPacket: designReview.loadPacket,
+              openSession: createReviewSessionOpener({ rootPath: dependencies.rootPath, ...reviewFileToolsOf(fileTools), runtimeFor: designReview.runtimeFor(designReviewBinding), onDiagnostic, onUsage: (payload) => {
+                const sent = emit("usage", usageForControlPlane(redactCredentials(payload), dependencies.model), { urgent: true });
+                reviewerUsage.push(sent);
+                void sent.catch(() => undefined);
+              }, ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }), ...(companyStandingInstructions === undefined ? {} : { standingInstructions: companyStandingInstructions }) }),
+              progress: async (message) => { await emit("progress", { message }); },
+            },
+            options: { signal: verificationStop.signal },
+          });
+        } finally {
+          // Failed, cancelled and successful reviewers all reach the same task/day ledger before this run ends.
+          await Promise.all(reviewerUsage);
+        }
       } else if (workflowDependencies === undefined) {
         await promptAndSettle(diagnosing ? `${invocation.payload.prompt}\n\n${diagnosisInstructions(manifest.repositories)}` : settingUpDraft ? `${invocation.payload.prompt}\n\n${setupProposalInstructions(manifest.repositories, { metaRepo: invocation.payload.setupMetaRepo })}` : specBinding !== undefined ? `${invocation.payload.prompt}\n\n${specWriteInstructions(specBinding)}` : taskPrompt);
       } else {

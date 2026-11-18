@@ -25,7 +25,11 @@ export function createHostedDesignReview(options: HostedReviewerOptions & { env:
         return price === undefined ? undefined : { inputUsdPerMTok: price.input, outputUsdPerMTok: price.output, cacheReadUsdPerMTok: price.cacheRead, cacheWriteUsdPerMTok: price.cacheWrite };
       },
       capCeilingUsd: async (orgId) => orgId !== companyId ? 0 : (await reviewers.authority())?.companyLimitUsd ?? 0,
-      taskRoomUsd: async (task) => task.companyId !== companyId ? 0 : options.taskRoomUsd(task),
+      taskRoomUsd: async (task) => {
+        if (task.companyId !== companyId) return 0;
+        const access = await reviewers.authority();
+        return access === undefined ? 0 : Math.min(access.companyLimitUsd, await options.taskRoomUsd(task));
+      },
       sourceReaders: (task, operationId) => localPacketSources({ companyId, projectAt: (project, revision) => flow.projects.revision(project, revision), codeHostOf: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) }, task, operationId),
     },
     async model() {
