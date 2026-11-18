@@ -24,10 +24,11 @@
 // and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
 import { profileDisplayName } from "../developer/github-profile.js";
 import { projectTaskCapReader, type ProjectSettingsHook } from "./project-settings.js";
+import { enginePolicyHook, policyHookSettingsFromEnvironment } from "./engine-policy-hook.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, WIKI_BUILD_WORDS, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -119,8 +120,8 @@ import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
-/** The variable that holds the install's policy hook settings (JSON: `{ address, jwks, thumbprints }`). Absent or empty: no hook. */
-export const CORE_POLICY_HOOK_VARIABLE = "ROVARA_POLICY_HOOK";
+// The policy hook's settings and the engine's hook live in engine-policy-hook.ts (the dispatcher reads them too, without this root); re-exported for the root's existing importers.
+export { CORE_POLICY_HOOK_VARIABLE, enginePolicyHook, policyHookSettingsFromEnvironment } from "./engine-policy-hook.js";
 
 /** What the root gives `codeModules`. */
 export interface BrokerCoreModuleContext {
@@ -149,6 +150,9 @@ export interface BrokerCoreRootInputs {
   extraModules?: () => readonly CoreAdapterModule[];
   /** The policy hook's asker (`policyHookInstallFromEnvironment`). Absent: an install with hook settings refuses its registry. */
   policyHookInstall?: () => PolicyHookInstall | undefined;
+  /** CORE-ROOT-HOOK-WIRING-TEST-20261117: how the root reaches the company rules service (its keys and its answers), for the engine's per-task limit and the hook in front of admission.
+   * Absent: the global fetch (the deployed broker). */
+  policyHookFetch?: typeof fetch;
   /** The people lessons ask (per company). Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once). */
   lessonsPeople?: (companyId: OrgId) => HostedLessonPeople;
   /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
@@ -229,21 +233,6 @@ const WORKSPACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const CORE_CALLBACK = /^\/v1\/internal\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/operations\/[0-9a-f-]{36}\/[a-z-]+$/u;
 const callbackAnswer = (statusCode: number, code: string, message: string): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code, message } }) });
 const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable.";
-
-/**
- * The hosted install's policy hook settings (ROVARA_POLICY_HOOK, JSON `{ address, jwks, thumbprints }`).
- * Absent or empty gives undefined. Unreadable settings throw in fixed words, so an install meant to ask always has a hook.
- * Developer-API composition (#717) uses the same resolved setting and hosted client.
- */
-export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): HostedPolicyHookSettings | undefined {
-  const raw = env[CORE_POLICY_HOOK_VARIABLE]?.trim() ?? "";
-  if (raw === "") return undefined;
-  let settings: unknown;
-  try { settings = JSON.parse(raw); } catch { throw new Error("the policy hook settings are not JSON"); }
-  const parsed = HostedPolicyHookSettingsSchema.safeParse(settings);
-  if (!parsed.success) throw new Error("the policy hook settings are not readable");
-  return parsed.data;
-}
 
 // ---- the eval plan source of the deployed callback layer (EVAL-PLAN-CORE-WIRING, DEC 253c/253j(1))
 
@@ -497,15 +486,6 @@ export async function hostedRoundCap(registry: Pick<AdapterRegistry, "require">,
   return { limitUsd: cap.micros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) };
 }
 
-/** L2-5 (b): the company rules service the engine's per-task limit is resolved through, as the settings page's: none on an install without one; settings that did not read, or no
- * install signer, throw (the limit is then unreadable and the work refused). */
-export function enginePolicyHook(settings: HostedPolicyHookSettings | undefined, problem: boolean, install: (() => PolicyHookInstall | undefined) | undefined): ProjectSettingsHook | undefined {
-  if (settings === undefined && !problem) return undefined;
-  const signer = install?.();
-  if (settings === undefined || signer === undefined) throw new Error("the policy hook is not usable");
-  return { settings, install: signer };
-}
-
 /**
  * The deployed identity's display name for a person: read live from their sign-in record, never for a revoked or unknown person. The name goes through the one display helper
  * (`profileDisplayName`, DEC 254p (a)): a GitHub person's is clean, cut text with no markup, address or placeholder shape; any other person's is exactly as stored.
@@ -543,7 +523,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
   // L2-5 (b): each task's cap is lowered to its project's own per-task limit (model_budget_usd) when one is set.
   // The company's rules service, when the install has one, as the settings page reads it (read each time: unreadable settings or no install signer refuse).
-  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall));
+  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall, inputs.policyHookFetch));
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
@@ -628,7 +608,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     beforeSeal: (registry) => {
       const settings = hookSettings;
       if (settings === undefined) return;
-      applyHostedPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log });
+      applyHostedPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log, ...(inputs.policyHookFetch === undefined ? {} : { fetch: inputs.policyHookFetch }) });
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
