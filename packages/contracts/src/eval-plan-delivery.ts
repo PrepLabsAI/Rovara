@@ -22,7 +22,7 @@ const whole = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 /** The spend grant as delivered: the same fields as `EvalSpendGrant`, each checked. */
 export const EvalPlanDeliveryGrantSchema = z.object({
   company: z.string().min(1).max(100), project: z.string().min(1).max(200), selection: z.string().min(1).max(512),
-  role: z.enum(["owner", "maintainer", "admin"]), inputsDigest: hash, provider: z.literal("customer"), connected: z.literal(true),
+  role: z.enum(["owner", "maintainer", "admin"]), inputsDigest: hash, provider: z.literal("customer"), connected: z.boolean(),
   maxCalls: whole, maxCostMicros: whole,
 }).strict();
 

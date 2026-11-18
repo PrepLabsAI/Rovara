@@ -55,7 +55,8 @@ import { deployedDevWiringParts, deployedSessionMembers, hostedChatApproval, hos
 import { decideFromChat } from "../core-host/chat-decision.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
-import { boundEvalMonthlyCap } from "../core/setup-agent/eval-reservation.js";
+import { boundEvalMonthlyCap, boundEvalProviderConnected } from "../core/setup-agent/eval-reservation.js";
+import { createEvalWrapperTargets } from "../core/setup-agent/eval-wrapper-targets.js";
 import { createEvalEnvironmentSource, evalSavedEnvDepsOf, repositoryPathsOf, type EvalEnvironmentSource } from "../core/setup-agent/eval-environment-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
@@ -737,6 +738,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // L4-SR1: the gateway's cap read for one company (an injected reader wins; else the environment's, only where the gateway's origin and the task-token signer exist). One reader per company: it never reads another's.
   const upkeepCapFor = (companyId: OrgId): UpkeepCapReader | undefined => inputs.upkeepCap !== undefined ? inputs.upkeepCap(companyId) : upkeepCapReaderFromEnvironment(env, inputs.taskTokens, companyId);
   const lessonsByCompany = new Map<string, CoreLessons>();
+  // L4-EVW4 (DEC 254zzz43, folded in from #1025): the project's repositories as the eval wrapper card reads and (on a person's click) writes them. One per company, over that company's own flow, registry view and scope:
+  // the pinned address, the host that serves it and `{ orgId: company }`. The setup run's callback gets NO wrapper wiring: nothing but a person's POST opens a pull request.
+  const wrapperTargetsByCompany = new Map<string, ReturnType<typeof createEvalWrapperTargets>>();
+  const wrapperTargetsOf = (companyId: OrgId, flow: Parameters<typeof createEvalWrapperTargets>[0]["flow"], registry: Parameters<typeof createEvalWrapperTargets>[0]["registry"]): ReturnType<typeof createEvalWrapperTargets> => {
+    let found = wrapperTargetsByCompany.get(companyId);
+    if (found === undefined) { found = createEvalWrapperTargets({ flow, registry, companyId, now: () => now().getTime() }); wrapperTargetsByCompany.set(companyId, found); }
+    return found;
+  };
   // L4-HW2: the company's learning port, asked for only where the lessons switch names the company (nothing is made, no token minted, for any other), and never allowed to break the runtime: a throw is "no port".
   const learningOf = (companyId: OrgId): CoreLessonsOptions["learning"] => {
     if (inputs.lessonsLearning === undefined || !switchCovers(lessonsSwitch.value, companyId)) return undefined;
@@ -1013,8 +1022,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             // L4-EVC (DEC 254zzz20): the eval card. The monthly cap comes only from the install's bound `eval-reservation` adapter (no adapter: no eval is confirmed); the broker hashes the confirmed files from the company's own code host.
             eval: {
               ...(boundEvalMonthlyCap(registry) === undefined ? {} : { monthlyCap: boundEvalMonthlyCap(registry)! }),
+              ...(boundEvalProviderConnected(registry) === undefined ? {} : { providerConnected: boundEvalProviderConnected(registry)! }),
               readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
                 .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
+              wrapperTargets: (project) => wrapperTargetsOf(runtime.companyId, runtime.flow.deps, registry)(project),
               ...(healthDeps === undefined ? {} : { healthRuns: true, healthRun: (project: string) => kickEvalHealth(healthDeps, project) }),
             },
             // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
@@ -1222,6 +1233,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),
       // Cloud #188 item 5: the task list's money read for a core task (the caller's own, in their live company).
       ...(entry.taskMoney === undefined ? {} : { taskMoney: entry.taskMoney.bind(entry) }),
+      // The same list's Understand round: whether the core's task read would show the caller the task.
+      ...(entry.taskReadable === undefined ? {} : { taskReadable: entry.taskReadable.bind(entry) }),
       ...(entry.chatDecision === undefined ? {} : { chatDecision: (caller: CoreEntryCaller, press: Parameters<NonNullable<CoreTaskEntry["chatDecision"]>>[1]) => entry.chatDecision!(caller, press) }),
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);

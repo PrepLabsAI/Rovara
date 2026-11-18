@@ -16,7 +16,8 @@
 //   POST <gateway>/v1/product/eval/cap
 //     headers  as above, with aud "rovara-model-gateway-eval-cap" and cid = the company asked about
 //     body     exactly {"company": <org id>, "project": <project>}
-//   200 body   exactly {"company", "project", "monthlyCapMicros": <whole micro-dollars>}: the smaller of the company's and the project's monthly caps
+//   200 body   exactly {"company", "project", "monthlyCapMicros": <whole micro-dollars>[, "connected": <boolean>]}: the smaller of the company's and the project's monthly caps; `connected` (L4-T3, additive,
+//              read by `providerConnected()`) is whether the project's own AI key is connected, from the same check the spend authority and the stage hold make
 // Accepted only when the answer names the SAME company and project; anything else (a non-200, a redirect, an oversized or unparseable body, a fault, the timeout) is undefined: no cap, and the
 // confirm is refused. Nothing throws, logs or echoes.
 //
@@ -47,7 +48,8 @@ const PrincipalAnswerSchema = z.object({
   companyId: OrgIdSchema, personId: text, displayName: z.string().max(256), roles: z.array(z.string().max(64)).max(32), provider: text,
   authTime: z.iso.datetime().optional(), methods: z.array(z.string().max(64)).max(16).optional(),
 }).strict();
-const CapAnswerSchema = z.object({ company: OrgIdSchema, project: ProjectSchema, monthlyCapMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }).strict();
+/** `connected` (L4-T3) is the one additive member: whether the project's own product key is connected. A gateway that does not say it gives none (unknown), never a guess. */
+const CapAnswerSchema = z.object({ company: OrgIdSchema, project: ProjectSchema, monthlyCapMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), connected: z.boolean().optional() }).strict();
 const AuthorityAnswerSchema = z.object({
   company: OrgIdSchema, project: ProjectSchema, principal: PrincipalAnswerSchema, provider: z.literal("customer"), connected: z.literal(true),
 }).strict();
@@ -66,6 +68,29 @@ export interface EvalAuthorityHttpInputs {
 
 export function evalAuthorityAdapter(input: EvalAuthorityHttpInputs): EvalReservationAdapter {
   const origin = input.gatewayUrl.replace(/\/+$/u, "");
+  /** The cap route's one answer (the cap and, additively, the connection), for exactly the company and project asked about; undefined for anything else. */
+  const askCap = async (request: { company: string; project: string } | undefined): Promise<{ monthlyCapMicros: number; connected?: boolean } | undefined> => {
+    const company = OrgIdSchema.safeParse(request?.company);
+    const project = ProjectSchema.safeParse(request?.project);
+    if (!company.success || !project.success) return undefined;
+    const asked = { company: company.data, project: project.data };
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<undefined>((resolve) => { timer = setTimeout(() => { controller.abort(); resolve(undefined); }, input.timeoutMs ?? EVAL_AUTHORITY_HTTP_TIMEOUT_MS); });
+    const ask = async (): Promise<{ monthlyCapMicros: number; connected?: boolean } | undefined> => {
+      const token = await signServiceToken(input, asked.company, EVAL_CAP_AUDIENCE);
+      const response = await (input.fetch ?? fetch)(`${origin}${EVAL_CAP_PATH}`, {
+        method: "POST", redirect: "error", signal: controller.signal, body: JSON.stringify(asked),
+        headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${token}` },
+      });
+      if (response.status !== 200) { await response.body?.cancel().catch(() => undefined); return undefined; }
+      const parsed = CapAnswerSchema.safeParse(JSON.parse(await boundedText(response, EVAL_AUTHORITY_BODY_MAX_BYTES)));
+      if (!parsed.success || parsed.data.company !== asked.company || parsed.data.project !== asked.project) return undefined;
+      return { monthlyCapMicros: parsed.data.monthlyCapMicros, ...(parsed.data.connected === undefined ? {} : { connected: parsed.data.connected }) };
+    };
+    try { return await Promise.race([ask(), deadline]); } catch { return undefined; }
+    finally { clearTimeout(timer); }
+  };
   return {
     async authority(request) {
       // Checked before anything is signed or sent.
@@ -100,28 +125,8 @@ export function evalAuthorityAdapter(input: EvalAuthorityHttpInputs): EvalReserv
       finally { clearTimeout(timer); }
     },
     async reserve() { return undefined; },
-    async monthlyCapMicros(request) {
-      const company = OrgIdSchema.safeParse(request?.company);
-      const project = ProjectSchema.safeParse(request?.project);
-      if (!company.success || !project.success) return undefined;
-      const asked = { company: company.data, project: project.data };
-      const controller = new AbortController();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<undefined>((resolve) => { timer = setTimeout(() => { controller.abort(); resolve(undefined); }, input.timeoutMs ?? EVAL_AUTHORITY_HTTP_TIMEOUT_MS); });
-      const ask = async (): Promise<number | undefined> => {
-        const token = await signServiceToken(input, asked.company, EVAL_CAP_AUDIENCE);
-        const response = await (input.fetch ?? fetch)(`${origin}${EVAL_CAP_PATH}`, {
-          method: "POST", redirect: "error", signal: controller.signal, body: JSON.stringify(asked),
-          headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${token}` },
-        });
-        if (response.status !== 200) { await response.body?.cancel().catch(() => undefined); return undefined; }
-        const parsed = CapAnswerSchema.safeParse(JSON.parse(await boundedText(response, EVAL_AUTHORITY_BODY_MAX_BYTES)));
-        if (!parsed.success || parsed.data.company !== asked.company || parsed.data.project !== asked.project) return undefined;
-        return parsed.data.monthlyCapMicros;
-      };
-      try { return await Promise.race([ask(), deadline]); } catch { return undefined; }
-      finally { clearTimeout(timer); }
-    },
+    monthlyCapMicros: async (request) => (await askCap(request))?.monthlyCapMicros,
+    providerConnected: async (request) => (await askCap(request))?.connected,
   };
 }
 

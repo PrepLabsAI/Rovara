@@ -199,6 +199,40 @@ describe("Cloud #188 item 5: the task list's money read for a core task", () => 
   });
 });
 
+describe("the task list's readable check for a core task (Understand's round on ?detail=1)", () => {
+  it("is true exactly where the core's own task read shows the caller the task: the owner; a reader the company's read rule lets in; never another company's caller, a script token, a bad or missing id", async () => {
+    const { routes, own, remember, taskId } = await started();
+    expect(await routes.taskReadable(own, taskId)).toBe(true);
+    // A member who is not the owner (the owner rule is the only one wired): the task read says "no such task", so the check says no.
+    const member = remember(FAKE_COMPANY, "member", "person-member-000000000003");
+    expect(await routes.taskReadable(member, taskId)).toBe(false);
+    expect((await routes.route(get(`/v1/dev/tasks/${taskId}`), member))?.statusCode).toBe(404);
+    // Another company's caller (a member of OTHER), a script token, a malformed id and a missing one.
+    expect(await routes.taskReadable(remember(OTHER), taskId)).toBe(false);
+    expect(await routes.taskReadable({ ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }, taskId)).toBe(false);
+    expect(await routes.taskReadable(own, "not-a-task")).toBe(false);
+    expect(await routes.taskReadable(own, randomUUID())).toBe(false);
+    // A caller with no member company at all.
+    expect(await routes.taskReadable({ principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "person-nobody-000000000009" }), client: "cli" }, taskId)).toBe(false);
+    // The company's read rule (the People list's viewers): a reader who may read but not act reads it, exactly as the task read says.
+    const readers = await started({ access: { ...ownerRule(), canRead: async (principal) => principal.personId === "person-reader-000000000005" } });
+    const reader = readers.remember(FAKE_COMPANY, "member", "person-reader-000000000005");
+    expect(await readers.routes.taskReadable(reader, readers.taskId)).toBe(true);
+    expect((await readers.routes.route(get(`/v1/dev/tasks/${readers.taskId}`), reader))?.statusCode).toBe(200);
+    expect(await readers.routes.taskReadable(readers.remember(FAKE_COMPANY, "member", "person-other-0000000000006"), readers.taskId)).toBe(false);
+  });
+
+  it("is false when the membership cannot be read or the read fails, never a throw", async () => {
+    const { routes, own, taskId, companyOf } = await started();
+    companyOf.mockRejectedValueOnce(new Error("sign-in table down"));
+    expect(await routes.taskReadable(own, taskId)).toBe(false);
+    companyOf.mockResolvedValueOnce({ companyId: "not-a-company", role: "owner" });
+    expect(await routes.taskReadable(own, taskId)).toBe(false);
+    companyOf.mockResolvedValueOnce(undefined);
+    expect(await routes.taskReadable(own, taskId)).toBe(false);
+  });
+});
+
 describe("Cloud #188 item 3: the old task routes on a core task reach the deployment's rules only for the caller's own company's task", () => {
   const RULES: Array<[string, string]> = [["GET", "people"], ["GET", "people/candidates"], ["POST", "people/add"], ["POST", "people/role"], ["POST", "people/take-ownership"], ["GET", "people/requests/r1"],
     ["GET", "readers"], ["PUT", `readers/${"c".repeat(64)}`], ["DELETE", `readers/${"c".repeat(64)}`], ["GET", "events"], ["GET", "comments"]];
