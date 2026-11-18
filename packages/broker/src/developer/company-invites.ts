@@ -129,14 +129,15 @@ export class CompanyInviteStore {
 
   /**
    * DEC 253z: may this person hold a session with no company? Only with no membership row at all (a removed member keeps theirs), and
-   * no sign-in record from before (a legacy person joins the built-in company) unless it is one this path wrote. Any doubt: no.
+   * no sign-in record from before (a legacy person joins the built-in company) unless it is one this path wrote, and never one that now points at a person
+   * (DEC 254zzz39: a kept unlinked sign-in linked again). Any doubt: no.
    */
   async companylessEligible(personId: string): Promise<boolean> {
     try {
       if (!CompanyPersonId.safeParse(personId).success) return false;
       if (await this.get(membershipKey(personId)) !== undefined) return false;
       const developer = await this.get({ pk: `DEVELOPER#${personId}`, sk: "META" }) as Record<string, unknown> | undefined;
-      return developer === undefined || (developer.entityType === "DEVELOPER" && developer.revoked === false && developer.companyless === true);
+      return developer === undefined || (developer.entityType === "DEVELOPER" && developer.revoked === false && developer.companyless === true && developer.mergedInto === undefined);
     } catch { return false; }
   }
 
