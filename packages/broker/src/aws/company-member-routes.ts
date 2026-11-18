@@ -15,11 +15,14 @@
 //   - A removal or a role change needs a FRESH step-up from the verified token (lane ID's contract, #682's check), every time.
 //   - Bodies and queries are validated at runtime and strictly; every refusal is a fixed sentence that never echoes what was sent.
 //   - Reads are bounded in total; past a bound the whole answer is refused, never a partial one.
+//   - L4-GH2: a removal takes the person's GitHub link (core/people/github-links.ts) with it, in the same request, only after the removal itself succeeded. The cleanup is conditional and idempotent, never blocks
+//     the removal (a failure is logged in fixed words, no cause), and a repeat of the same removal request retries it (the repeat is still answered "already removed"). Only this company's rows are read or removed.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { OrgIdSchema, agentXError, type OrgRole } from "@agentx/contracts";
+import { OrgIdSchema, agentXError, companyLog, type DocumentStore, type OrgRole } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
+import { unlinkGithubAccount } from "../core/people/github-links.js";
 import { profileDisplayName } from "../developer/github-profile.js";
 import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -56,6 +59,18 @@ export interface CompanyMemberRouteContext {
   members: CompanyMemberActions;
   /** Of these project names, the ones whose latest revision belongs to the company. */
   projectsInCompany(names: readonly string[], companyId: string): Promise<ReadonlySet<string>>;
+  /** L4-GH2: where the members' GitHub links live (the core's own store) and the broker's log sink. Absent: a removal removes no link (the install has none). */
+  githubLinks?: { store: Pick<DocumentStore, "get" | "delete" | "transact">; log: (entry: Record<string, unknown>) => void };
+}
+
+/** The removed person's GitHub link in their own company. Never throws: the removal has happened, and a failure is only logged (event name and person id; never the cause). */
+async function dropGithubLink(ctx: CompanyMemberRouteContext, companyId: string, personId: string): Promise<void> {
+  if (ctx.githubLinks === undefined) return;
+  try {
+    await unlinkGithubAccount(ctx.githubLinks.store, companyId, personId);
+  } catch {
+    try { companyLog(companyId, ctx.githubLinks.log)({ event: "member_removal.github_link_not_removed", level: "error", person: personId }); } catch { /* a log sink that fails must not turn a finished removal into an error */ }
+  }
 }
 
 const MEMBERS = "/v1/dev/company/members";
@@ -140,9 +155,14 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
   }
   if (!RemovalBody.safeParse(body(request)).success) throw agentXError("CONFIG_INVALID", REMOVAL_BODY);
   if (target.role === "owner" && me.role !== "owner") throw agentXError("FORBIDDEN", OWNER_ONLY);
-  if (target.revokedAt !== undefined) throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
+  if (target.revokedAt !== undefined) {
+    // A repeat of a removal retries a link left behind by an earlier cleanup that failed. It takes away only what a removed member still holds, so it needs no step-up.
+    await dropGithubLink(ctx, me.companyId, targetId);
+    throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
+  }
   requireFreshStepUp(input.stepUp, ctx.now(), REMOVAL_STEP_UP);
   unwrap(await ctx.members.revoke(caller, { companyId: me.companyId, personId: targetId }));
+  await dropGithubLink(ctx, me.companyId, targetId);
   return { ok: true };
 }
 
