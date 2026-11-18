@@ -340,7 +340,7 @@ describe("the ready line budget in a pass", () => {
   it("counts the verdict heading: with a long repository name the eval line is dropped, never the heading, and the milestone stays within its limit", async () => {
     const { w, deps } = await world(settings(), { repositoryId: "r".repeat(100) });
     const heading = "Verified · Low risk · nothing extra to check";
-    deps.verdict = async () => ({ heading, resultKind: "verified", body: [] }) as never;
+    deps.verdict = async () => ({ heading, resultKind: "verified", body: [] });
     w.prs[0]!.model.changeRequests[0]!.draft = true;
     setChecks(w, [unit, evals({ url: `https://github.com/acme/app/actions/runs/${"7".repeat(250)}` })]);
     await trackTask(deps, TASK_ID);
@@ -470,7 +470,7 @@ describe("the record write", () => {
     const { w } = await world(settings());
     const keys = await workspaceKeys({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1");
     const key = pullRequestRecordKey(keys.workspaceKey, "app", w.prs[0]!.number);
-    await w.store.put({ item: { ...key, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", repositoryUrl: "https://github.com/acme/app", number: w.prs[0]!.number, url: "u", state: "open", headBranch: "b", baseBranch: "main", expectedHeadCommit: w.prs[0]!.head, title: "t", body: bodyOf(), createdByOperationId: "op", updatedAt: new Date(CLOCK).toISOString() } as never });
+    await w.store.put({ item: { ...key, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", repositoryUrl: "https://github.com/acme/app", number: w.prs[0]!.number, url: "u", state: "open", headBranch: "b", baseBranch: "main", expectedHeadCommit: w.prs[0]!.head, title: "t", body: bodyOf(), createdByOperationId: "op", updatedAt: new Date(CLOCK).toISOString() } });
     const model = w.prs[0]!.model;
     const ref = { repository: { url: "https://github.com/acme/app" }, id: String(w.prs[0]!.number), url: model.crUrl(String(w.prs[0]!.number)) };
     const host = (await w.host.repository("web", 1, "app", IMPLICIT_COMPANY_ID))!.codeHost;

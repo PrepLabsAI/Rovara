@@ -228,7 +228,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const key = `pr_opened#${sha(requests.map((request) => `${request.repository}#${String(request.number)}`).join(",")).slice(0, 24)}`;
         const links = requests.flatMap((request) => plainHttpsLink(request.url) ?? []);
         // L4-EVCI: the customer's own eval result, when it had landed by the time the pull request was marked ready: the same one line as in the description (fixed words, numbers and a plain https address; a line that is
-        // not exactly Rovara's own words is not sent). It rides on the typed card as its own field when the card is used, and on the plain text otherwise.
+        // not exactly Rovara's own words is not sent). The typed pull request card has no place for it, so a ready line that carries it is the plain progress text (which keeps the verdict heading).
         const evalLine = milestone.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(milestone.evalLine) ? milestone.evalLine : undefined;
         await send(orgId, sessionId, key, () => tell(links.length === 1 && evalLine === undefined
           ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened", ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }) } }
