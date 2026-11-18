@@ -5,7 +5,7 @@
 
 **Changed** 300 files, +50,850 -600.
 **Proven** 1 of 40 requirements proven. 1 failed. 36 not tested.
-**Tested against** Service 0 (recorded fake, 138 days old, 3 made-up answers). Service 1 (fake written by hand, 3 made-up answers). Service 2 (recorded fake, 138 days old, 3 made-up answers). Service 3 (fake written by hand, 3 made-up answers). Service 4 (recorded fake, 138 days old, 3 made-up answers). Service 5 (fake written by hand, 3 made-up answers). Service 6 (recorded fake, 138 days old, 3 made-up answers). Service 7 (fake written by hand, 3 made-up answers). Service 8 (recorded fake, 138 days old, 3 made-up answers). Service 9 (fake written by hand, 3 made-up answers). Service 10 (recorded fake, 138 days old, 3 made-up answers). Service 11 (fake written by hand, 3 made-up answers).
+**Tested against** Service 0 (recorded fake, recorded 138 days ago, 3 made-up answers). Service 1 (fake written by hand, 3 made-up answers). Service 2 (recorded fake, recorded 138 days ago, 3 made-up answers). Service 3 (fake written by hand, 3 made-up answers). Service 4 (recorded fake, recorded 138 days ago, 3 made-up answers). Service 5 (fake written by hand, 3 made-up answers). Service 6 (recorded fake, recorded 138 days ago, 3 made-up answers). Service 7 (fake written by hand, 3 made-up answers). Service 8 (recorded fake, recorded 138 days ago, 3 made-up answers). Service 9 (fake written by hand, 3 made-up answers). Service 10 (recorded fake, recorded 138 days ago, 3 made-up answers). Service 11 (fake written by hand, 3 made-up answers).
 **Reviews** Code review passed after the owner accepted its findings. Security review passed. **The owner accepted 20 review findings.** **The second review did not pass.**
 **Risk** High. Changes sensitive paths: db/migrations/001.sql.
   - The code review rated this change high risk.
@@ -58,7 +58,7 @@
    - Service 8: 3 requests
    - Service 9: 3 requests
    - and 2 more
-7. **6 recorded fakes are old.** Recorded more than 90 days ago (or the date is unknown). Real behaviour may have changed.
+7. **6 recorded fakes are old.** More than 90 days old (or the date is unknown). Real behaviour may have changed.
    - Service 0: recorded 138 days before this pull request
    - Service 2: recorded 138 days before this pull request
    - Service 4: recorded 138 days before this pull request
@@ -294,7 +294,7 @@ Not tested:
 </details>
 
 <details>
-<summary>Test setup: sandbox, 6 old recorded fakes, 6 hand-written fakes</summary>
+<summary>Test setup: sandbox, 6 old recorded fakes, 6 hand-written fakes, Service 0 recorded fake, recorded 138 days ago, Service 2 recorded fake, recorded 138 days ago, Service 4 recorded fake, recorded 138 days ago, Service 6 recorded fake, recorded 138 days ago, Service 8 recorded fake, recorded 138 days ago, Service 10 recorded fake, recorded 138 days ago</summary>
 
 - Environment: sandbox, approved test environment revision 7. Test data: synthetic.
 - Integration tests ran against: Service 0, Service 2, Service 4, Service 6, Service 8 and Service 10 (recorded fake, +3 made-up answers), Service 1, Service 3, Service 5, Service 7, Service 9 and Service 11 (hand-written fake, +3 made-up answers).

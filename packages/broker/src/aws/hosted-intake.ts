@@ -12,13 +12,20 @@
 // A company whose new tasks do not start on the core has no intake here (`intakeFor` is undefined, so the webhook logs `linear.intake_not_wired` and nothing starts).
 import { createHash, createHmac } from "node:crypto";
 import {
-  OrgIdSchema, companyLog, type AuditSink, type DocumentStore, type IdentityProvider, type IntakeWaitingList, type OrgId, type Principal, type Tracker,
+  NEW_HOSTED_TICKET_UPDATES, OrgIdSchema, companyLog, type AuditSink, type DocumentStore, type IdentityProvider, type IntakeWaitingList, type OrgId, type Principal, type Tracker,
 } from "@agentx/contracts";
 import { dismissIntakeItem, intakePortsOf, listWaitingIntakeItems, readIntakeItem, startWaitingIntake, type IntakePorts } from "../core/intake/index.js";
 import type { MomentTable } from "../core/ticket-updates/moments.js";
-import { ticketUpdatesHandler } from "../core/ticket-updates/handler.js";
+import { ticketUpdatesHandler, type TicketUpdatesDependencies } from "../core/ticket-updates/handler.js";
+import { refreshTicketThread, seedTicketUpdatesIfUnset, ticketStartedShared } from "../core/ticket-updates/index.js";
+import { taskLogMilestoneHandler } from "../core/task-log/milestones.js";
+import type { TaskLogHooks } from "../core/task-log/hooks.js";
+import { taskSharedOf } from "../core/task-log/task-shared.js";
+import { taskKey } from "../core/task-flow/keys.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { developerIdOf } from "../core/sessions/create.js";
+import type { SessionMembers } from "../core/sessions/access.js";
+import { HOSTED_IDENTITY_PROVIDER } from "../core-host/hosted-modules.js";
 import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flow/deps.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { waitingViewOf } from "../local/app/intake.js";
@@ -31,7 +38,7 @@ import type { LinearConnections } from "./linear-connections.js";
 export interface HostedIntakeCompany {
   store: DocumentStore;
   access: Pick<TaskAccess, "checkStart">;
-  flow: Pick<TaskFlow, "start">;
+  flow: Pick<TaskFlow, "start" | "deps">;
   /** The hosted identity point: a member of THIS company, read live (membership and the sign-in record). */
   identity: Pick<IdentityProvider, "getPrincipal">;
   audit: Pick<AuditSink, "record">;
@@ -64,6 +71,11 @@ export interface HostedIntake {
   waiting(companyId: OrgId, project: string): Promise<IntakeWaitingList>;
   /** "Start" by this member: the work is theirs. */
   start(companyId: OrgId, project: string, itemId: string, personId: string): Promise<HostedIntakeStart>;
+  /**
+   * A project that just got its first tracker team (the one place a hosted project first gets tracker intake): when it has NO ticket-updates settings saved, saves the new-hosted-project default (`NEW_HOSTED_TICKET_UPDATES`,
+   * level "full"), once, conditionally, so a saved choice (even a saved status_only) is never overwritten and two adds at once save once. "no_intake": this company's tasks do not start on the core, so nothing is saved.
+   */
+  seedTicketUpdates(companyId: OrgId, project: string, personId: string): Promise<"seeded" | "kept" | "no_intake">;
   /** "Not this one" by this member. `false`: no such waiting ticket. */
   dismiss(companyId: OrgId, project: string, itemId: string, personId: string): Promise<boolean>;
 }
@@ -134,6 +146,11 @@ export function createHostedIntake(deps: HostedIntakeDeps): HostedIntake {
       if (outcome.outcome === "skipped") return { outcome: "duplicate", state: "waiting" };
       return outcome;
     },
+    async seedTicketUpdates(companyId, project, personId) {
+      const company = await companyOf(companyId);
+      if (company === undefined) return "no_intake";
+      return seedTicketUpdatesIfUnset({ store: company.store, now: deps.now }, { orgId: OrgIdSchema.parse(companyId), project, settings: NEW_HOSTED_TICKET_UPDATES, by: personId });
+    },
     async dismiss(companyId, project, itemId, personId) {
       if (!ITEM_ID.test(itemId)) return false;
       const company = await companyOf(companyId);
@@ -155,19 +172,53 @@ export function createHostedIntake(deps: HostedIntakeDeps): HostedIntake {
   };
 }
 
-/**
- * The ticket updates handler for ONE company on a hosted install: a Linear ticket is written with the company's own OAuth connection only (`linearCompanyTracker`, which refuses any
- * other company's scope before a token is read); any other tracker has no write-back here. Registered on the company's milestones.
- */
-export function hostedTicketUpdatesHandler(input: {
+/** What the hosted ticket write-back is made of for ONE company: what it listens to, and the thread refresh for a task whose log gained entries. */
+export interface HostedTicketUpdatesInput {
   companyId: OrgId; store: DocumentStore; connections: Pick<LinearConnections, "accessToken">; fetch?: typeof fetch | undefined; now: () => number; log: (entry: Record<string, unknown>) => void;
-}): CodeMilestoneHandler {
+  /** The summary of the plan waiting for review for the task log's `plan_summary` (`core/task-log/plan-summary-source.ts`, over the company's own decision gate). Absent: no plan summary is logged, so none is written to a ticket. */
+  planSummaryOf?: TicketUpdatesDependencies["planSummaryOf"];
+  /** The task log's hook (`core/task-log/hooks.ts`): the ticket's thread is brought up to date when an answer, a decision or a question is committed. Absent: only a milestone updates the thread. */
+  taskLog?: Pick<TaskLogHooks, "subscribe"> | undefined;
+  /** The company's session-levels members reader (`deployedSessionMembers`): a `web` People entry counts toward "shared" only while this finds the person a live member with a grant on the task's project. Absent: web entries do not count. */
+  members?: SessionMembers | undefined;
+}
+
+/**
+ * Whether a task counts as shared for this company's ticket thread: started from a ticket (the ticket rule), else the company's own session and People records (`taskSharedOf`), where a web People entry counts only while that
+ * person's project grant is live now (`members`, the session levels' reader; absent: web entries do not count).
+ */
+export function hostedTaskShared(input: { store: DocumentStore; now: () => number; companyId: OrgId; members?: SessionMembers | undefined }): (orgId: OrgId, taskId: string) => Promise<boolean> {
+  const companyId = OrgIdSchema.parse(input.companyId);
+  return ticketStartedShared({ store: input.store, now: input.now, scope: { orgId: companyId } }, taskSharedOf({
+    store: input.store, webPeople: input.members === undefined ? undefined : { members: input.members, provider: HOSTED_IDENTITY_PROVIDER },
+  }));
+}
+
+/**
+ * The ticket write-back for ONE company on a hosted install: a Linear ticket is written with the company's own OAuth connection only (`linearCompanyTracker`, which refuses any other company's scope before a token
+ * is read); any other tracker has no write-back here. The handlers go on the company's milestones, the task log's first (its entries are then there when the thread is drawn) and the ticket's second, as on a laptop.
+ *
+ * What may leave is the project's own level (default `status_only`: unchanged for every project that exists). Above it, a task counts as shared when it was started from a ticket (`ticketStartedShared`, owner decision 254zzq:
+ * the ticket is a shared place and the project chose the level) or when the company's own session and People records say so (`taskSharedOf`; a web People entry counts only while that person's project grant is live now, `members`); a task only its owner can see that did not start from a ticket
+ * stays at `status_only`: a Linear comment is seen by everyone who can see the ticket. A refresh told of a task that is not this company's is refused before anything is read or written.
+ */
+export function hostedTicketUpdates(input: HostedTicketUpdatesInput): CodeMilestoneHandler[] {
   const companyId = OrgIdSchema.parse(input.companyId);
   const log = companyLog(companyId, input.log);
-  return ticketUpdatesHandler({
-    store: input.store, now: input.now, scope: { orgId: companyId }, trackerFor: hostedTrackerFor(companyId, input.connections, input.fetch),
-    log: (event, fields) => { log({ component: "intake", event, ...fields }); },
+  const emit = (event: string, fields: Record<string, unknown>): void => { log({ component: "intake", event, ...fields }); };
+  const deps: TicketUpdatesDependencies = {
+    store: input.store, now: input.now, scope: { orgId: companyId }, trackerFor: hostedTrackerFor(companyId, input.connections, input.fetch), log: emit,
+    taskShared: hostedTaskShared({ store: input.store, now: input.now, companyId, members: input.members }),
+    ...(input.planSummaryOf === undefined ? {} : { planSummaryOf: input.planSummaryOf }),
+  };
+  input.taskLog?.subscribe(async (taskId) => {
+    // The hook is this company's own flow, but a task id is not company-scoped: a task of another company is not refreshed from here.
+    const task = await input.store.get(taskKey(taskId));
+    if ((task?.["orgId"] ?? task?.["companyId"]) !== companyId) return;
+    // An outcome that says "not yet" is caught up by the next change or milestone (a milestone is delivered again after a refusal to edit too soon).
+    await refreshTicketThread(deps, taskId);
   });
+  return [taskLogMilestoneHandler({ store: input.store, companyId, ...(input.planSummaryOf === undefined ? {} : { planSummaryOf: input.planSummaryOf }), log: emit }), ticketUpdatesHandler(deps)];
 }
 
 /** The trackers a company's tickets are written with: Linear through the company's own connection; nothing else. */

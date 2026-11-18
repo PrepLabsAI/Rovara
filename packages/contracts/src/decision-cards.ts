@@ -138,6 +138,21 @@ export const EvidenceChipSchema = z
   .refine((chip) => (chip.kind === "thumbnail") === (chip.href !== undefined), { message: "only a thumbnail has an href", path: ["href"] });
 export type EvidenceChip = z.infer<typeof EvidenceChipSchema>;
 
+/** The sources a task's feature can have (Code's `FEATURE_SOURCES`, lead 4 cost report): a person moved it, chose it, confirmed the tracker's suggestion at plan review, or the tracker or an earlier task gave it. */
+export const PLAN_FEATURE_SOURCES = ["moved", "chosen", "confirmed_at_plan", "tracker", "inherited"] as const;
+export const PLAN_FEATURE_ID_PATTERN = /^ft_[a-f0-9]{20}$/u;
+/**
+ * A coding plan's card (lead 4, PCF): the task's feature in ONE line Code words ("Feature: Checkout v2 (from the Linear parent)"), the feature now (null: "No feature"), and whether this person may change it
+ * (`canChange`) or make a new feature to put the task under (`canCreate`). Code decides both on every read and again on every press; a card without `canChange` shows the line and no control.
+ */
+export const PlanFeatureSchema = z.object({
+  line: z.string().min(1).max(200).regex(NO_HIDDEN, "one plain line"),
+  feature: z.object({ id: z.string().regex(PLAN_FEATURE_ID_PATTERN), name: z.string().min(1).max(320), source: z.enum(PLAN_FEATURE_SOURCES) }).strict().nullable(),
+  canChange: z.boolean(),
+  canCreate: z.boolean(),
+}).strict();
+export type PlanFeature = z.infer<typeof PlanFeatureSchema>;
+
 export const DECISION_CARD_STATUSES = ["pending", "approved", "rejected", "answered_by_rule", "expired", "cancelled"] as const;
 export const DECISION_CARD_ID_PATTERN = new RegExp(`^(?:${DECISION_KINDS.join("|")}):[A-Za-z0-9_-]{1,150}$`, "u");
 export const DecisionCardIdSchema = z.string().regex(DECISION_CARD_ID_PATTERN);
@@ -167,6 +182,8 @@ export const DecisionCardSchema = z
      * tick and the approve carries `acknowledgedRunLimitUsd` (the server refuses a raise without it, whoever asks).
      */
     runLimit: z.object({ currentUsd: z.number().min(0).max(100_000).optional(), proposedUsd: z.number().min(0).max(100_000) }).strict().optional(),
+    /** A coding plan's card only (lead 4, PCF): the task's feature, in one line, and whether this person may change it. Not part of the card's digest: changing the feature never makes a card stale. */
+    planFeature: PlanFeatureSchema.optional(),
     rejectReasons: z.array(DecisionRejectReasonSchema).max(6),
     /** Set exactly when a standing rule answered the card (recorded in history; never for a high card). */
     answeredByRule: z.object({ ruleId: line(64), at: z.string().datetime() }).strict().optional(),
@@ -190,6 +207,7 @@ export const DecisionCardSchema = z
     if ((card.status === "answered_by_rule") !== (card.answeredByRule !== undefined)) problem(["answeredByRule"], "answeredByRule is there exactly when a rule answered the card");
     if (card.status !== "pending" && card.actions.length > 0) problem(["actions"], "an answered card has no actions");
     if (card.runLimit !== undefined && card.kind !== "approve_plan") problem(["runLimit"], "only a coding plan's card carries a run limit");
+    if (card.planFeature !== undefined && card.kind !== "approve_plan") problem(["planFeature"], "only a coding plan's card carries a feature line");
     if (card.actions.some((action) => action.kind === "reject") && card.rejectReasons.length === 0) problem(["rejectReasons"], "a card that can be rejected lists its reject reasons");
     if (new Set(card.rejectReasons).size !== card.rejectReasons.length) problem(["rejectReasons"], "reject reasons are unique");
   });

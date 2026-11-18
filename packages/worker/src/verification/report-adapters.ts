@@ -2,7 +2,8 @@
 // The legacy functions stay in test-report.ts so existing callers and their byte-for-byte outputs remain unchanged.
 // Table callbacks are lazy: neither side of this module's test-report import cycle reads the other's constants at initialisation.
 import { readMeasuresFile, type MeasuresFile } from "@agentx/contracts";
-import { ATTRIBUTE_TEXT_MAX, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS, counted, looksLikeGoTestJson, parseAttributes, parseGoTestJson, parseJsonReport, parseJunit, tagEnd, testText, type ParsedTestReport, type ReportedTest } from "./test-report.js";
+import { ATTRIBUTE_TEXT_MAX, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS, FAILURE_TEXTS_MAX, counted, failureTextOf, looksLikeGoTestJson, parseAttributes, parseGoTestJson, parseJsonReport, parseJunit, tagEnd, testText, type ParsedTestReport, type ReportedTest } from "./test-report.js";
+import { FAILURE_ATTRIBUTION_LIMITS } from "@agentx/contracts";
 
 export type ReportFormat = ParsedTestReport["format"] | "measures";
 export type ReportFormatHint = ReportFormat | "auto";
@@ -60,11 +61,15 @@ function parseCtrf(text: string): ReportParts | undefined {
   const rows = root !== undefined && object(root.results) ? root.results.tests : undefined;
   if (!Array.isArray(rows) || rows.length === 0 || rows.length > TEST_REPORT_MAX_TESTS) return undefined;
   const tests: ReportedTest[] = [];
+  let failures = 0;
   for (const row of rows as unknown[]) {
     if (!object(row) || typeof row.name !== "string" || row.name === "") return undefined;
     const status = row.status === "passed" ? "passed" : row.status === "failed" ? "failed" : row.status === "skipped" || row.status === "pending" ? "skipped" : "errored";
     const ms = duration(row.duration);
-    tests.push({ name: testText(row.name), status, ...(typeof row.filepath === "string" && row.filepath !== "" ? { file: testText(row.filepath) } : {}), ...(ms === undefined ? {} : { durationMs: ms }), ...times(row.start, row.stop) });
+    const failure = status === "failed" && failures < FAILURE_TEXTS_MAX ? (typeof row.failureMessage === "string" ? row.failureMessage : typeof row.message === "string" ? row.message : typeof row.trace === "string" ? row.trace : undefined) : undefined;
+    if (status === "failed") failures += 1;
+    const failureText = failure === undefined ? undefined : failureTextOf(failure);
+    tests.push({ name: testText(row.name), status, ...(typeof row.filepath === "string" && row.filepath !== "" ? { file: testText(row.filepath) } : {}), ...(failureText === undefined ? {} : { failureText }), ...(ms === undefined ? {} : { durationMs: ms }), ...times(row.start, row.stop) });
   }
   return testsPart(counted("ctrf", tests));
 }
@@ -86,8 +91,14 @@ function parseTrx(text: string): ReportParts | undefined {
   const tests: ReportedTest[] = [];
   let position = 0;
   let rootSeen = false;
+  let currentTest: number | undefined;
+  let capture: string | undefined;
+  let captured = "";
+  let failures = 0;
+  const captureMax = Math.floor(FAILURE_ATTRIBUTION_LIMITS.textMax / 2);
   for (;;) {
     const start = text.indexOf("<", position);
+    if (capture !== undefined && currentTest !== undefined && start > position) captured += text.slice(position, start).slice(0, captureMax - captured.length);
     if (start === -1) {
       if (text.slice(position).trim() !== "") return undefined;
       break;
@@ -97,6 +108,7 @@ function parseTrx(text: string): ReportParts | undefined {
       const close = text.startsWith("<!--", start) ? "-->" : text.startsWith("<?", start) ? "?>" : "]]>";
       const end = text.indexOf(close, start + 2);
       if (end === -1) return undefined;
+      if (text.startsWith("<![CDATA[", start) && capture !== undefined && currentTest !== undefined) captured += text.slice(start + 9, end).slice(0, captureMax - captured.length);
       position = end + close.length;
       continue;
     }
@@ -110,6 +122,15 @@ function parseTrx(text: string): ReportParts | undefined {
     const name = qualifiedName.split(":").at(-1)!;
     const selfClosing = token.endsWith("/");
     if (closing) {
+      if ((name === "Message" || name === "StackTrace") && capture === name && currentTest !== undefined) {
+        const test = tests[currentTest];
+        if (test !== undefined && (test.status === "failed" || test.status === "errored")) {
+          const failureText = failureTextOf([test.failureText, captured].filter((part): part is string => part !== undefined).join(" "));
+          if (failureText !== undefined) test.failureText = failureText;
+        }
+        capture = undefined; captured = "";
+      }
+      if (name === "UnitTestResult") currentTest = undefined;
       if (token.slice(match[0].length).trim() !== "" || stack.pop() !== qualifiedName) return undefined;
     } else {
       if (stack.length === 0) {
@@ -124,7 +145,10 @@ function parseTrx(text: string): ReportParts | undefined {
         const status = outcome === "Passed" ? "passed" : outcome === "Failed" ? "failed" : outcome === "NotExecuted" ? "skipped" : "errored";
         const ms = trxDuration(attrs.get("duration"));
         tests.push({ name: testText(attrs.get("testName") ?? "test"), status, ...(ms === undefined ? {} : { durationMs: ms }), ...times(timestamp(attrs.get("startTime")), timestamp(attrs.get("endTime"))) });
+        currentTest = tests.length - 1;
+        if (status === "failed" || status === "errored") failures += 1;
       }
+      if ((name === "Message" || name === "StackTrace") && currentTest !== undefined && failures <= FAILURE_TEXTS_MAX) { capture = name; captured = ""; }
       if (!selfClosing) stack.push(qualifiedName);
     }
     position = end + 1;

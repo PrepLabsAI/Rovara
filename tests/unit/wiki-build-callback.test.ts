@@ -2,6 +2,7 @@
 // store cannot reach each other's page loop, pointer, sink or spend; an operation that is not a running wiki build of this company is refused. Mutants (listed in the PR body) are killed by the tests named in the comments.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { change, orgLimitKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { handleWikiBuildCallback, wikiBuildRunOfOperation, type WikiBuildCallbackDeps, type WikiBuildOperation } from "../../packages/broker/src/core/wiki-build/callback.js";
 import { readWikiBuildPointer, startWikiBuild, type WikiBuildDeps, type WikiBuildStanding } from "../../packages/broker/src/core/wiki-build/run.js";
@@ -89,13 +90,17 @@ describe("the callback's scope is the operation's", () => {
     await refused({ ...good.operation, companyId: COMPANY_B });
     const notWiki = await s.begin(COMPANY_A, "other-project", { purpose: "setup_agent" });
     await refused(notWiki.operation);
+    // #934 admits two wiki builds per company at a time: free company A's two slots (this test is about the callback's scope, not the cap) before a third build starts.
+    await s.store.update({ key: orgLimitKey(COMPANY_A), ops: [change.remove("wikiBuildSlot0"), change.remove("wikiBuildSlot1")] });
     const foreignTask = await s.begin(COMPANY_A, "third", { taskCompany: COMPANY_B });
     await refused(foreignTask.operation);
     // Each task check holds on its own: an operation that names no company (so the operation's own company cannot refuse it) still meets the task's.
     await refused({ ...foreignTask.operation, companyId: undefined });
+    await s.store.update({ key: orgLimitKey(COMPANY_A), ops: [change.remove("wikiBuildSlot0"), change.remove("wikiBuildSlot1")] });
     const closed = await s.begin(COMPANY_A, "fourth", { closed: true });
     await refused(closed.operation);
     // A task that belongs to another workspace than the operation's is not this operation's run.
+    await s.store.update({ key: orgLimitKey(COMPANY_A), ops: [change.remove("wikiBuildSlot0"), change.remove("wikiBuildSlot1")] });
     const elsewhere = await s.begin(COMPANY_A, "fifth", { taskWorkspace: randomUUID() });
     await refused(elsewhere.operation);
     // The good one still works, and none of the refusals wrote anything.

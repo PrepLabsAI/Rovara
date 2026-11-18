@@ -377,7 +377,7 @@ describe("scheduled jobs", () => {
 
   it("every job name is unique and every schedule is a rate EventBridge Scheduler accepts", () => {
     expect(new Set(CORE_JOBS.map((job) => job.name)).size).toBe(CORE_JOBS.length);
-    for (const job of CORE_JOBS) if (job.trigger.kind === "schedule") expect(job.trigger.rate).toMatch(/^rate\((1 minute|\d+ minutes)\)$/);
+    for (const job of CORE_JOBS) if (job.trigger.kind === "schedule") expect(job.trigger.rate).toMatch(/^rate\((1 minute|\d+ minutes|1 hour|\d+ hours)\)$/);
   });
 });
 

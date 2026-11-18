@@ -179,9 +179,10 @@ export type WikiPageDraft = z.infer<typeof WikiPageDraftSchema>;
 /**
  * `built`: every planned page was handed out. `budget_used`: the next page did not fit under the cap. `pages_used`: the page limit. `time_used`: the clock. `stopped_by_person`: Stop.
  * `needs_ai_key`: the company has no AI key connected (or the gateway refused for that reason). `repo_unreadable`: Rovara could not read a repository at its commit. `access_lost`: the person who
- * started it can no longer build the wiki (read again before every page). `infrastructure`: anything else.
+ * started it can no longer build the wiki (read again before every page). `infrastructure`: anything else. `upkeep_paused` (lead 4 N1): a NIGHTLY refresh the gateway refused at the project's upkeep limit; only an
+ * unattended run ends with it.
  */
-export const WIKI_BUILD_END_WORDS = ["built", "budget_used", "pages_used", "time_used", "stopped_by_person", "needs_ai_key", "repo_unreadable", "access_lost", "infrastructure"] as const;
+export const WIKI_BUILD_END_WORDS = ["built", "budget_used", "pages_used", "time_used", "stopped_by_person", "needs_ai_key", "repo_unreadable", "access_lost", "infrastructure", "upkeep_paused"] as const;
 export const WikiBuildEndWordSchema = z.enum(WIKI_BUILD_END_WORDS);
 export type WikiBuildEndWord = z.infer<typeof WikiBuildEndWordSchema>;
 
@@ -203,6 +204,7 @@ export const WIKI_BUILD_WORDS = {
   repo_unreadable: "Rovara could not read a repository at the commit it started from. It kept the pages it finished.",
   access_lost: "The person who started the wiki build can no longer build it. It kept the pages it finished.",
   infrastructure: "The wiki build could not go on. Try again; finished pages are kept.",
+  upkeep_paused: "Nightly upkeep reached its spending limit, so the wiki refresh paused. It kept the pages it finished.",
 } as const satisfies Record<string, string>;
 
 /** "Tell Rovara what matters": at most this many characters. Notes only steer order; they never become wiki text (every claim still needs a citation). */

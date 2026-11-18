@@ -418,6 +418,34 @@ export class DeveloperSignIn extends Construct {
       },
     }));
 
+    // DEC 254zzz(2): the install company import (`agentx admin company import --from-install`, and its undo plan) reads Code's company record and member mirror on this table
+    // (install-company-import.ts: GetItem ORG#<id>#COMPANY / META, Query ORG#<id>#MEMBERS / MEMBER#). Exactly those two partitions, for a company id of the shape
+    // OrgIdSchema accepts (`org_` and 20 base-36 characters), read-only; nothing else under ORG#, and no write. Its own role policy, not the broker's DefaultPolicy:
+    // that one is near CDK's split threshold (above), and a split would be a managed policy the deploy role cannot create. An inline AWS::IAM::Policy is what the deploy
+    // role and the permissions boundary already allow (iam:PutRolePolicy under the install's role path).
+    // Named environments only, as the COMPANY_MEMBER# read and the company reads above: the legacy deployment (production) runs tasks too but its template stays as deployed.
+    if (named) new iam.Policy(this, "BrokerCompanyImportReads", {
+      roles: [broker.role!],
+      statements: [
+        new iam.PolicyStatement({
+          actions: ["dynamodb:GetItem"],
+          resources: [table.tableArn],
+          conditions: {
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY"] },
+            Null: { "dynamodb:LeadingKeys": "false" },
+          },
+        }),
+        new iam.PolicyStatement({
+          actions: ["dynamodb:Query"],
+          resources: [table.tableArn],
+          conditions: {
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#MEMBERS"] },
+            Null: { "dynamodb:LeadingKeys": "false" },
+          },
+        }),
+      ],
+    });
+
     // FR-037, R27: the developer task routes write immutable AI-tool turn records, only under TASK#.
     // No update or delete: a record is written once with a condition and never changed.
     broker.addToRolePolicy(new iam.PolicyStatement({

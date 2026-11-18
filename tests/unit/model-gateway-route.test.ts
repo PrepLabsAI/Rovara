@@ -242,7 +242,8 @@ it.each(["nightly", "app", "cli", "mcp", "slack", "tracker", "jira", "github_iss
   const w = await world();
   const ok = operationKey(T1_COMPANY, v.ws, v.op); const tk = taskKey(v.tid);
   await w.h.store.put({ item: { ...(await w.h.store.get(ok))!, kind: "task", requester: { personId: v.per!, provider: "test" } } });
-  await w.h.store.put({ item: { ...(await w.h.store.get(tk))!, ...(origin === undefined ? {} : { origin }) } });
+  // Origin nightly marks nightly upkeep AI (lead 4 N1): only a wiki build task is minted it (the case below says what a nightly task of any other kind gets).
+  await w.h.store.put({ item: { ...(await w.h.store.get(tk))!, ...(origin === undefined ? {} : { origin }), ...(origin === "nightly" ? { purpose: "wiki_build" } : {}) } });
   w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
   w.deps.modelGateway!.describer = createTaskTokenDescriber(w.h.deps);
   const get = w.h.store.get.bind(w.h.store); let reads = 0;
@@ -260,6 +261,18 @@ it.each(["nightly", "app", "cli", "mcp", "slack", "tracker", "jira", "github_iss
     else expect(claims).toMatchObject({ src: origin });
   }
   else { expect(answer).toMatchObject({ statusCode: 409, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"could not work out who pays for this task"}}' }); expect(w.w.signs()).toBe(0); }
+});
+
+it("mints nothing for a task marked nightly that is not a wiki build (the model-free nightly test run gets no model access)", async () => {
+  const w = await world();
+  const ok = operationKey(T1_COMPANY, v.ws, v.op); const tk = taskKey(v.tid);
+  await w.h.store.put({ item: { ...(await w.h.store.get(ok))!, kind: "task", requester: { personId: v.per!, provider: "test" } } });
+  await w.h.store.put({ item: { ...(await w.h.store.get(tk))!, origin: "nightly" } });
+  w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
+  w.deps.modelGateway!.describer = createTaskTokenDescriber(w.h.deps);
+  const answer = await w.call();
+  expect(answer.statusCode).not.toBe(200);
+  expect(w.w.signs()).toBe(0);
 });
 
 it("refuses a developer-purpose signer with the fixed HTTP error and no leaked metadata", async () => {

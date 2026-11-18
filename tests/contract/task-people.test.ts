@@ -720,7 +720,7 @@ describe("task people", () => {
     expect(names).toEqual([OWNER.name, `${MEMBER.name} (Slack identity)`, `${MEMBER.name} (${method === "github" ? "GitHub" : "OIDC"} identity)`].sort());
   });
 
-  it("requires explicit enablement for initialization and preserves unshared legacy tasks", async () => {
+  it("requires explicit enablement for initialization, and (C3) initializes an unshared task only for its proved creator", async () => {
     for (const enabled of [undefined, false]) {
       const h = harness({ ...(enabled === undefined ? {} : { enabled }) });
       expect((await errorOf(getTaskPeople(h.deps, OWNER, TASK_ID))).code).toBe("RUNTIME_UNAVAILABLE");
@@ -729,9 +729,13 @@ describe("task people", () => {
     const unsharedRecord = task({ shared: false, provider: "oidc" });
     delete unsharedRecord.share;
     delete unsharedRecord.slackUserId;
+    // C3 (plan 3 item 5): a task with no Slack share gets People once its creator passes their own proof path; nobody else starts it.
+    const stranger = harness({ enabled: true, record: unsharedRecord });
+    expect((await errorOf(getTaskPeople(stranger.deps, OTHER, TASK_ID))).code).toBe("TASK_ACCESS_DENIED");
+    expect(stranger.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toBeUndefined();
     const unshared = harness({ enabled: true, record: unsharedRecord });
-    expect((await errorOf(getTaskPeople(unshared.deps, OWNER, TASK_ID))).code).toBe("TASK_ACCESS_DENIED");
-    expect(unshared.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toBeUndefined();
+    await getTaskPeople(unshared.deps, OWNER, TASK_ID);
+    expect(unshared.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toMatchObject({ revision: 1, orphaned: false });
   });
 
   it("refuses an unauthorized cold read without initializing People or registry rows", async () => {

@@ -112,6 +112,8 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
       // Core switch-on blocker (2026-11-17): the model gateway settings an overlay used to carry, now kept like the rest.
       CoreModelGatewayHost: "gateway.staging.example.dev",
       CoreAgentModel: "claude-sonnet-4-6",
+      // L4-AM (DEC 254zzn(2)): the hosted answers model is kept across an upgrade too.
+      CoreAnswersModel: "claude-haiku-5-5",
     };
     const h = await harness({ controlPlane: { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****", ...coreSettings }, loadRelease: async () => release("1.3.0", ["BudgetMonthlyUsd", ...Object.keys(coreSettings)]) });
     await runUpgrade(options, h.deps);

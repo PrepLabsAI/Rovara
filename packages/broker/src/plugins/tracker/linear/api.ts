@@ -9,7 +9,7 @@
 //     notes Rovara keeps of what it writes.
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { TrackerSearchError, TrackerWriteRefusedError, agentXError, type TrackerAskedItem } from "@agentx/contracts";
+import { TrackerSearchError, TrackerWriteRefusedError, TrackerParentSchema, agentXError, type TrackerAskedItem } from "@agentx/contracts";
 import { normalizeIssueKey } from "./webhook.js";
 import type { LinearIssueRead, LinearReplyPort, LinearStateType, LinearTrackerAccess } from "./index.js";
 
@@ -76,8 +76,8 @@ export interface LinearApiOptions {
 }
 
 const STATE_TYPES: readonly string[] = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
-const ASKED_QUERY = `query($filter: IssueFilter!, $first: Int!) { viewer { id } issues(first: $first, filter: $filter) { nodes { id identifier title description url creator { displayName }
- labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } } }`;
+const ASKED_QUERY = `query($filter: IssueFilter!, $first: Int!) { viewer { id } issues(first: $first, filter: $filter) { nodes { id identifier title description url project { id name url } parent { id identifier title url }
+creator { displayName } labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } } }`;
 const HISTORY_PAGE_QUERY = `query($id: String!, $after: String) { issue(id: $id) { history(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } }`;
 /** The most further pages of one issue's history read to see all of it (100 entries each). An issue with more is not read to the end, so nobody is credited for it. */
 export const LINEAR_HISTORY_PAGES_MAX = 5;
@@ -175,7 +175,19 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     };
   };
 
-  const reply: LinearReplyPort["reply"] = async ({ orgId, issueKey, text, commentKey, workspace }) => {
+  /** A comment as Linear has it: whether it exists, which issue it is on, and (for a reply) its parent. Used to refuse an id that is not on the issue named. */
+  const commentOn = async (id: string): Promise<{ issue: string | undefined; parent: string | undefined } | undefined> => {
+    const read = await call("query($id: String!) { comment(id: $id) { id issue { identifier } parent { id } } }", { id });
+    if ("errors" in read) {
+      if (isNotFoundAnswer(read.errors)) return undefined;
+      throw unavailable();
+    }
+    const found = rec(read.data["comment"]);
+    if (str(found["id"]) !== id) return undefined;
+    return { issue: normalizeIssueKey(str(rec(found["issue"])["identifier"])), parent: str(rec(found["parent"])["id"]) };
+  };
+
+  const reply: LinearReplyPort["reply"] = async ({ orgId, issueKey, text, commentKey, workspace, parentId }) => {
     const key = normalizeIssueKey(issueKey);
     const body = text.trim();
     if (key === undefined || body === "") throw agentXError("CONFIG_INVALID", "A comment needs an issue and some words.");
@@ -185,7 +197,12 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     const issue = await issueOf(key);
     // An answer for another issue than the one asked about is no answer; and the issue's own link says which workspace it is in.
     if (issue === undefined || normalizeIssueKey(issue.identifier) !== key || (workspace !== undefined && workspaceOfIssueUrl(issue.url) !== workspace)) throw new TrackerWriteRefusedError("not_found");
-    const created = await call("mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }", { input: { id: commentId, issueId: issue.id, body: words } });
+    // A reply goes in the thread of a comment that is on THIS issue, never another's.
+    if (parentId !== undefined) {
+      const parent = await commentOn(parentId);
+      if (parent === undefined || parent.issue !== key || parent.parent !== undefined) throw new TrackerWriteRefusedError("not_found");
+    }
+    const created = await call("mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }", { input: { id: commentId, issueId: issue.id, body: words, ...(parentId === undefined ? {} : { parentId }) } });
     if (!("errors" in created) && rec(created.data["commentCreate"])["success"] === true) return { commentId };
     if ("errors" in created && isPermissionAnswer(created.errors)) throw new TrackerWriteRefusedError("needs_write_access");
     // Linear refused or the answer was lost: if a comment with this very id is on this very issue, it is posted (the same post again is the same comment).
@@ -195,8 +212,24 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     throw unavailable();
   };
 
+  const edit: NonNullable<LinearReplyPort["edit"]> = async ({ issueKey, commentId, text, workspace }) => {
+    const key = normalizeIssueKey(issueKey);
+    const body = text.trim();
+    if (key === undefined || body === "") throw agentXError("CONFIG_INVALID", "A comment needs an issue and some words.");
+    if (workspace !== undefined && !WORKSPACE_KEY.test(workspace)) throw agentXError("CONFIG_INVALID", "A comment needs a valid workspace.");
+    const issue = await issueOf(key);
+    if (issue === undefined || normalizeIssueKey(issue.identifier) !== key || (workspace !== undefined && workspaceOfIssueUrl(issue.url) !== workspace)) throw new TrackerWriteRefusedError("not_found");
+    // Only a comment that is on this very issue is rewritten (Linear lets the key edit its own comments only, and this says which issue they are on).
+    const found = await commentOn(commentId);
+    if (found === undefined || found.issue !== key) throw new TrackerWriteRefusedError("not_found");
+    const written = await call("mutation($id: String!, $input: CommentUpdateInput!) { commentUpdate(id: $id, input: $input) { success } }", { id: commentId, input: { body: cut(body, LINEAR_COMMENT_MAX_CHARS) } });
+    if (!("errors" in written) && rec(written.data["commentUpdate"])["success"] === true) return;
+    if ("errors" in written && isPermissionAnswer(written.errors)) throw new TrackerWriteRefusedError("needs_write_access");
+    throw unavailable();
+  };
+
   const readIssue: NonNullable<LinearTrackerAccess["readIssue"]> = async (_orgId, key) => {
-    const answer = await call("query($id: String!) { issue(id: $id) { identifier title description url updatedAt state { type } assignee { displayName } labels { nodes { name } } } }", { id: key });
+    const answer = await call("query($id: String!) { issue(id: $id) { identifier title description url updatedAt state { type } assignee { displayName } labels { nodes { name } } project { id name url } parent { id identifier title url } } }", { id: key });
     if ("errors" in answer) {
       if (isNotFoundAnswer(answer.errors)) return undefined;
       throw unavailable();
@@ -211,6 +244,8 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
       labels: arr(rec(issue["labels"])["nodes"]).map((node) => str(rec(node)["name"])).filter((name): name is string => name !== undefined),
       ...(str(rec(issue["assignee"])["displayName"]) === undefined ? {} : { assignee: str(rec(issue["assignee"])["displayName"])! }),
       ...(str(issue["updatedAt"]) === undefined ? {} : { updatedAt: str(issue["updatedAt"])! }),
+      ...(str(rec(issue["project"])["id"]) !== undefined ? { project: { id: str(rec(issue["project"])["id"])!, name: cut(str(rec(issue["project"])["name"]) ?? "", 200), ...(str(rec(issue["project"])["url"]) === undefined ? {} : { url: str(rec(issue["project"])["url"])! }) } } : {}),
+      ...(str(rec(issue["parent"])["id"]) !== undefined ? { parent: { id: str(rec(issue["parent"])["id"])!, title: cut(str(rec(issue["parent"])["title"]) ?? "", 200), ...(str(rec(issue["parent"])["url"]) === undefined ? {} : { url: str(rec(issue["parent"])["url"])! }) } } : {}),
     };
     return read;
   };
@@ -264,6 +299,14 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
         ...(str(rec(issue["creator"])["displayName"]) === undefined ? {} : { reporter: str(rec(issue["creator"])["displayName"])! }),
         ...(actor === undefined ? {} : { actor }),
         ...(found === undefined ? {} : { occurredAt: found.at }),
+        ...(() => {
+          const project = rec(issue["project"]), parentIssue = rec(issue["parent"]);
+          const raw = str(project["id"]) === undefined
+            ? { kind: "parent_issue", id: str(parentIssue["id"]), title: cut(str(parentIssue["title"]) ?? "", 200), url: str(parentIssue["url"]) }
+            : { kind: "project", id: str(project["id"]), title: cut(str(project["name"]) ?? "", 200), url: str(project["url"]) };
+          const parsed = TrackerParentSchema.safeParse(raw);
+          return parsed.success ? { parent: parsed.data } : {};
+        })(),
       });
     }
     return items;
@@ -282,5 +325,5 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     throw unavailable();
   };
 
-  return { reply: { reply }, readIssue, asked, moveIssue };
+  return { reply: { reply, edit }, readIssue, asked, moveIssue };
 }

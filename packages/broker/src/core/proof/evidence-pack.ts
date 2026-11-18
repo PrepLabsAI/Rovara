@@ -152,6 +152,17 @@ export function buildEvidencePack(input: EvidenceBuildInput): EvidenceBuildResul
         tests = rest;
       }
     }
+    // TE-A6 (DEC 254zt): the change that most likely broke each failing test. Only for a failed check and for tests this check's report shows failing: anything else drops only the causes (the tests part stays), and the check keeps its
+    // per-check line. Every text is redacted again below, and the test ids are given the same names the `names` list gets.
+    if (tests?.failureCauses !== undefined) {
+      const failing = new Set(tests.names.filter((name) => name.status === "failed" || name.status === "errored").map((name) => name.name));
+      if (entry.after !== "failed" || !tests.failureCauses.every((cause) => failing.has(cause.testId))) {
+        problems.add("tests_disagree_with_check");
+        const { failureCauses: _causes, ...rest } = tests;
+        void _causes;
+        tests = rest;
+      }
+    }
     let coverage = extra?.coverage;
     if (coverage !== undefined && coverage.files.reduce((sum, file) => sum + file.uncovered.length, 0) > coverage.linesChanged - coverage.linesCovered) {
       problems.add("coverage_inconsistent");
@@ -185,7 +196,7 @@ export function buildEvidencePack(input: EvidenceBuildInput): EvidenceBuildResul
       before: entry.before, after: entry.after, class: entry.class, durationMs: entry.durationMs,
       ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
       // TE-B3: the tests that ran before and are gone are named like the new ones: redacted again, a valid id as it is, anything else one plain cut line.
-      ...(tests === undefined ? {} : { tests: { ...tests, names: tests.names.map((name) => ({ ...name, ...testNameOf(name.name, name.unlisted === true) })), newTests: tests.newTests.map((name) => testNameOf(name, false).name), ...(tests.absentOnNew === undefined ? {} : { absentOnNew: tests.absentOnNew.map((name) => testNameOf(name, false).name) }), ...(tests.flakyOnRerun === undefined ? {} : { flakyOnRerun: tests.flakyOnRerun.map((name) => testNameOf(name, false).name) }) } }),
+      ...(tests === undefined ? {} : { tests: { ...tests, names: tests.names.map((name) => ({ ...name, ...testNameOf(name.name, name.unlisted === true) })), newTests: tests.newTests.map((name) => testNameOf(name, false).name), ...(tests.absentOnNew === undefined ? {} : { absentOnNew: tests.absentOnNew.map((name) => testNameOf(name, false).name) }), ...(tests.flakyOnRerun === undefined ? {} : { flakyOnRerun: tests.flakyOnRerun.map((name) => testNameOf(name, false).name) }), ...(tests.failureCauses === undefined ? {} : { failureCauses: tests.failureCauses.map((row) => ({ testId: testNameOf(row.testId, tests.names.some((name) => name.name === row.testId && name.unlisted === true)).name, cause: row.cause.kind === "unknown" ? row.cause : { ...row.cause, paths: row.cause.paths.map((path) => plain(path, 500)) } })) }) } }),
       ...(coverage === undefined ? {} : { coverage: { ...coverage, files: coverage.files.map((file) => ({ ...file, path: plain(file.path, 500) })) } }),
       ...(findings === undefined ? {} : { findings: { ...findings, tool: plain(findings.tool, 60), items: findings.items.map((item) => ({ ...item, ruleId: plain(item.ruleId, 100), path: plain(item.path, 500), message: item.message === "" ? "" : plain(item.message, 300) })) } }),
       ...(extra?.migrations === undefined ? {} : { migrations: { applied: extra.migrations.applied.map((name) => plain(name, 100)), rolledBack: extra.migrations.rolledBack, schemaChanges: extra.migrations.schemaChanges.map((name) => plain(name, 200)) } }),

@@ -19,3 +19,6 @@ export const HOST_ASK_SK_PREFIX = "SETUP_HOST_ASK#";
 export const hostRefusedCountKey = (orgId: OrgId, project: string, taskId: string, kind: string): DocumentKey => ({ pk: projectPk(orgId, project), sk: `SETUP_HOST_REFUSED#${taskId}#${kind}` });
 
 export const expiryOf = (nowMs: number): { [INDEX_EXPIRY_ATTRIBUTE]: number } => ({ [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + SETUP_KEEP_SECONDS });
+
+/** The same expiry attribute for rows that live `seconds` (the setup re-check's rows live as long as the cap's claims do). */
+export const expiryAfter = (nowMs: number, seconds: number): { [INDEX_EXPIRY_ATTRIBUTE]: number } => ({ [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + seconds });
