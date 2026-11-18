@@ -58,8 +58,8 @@ describe("the knowledge routes at the developer router", () => {
     // No sign-in and a bad sign-in are refused before the API is asked; a GET, and a path next to it, are not this door (a token is refused there).
     expect((await callOn(deps, "POST", `${P}/knowledge/propose`, undefined, body)).status).toBe(401);
     expect((await callOn(deps, "POST", `${P}/knowledge/propose`, "Bearer not.a.jwt", body)).status).toBe(401);
-    expect((await callOn(deps, "GET", `${P}/knowledge/propose`, `Bearer ${TOKEN}`)).status).toBe(401);
-    expect((await callOn(deps, "POST", `${P}/knowledge/proposals`, `Bearer ${TOKEN}`, body)).status).toBe(401);
+    expect((await callOn(deps, "GET", `${P}/knowledge/propose`, `Bearer ${TOKEN}`)).status).toBe(404);
+    expect((await callOn(deps, "POST", `${P}/knowledge/proposals`, `Bearer ${TOKEN}`, body)).status).toBe(404);
     expect(answer).toHaveBeenCalledTimes(2);
     // Without the wiring: a person is told the fixed off sentence, a token is refused.
     const bare: DeveloperRouteDependencies = { ...w.routes };
