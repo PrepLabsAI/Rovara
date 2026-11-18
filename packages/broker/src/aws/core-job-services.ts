@@ -11,6 +11,7 @@ import { createCostLedger, costUsdOf } from "../core/cost/ledger.js";
 import { createSessionService } from "../services/sessions.js";
 import { createNoticeService } from "../services/notices.js";
 import { createMergeTrackingService, createMilestoneService } from "../services/merge-tracking.js";
+import { rovaraCheckSource } from "../services/rovara-check.js";
 import { createIdentityMergePeople, type MergePeople } from "../core/merge/people.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -91,6 +92,14 @@ export interface BrokerCoreServicesOptions {
 }
 
 type JobServices = Record<"merge-tracking" | "session-sweep" | "notify-deliver", CoreService>;
+
+/**
+ * L4-RC: the deployed broker's job services, with the "Rovara" Check on for every company's tasks (owner decision 2026-11-17). The Check's "Details" has no link here: Code has no address for a core task's page (a core task's
+ * pull request description carries none either), and the old `/review/<task>/task` page is for the first workflow's tasks only. The company's own code host writes it (aws/core-code-host.ts keeps the company rules).
+ */
+export function createHostedBrokerCoreServices(options: Omit<BrokerCoreServicesOptions, "summaryCheck">): JobServices {
+  return createBrokerCoreServices({ ...options, summaryCheck: rovaraCheckSource() });
+}
 
 /** Built once for one company's runtime. Each pass binds all internal store work to ONE allowance. */
 export function createBrokerCoreServices(options: BrokerCoreServicesOptions): JobServices {
