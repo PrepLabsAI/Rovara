@@ -2180,6 +2180,8 @@ async function linearConnectRoute(deps: DeveloperRouteDependencies, request: Ada
     documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, now: deps.now, wiring,
     projectInCompany: async (project, company) => (await projectsWithPolicy(deps, [project], company)).has(project),
     projectRole: async (project, personId, company) => (await projectGrant(memberActions(deps), project, personId, company))?.role,
+    // A project's first tracker team: where the new-hosted-project ticket-updates default is saved (once, only if none is saved), for a company whose tasks start on the core.
+    ...(deps.developer.coreIntake === undefined ? {} : { onFirstTeam: async (company: string, project: string, personId: string) => { await deps.developer.coreIntake!.seedTicketUpdates(OrgIdSchema.parse(company), project, personId); } }),
   }, caller, companyId, request, url, stepUp);
 }
 

@@ -25,6 +25,8 @@ export function planSummarySourceOf(deps: PlanSummarySourceDeps): (orgId: OrgId,
     if (workflow === undefined || workflow.stage !== "PLAN_REVIEW" || workflow.state !== "WAITING") return undefined;
     const artifact: WorkflowArtifact | undefined = workflow.artifacts.filter((entry) => entry.type === currentDocumentType(workflow)).at(-1);
     if (artifact === undefined) return undefined;
+    // Only this task's own stored documents are read (the decision card's rule): a pointer to any other object, on a bucket several companies share, is a document that does not read.
+    if (typeof task["ownerKey"] !== "string" || typeof task["workspaceId"] !== "string" || !artifact.objectKey.startsWith(`private/${task["ownerKey"]}/${task["workspaceId"]}/`)) return undefined;
     const summary = documentSummary(await loadWorkflowDocument(textReaderOf(deps.artifacts), artifact, {}).catch(() => undefined));
     if (summary === undefined) return undefined;
     const found = await deps.gate.requirement(orgId, WORKFLOW_DOCUMENT_KIND, taskId);

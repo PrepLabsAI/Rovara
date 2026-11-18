@@ -54,7 +54,11 @@ export function linearCompanyTracker(input: {
       const issue = await read(orgId, key);
       return issue === undefined || (input.workspace !== undefined && workspaceOfIssueUrl(issue.url) !== input.workspace.toLowerCase()) ? undefined : issue;
     },
-    reply: { reply: async (request) => { own(request.orgId); return write.reply(request); } },
+    // The company's own port, whole: a reply (in a thread, when the request names a parent) and a rewrite of a comment Rovara wrote (the ticket thread's root, edited in place). Each names its company, and another company's is refused before anything is sent.
+    reply: {
+      reply: async (request) => { own(request.orgId); return write.reply(request); },
+      ...(write.edit === undefined ? {} : { edit: async (request: Parameters<NonNullable<typeof write.edit>>[0]) => { own(request.orgId); return write.edit!(request); } }),
+    },
     ...(input.hook === undefined ? {} : { hook: async (scope: HostScope) => ("orgId" in scope && scope.orgId === company ? input.hook : undefined) }),
   };
   return linearTracker(access);

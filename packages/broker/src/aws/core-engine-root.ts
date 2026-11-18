@@ -100,7 +100,9 @@ import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
 import { handleCoreContextTools } from "../core-host/context-tools.js";
-import { createHostedIntake, hostedTicketUpdatesHandler, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
+import { createTaskLogHooks } from "../core/task-log/hooks.js";
+import { hostedPlanSummaryOf } from "../core-host/plan-summary.js";
+import { createHostedIntake, hostedTicketUpdates, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
 import type { LinearConnections } from "./linear-connections.js";
 import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.js";
 
@@ -608,8 +610,15 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           });
           if (lessons !== undefined) {
             // L2-4: the ticket write-back rides on the company's milestones, through the company's own Linear connection only.
+            // The task log rides with it: the flow tells the hook once an answer, a question or a decision is committed (the entries are written in that change's own transaction), and the plan's summary is read
+            // through the company's own decision gate. A company with no Linear write-back gets neither (the hook is never set, so the flow is byte-identical to before).
             if (inputs.linearIntake !== undefined) {
-              lessons.milestones.register(hostedTicketUpdatesHandler({ companyId, store: registry.require("storage"), connections: inputs.linearIntake.connections, fetch: inputs.linearIntake.fetch, now: () => now().getTime(), log }));
+              const taskLog = createTaskLogHooks((event, fields) => { log({ component: "task_log", companyId, event, ...fields }); });
+              flow.deps.taskLog = taskLog;
+              for (const handler of hostedTicketUpdates({
+                companyId, store: registry.require("storage"), connections: inputs.linearIntake.connections, fetch: inputs.linearIntake.fetch, now: () => now().getTime(), log,
+                planSummaryOf: hostedPlanSummaryOf({ flow: flow.deps, registry, companyId, now }), taskLog,
+              })) lessons.milestones.register(handler);
             }
             lessons.attach();
             lessonsByCompany.set(companyId, lessons);

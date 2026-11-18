@@ -19,7 +19,7 @@ import { noteOwnWrite } from "../intake/own-writes.js";
 import { recordMilestoneInLog } from "../task-log/milestones.js";
 import { readTaskLog } from "../task-log/store.js";
 import { taskKey } from "../task-flow/keys.js";
-import { KEPT_SECONDS, claim, claimKey, countWithin, giveBack, hourOf, isFinal, refusalOf, release, settle } from "./claims.js";
+import { KEPT_SECONDS, claim, claimKey, scopeCoversCompany, countWithin, giveBack, hourOf, isFinal, refusalOf, release, settle } from "./claims.js";
 import type { TicketRef, TicketUpdatesDependencies } from "./handler.js";
 import { noteWriteAccessMissing, noteWriteAccessOk } from "./settings.js";
 import { renderReplies, renderRoot, visibleEntries } from "./thread-render.js";
@@ -334,6 +334,8 @@ export async function refreshThreadOfTask(
   const taskOrg = task?.["orgId"] ?? task?.["companyId"];
   if (task === undefined || typeof taskOrg !== "string" || typeof task["project"] !== "string" || typeof task["sessionId"] !== "string") return undefined;
   const orgId = taskOrg;
+  // The task's own record names its company; a handler scoped to another company never writes for it (a task id is not company-scoped, so a hook told of another company's task is refused here).
+  if (!scopeCoversCompany(deps.scope, orgId)) return undefined;
   const ticket = await input.originTicketOf({ orgId, project: task["project"], taskId: input.taskId, sessionId: task["sessionId"] });
   if (ticket === undefined) return undefined;
   const chosen = await input.levelOf(orgId, task["project"]);

@@ -2,7 +2,9 @@
 // (`intakePortsOf` over a memory store) through `createHostedIntake`, the real developer dispatcher for the waiting-ticket routes, and a fake Linear behind the fetch seam.
 // Two companies throughout: company B's Linear workspace has a team id and a Linear user id that are the SAME strings as company A's.
 import { createHmac, randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { DEFAULT_TICKET_UPDATES, NEW_HOSTED_TICKET_UPDATES, ticketUpdatesSettingsKey } from "@agentx/contracts";
+import { readTicketUpdates, saveTicketUpdates } from "../../packages/broker/src/core/ticket-updates/index.js";
+import { describe, expect, it, vi } from "vitest";
 import { intakeItemIdOf, type AuditEvent, type OrgId, type Principal } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
@@ -117,7 +119,7 @@ async function world(options: { onCore?: readonly string[] } = {}) {
   };
   const ticket = async (workspace: FakeWorkspace, actor?: string, key?: string) => { at += 1; return appHook(issueCreated(workspace, actor, at, key)); };
   const link = (companyId: string, organizationId: string, linearUserId: string, personId: string) => linkLinearAccount(store, { companyId, organizationId, linearUserId, personId, linkedAt: TIME });
-  return { h, linear, logs, connections, store, starts, audits, intake, call, as, grant, member, ticket, link, now };
+  return { h, linear, logs, connections, store, starts, audits, intake, call, as, grant, member, ticket, link, now, project, onCore };
 }
 
 describe("Linear account links (company-scoped, first wins)", () => {
@@ -387,5 +389,89 @@ describe("hosted wiring", () => {
     expect(Buffer.from(intakeFenceKeyOf("k1")).equals(Buffer.from(intakeFenceKeyOf("k1")))).toBe(true);
     expect(Buffer.from(intakeFenceKeyOf("k1")).equals(Buffer.from(intakeFenceKeyOf("k2")))).toBe(false);
     expect(Buffer.from(intakeFenceKeyOf("k1")).toString()).not.toContain("k1");
+  });
+});
+
+describe("L4-LP2: a project's first tracker team saves the new-hosted ticket-updates default, once, and never over a saved choice", () => {
+  const settingsOf = (w: Awaited<ReturnType<typeof world>>, company: OrgId, project: string) => readTicketUpdates({ store: w.store, now: () => w.now }, company, project);
+
+  it("a project with no saved settings gets level full when its first team is set; the setting is the company's own", async () => {
+    const w = await world();
+    w.as(PERSON);
+    await w.project("charlie", A);
+    const saved = await settingsOf(w, A, "charlie");
+    expect(saved.revision).toBe(1);
+    expect(saved.settings).toEqual(NEW_HOSTED_TICKET_UPDATES);
+    expect(saved.settings.level).toBe("full");
+    // Nothing for company B, and nothing for another project of A.
+    expect((await settingsOf(w, B, "charlie")).revision).toBe(0);
+    expect((await settingsOf(w, A, "alpha")).revision).toBe(0);
+  });
+
+  it("a saved status_only stays status_only (and a saved anything else), however the team is set", async () => {
+    const w = await world();
+    w.as(PERSON);
+    await saveTicketUpdates({ store: w.store, now: () => w.now }, { orgId: A, project: "delta", requestId: randomUUID(), by: "owner", settings: { ...DEFAULT_TICKET_UPDATES, level: "status_only" } });
+    await w.project("delta", A);
+    const kept = await settingsOf(w, A, "delta");
+    expect(kept.revision).toBe(1);
+    expect(kept.settings.level).toBe("status_only");
+    await saveTicketUpdates({ store: w.store, now: () => w.now }, { orgId: A, project: "echo", requestId: randomUUID(), by: "owner", settings: { ...DEFAULT_TICKET_UPDATES, level: "decisions" } });
+    await w.project("echo", A);
+    expect((await settingsOf(w, A, "echo")).settings.level).toBe("decisions");
+  });
+
+  it("only the FIRST team: a project that already had one (an existing project) is unchanged by another team choice, and a later choice never rewrites the default", async () => {
+    const w = await world();
+    w.as(PERSON);
+    // alpha got its team before the intake existed: changing its team again seeds nothing.
+    expect((await w.call("PUT", `${BASE}/projects/alpha`, { teamId: "team-a-eng" })).status).toBe(200);
+    expect((await settingsOf(w, A, "alpha")).revision).toBe(0);
+    await w.project("foxtrot", A);
+    await saveTicketUpdates({ store: w.store, now: () => w.now }, { orgId: A, project: "foxtrot", requestId: randomUUID(), by: "owner", settings: { ...NEW_HOSTED_TICKET_UPDATES, level: "decisions" }, });
+    expect((await w.call("PUT", `${BASE}/projects/foxtrot`, { teamId: "team-a-eng" })).status).toBe(200);
+    expect((await settingsOf(w, A, "foxtrot")).settings.level).toBe("decisions");
+  });
+
+  it("two adds at once save once: one seeds, the other keeps", async () => {
+    const w = await world();
+    const results = await Promise.all([w.intake.seedTicketUpdates(A, "golf", MAYA), w.intake.seedTicketUpdates(A, "golf", BO), w.intake.seedTicketUpdates(A, "golf", DEV)]);
+    expect(results.filter((r) => r === "seeded")).toHaveLength(1);
+    expect(results.filter((r) => r === "kept")).toHaveLength(2);
+    expect((await settingsOf(w, A, "golf")).revision).toBe(1);
+  });
+
+  it("two companies: the same project name in each is seeded separately; a company whose tasks do not start on the core saves nothing", async () => {
+    const w = await world({ onCore: [A] });
+    expect(await w.intake.seedTicketUpdates(A, "hotel", MAYA)).toBe("seeded");
+    expect(await w.intake.seedTicketUpdates(B, "hotel", BO)).toBe("no_intake");
+    expect((await settingsOf(w, B, "hotel")).revision).toBe(0);
+    const both = await world();
+    expect(await both.intake.seedTicketUpdates(A, "hotel", MAYA)).toBe("seeded");
+    expect(await both.intake.seedTicketUpdates(B, "hotel", BO)).toBe("seeded");
+    expect((await settingsOf(both, A, "hotel")).revision).toBe(1);
+    expect((await settingsOf(both, B, "hotel")).revision).toBe(1);
+  });
+
+  it("a team read that fails counts as 'had a team' (nothing is seeded); a seed that fails never fails the team PUT; an item that does not parse is kept, not overwritten", async () => {
+    const w = await world();
+    w.as(PERSON);
+    const real = w.connections.teamPick.bind(w.connections);
+    w.connections.teamPick = async () => { throw new Error("unreadable"); };
+    await w.project("india", A);
+    expect((await settingsOf(w, A, "india")).revision).toBe(0);
+    w.connections.teamPick = real;
+    const seeded = vi.spyOn(w.intake, "seedTicketUpdates").mockRejectedValue(new Error("store down"));
+    {
+      await w.project("juliet", A);
+      expect(seeded).toHaveBeenCalledTimes(1);
+      expect((await settingsOf(w, A, "juliet")).revision).toBe(0);
+      expect((await w.call("GET", `${BASE}/projects/juliet`)).status).toBe(200);
+    }
+    seeded.mockRestore();
+    const key = ticketUpdatesSettingsKey(A, "kilo");
+    await w.store.put({ item: { ...key, entityType: "TICKET_UPDATES", orgId: A, project: "kilo", settings: { level: "nonsense" }, revision: 4 } });
+    expect(await w.intake.seedTicketUpdates(A, "kilo", MAYA)).toBe("kept");
+    expect((await w.store.get(key))!["revision"]).toBe(4);
   });
 });
