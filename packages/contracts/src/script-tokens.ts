@@ -78,8 +78,8 @@ export const ScriptTokenViewSchema = z
   .strict();
 export type ScriptTokenView = z.infer<typeof ScriptTokenViewSchema>;
 
-/** `GET /v1/app/script-tokens`. */
-export const ScriptTokenListSchema = z.object({ tokens: z.array(ScriptTokenViewSchema).max(1000) }).strict();
+/** `GET /v1/app/script-tokens`. `canCreate` is true only for a live company owner or admin. */
+export const ScriptTokenListSchema = z.object({ tokens: z.array(ScriptTokenViewSchema).max(1000), canCreate: z.boolean() }).strict();
 export type ScriptTokenList = z.infer<typeof ScriptTokenListSchema>;
 
 /** `POST /v1/app/script-tokens`: the token itself, this once. The broker never shows it again: a repeat of the request is refused, not answered with it. */

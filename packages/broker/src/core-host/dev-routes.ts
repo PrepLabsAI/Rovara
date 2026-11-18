@@ -24,7 +24,7 @@
 //     install switch is on: then it answers a plain 404 "Saved environments are off for this install", never made-up data. Reset and the setting are not on the core here;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
 //     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with a fresh step-up and the risk-based approver rule; the rules are setup-run-routes.ts's;
-//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
+//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a live company owner/admin role and a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
 //     "a page signed in to a few minutes ago" rule, with Code's own factor as the proof). A token's own requests are not accepted here either (the broker's sign-in decides that).
 //   - The step-up's time comes only from the caller the broker's sign-in vouched for (`DeployedCaller.stepUp`, read from the verified access token), never from a header, a query or a
 //     body. The age is checked HERE, on every such request, against the company's window (`stepUpWindowSeconds`, the policy hook's answer, which may only shorten the default), so a
@@ -51,6 +51,7 @@ import { answerTaskOnRequest } from "../core/task-flow/answer-request.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
 import { createScriptToken, listScriptTokens, readScriptToken, scriptTokenStatus, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
+import { SCRIPT_TOKEN_CREATE_ADMIN_ONLY } from "../core/script-tokens/store.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer, inboxOwns } from "./inbox-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
@@ -666,10 +667,11 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.scriptTokens === undefined || !enabled()) throw agentXError("NOT_FOUND", "route not found");
           const audit = target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
           const deps = { store: target.runtime.flow.deps.store, audit, now: () => nowOf(target) };
-          // The live role from membership decides whether the list and revoke reach every token of the company (an administrator) or only the caller's own.
+          // Read live for this request: the role controls creation and whether list/revoke reach every company token or only the caller's own.
           const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };
           if (tokens[1] === undefined && request.method === "POST") {
-            // Making a token needs a fresh step-up, checked before the body is read.
+            // Refuse the role before checking step-up or reading the body; core creation enforces it too.
+            if (scriptCaller.orgRole !== "owner" && scriptCaller.orgRole !== "admin") throw agentXError("FORBIDDEN", SCRIPT_TOKEN_CREATE_ADMIN_ONLY);
             const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), MAKE_SCRIPT_TOKEN_ON_A_PAGE);
             const canRead = target.wiring.canReadProject;
             if (canRead === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
@@ -682,7 +684,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), signIn: { amr: stepUp.method, authTime: stepUp.at } });
             return json(201, made);
           }
-          if (tokens[1] === undefined && request.method === "GET") return json(200, { tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });
+          if (tokens[1] === undefined && request.method === "GET") return json(200, { canCreate: scriptCaller.orgRole === "owner" || scriptCaller.orgRole === "admin", tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });
           if (tokens[1] !== undefined && request.method === "POST") return json(200, { token: await revokeScriptToken(deps, scriptCaller, tokenIdOf(tokens[1])) });
           throw agentXError("NOT_FOUND", "route not found");
         }
