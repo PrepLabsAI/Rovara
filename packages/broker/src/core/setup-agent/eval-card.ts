@@ -88,7 +88,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
     ? await (async () => {
       const view = await readEvalHealthView({ ...table, ...(deps.now === undefined ? {} : { now: deps.now }) }, project);
       return { state: view.state, label: card.healthRun.label, cost: card.healthRun.cost, seenCostMicros: record.plan.estimate.costMicros,
-        ...(view.reason === undefined ? {} : { words: evalHealthNotRunWords(view.reason) }), ...(view.result === undefined ? {} : { result: view.result }) };
+        ...(view.reason === undefined ? {} : { words: evalHealthNotRunWords(view.reason, view.blocked) }), ...(view.result === undefined ? {} : { result: view.result }) };
     })()
     : undefined;
   return {

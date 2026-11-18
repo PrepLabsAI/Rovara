@@ -145,7 +145,8 @@ export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; read
   // L4-EVS: a run failure is read through its schema (a name, a code, a bounded tail); anything else is dropped and the fixed sentence of the reason stays.
   const failure = reason === "eval_run_failed" && args.runFailure !== undefined ? EvalRunDiagnosticSchema.safeParse(args.runFailure) : undefined;
   const sentence = failure?.success ? `not run: ${evalRunFailureSentence(failure.data)}` : EVAL_NOT_RUN_SENTENCES[reason];
-  const ending = reason === "baseline_measuring" ? "Not a pass or a fail." : reason === "baseline_not_confirmed" ? "" : "Retry.";
+  // TH1: a blocked connection is the same on a second try (the sealed box reaches nothing but the model), so it does not say "Retry."
+  const ending = reason === "baseline_measuring" ? "Not a pass or a fail." : reason === "baseline_not_confirmed" || (failure?.success === true && failure.data.code === "blocked_connection") ? "" : "Retry.";
   return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason, sentence, ...(failure?.success ? { runFailure: failure.data } : {}) }, usedHiddenSet: args.hiddenSetUsed === true,
     casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], fixRequested: false,
     summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}.${ending === "" ? "" : ` ${ending}`}`, disposition: { draft: false, check: "neutral", retry: true } };
