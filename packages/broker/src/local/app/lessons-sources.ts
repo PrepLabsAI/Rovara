@@ -293,6 +293,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       if (typeof sessionId !== "string") return [];
       const origin = await originTicketOf({ store: flow.store, now: options.now }, { orgId: options.companyId, project: task.project, taskId: task.taskId, sessionId }, { strict: true });
       if (origin === undefined) return [];
+      // Without the ticket's own link the workspace (Linear) or site cannot be told, and a key repeats across workspaces: nothing is read.
+      if (origin.url === "") return skip("no_url");
       const tracker = tickets.trackerFor(origin.tracker);
       if (tracker?.comments === undefined) return skip("no_read");
       const startedAt = Date.parse(task.createdAt);

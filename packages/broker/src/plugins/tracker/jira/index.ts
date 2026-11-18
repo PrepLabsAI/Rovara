@@ -325,6 +325,9 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
         const updated = Date.parse(str(comment["updated"]) ?? str(comment["created"]) ?? "");
         if (id === undefined || !JIRA_COMMENT_ID.test(id) || !Number.isFinite(created) || !Number.isFinite(updated)) return [];
         if (since !== undefined && Number.isFinite(since) && created <= since) return [];
+        // A comment only some can read (a role or group restriction, or a service desk's internal note) is not for a lesson every project member and agent sees: left out.
+        if (comment["visibility"] !== undefined && comment["visibility"] !== null) return [];
+        if (comment["jsdPublic"] === false) return [];
         const author = rec(comment["author"]);
         const accountId = str(author["accountId"]);
         const own = arr(comment["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY);

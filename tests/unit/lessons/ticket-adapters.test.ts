@@ -70,6 +70,26 @@ describe("Linear: the comments of an issue", () => {
     expect(page2.comments.map((c) => c.id)).toEqual(["c2"]);
     expect(page2.nextPage).toBeUndefined();
   });
+  it("reading page after page costs one request per page (the cursor that ends a page is remembered), and a page asked for cold still walks from the start", async () => {
+    const pages = fakeFetch((call) => {
+      const after = call.body?.variables?.["after"];
+      return after === null ? answerOf([node("p1")], { next: true, cursor: "cur-1" }) : after === "cur-1" ? answerOf([node("p2")], { next: true, cursor: "cur-2" }) : answerOf([node("p3")]);
+    });
+    const tracker = make(pages.fetch);
+    expect((await tracker.comments!(REF, { page: 1 }, SCOPE)).comments.map((c) => c.id)).toEqual(["p1"]);
+    expect((await tracker.comments!(REF, { page: 2 }, SCOPE)).comments.map((c) => c.id)).toEqual(["p2"]);
+    expect((await tracker.comments!(REF, { page: 3 }, SCOPE)).comments.map((c) => c.id)).toEqual(["p3"]);
+    expect(pages.calls.map((c) => c.body?.variables?.["after"])).toEqual([null, "cur-1", "cur-2"]);
+    const cold = fakeFetch((call) => (call.body?.variables?.["after"] === null ? answerOf([node("p1")], { next: true, cursor: "cur-1" }) : answerOf([node("p2")])));
+    expect((await make(cold.fetch).comments!(REF, { page: 2 }, SCOPE)).comments.map((c) => c.id)).toEqual(["p2"]);
+    expect(cold.calls.map((c) => c.body?.variables?.["after"])).toEqual([null, "cur-1"]);
+    // Another read of the same ticket (another `since`) does not take this one's cursor.
+    const other = fakeFetch(() => answerOf([node("q1")], { next: true, cursor: "cq" }));
+    const second = make(other.fetch);
+    await second.comments!(REF, { since: "2026-11-17T10:00:00.000Z", page: 1 }, SCOPE);
+    await second.comments!(REF, { since: "2026-11-17T11:00:00.000Z", page: 2 }, SCOPE).catch(() => undefined);
+    expect(other.calls[1]!.body?.variables?.["after"]).toBeNull();
+  });
   it("a comment with no id or no time is left out; an issue that is not found has no comments; a refusal is a refusal", async () => {
     const odd = fakeFetch(() => answerOf([node("ok"), { body: "no id", createdAt: "2026-11-17T11:00:00.000Z" }, node("notime", { createdAt: null, updatedAt: null })]));
     expect((await make(odd.fetch).comments!(REF, {}, SCOPE)).comments.map((c) => c.id)).toEqual(["ok"]);
@@ -111,6 +131,16 @@ describe("Jira: the comments of an issue", () => {
     ]));
     const page = await make(impl).comments!(REF, {}, SCOPE);
     expect(Object.fromEntries(page.comments.map((c) => [c.id, c.author.isBot]))).toEqual({ "1": true, "2": true, "3": true, "4": true, "5": false });
+  });
+  it("a comment only some can read (a role or group visibility, a service desk's internal note) is left out; a public one and a null visibility stay", async () => {
+    const { fetch: impl } = fakeFetch(() => answer([
+      cmt("1", { visibility: { type: "role", value: "Administrators" } }), cmt("2", { visibility: { type: "group", value: "staff" } }), cmt("3", { jsdPublic: false }), cmt("4", { jsdPublic: true }), cmt("5", { visibility: null }), cmt("6"),
+    ]));
+    expect((await make(impl).comments!(REF, {}, SCOPE)).comments.map((c) => c.id)).toEqual(["4", "5", "6"]);
+  });
+  it("an atlassian account with no account id is a bot (nobody can be named)", async () => {
+    const { fetch: impl } = fakeFetch(() => answer([cmt("1", { author: { accountType: "atlassian", displayName: "Ghost" } })]));
+    expect((await make(impl).comments!(REF, {}, SCOPE)).comments.map((c) => c.author.isBot)).toEqual([true]);
   });
   it("leaves out comments created at or before `since`, and ones whose times or id cannot be read", async () => {
     const { fetch: impl } = fakeFetch(() => answer([cmt("1", { created: "2026-11-17T09:00:00.000+0000", updated: "2026-11-17T09:00:00.000+0000" }), cmt("2"), cmt("x-3"), cmt("4", { created: "soon" })]));
