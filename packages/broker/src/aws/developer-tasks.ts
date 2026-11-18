@@ -1,3 +1,5 @@
+import { proofIndexOf, type ProofIndexResponse } from "../local/app/proof-index.js";
+import { rowInCompany } from "../developer/company-rows.js";
 import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
 import type { CallerStepUp } from "./step-up-check.js";
@@ -6381,6 +6383,17 @@ async function answerWorkflowTask(deps: DeveloperTaskRouteDependencies, caller: 
   throw agentXError("INTENT_NOT_WAITING", INTENT_NOT_WAITING_MESSAGE);
 }
 
+/**
+ * Cloud's Proof tab (`GET /v1/dev/tasks/{id}/evidence`): the task read's own rule (`loadReadableTask`: the owner, or a reader it is shared with; anyone else, another company's task and a core task read
+ * as missing; the company rule of the sibling task routes as well), then the proof index of what the workflow recorded for its current code. This engine keeps no evidence pack, so there are no failing-test causes here (proof-index.ts).
+ */
+async function taskProofIndex(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<ProofIndexResponse> {
+  const { task } = await loadReadableTask(deps, caller, taskId);
+  // The sibling task routes' company rule too (task-code-routes.ts): a row naming another company by `orgId` reads as missing, in the owner check's own words.
+  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", `no task ${task.taskId} of yours`);
+  return proofIndexOf(task.taskId, task.workflow, undefined);
+}
+
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") {
     // Lane E2 step 6: where the switch sends the caller's company to the core, the core starts the task; anywhere else (and with no core entry, the default) the start below, unchanged.
@@ -6415,12 +6428,13 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
   if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge|answers))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge|answers|evidence))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "answers") return answerWorkflowTask(deps, caller, taskId);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "plan") return getTaskPlan(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "evidence") return taskProofIndex(deps, caller, taskId);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "messages") return listTaskMessages(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "messages") return sendTaskMessage(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "diff") return readTaskDiff(deps, caller, taskId, url);

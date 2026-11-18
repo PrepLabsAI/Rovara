@@ -7,6 +7,8 @@ import { inertPlanLine } from "../../core/proof/inert-text.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 
 const words = (text: string, max = 200): string => Array.from(inertPlanLine(redactText(text).replace(/\s+/gu, " ")).trim()).slice(0, max).join("");
+/** One line of repository- or worker-written text as the proof page shows it: redacted, on one line, made inert, cut to `max` characters. The proof index (proof-index.ts) shows the same words. */
+export const proofWords = words;
 const OUTCOME: Record<EvidencePack["checks"][number]["after"], ProofRowView["status"]> = { passed: "passed", failed: "failed", timed_out: "failed", unknown: "not_run", not_run: "not_run" };
 const KIND_WORDS: Record<string, string> = { test: "tests", lint: "lint", types: "types", build: "build", security: "security scan", migration: "migration", other: "check" };
 

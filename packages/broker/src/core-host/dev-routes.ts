@@ -3,6 +3,7 @@
 // The controller decided that, once the host is deployed, these answers come from the core itself, not from adapters on the old broker:
 //   - sessions (`/v1/app/sessions...`): a session's read (the task view with its evidence), the understanding answers (`POST .../answers`), stop, retry, follow;
 //   - a task's read (`GET /v1/dev/tasks/<id>`), whose view carries the evidence kept for its checked code;
+//   - a task's proof index (`GET /v1/dev/tasks/<id>/evidence`, Cloud's Proof tab): the task read's own rule, then the items the proof page shows for the current code and its failing tests (at most ten);
 //   - a task's START (`POST /v1/dev/tasks`), only for a member whose company the switch sends NEW tasks to the core (`engineForNewTask`). Anyone else, and a person with no member company,
 //     gets `undefined`: the old broker starts the task exactly as before (lane E2 step 6). A membership read that fails refuses (the sign-in refusal), never falls back;
 //   - decision cards (`/v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card (approve, reject, request changes,
@@ -56,6 +57,8 @@ import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer, inboxOwns } from "./inbox-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
 import { developerTaskView } from "../local/app/task-view.js";
+import { proofIndexOf } from "../local/app/proof-index.js";
+import { loadEvidencePack } from "../core/proof/evidence-keep.js";
 import type { CoreHostApp } from "./app.js";
 import type { TestEnvDeps } from "../core/test-env/deps.js";
 import type { ServiceCatalogSource } from "../core/test-env/dependency-plan.js";
@@ -83,6 +86,8 @@ import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directo
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
 const TASK_READ = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})$/u;
+/** A core task's proof index (Cloud's `tasks.evidence.list`): the task read's own rule, then what the proof page reads (proof-index.ts). */
+const TASK_EVIDENCE = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/evidence$/u;
 /** The owner's moves on a task already running (DECISIONS 198), on the old workflow routes' paths. */
 const TASK_ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/(workflow\/send-back|workflow\/review-findings|continue)$/u;
 /** A person's Stop on a core task, on the old cancel route's path (`{ requestId }` in, `{ task }` out), so Cloud's Stop and the AI tools' cancel stop a task of either engine. */
@@ -251,7 +256,7 @@ function owns(path: string, method: string, query: string): boolean {
   // The ordinary list (`GET /v1/dev/tasks`) is the old broker's; only `?involved=1` (exactly) is the core's: the tasks the caller was added to.
   if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
   if (TASK_ANSWERS.test(path)) return method === "POST";
-  if (TASK_READ.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
+  if (TASK_READ.test(path) || TASK_EVIDENCE.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
   if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
@@ -472,6 +477,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             ? await loadReadableTask(target.runtime.flow.deps, taskCaller, task[1]!)
             : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
           return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+        }
+        const evidence = TASK_EVIDENCE.exec(path);
+        if (evidence !== null) {
+          // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
+          // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
+          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, evidence[1]!);
+          const pack = await loadEvidencePack(target.blobs, { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
+          return json(200, proofIndexOf(record.taskId, record.workflow, pack));
         }
         const cancel = TASK_CANCEL.exec(path);
         if (cancel !== null) {
