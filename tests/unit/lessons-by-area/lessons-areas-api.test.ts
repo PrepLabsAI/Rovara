@@ -303,7 +303,7 @@ describe("where Rovara learns from", () => {
     w.world.clock.now = w0.now;
     const { api: target } = api(w);
     const store = w.lessons.get(A)!.runtime.store;
-    const flagsOf = async () => Object.keys((await store.flags({ workspaceId: A, project: "payments" })).pausedSources ?? {}).sort();
+    const flagsOf = async () => Object.keys((await store.flags({ workspaceId: A, project: "payments" })).stoppedKinds ?? {}).sort();
     const failing = w.lessons.get(A)!.runtime.audit;
     const emit = failing.emit.bind(failing);
     (failing as { emit: typeof failing.emit }).emit = async () => { throw new Error("audit down"); };
@@ -311,7 +311,7 @@ describe("where Rovara learns from", () => {
     expect(await flagsOf()).toEqual([]);
     (failing as { emit: typeof failing.emit }).emit = emit;
     expect(await call(target, "a-maint", "PUT", `${SOURCES}/task_decisions`, { paused: true })).toMatchObject({ ok: true, body: { paused: true } });
-    expect(await flagsOf()).toEqual(["kind:close_reason", "kind:send_back"]);
+    expect(await flagsOf()).toEqual(["close_reason", "send_back"]);
     expect(lessonEvents(w).filter((e) => e.action === "lesson.learning_source_switched")).toHaveLength(1);
     // Again: nothing new is recorded or written.
     expect(await call(target, "a-maint", "PUT", `${SOURCES}/task_decisions`, { paused: true })).toMatchObject({ ok: true, body: { paused: true } });
@@ -319,7 +319,7 @@ describe("where Rovara learns from", () => {
     expect(rowsOf(await call(target, "a-maint", "GET", SOURCES)).find((r) => r.key === "task_decisions")!.paused).toBe(true);
     expect(rowsOf(await call(target, "a-maint", "GET", SOURCES)).find((r) => r.key === "ci")!.paused).toBe(false);
     // Company B's same project name is untouched.
-    expect(Object.keys((await w.lessons.get(B)!.runtime.store.flags({ workspaceId: B, project: "payments" })).pausedSources ?? {})).toEqual([]);
+    expect(Object.keys((await w.lessons.get(B)!.runtime.store.flags({ workspaceId: B, project: "payments" })).stoppedKinds ?? {})).toEqual([]);
     expect(rowsOf(await call(target, "b-admin", "GET", SOURCES)).find((r) => r.key === "task_decisions")!.paused).toBe(false);
     expect(await call(target, "a-maint", "PUT", `${SOURCES}/task_decisions`, { paused: false })).toMatchObject({ ok: true, body: { paused: false } });
     expect(await flagsOf()).toEqual([]);

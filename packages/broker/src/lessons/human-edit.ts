@@ -72,6 +72,9 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       if (base === undefined || base.facts.workspaceId !== input.workspaceId || base.facts.project !== input.project || base.facts.taskId !== input.taskId) return none;
       // An edit to an eval or replay run's pull request teaches nothing; refused before any author is looked up.
       if (isEvalRunMark(base.facts.rest.evalRun)) return none;
+      // Edits stopped at any time while the task was alive are not read after a resume either (`paused-kinds.ts`); read again now that the task's life is known.
+      const during = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: input.project }, base.lifetime ?? "unknown");
+      if (during.has("human_edit")) return none;
       // Every author, now. Asking all of them (no short cut) so a check that cannot tell is never hidden by an earlier answer.
       let allowed = true;
       for (const developerId of input.authors) {
@@ -81,7 +84,7 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       }
       if (!allowed) return none;
       const editSpans = input.files.map((file) => editSpan(file, input));
-      const context = withoutPausedSpans((base.facts.rest.spans ?? []).filter((span) => CONTEXT_KINDS.has(span.kind)), paused);
+      const context = withoutPausedSpans((base.facts.rest.spans ?? []).filter((span) => CONTEXT_KINDS.has(span.kind)), during);
       const links = [...new Set([...(base.facts.rest.links ?? []), input.link])];
       const subject: ReflectSubject = buildTaskReflectSubject({
         ...base.facts, sendBacks: [],
@@ -123,7 +126,9 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       if (paused.has("human_edit")) return;
       const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(paused.size === 0 ? {} : { skip: paused }) });
       if (given === undefined || given.facts.workspaceId !== input.workspaceId || given.facts.project !== input.project || given.facts.taskId !== input.taskId) return;
-      const base = withoutPausedEvidence(given, paused);
+      const during = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: input.project }, given.lifetime ?? "unknown");
+      if (during.has("human_edit")) return;
+      const base = withoutPausedEvidence(given, during);
       const found = (base.repoChanges ?? []).find((change) => change.link.toLowerCase() === input.link.toLowerCase());
       if (found === undefined) return;
       const owned = withEdits(found, { place: input.scope, audience: input.audience, spans: edits });

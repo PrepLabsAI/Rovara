@@ -42,6 +42,14 @@ const FINDING_NOTES_TEXT_MAX = 4_000;
 const AGENT_TEXT_TRUST: TrustClass = "system";
 const CI_FAILURE_PREFIX = "A check failed on the change: ";
 
+/** The task's life as times (creation to close); undefined when the record's times cannot be read. */
+function lifetimeOf(task: TaskRecord): { from: number; to?: number } | undefined {
+  const from = Date.parse(task.createdAt);
+  if (!Number.isFinite(from)) return undefined;
+  const to = task.closedAt === undefined ? undefined : Date.parse(task.closedAt);
+  return to === undefined || !Number.isFinite(to) ? { from } : { from, to };
+}
+
 const present = (value: string | undefined): value is string => value !== undefined && value.trim() !== "";
 
 function outcomeOf(workflow: WorkflowSnapshot | undefined): "merged" | "closed" | undefined {
@@ -252,6 +260,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
           },
         },
         sendBackRequestIds, ...(repoChanges.length === 0 ? {} : { repoChanges }),
+        // When the task was alive: a kind stopped at any time during it is not read after a resume (`lessons/paused-kinds.ts`).
+        ...(lifetimeOf(task) === undefined ? {} : { lifetime: lifetimeOf(task)! }),
       };
     },
   };

@@ -79,8 +79,8 @@ const stored = async (store: InMemoryLessonStore, key = KEY) => store.list(key);
 
 describe("the kinds a pause stops", () => {
   it("a person's pause names exactly the kinds of its row, and a flood-guard hold on a `kind:` source is not a stop", () => {
-    for (const key of LEARNING_SOURCE_KEYS) expect([...pausedKindsOfFlags({ pausedSources: Object.fromEntries(SOURCE_KINDS[key].map((kind) => [`kind:${kind}`, { at: 1, reason: "person" }])) })].sort()).toEqual([...SOURCE_KINDS[key]].sort());
-    expect(pausedKindsOfFlags({ pausedSources: { "kind:send_back": { at: 1, reason: "spike" }, "member:ann": { at: 1, reason: "person" }, "kind:nonsense": { at: 1, reason: "person" } } }).size).toBe(0);
+    for (const key of LEARNING_SOURCE_KEYS) expect([...pausedKindsOfFlags({ stoppedKinds: Object.fromEntries(SOURCE_KINDS[key].map((kind) => [kind, { at: 1 }])) })].sort()).toEqual([...SOURCE_KINDS[key]].sort());
+    expect(pausedKindsOfFlags({ pausedSources: { "kind:send_back": { at: 1, reason: "spike" }, "member:ann": { at: 1, reason: "person" } }, stoppedKinds: { nonsense: { at: 1 } } }).size).toBe(0);
   });
   it("an unreadable store means every kind is paused (fail closed)", async () => {
     expect(await pausedKindsFor({ flags: async () => { throw new Error("down"); } }, KEY)).toBe(ALL_PAUSABLE_KINDS);
@@ -113,7 +113,8 @@ describe("task end: a paused source is not read, stored or paid for", () => {
     // Resuming wrote the person's action and nothing else: no settle, no lesson event.
     expect(w.audit.events.slice(auditBefore).map((e) => e.action)).toEqual(["lesson.learning_source_switched"]);
     expect(await stored(w.store)).toEqual([]);
-    w.state.base = baseOf([span("send_back", "NEW-WORDS call withRetry", { eventId: "ev-new" })]);
+    w.clock.advance(1000);
+    w.state.base = { ...baseOf([span("send_back", "NEW-WORDS call withRetry", { eventId: "ev-new" })]), lifetime: { from: w.clock.now() } };
     expect(await learnFromEndedTask(w.deps, merged)).toBe("reflected");
     expect(w.model.calls).toHaveLength(1);
     expect(String(w.model.calls[0]!.user)).toContain("NEW-WORDS");
@@ -159,6 +160,53 @@ describe("task end: a paused source is not read, stored or paid for", () => {
   });
 });
 
+describe("resume brings nothing back (the stopped time stays on record)", () => {
+  it("a task alive during the stopped time is not read for that kind after the resume; one created after the resume is", async () => {
+    const w = await world();
+    w.clock.advance(1000);
+    const created = w.clock.now();
+    w.clock.advance(1000);
+    await w.pause("task_decisions", true);
+    w.clock.advance(1000);
+    await w.pause("task_decisions", false);
+    w.clock.advance(1000);
+    // The task began before the resume and ends after it: its send-back (made while stopped, or not) is not read.
+    w.state.base = { ...baseOf([span("send_back", "PAUSED-WINDOW-WORDS use the helper")]), lifetime: { from: created } };
+    expect(await learnFromEndedTask(w.deps, merged)).toBe("not_reflected");
+    expect(w.model.calls).toHaveLength(0);
+    expect(await stored(w.store)).toEqual([]);
+    // A task created after the resume is read as usual.
+    w.state.base = { ...baseOf([span("send_back", "use withRetry for retries")]), lifetime: { from: w.clock.now() } };
+    expect(await learnFromEndedTask(w.deps, merged)).toBe("reflected");
+    expect(w.model.calls).toHaveLength(1);
+    expect(JSON.stringify(w.model.calls)).not.toContain("PAUSED-WINDOW-WORDS");
+    // A task that ended before the stop began is not touched either (a comment alone is judged by its start).
+    const early = await world();
+    early.clock.advance(5000);
+    await early.pause("task_decisions", true);
+    early.clock.advance(1000);
+    await early.pause("task_decisions", false);
+    early.state.base = { ...baseOf([span("send_back", "use withRetry for retries")]), lifetime: { from: early.clock.now() - 5500, to: early.clock.now() - 5200 } };
+    expect(await learnFromEndedTask(early.deps, merged)).toBe("reflected");
+  });
+  it("a task whose life is unknown is judged alive the whole time once a stop has been lifted (fail closed); with no stop ever lifted nothing changes", async () => {
+    const w = await world();
+    w.state.base = baseOf([span("send_back", "use withRetry for retries")]);
+    expect(await learnFromEndedTask(w.deps, merged)).toBe("reflected");
+    const other = await world();
+    await other.pause("task_decisions", true);
+    await other.pause("task_decisions", false);
+    other.state.base = baseOf([span("send_back", "use withRetry for retries")]);
+    expect(await learnFromEndedTask(other.deps, merged)).toBe("not_reflected");
+    expect(other.model.calls).toHaveLength(0);
+  });
+  it("the lifted stops are bounded, newest kept", async () => {
+    const w = await world();
+    for (let i = 0; i < 210; i += 1) { w.clock.advance(1); await w.pause("ci", true); w.clock.advance(1); await w.pause("ci", false); }
+    expect((await w.store.flags(KEY)).stopWindows!.length).toBe(200);
+  });
+});
+
 describe("outcome counting: a paused source is not judged or counted", () => {
   it("paused review comments: the comment is never sent to the judge; a remembered note (another source) still is", async () => {
     const judge = new RecordingJudge();
@@ -189,6 +237,8 @@ describe("outcome counting: a paused source is not judged or counted", () => {
     expect(await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "reverted" })).toMatchObject({ status: expect.any(String) });
     expect(w.rows.asked).not.toContain("reverted_by");
     await w.pause("after_merge", false);
+    w.clock.advance(1000);
+    w.state.base = { ...w.state.base, lifetime: { from: w.clock.now() } };
     await learnFromEndedTask(w.deps, merged);
     expect(await w.queued()).toEqual(["helpful:task-1:les_used0001"]);
   });
@@ -208,11 +258,11 @@ describe("the human-edit extractor", () => {
     const process: ProcessDeps = { store, embedder, vectors: new MemoryVectors(), judgeModel: new ScriptedModel(), spend: new Spend(), audit, alerts: new Alerts(), now: clock.now, verifier: verifier("valid"), facts: facts(), settings: configured, newId: () => "les_0001" };
     const calls = { read: 0, erased: 0, standing: 0 };
     const deps: HumanEditExtractorDeps = {
-      source: { read: async () => { calls.read += 1; return baseOf([span("intent", "Make retries use the helper", { authorId: "creator" })]); } }, settings: configured,
+      source: { read: async () => { calls.read += 1; return { ...baseOf([span("intent", "Make retries use the helper", { authorId: "creator" })]), lifetime: { from: clock.now() } }; } }, settings: configured,
       reflect: { model, spend: new Spend(), audit, settings: configured, edition: "public", now: clock.now, newId: () => "run-1" }, process,
       standing: async () => { calls.standing += 1; return "member"; }, isErased: async () => { calls.erased += 1; return false; },
     };
-    return { extractor: createHumanEditExtractor(deps), store, model, calls, pause: (paused: boolean) => setLearningSourcePause({ store, audit, now: clock.now }, KEY, "owner", "pr_edits", paused) };
+    return { clock, extractor: createHumanEditExtractor(deps), store, model, calls, pause: (paused: boolean) => setLearningSourcePause({ store, audit, now: clock.now }, KEY, "owner", "pr_edits", paused) };
   }
   it("paused edits: the lines are not read, no author is looked up, no model is called, nothing is stored; resumed, the next edit is learned", async () => {
     const w = editWorld();
@@ -222,6 +272,7 @@ describe("the human-edit extractor", () => {
     expect(w.model.calls).toHaveLength(0);
     expect(await stored(w.store)).toEqual([]);
     await w.pause(false);
+    w.clock.advance(1000);
     expect(await w.extractor.extract(input())).toEqual({ candidates: 1 });
     expect(w.model.calls).toHaveLength(1);
   });
@@ -291,9 +342,11 @@ describe("the last lines: the reflector and the store", () => {
     // What the old Pause (a hold) could have left in a store: a candidate resting on a paused kind, held and reviewRequired, with the pause key in the flags.
     const old = lessonRecord({ id: "les_old00001", status: "candidate", reviewRequired: true });
     await seed(w.store, old);
-    await w.store.setFlags(KEY, { pausedSources: { "kind:send_back": { at: 1, reason: "person" }, "kind:close_reason": { at: 1, reason: "person" }, "member:ann": { at: 1, reason: "spike" } } });
+    await w.store.setFlags(KEY, { stoppedKinds: { send_back: { at: 1 }, close_reason: { at: 1 } }, pausedSources: { "kind:send_back": { at: 1, reason: "spike" }, "member:ann": { at: 1, reason: "spike" } } });
     expect(await w.pause("task_decisions", false)).toEqual({ ok: true, paused: false, changed: true });
-    expect(Object.keys((await w.store.flags(KEY)).pausedSources ?? {})).toEqual(["member:ann"]);
+    expect(Object.keys((await w.store.flags(KEY)).stoppedKinds ?? {})).toEqual([]);
+    // The flood guard's holds are untouched, including one that is named `kind:send_back`.
+    expect(Object.keys((await w.store.flags(KEY)).pausedSources ?? {}).sort()).toEqual(["kind:send_back", "member:ann"]);
     const after = await w.store.get(KEY, "les_old00001");
     expect(after).toMatchObject({ status: "candidate", reviewRequired: true, version: old.version });
     expect(w.judge.calls).toHaveLength(0);

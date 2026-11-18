@@ -5,7 +5,7 @@
 //   suggested  of those, the ones that reached a person or went live (pending, active, stale, retired, rejected, expired)
 //   kept       of those, the ones a person approved or that are in use (active, stale)
 // Everything counted or named passes `readVisibleRanked` for THIS reader first: a lesson from a place the reader cannot see is not counted and is never the example (a count must not reveal what it hides).
-// PAUSE STOPS (owner 2026-11-18): a paused kind is recorded in the project's paused sources as `kind:<span kind>` (reason "person"), and while it is paused Rovara does not read that kind of evidence at all: nothing is gathered,
+// PAUSE STOPS (owner 2026-11-18): a stopped kind is recorded in the project's flags (`stoppedKinds`, one entry per span kind), and while it is paused Rovara does not read that kind of evidence at all: nothing is gathered,
 // nothing is stored, no model is called for it (`paused-kinds.ts` and the places that gather spans). Resuming starts again from that moment: nothing from the paused time comes back, and nothing is re-settled.
 // The counts below are of lessons that already exist; a paused row stops growing.
 import { LEARNING_SOURCE_KEYS, LEARNING_SOURCE_WORDS, cleanLessonText, type LearningSourceKey, type LearningSourcesAnswer } from "@agentx/contracts";
@@ -14,9 +14,9 @@ import type { LessonAuditSink } from "./ports.js";
 import { readVisibleRanked, type LessonLog } from "./read-visible.js";
 import type { AccessCheckPort } from "./access-port.js";
 import type { ApproverDirectory } from "./ports.js";
-import { pausedKindsOfFlags, PERSON } from "./paused-kinds.js";
+import { MAX_STOP_WINDOWS, pausedKindsOfFlags } from "./paused-kinds.js";
 import type { LessonStore, ScopeKey } from "./store.js";
-import { idIn, normSource, type Lesson, type SpanKind } from "./types.js";
+import { idIn, type Lesson, type SpanKind } from "./types.js";
 import { createLessonLiveReader, LESSON_LIVE_TIMEOUT_MS } from "./live-visibility.js";
 
 /** The kinds of evidence each row stands for. A kind in no row (the task's own description, Rovara's plan, a loaded lesson, a fact row) is not a source people can pause. */
@@ -34,7 +34,6 @@ export const SOURCES_HEADS_MAX = 1000;
 const SOURCES_DEADLINE_MS = 12_000;
 const SUGGESTED: ReadonlySet<Lesson["status"]> = new Set(["pending", "active", "stale", "retired", "rejected", "expired"]);
 const KEPT: ReadonlySet<Lesson["status"]> = new Set(["active", "stale"]);
-export const pauseKeyOf = (kind: SpanKind): string => `kind:${kind}`;
 
 export interface LearningSourcesDeps { store: LessonStore; directory: ApproverDirectory; access: AccessCheckPort; now: () => number; log?: LessonLog }
 
@@ -81,20 +80,21 @@ export async function setLearningSourcePause(deps: { store: LessonStore; audit: 
     if (kinds.every((kind) => stopped.has(kind))) return { ok: true, paused: true, changed: false };
     if (!(await requireAudit(deps.audit, { action: "lesson.learning_source_switched", workspaceId: key.workspaceId, project: key.project, actor, facts: { source: sourceKey, paused: true } }))) return { ok: false, code: "audit_unavailable" };
     const at = deps.now();
-    // Re-read just before the write so a pause another change made in between is kept.
+    // Re-read just before the write so a stop another change made in between is kept.
     const latest = await deps.store.flags(key);
-    const next = { ...(latest.pausedSources ?? {}) };
-    const already = pausedKindsOfFlags(latest);
-    for (const kind of kinds) if (!already.has(kind)) next[pauseKeyOf(kind)] = { at, reason: PERSON };
-    await deps.store.setFlags(key, { ...latest, pausedSources: next });
+    const next = { ...(latest.stoppedKinds ?? {}) };
+    for (const kind of kinds) if (next[kind] === undefined) next[kind] = { at };
+    await deps.store.setFlags(key, { ...latest, stoppedKinds: next });
     return { ok: true, paused: true, changed: true };
   }
   if (!kinds.some((kind) => stopped.has(kind))) return { ok: true, paused: false, changed: false };
   if (!(await requireAudit(deps.audit, { action: "lesson.learning_source_switched", workspaceId: key.workspaceId, project: key.project, actor, facts: { source: sourceKey, paused: false } }))) return { ok: false, code: "audit_unavailable" };
   const latest = await deps.store.flags(key);
-  const wanted = new Set(kinds.map((kind) => pauseKeyOf(kind)));
-  // Only a pause a person pressed is lifted (a flood-guard hold on a source of the same name is not theirs to lift here, and is not touched).
-  const rest = Object.fromEntries(Object.entries(latest.pausedSources ?? {}).filter(([name, entry]) => !(entry.reason === PERSON && wanted.has(normSource(name)))));
-  await deps.store.setFlags(key, { ...latest, pausedSources: rest });
+  const to = deps.now();
+  const rest = { ...(latest.stoppedKinds ?? {}) };
+  // The stopped time stays on record as a window, so evidence of a task that was alive during it is not read after the resume.
+  const lifted = kinds.flatMap((kind) => (rest[kind] === undefined ? [] : [{ kind, from: rest[kind]!.at, to }]));
+  for (const kind of kinds) delete rest[kind];
+  await deps.store.setFlags(key, { ...latest, stoppedKinds: rest, stopWindows: [...(latest.stopWindows ?? []), ...lifted].slice(-MAX_STOP_WINDOWS) });
   return { ok: true, paused: false, changed: true };
 }

@@ -26,7 +26,7 @@ import { attachCapLadder, noteTaskHeld, readTaskHeld, reflectRepoOnly, type Repo
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
 import { lessonTaskRefs } from "./live-visibility.js";
 import type { LessonStore, ScopeKey } from "./store.js";
-import { pausedKindsFor, withoutPausedSpans } from "./paused-kinds.js";
+import { pausedKindsFor, withoutPausedSpans, type TaskLifetime } from "./paused-kinds.js";
 import { sameId, type SpanKind } from "./types.js";
 import { buildTaskReflectSubject, type SendBackFact, type TaskSubjectFacts } from "./task-subject.js";
 
@@ -46,6 +46,8 @@ export interface TaskSubjectBase {
    * repository-visible correction. Absent or empty: no second reflection.
    */
   repoChanges?: readonly RepoChangeRequest[];
+  /** Lead 4 L4-LP3Wc: when the task was alive (creation to close), so evidence of a kind stopped at any time during it is not read after the resume. Absent: unknown (judged as alive the whole time). */
+  lifetime?: TaskLifetime;
 }
 export interface TaskSubjectSource {
   /**
@@ -151,7 +153,7 @@ export async function subjectForTask(deps: TaskLearningDeps, input: { workspaceI
   const early = known === undefined ? undefined : await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: known });
   const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
   if (base === undefined) return undefined;
-  return subjectFrom(deps, base, input.workspaceId, input.outcome, await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: base.facts.project }));
+  return subjectFrom(deps, base, input.workspaceId, input.outcome, await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: base.facts.project }, base.lifetime ?? "unknown"));
 }
 
 /** The fixed text of a correction whose words the record does not give (an erased sender's send-back, a revert): it is counted, never read. */
@@ -218,6 +220,8 @@ async function countOutcome(deps: TaskLearningDeps, base: TaskSubjectBase, subje
     if (subject.outcome === "reverted" && subject.revertedBy === undefined) return;
     // Lead 4 L4-LP3Wc: a paused "After merge" row counts no revert and no merge mark (the corrections of the kinds that are not paused are still rated).
     const outcomePaused = paused.has("outcome");
+    // With the send-backs not read their count is zero, which would read as "never sent back": no merge mark is queued then either.
+    const noMarks = outcomePaused || paused.has("send_back");
     if (outcomePaused && subject.outcome === "reverted") return;
     const corrections = correctionsOf(base, subject, deps.reflect.now());
     const needsJudge = corrections.some((correction) => correction.fixed !== true);
@@ -235,7 +239,7 @@ async function countOutcome(deps: TaskLearningDeps, base: TaskSubjectBase, subje
     const run = () => recordTaskOutcome(counters, {
       workspaceId: subject.workspaceId, project: subject.project, taskId: input.taskId, outcome: ended, sendBacks: Math.max(subject.spans.filter((span) => span.kind === "send_back").length, base.sendBackRequestIds.length),
       ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}),
-      ...(outcomePaused ? { skipOutcomeMarks: true as const } : {}),
+      ...(noMarks ? { skipOutcomeMarks: true as const } : {}),
     });
     const result = await (judging === undefined ? run() : withLearningAttempt(judging, run));
     // Counted for good only when no judging was cut for time; a cut one is tried again by the next delivery (the harmful marks are once per person, the queued mark is replaced, so nothing counts twice).
@@ -292,7 +296,7 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     const early = knownProject === undefined ? undefined : await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: knownProject });
     const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
     if (given === undefined || given.facts.workspaceId !== input.workspaceId) return final("no_facts");
-    const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: given.facts.project });
+    const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: given.facts.project }, given.lifetime ?? "unknown");
     const base = withoutPausedEvidence(given, paused);
     // An eval or replay run is not learned from: no rows are read, no outcome is counted, no model is called.
     if (isEvalRunMark(base.facts.rest.evalRun)) return final("eval_run");
@@ -356,7 +360,8 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     try {
       reflected = await reflectionOf();
     } finally {
-      await countOutcome(deps, base, subject, input, tally, "after", paused);
+      // Read again: a kind stopped while the reflection ran is not judged or counted either.
+      await countOutcome(deps, base, subject, input, tally, "after", await pausedKindsFor(deps.process.store, reflectKey, given.lifetime ?? "unknown"));
     }
     // A merged pull request's SECOND reflection, over the repository's own words only. After the first one and after the outcome judge (review: the judge's marks decide "stable", so the
     // repo-only call takes what is left of the task's budget, not the other way round), in the same attempt and lease, on the same task tally. It runs whatever the first reflection came to, a retry included (review: its own once-key decides, so a retried delivery does not repeat it). It never makes the result retry (a retry would run the first reflection again, which the

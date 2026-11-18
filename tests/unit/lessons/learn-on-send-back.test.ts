@@ -173,6 +173,12 @@ describe("queueing: a person's send-back, behind the switch and the mode, for th
     await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "second, in a person's words" }]);
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
     expect((await queued(fake)).map((m) => m["round"])).toEqual([2]);
+    // Only the send-back kind decides this: a stop on another kind (a close reason) does not hold a send-back back.
+    const store = a.lessons!.runtime.store;
+    await store.setFlags({ workspaceId: A, project: "payments" }, { stoppedKinds: { close_reason: { at: fake.clock.now } } });
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "third, in a person's words" }]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect((await queued(fake)).map((m) => m["round"])).toEqual([3]);
     expect(logs).not.toContain("send_back_not_queued");
   });
 
