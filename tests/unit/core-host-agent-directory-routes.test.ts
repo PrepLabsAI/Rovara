@@ -206,7 +206,7 @@ describe("unreadable data is a fixed 503, never a shorter list", () => {
     expect(broken.raw).not.toContain("not-a-hash");
 
     const guard = world();
-    await guard.store.put({ item: { ...agentGuardrailsKey(A), entityType: "AGENT_GUARDRAILS", guardrails: { nonsense: true }, revision: 1 } } as never);
+    await guard.store.put({ item: { ...agentGuardrailsKey(A), entityType: "AGENT_GUARDRAILS", guardrails: { nonsense: true }, revision: 1 } });
     const unreadable = await guard.get(A, "owner");
     expect(unreadable.status).toBe(503);
     expect(unreadable.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: AGENT_DIRECTORY_UNAVAILABLE } });
@@ -219,7 +219,7 @@ describe("unreadable data is a fixed 503, never a shorter list", () => {
     sick.mockRestore();
 
     const big = world();
-    for (let i = 0; i < AGENT_DIRECTORY_MAX + 1; i += 1) await big.store.put({ item: { pk: `ORG#${A}#AGENT_DIRECTORY`, sk: `agt_${String(i).padStart(20, "0")}`, entityType: "AGENT_DIRECTORY", orgId: A } } as never);
+    for (let i = 0; i < AGENT_DIRECTORY_MAX + 1; i += 1) await big.store.put({ item: { pk: `ORG#${A}#AGENT_DIRECTORY`, sk: `agt_${String(i).padStart(20, "0")}`, entityType: "AGENT_DIRECTORY", orgId: A } });
     const over = await big.get(A, "owner");
     expect(over.status).toBe(503);
     expect(over.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: AGENT_DIRECTORY_UNAVAILABLE } });
@@ -262,7 +262,7 @@ async function over(switches: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) 
     roles.set(personId + companyId, role);
     return caller;
   };
-  const agents = (companyId: string) => new AgentStore({ store: w.store, now, audit, companyId: companyId as OrgId });
+  const agents = (companyId: string) => new AgentStore({ store: w.store, now, audit, companyId: companyId });
   return { w, app, routes, person, roles, companyOf, agents };
 }
 const bodyOf = (answer: { body: string } | undefined) => JSON.parse(answer!.body) as { agents?: Row[]; error?: { code: string; message: string } };
@@ -270,7 +270,7 @@ const bodyOf = (answer: { body: string } | undefined) => JSON.parse(answer!.body
 describe("through the dev routes", () => {
   it("an owner and an admin read 200; a member is refused 403; the role is read live for each request (a demotion takes effect at once)", async () => {
     const h = await over();
-    await h.agents(FAKE_COMPANY).create({ orgId: FAKE_COMPANY as OrgId, name: "Mine", by: developerIdOf(localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "ada" })) });
+    await h.agents(FAKE_COMPANY).create({ orgId: FAKE_COMPANY, name: "Mine", by: developerIdOf(localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "ada" })) });
     const owner = h.person(FAKE_COMPANY, "owner", "owner"), admin = h.person(FAKE_COMPANY, "admin", "ada"), member = h.person(FAKE_COMPANY, "member", "bo");
     expect((await h.routes.route(get(AGENTS_PATH), owner))?.statusCode).toBe(200);
     expect((await h.routes.route(get(`${AGENTS_PATH}?scope=all`), admin))?.statusCode).toBe(200);
@@ -290,8 +290,8 @@ describe("through the dev routes", () => {
 
   it("the company is the membership's: an owner of one company never reads the other's agents", async () => {
     const h = await over();
-    await h.agents(FAKE_COMPANY).create({ orgId: FAKE_COMPANY as OrgId, name: "In first", by: ADA });
-    await h.agents(OTHER).create({ orgId: OTHER as OrgId, name: "In second", by: BOB });
+    await h.agents(FAKE_COMPANY).create({ orgId: FAKE_COMPANY, name: "In first", by: ADA });
+    await h.agents(OTHER).create({ orgId: OTHER, name: "In second", by: BOB });
     const first = bodyOf(await h.routes.route(get(AGENTS_PATH), h.person(FAKE_COMPANY, "owner", "o1")));
     const second = bodyOf(await h.routes.route(get(AGENTS_PATH), h.person(OTHER, "owner", "o2")));
     expect(first.agents?.filter((row) => !row.builtin).map((row) => row.name)).toEqual(["In first"]);
