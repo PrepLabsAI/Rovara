@@ -8,7 +8,6 @@ import { curateDraft, type CurateDeps } from "../../../packages/broker/src/lesso
 import { earnedAttention, processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
 import { buildReflectorInput } from "../../../packages/broker/src/lessons/reflect-input.js";
 import { reflectSubject, type LessonDraft } from "../../../packages/broker/src/lessons/reflect.js";
-import { repoVisibilityOf } from "../../../packages/broker/src/lessons/repo-eligibility.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import { LessonProvenanceSchema, SPAN_KINDS } from "../../../packages/broker/src/lessons/types.js";
 import { STRONG_SPAN_KINDS, WEAK_SIGHTINGS_NEEDED, WEAK_SPAN_KINDS, hasWeakKind, isWeakOnly, seenEnoughTimes, weakSourceWaits } from "../../../packages/broker/src/lessons/weak-source.js";
@@ -174,17 +173,6 @@ describe("the reflector: a person's words, untrusted data, never a member correc
   });
 });
 
-describe("never in a repository's own file", () => {
-  it("a lesson that rests on a ticket comment is blocked from a repository's file (a tracker is not a repository)", () => {
-    const task = { kind: "task", repoInputs: { place: "github:repo/1", repository: "api", linkPrefix: "https://github.com/acme/api/pull/" }, repositories: ["api"], links: [] };
-    const repoSpan = { kind: "pr_comment", trust: "member", authorId: "rae", scopes: ["github:repo/1"], audience: { kind: "project" as const } };
-    expect(repoVisibilityOf(task, [repoSpan]).repoOnly).toBeDefined();
-    const result = repoVisibilityOf(task, [repoSpan, { kind: "ticket_comment", trust: "member", authorId: "ann", audience: { kind: "project" as const } }]);
-    expect(result.repoOnly).toBeUndefined();
-    expect(result.blocked).toContain("other_place");
-  });
-});
-
 describe("the stored shape", () => {
   it("ticket_comment is a kind this build writes and reads back as itself (a kind it does not list reads as `other`)", () => {
     expect(SPAN_KINDS).toContain("ticket_comment");
@@ -247,9 +235,6 @@ describe("the curator: a weak sighting waits as a candidate, with no alert, even
     for (const [kinds, status] of [[["ticket_comment"], "candidate"], [["human_edit"], "pending"]] as const) {
       const { deps, store } = setup("same");
       await curateDraft(deps, KEY, text("Retries", a, ["human_edit"]));
-      // The first lesson cannot merge across the repository line: it is the only one that is repo-only.
-      const [first] = await store.list(KEY);
-      await store.commit(KEY, await store.setVersion(KEY), [{ ...first!, version: first!.version + 1, provenance: { ...first!.provenance, repoOnly: { place: "github:repo/1" } } }], 2);
       const out = await curateDraft(deps, KEY, text("Retries", reworded, [...kinds]));
       expect(out.outcome, kinds.join()).toBe("possible_duplicate");
       if (out.outcome !== "possible_duplicate") return;

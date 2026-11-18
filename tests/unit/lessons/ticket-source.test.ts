@@ -64,11 +64,11 @@ async function world(over: Over = {}) {
   const table = { store, now: () => NOW };
   let sessionId: string;
   if (origin === "intake" || origin === "raced") {
-    const extras = ticketSessionStartExtras(company)({ taskId, project, title: "Refunds fail", principal, client: "tracker", receivedAt: STARTED, ticket: { system: "linear", id: KEY, url } });
+    const extras = ticketSessionStartExtras(company)({ taskId, workspaceId: `ws-${taskId}`, project, title: "Refunds fail", principal, client: "tracker", receivedAt: STARTED, ticket: { system: "linear", id: KEY, url } });
     await store.transact([...extras.items]);
     sessionId = extras.sessionId!;
   } else {
-    const extras = createSessionStartExtras(company)({ taskId, project, title: "Refunds fail", principal, client: "web", receivedAt: STARTED });
+    const extras = createSessionStartExtras(company)({ taskId, workspaceId: `ws-${taskId}`, project, title: "Refunds fail", principal, client: "web", receivedAt: STARTED });
     await store.transact([...extras.items]);
     sessionId = extras.sessionId!;
     if (origin === "hand_linked") await bindSessionSurface(table, { orgId: company, sessionId, binding: { kind: "tracker_item", system: "linear", id: KEY, url } });

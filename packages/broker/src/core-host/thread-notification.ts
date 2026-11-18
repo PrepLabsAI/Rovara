@@ -12,13 +12,13 @@ import type { AdapterRegistry, DocumentStore, OrgId } from "@agentx/contracts";
 import { channelThreadHandler, planCardPosted, setupPausedPosted } from "../core/channel/thread-notices.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import type { ChannelMemberRule } from "../core/channel/company.js";
+import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { hostedDecisionService } from "./deployed-decisions.js";
 import { readTaskThread } from "../core/channel/threads.js";
 import { projectPageUrl, sessionPageUrl } from "../core/decisions/open-path.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { ChatThreads } from "./chat-threads.js";
-import type { CoreServiceWiring } from "./core-runtime.js";
 
 export interface HostedThreadNotificationInputs {
   threads: ChatThreads;
@@ -32,7 +32,7 @@ export interface HostedThreadNotificationInputs {
   threadsTold: boolean;
 }
 
-export function hostedThreadNotification(input: HostedThreadNotificationInputs): NonNullable<CoreServiceWiring["notification"]> {
+export function hostedThreadNotification(input: HostedThreadNotificationInputs): Pick<AttentionDeliveryDependencies, "registry" | "companyOf" | "link" | "thread" | "planCarded" | "setupPausedTold" | "doneToldInThread"> {
   const { threads, registry, companyId, store } = input;
   return {
     registry: {

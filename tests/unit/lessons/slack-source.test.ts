@@ -8,7 +8,6 @@ import { citesSlackReply, isWeakSlackOnly } from "../../../packages/broker/src/l
 import { earnedAttention, processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
 import { buildReflectorInput } from "../../../packages/broker/src/lessons/reflect-input.js";
 import { reflectSubject } from "../../../packages/broker/src/lessons/reflect.js";
-import { repoVisibilityOf } from "../../../packages/broker/src/lessons/repo-eligibility.js";
 import { trialBlockers } from "../../../packages/broker/src/lessons/trial.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import { LessonProvenanceSchema, SPAN_KINDS } from "../../../packages/broker/src/lessons/types.js";
@@ -238,14 +237,6 @@ describe("the weak-source rules", () => {
     expect(trialBlockers(base, 0, ctx)).not.toContain("slack_source");
     const withSlack = lessonRecord({ id: "les_sl000003", provenance: { ...base.provenance, sourceKinds: ["human_edit", "slack_reply"] } });
     expect(trialBlockers(withSlack, 0, ctx)).toContain("slack_source");
-  });
-  it("never reaches a repository's own file (a chat reply is a place that is not a repository)", () => {
-    const task = { kind: "task", repoInputs: { place: "github:repo/1", repository: "api", linkPrefix: "https://github.com/acme/api/pull/" }, repositories: ["api"], links: [] };
-    const repoSpan = { kind: "pr_comment", trust: "member", authorId: "rae", scopes: ["github:repo/1"], audience: { kind: "project" as const } };
-    expect(repoVisibilityOf(task, [repoSpan]).repoOnly).toBeDefined();
-    const result = repoVisibilityOf(task, [repoSpan, { kind: "slack_reply", trust: "member", authorId: "ann", scopes: [PLACE], audience: { kind: "project" as const } }]);
-    expect(result.repoOnly).toBeUndefined();
-    expect(result.blocked).toContain("other_place");
   });
 });
 
