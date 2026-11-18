@@ -22,7 +22,10 @@ const SERVER_ONLY: Record<string, ReadonlySet<string>> = {
 const FORBIDDEN_CALLS = new Set(["fetch", "connect", "createConnection", "XMLHttpRequest", "WebSocket", "EventSource", "createRequire", "require"]);
 const bare = (specifier: string): string => specifier.replace(/^node:/u, "");
 
-export function walkImportGraph(entry: string, resolveSpecifier: (from: string, specifier: string) => string | undefined): GraphResult {
+/** A caller that serves TLS (the eval stand-in helper) may import only these server-side names from modules that are otherwise forbidden; every other name from them, and every connect call, is still a violation. */
+export interface GraphOptions { readonly serverOnly?: Readonly<Record<string, ReadonlySet<string>>> }
+
+export function walkImportGraph(entry: string, resolveSpecifier: (from: string, specifier: string) => string | undefined, options: GraphOptions = {}): GraphResult {
   const seen = new Set<string>();
   const violations: GraphViolation[] = [];
   const queue = [entry];
@@ -36,8 +39,9 @@ export function walkImportGraph(entry: string, resolveSpecifier: (from: string, 
     };
     const consider = (specifier: string, clause: ts.ImportClause | undefined, typeOnly: boolean): void => {
       const name = bare(specifier);
-      if (FORBIDDEN_MODULES.has(name) || name.startsWith("@aws-sdk/")) return flag(`imports ${specifier}`);
-      const only = SERVER_ONLY[name];
+      const extra = options.serverOnly?.[name];
+      if ((FORBIDDEN_MODULES.has(name) && extra === undefined) || name.startsWith("@aws-sdk/")) return flag(`imports ${specifier}`);
+      const only = extra ?? SERVER_ONLY[name];
       if (only !== undefined && !typeOnly) {
         if (clause === undefined) return flag(`bare import of ${specifier}`);
         if (clause.name !== undefined) return flag(`default import of ${specifier}`);
@@ -70,6 +74,7 @@ export function repoResolver(root: string): (from: string, specifier: string) =>
   return (from, specifier) => {
     if (specifier === "@agentx/contracts/model-helper") return join(root, "packages/contracts/src/model-helper-entry.ts");
     if (specifier === "@agentx/contracts/general-fakes-helper") return join(root, "packages/contracts/src/general-fakes-helper-entry.ts");
+    if (specifier === "@agentx/contracts/eval-standin-helper") return join(root, "packages/contracts/src/eval-standin-helper-entry.ts");
     if (specifier === "@agentx/contracts") return join(root, "packages/contracts/src/index.ts");
     if (!specifier.startsWith(".")) return undefined;
     const target = resolve(dirname(from), specifier.replace(/\.js$/u, ".ts"));

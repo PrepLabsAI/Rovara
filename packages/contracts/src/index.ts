@@ -462,6 +462,7 @@ export * from "./eval-plan-delivery.js";
 export * from "./eval-environment.js";
 export * from "./eval-health-run.js";
 export * from "./eval-run-diagnostic.js";
+export * from "./eval-dependency-list.js";
 // DEC 253j(1): the trusted EVAL_PLAN record (stored next to EVAL_SPEND, bound by its digest).
 export * from "./eval-plan-record.js";
 export * from "./eval-discovery-report.js";
@@ -478,6 +479,9 @@ export * from "./general-fakes.js";
 export * from "./plan-setup-changes.js";
 export * from "./general-fakes-set.js";
 export * from "./openapi-fake.js";
+export * from "./eval-standin-engine.js";
+export * from "./eval-standin-set.js";
+export * from "./eval-standin-cassettes.js";
 export * from "./agent-model-choice.js";
 export * from "./company-engine-model.js";
 export * from "./report-keys.js";

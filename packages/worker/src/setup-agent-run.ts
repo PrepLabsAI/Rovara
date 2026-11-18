@@ -16,7 +16,7 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type EvalDependencyList, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
   type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
@@ -82,6 +82,11 @@ export interface SetupRunInput {
   evalImage?: string | undefined;
   /** Test seam: F4's discovery of one checkout (`discoverEvals`). */
   discoverEvals?: ((root: string) => Promise<EvalDiscovery>) | undefined;
+  /**
+   * L4-E12 (E2, DEC 254zzz55 N6): the FREE dry run of the eval the run just drafted: runs it once on main in the sealed box with scripted model replies (no model, no spend, a few machine minutes) and answers the dependency list, or
+   * undefined when it could not run. Started without asking; sent once through the run's own setup callback (`eval_dry_run`). Absent (a host that cannot run one): nothing is sent. A failure never changes the run's result.
+   */
+  evalDryRun?: ((report: SetupEvalDiscoveryReport) => Promise<EvalDependencyList | undefined>) | undefined;
 }
 
 export interface SetupRunResult {
@@ -428,7 +433,14 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     // What is left unsent goes now, once; the broker keeps the first entry for a position.
     await flushLast(ports, pendingEntries);
     // The eval report goes once through the run's own setup callback. A refusal leaves the run's proposal as it is: the setup page then shows no eval to confirm.
-    if (evalReport !== undefined && proposal !== undefined) await ports.callback({ kind: "eval_discovery", report: evalReport }).catch(() => undefined);
+    if (evalReport !== undefined && proposal !== undefined) {
+      const reported = await ports.callback({ kind: "eval_discovery", report: evalReport }).then(() => true, () => false);
+      // The free dry run (L4-E12): only for a report the broker took, so a list never sits beside an eval nobody can confirm. Whatever it does, the run's own result is already made.
+      if (reported && input.evalDryRun !== undefined && !cancelled) {
+        const list = await input.evalDryRun(evalReport).catch(() => undefined);
+        if (list !== undefined) await ports.callback({ kind: "eval_dry_run", list }).catch(() => undefined);
+      }
+    }
     return { workflowMode: "SETUP_AGENT", ...(proposal === undefined ? {} : { setupProposal: proposal }), setupRunSummary: summary };
   } finally {
     if (tick !== undefined) clearInterval(tick);

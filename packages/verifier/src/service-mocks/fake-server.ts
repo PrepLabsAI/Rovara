@@ -32,6 +32,7 @@ import {
   type ServiceMockFault,
   type ServiceMockUsage,
 } from "@agentx/contracts";
+import { EvalAnswerBook, generateEvalStandInAnswer } from "@agentx/contracts";
 import { createSyntheticGenerator } from "../data-guard.js";
 import { callerAddress, clip, readBoundedBody, startCore, type CoreAnswer, type CoreRefusal, type CoreRequest, type CoreStrategy, type RunningCore } from "./fake-core.js";
 import { FixtureSetRefused, sagemakerEndpointOfPath } from "./fixture-set.js";
@@ -82,7 +83,14 @@ export type FakeReplayOptions = Common & {
   /** The fixture set as stored: untrusted until it has parsed and hashed to `expectedDigest` (the approved environment's `fixtureSetRef`). */
   fixtureSet: unknown;
   expectedDigest: string;
-  unmatched: "fail" | "schema_synth";
+  /**
+   * What a request with no recording gets. `fail` (the default) answers 500; `schema_synth` makes an answer when the set has a response schema the request satisfies; `generate` (L4-E56, eval rounds: owner decision DEC 254zzz55, never stop)
+   * ALWAYS answers: a deterministic answer seeded by the request's hash, shaped from the set's response schema when it has one, else a minimal one built from the request, kept in the round's `answerBook` so the second side of a comparison
+   * gets the same bytes, labelled `x-rovara-mock: generated`, and counted as `synthesized`. Never change proof.
+   */
+  unmatched: "fail" | "schema_synth" | "generate";
+  /** The round's ONE answer book, shared by both sides (required for `generate`: a fresh one is made when absent). */
+  answerBook?: EvalAnswerBook;
   /** The task's new answers (design 7.3), already checked by the broker's pin. They are served only when the pinned set has no recording; each must be an entry of this set's own hash. */
   additionEntries?: readonly FixtureEntry[];
   /** Wait for the recorded latency before answering (off by default: a fake should be quick). */
@@ -267,7 +275,21 @@ export async function startFakeServer(options: FakeServerOptions): Promise<Runni
     });
 
     // What a request with no recording is answered with (`fail` by default; `schema_synth` only when the set has a response schema the request satisfies). Either way it is counted.
+    const generateBook = options.unmatched === "generate" ? (options.answerBook ?? new EvalAnswerBook()) : undefined;
     const unmatchedAnswer = (request: CoreRequest, hash: string, host: string | null, addressed: boolean): CoreAnswer => {
+      if (generateBook !== undefined) {
+        // Never stop: the book's answer for this request (made once, then the same bytes on the other side), from the set's response schema when there is one.
+        const made = generateBook.resolve(hash, undefined, () => {
+          if (addressed && set.responseSchema !== undefined) {
+            const body = JSON.stringify(synthesizeFromSchema(set.responseSchema, createSyntheticGenerator(parseInt(hash.slice(0, 7), 16))));
+            return { status: 200, contentType: "application/json", body, cls: "generated" as const };
+          }
+          return generateEvalStandInAnswer([{ host: (host ?? "").toLowerCase() }], { method: request.method, host: host === null ? null : host.replace(/:\d+$/u, "").toLowerCase(), path: request.rawPath, query: request.rawQuery, contentType: String(request.headers["content-type"] ?? ""), body: request.body }, hash);
+        });
+        counts.synthesized += 1;
+        return { status: made.status, contentType: made.contentType, text: made.body, headers: { "x-rovara-mock": "generated", "x-rovara-label": "madeByRovara" },
+          ledger: { outcome: "synthesized", host, entryHash: null, fault: null, requestSha256: hash, responseSha256: fakeResponseDigest({ status: made.status, contentType: made.contentType, body: made.body }) } };
+      }
       if (options.unmatched === "schema_synth" && addressed && set.responseSchema !== undefined) {
         let acceptable = set.requestSchema === undefined;
         if (set.requestSchema !== undefined) {

@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import {
   EvalBaseRecordSchema, EvalHealthResultBodySchema, createDocumentBaseScoreCache, evalBaseCacheKey,
-  type AdapterRegistry, type DocumentStore, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalHealthNotRunReason, type OrgId,
+  type AdapterRegistry, type DocumentStore, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalBlockedReach, type EvalHealthNotRunReason, type OrgId,
 } from "@agentx/contracts";
 import { baselineParts, type EvalPlanRead } from "../proof/eval-plan-delivery.js";
 import type { SessionMembers } from "../sessions/access.js";
@@ -94,9 +94,9 @@ async function settleWrapperTest(deps: EvalHealthRunDeps, project: string, row: 
 }
 
 /** Writes one move: its audit record first, then the conditional write. A failed audit stops the move. */
-async function settleNotRun(deps: EvalHealthRunDeps, project: string, row: EvalHealthRequestRecord, reason: EvalHealthNotRunReason, claimId?: string): Promise<EvalHealthStart> {
+async function settleNotRun(deps: EvalHealthRunDeps, project: string, row: EvalHealthRequestRecord, reason: EvalHealthNotRunReason, claimId?: string, blocked?: EvalBlockedReach): Promise<EvalHealthStart> {
   try { await deps.audit({ action: "eval.health_not_run", project, requestId: row.requestId, reason }); } catch { return { outcome: "nothing" }; }
-  const done = await failEvalHealthRequest({ store: deps.store, companyId: deps.companyId, now: deps.now }, project, row.requestId, reason, claimId === undefined ? undefined : { claimId });
+  const done = await failEvalHealthRequest({ store: deps.store, companyId: deps.companyId, now: deps.now }, project, row.requestId, reason, claimId === undefined && blocked === undefined ? undefined : { ...(claimId === undefined ? {} : { claimId }), ...(blocked === undefined ? {} : { blocked }) });
   return done ? { outcome: "not_run", requestId: row.requestId, reason } : { outcome: "nothing" };
 }
 
@@ -210,14 +210,14 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
     const claim = row.claim;
     const parts = claim.parts as unknown as EvalBaseCacheKeyParts;
     const cache = cacheOf(deps);
-    const end = async (reason: EvalHealthNotRunReason): Promise<EvalHealthRecorded> => {
-      const settled = await settleNotRun(deps, project, row, reason, claim.claimId);
+    const end = async (reason: EvalHealthNotRunReason, blocked?: EvalBlockedReach): Promise<EvalHealthRecorded> => {
+      const settled = await settleNotRun(deps, project, row, reason, claim.claimId, blocked);
       await finish(deps, cache, parts, claim.mark);
       if (settled.outcome !== "not_run") return { outcome: "refused" };
       if (UNREADABLE_REASONS.has(reason)) await settleWrapperTest(deps, project, row, "unreadable");
       return { outcome: "not_run" };
     };
-    if (body.result.status === "not_run") return await end(body.result.reason);
+    if (body.result.status === "not_run") return await end(body.result.reason, body.result.blocked);
     const cap = await capOf(deps, project);
     // The result is for the approved plan the claim was made under; a plan replaced since is not the one this measured.
     const found = await readApprovedEvalPlan(table(deps, cap), project);

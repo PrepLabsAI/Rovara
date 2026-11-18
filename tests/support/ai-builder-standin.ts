@@ -252,6 +252,8 @@ export interface StandInWorldOptions {
   promptLocations?: readonly PromptLocation[] | undefined;
   /** Whether the eval runs in the project's saved environment (its PyYAML installed) or in the bare sandbox (nothing but the standard library). Default "saved". */
   environment?: "saved" | "bare";
+  /** TH1: the eval command stops with this printed to stderr (a Python eval whose database and outside API are unreachable in the sealed box), instead of running. The text is built by the test (it may carry a secret on purpose). */
+  blockedOutput?: string | undefined;
   /** Refuse every model call with this class, as the stage's gateway would. */
   providerClass?: "rate_limit" | "provider_error" | undefined;
 }
@@ -366,7 +368,8 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
       try {
         const exitCode = await new Promise<number | null>((resolve, reject) => {
           // The bare sandbox shape: `-S` (no site-packages of this machine), stderr kept (its last 16 KB) the way the sandbox's capped log is, never shown raw.
-          const child = spawn(EVAL_COMMAND.executable, [...EVAL_PYTHON_FLAGS, ...EVAL_COMMAND.args], { cwd: join(dir, EVAL_COMMAND.cwd), env, stdio: ["ignore", "ignore", "pipe"] });
+          const command = options.blockedOutput === undefined ? [...EVAL_PYTHON_FLAGS, ...EVAL_COMMAND.args] : [...EVAL_PYTHON_FLAGS, "-c", "import sys; sys.stderr.write(sys.argv[1]); sys.exit(1)", options.blockedOutput];
+          const child = spawn(EVAL_COMMAND.executable, command, { cwd: join(dir, EVAL_COMMAND.cwd), env, stdio: ["ignore", "ignore", "pipe"] });
           child.stderr.on("data", (chunk: Buffer) => { stderrTail = (stderrTail + chunk.toString("utf8")).slice(-16_384); });
           const stop = () => child.kill("SIGKILL");
           request.signal.addEventListener("abort", stop, { once: true });

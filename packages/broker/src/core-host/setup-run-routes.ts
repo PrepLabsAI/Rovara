@@ -113,6 +113,8 @@ export interface HostedSetupRunWiring {
     wrapperTargets?: EvalWrapperDeps["targets"];
     /** D5: true only where a health runner reads the person's yes (`readEvalHealthRequest`). Absent: the card shows no health button and `eval-health` is not served. No deployment wires one yet. */
     healthRuns?: boolean;
+    /** L4-E12: whether this install's test services are off right now (the hosted broker's `!testServicesEnabled(env)`), for the free dry run's words. Absent: read as on. */
+    testServicesOff?: () => boolean;
     /** L4-EVH: starts the health run for the project's waiting yes (the broker claims it and hands it to a worker). Best effort; never throws, and the person's answer does not wait on the worker. Absent: nothing starts here (the card shows no button). */
     healthRun?: (project: string) => Promise<unknown> } | undefined;
   /** A person's display name, for "stopped by". Absent or unknown: "Unknown". */
@@ -448,7 +450,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
         const latest = await readEvalDiscovery({ store: flow.store, companyId }, project);
         if (latest !== undefined) await detectEvalWrappers(reads, project, latest.report);
       }
-      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, providerConnected: input.wiring.eval.providerConnected, healthRuns: input.wiring.eval.healthRuns, now: input.now }, project, input.principal)) });
+      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, providerConnected: input.wiring.eval.providerConnected, healthRuns: input.wiring.eval.healthRuns, testServicesOff: input.wiring.eval.testServicesOff, now: input.now }, project, input.principal)) });
     }
     if (input.request.method === "GET" && tail === undefined) {
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
