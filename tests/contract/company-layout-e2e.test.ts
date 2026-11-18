@@ -14,7 +14,7 @@ import { AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, type Pri
 import { COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import {
-  hostedTaskAccess, membershipWithRoleFromDynamo, NO_PROJECT_GRANT, NOT_A_MEMBER_HERE, projectGrantRoleFromDynamo, setupRunStandingFrom, wikiProjectRoleFrom,
+  hostedTaskAccess, liveCompanyGrantRole, membershipWithRoleFromDynamo, NO_PROJECT_GRANT, NOT_A_MEMBER_HERE, projectGrantRoleFromDynamo, setupRunStandingFrom, wikiProjectRoleFrom,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { grantKeyFor, projectMemberRowKeyFor, revisionKeyFor, revisionPkFor } from "../../packages/broker/src/aws/company-layout.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
@@ -126,7 +126,7 @@ function world() {
 
   // The core's task start, wired as the deployed root wires it (core-engine-root.ts): live membership from the sign-in table, the broker's project grant from State.
   const membershipOf = membershipWithRoleFromDynamo(db, "SignIn");
-  const projectGrantRole = projectGrantRoleFromDynamo(db, "State");
+  const projectGrantRole = liveCompanyGrantRole(membershipOf, projectGrantRoleFromDynamo(db, "State"));
   const projectGrant = async (personId: string, name: string) => mayUseProject(await projectGrantRole(personId, name));
   const principal = (companyId: string, personId: string): Principal => ({ companyId, personId, displayName: "p", roles: [], provider: "cloud" });
   const start = (companyId: string, personId: string, name: string) =>
