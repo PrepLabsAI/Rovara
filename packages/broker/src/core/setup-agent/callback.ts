@@ -11,6 +11,8 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //   eval_dry_run  L4-E12: the free dry run's dependency list (databases by port, outside hosts by name, missing variables by name), kept once per project (the newest run's) and shown through the TH1 words (`eval-dependency-list.ts`).
 //   eval_discovery  DEC 253n(1): the eval questions the run found (suites, their question files and categories, the command, judge pins, model catalog row and image), kept once per run and
 //                 never trusted for a hash (`eval-discovery.ts`): a maintainer or admin confirms a selection from it, and the broker builds the eval plan from its own reads.
+//   stand_in_data L4-E7: the sample rows and answers the run's stand-in writer made on the company's own AI. Checked strictly, scanned for personal data, credentials and the project's production names, and kept (ONE set per run, versioned
+//                 by digest, for THIS company and project: both come from the authenticated run, never the body) by `standin-data-store.ts`. The answer is `{stored}` with a digest and version, or a fixed reason.
 // Nothing in a reply is repository or command text except the person's own command (which only the owner could type and the broker already checked).
 import { z } from "zod";
 import { agentXError, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
@@ -21,6 +23,9 @@ import { listHostAsks, approvedHostsOf, requestHostAsk } from "./host-ask.js";
 import { SETUP_JOURNAL_BATCH_MAX, appendSetupJournal } from "./journal.js";
 import { recordEvalDiscovery, type EvalDiscoveryLogEvent } from "./eval-discovery.js";
 import { recordEvalDependencyList, type EvalDependencyListLogEvent } from "./eval-dependency-list.js";
+import { createStandInDataStore } from "../test-env/standin-data-store.js";
+import { NO_PROD_DENY } from "../proof/evidence-guard.js";
+import type { FixtureObjectPort } from "../test-env/fixture-store.js";
 
 export interface SetupAgentCallbackDeps {
   store: DocumentStore;
@@ -34,6 +39,8 @@ export interface SetupAgentCallbackDeps {
   sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** Whether the person who typed a command may still have it run (the owner, read live at hand-over). Absent: nothing is handed over. */
   mayStillRun?: ((by: string) => Promise<boolean>) | undefined;
+  /** L4-E7: where the stand-in writer's sample data is kept (the install's object storage as a fixture object port). Absent: a `stand_in_data` report is answered `stored: false` and nothing is kept. */
+  standInObjects?: FixtureObjectPort | undefined;
   /** Fixed-word log lines (the eval discovery's); never the body. */
   log?: ((entry: { event: EvalDiscoveryLogEvent | EvalDependencyListLogEvent; reason?: string }) => void) | undefined;
 }
@@ -58,6 +65,8 @@ export const SetupAgentCallbackBodySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("eval_discovery"), report: z.unknown() }).strict(),
   // L4-E12 (DEC 254zzz55 N6): what the free dry run of the drafted eval found it reaches. Checked by `recordEvalDependencyList` (a fixed-shape list; a model call claimed is refused).
   z.object({ kind: z.literal("eval_dry_run"), list: z.unknown() }).strict(),
+  // The set is checked by the stand-in data store (`StandInWriterSetSchema`, the bytes cap, the data guard).
+  z.object({ kind: z.literal("stand_in_data"), set: z.unknown() }).strict(),
 ]);
 export type SetupAgentCallbackBody = z.infer<typeof SetupAgentCallbackBodySchema>;
 
@@ -108,5 +117,12 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
       return await recordEvalDiscovery({ ...table, store: deps.store, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.report);
     case "eval_dry_run":
       return await recordEvalDependencyList({ ...table, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.list);
+    case "stand_in_data": {
+      if (deps.standInObjects === undefined) return { stored: false, reason: "off" };
+      // The project's production names when the install knows them (a list that cannot be read stops the write: fail closed); none known is the empty list, and the guard still scans for personal data and credentials.
+      const store = createStandInDataStore({ objects: deps.standInObjects, documents: deps.store, denyFor: async (_org, project) => (await deps.prodDeny?.(project)) ?? NO_PROD_DENY, now: () => new Date(deps.now()) });
+      const stored = await store.put(run.orgId, run.project, { taskId: run.taskId, actor: "rovara-stand-in-writer" }, body.set);
+      return stored.ok ? { stored: true, digest: stored.digest, version: stored.version } : { stored: false, reason: stored.reason };
+    }
   }
 }
