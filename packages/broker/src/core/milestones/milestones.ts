@@ -87,7 +87,7 @@ const milestoneOf = (item: StoredDocument): CodeMilestone | undefined => {
   const parsed = CodeMilestoneSchema.safeParse({
     kind: item["kind"], orgId: item["orgId"], taskId: item["taskId"], at: item["at"], text: item["text"],
     ...(item["verdict"] === undefined ? {} : { verdict: item["verdict"] }),
-    ...(item["sessionId"] === undefined ? {} : { sessionId: item["sessionId"] }),
+    ...(item["sessionId"] === undefined ? {} : { sessionId: item["sessionId"] }), ...(item["evalLine"] === undefined ? {} : { evalLine: item["evalLine"] }),
     ...(item["pullRequests"] === undefined ? {} : { pullRequests: item["pullRequests"] }),
     ...(item["bindings"] === undefined ? {} : { bindings: item["bindings"] }),
     ...(item["to"] === undefined ? {} : { to: item["to"] }),

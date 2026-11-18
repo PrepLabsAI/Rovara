@@ -12,7 +12,7 @@
 // A ticket is written through the Tracker port (`comment`, `setStatusByName`), so Linear and Jira (or any tracker that registers) are the same code here.
 import { createHash } from "node:crypto";
 import {
-  TICKET_MOMENT_WORDS, intakeItemIdOf, ticketUpdateCallsKey, ticketUpdateLevelOf,
+  EVAL_CI_LINE_PATTERN, TICKET_MOMENT_WORDS, intakeItemIdOf, ticketUpdateCallsKey, ticketUpdateLevelOf,
   type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type HostScope, type OrgId, type Tracker, type TicketUpdateMoment,
 } from "@agentx/contracts";
 import { readIntakeItem } from "../intake/store.js";
@@ -61,14 +61,17 @@ export interface TicketUpdatesDependencies {
 type Item = Record<string, unknown>;
 
 /** The words of one update: the moment, the title, the status it moved to, the pull request's link. Nothing else. */
-export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined; verdict?: string | undefined; /** L4-U5: the setup's evidence line (fixed words), only when the check could not be made or finished. */ setupLine?: string | undefined }): string {
+export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined; verdict?: string | undefined; evalLine?: string | undefined; /** L4-U5: the setup's evidence line (fixed words), only when the check could not be made or finished. */ setupLine?: string | undefined }): string {
   const links = (input.pullRequests ?? []).flatMap((link) => plainHttpsLink(link) ?? []).slice(0, 5);
+  // L4-EVCI: the customer's own eval result as one line, only when it is exactly the words Rovara writes for it (never a free text), and only on the ready line.
+  const evalLine = input.moment === "pr_opened" && input.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(input.evalLine) ? [input.evalLine] : [];
   return [
     `${TICKET_MOMENT_WORDS[input.moment]}: "${inertTicketTitle(input.title)}".`,
     ...(input.status === undefined ? [] : [`Status: ${inertTicketTitle(input.status)}.`]),
     // L4-PRP: the pull request's verdict, the same words as its description (fixed words and counts), only for a pull request that is ready.
     ...(input.moment !== "pr_opened" || input.verdict === undefined ? [] : [`Result: ${Array.from(input.verdict.replace(/[\p{Cc}\p{Cf}<>@[\]`*_~#|!]/gu, " ").replace(/\s+/gu, " ").trim()).slice(0, 200).join("")}.`]),
     ...links.map((link) => `Pull request: ${link}`),
+    ...evalLine,
     ...(input.setupLine === undefined ? [] : [input.setupLine]),
   ].join("\n");
 }
@@ -175,7 +178,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     if (settings.comments) {
       if (tracker.comment === undefined) posted = "not_connected";
       else {
-        const text = setupText ?? ticketUpdateText({ moment: moment!, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }), ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }), ...(trustLine === undefined ? {} : { setupLine: trustLine }) });
+        const text = setupText ?? ticketUpdateText({ moment: moment!, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }), ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }), ...(milestone.evalLine === undefined ? {} : { evalLine: milestone.evalLine }), ...(trustLine === undefined ? {} : { setupLine: trustLine }) });
         // The comment's key is the claim's: the same update again is the same comment, never a second one. A task only its owner can see is written as an internal comment.
         posted = await tracker.comment(ref, text, deps.scope, { key: `ticket_update:${milestone.taskId}:${key}`, requirePrivate: true }).then(() => "posted", (error: unknown) => { if (isFinal(error)) return refusalOf(error); throw error; });
         if (posted === "needs_write_access") missing = true;

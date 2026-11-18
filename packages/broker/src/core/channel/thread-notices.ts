@@ -18,7 +18,7 @@
 // stays on while the host gives a gate. Nothing here is a reason for the work to fail: a handler that throws is told again, up to the hook's limit.
 import { createHash } from "node:crypto";
 import {
-  INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
+  EVAL_CI_LINE_PATTERN, INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
   type AgentSessionRecord, type ChannelEvent, type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type OrgId, type RegistryView, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { CodeMilestoneHandler } from "../milestones/milestones.js";
@@ -265,9 +265,12 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         // L4-U5: when the setup could not be re-checked (or the check did not finish), the one evidence line goes with the pull request, in the page's own words. A pass never does.
         const project = typeof task["project"] === "string" ? task["project"] : undefined;
         const trust = project === undefined ? undefined : await setupTrustLineOf({ store: deps.store, companyId: orgId }, project, taskId);
-        await send(orgId, sessionId, key, () => tell(links.length === 1 && trust === undefined
+        // L4-EVCI: the customer's own eval result, when it had landed by the time the pull request was marked ready: the same one line as in the description (fixed words, numbers and a plain https address; a line that is
+        // not exactly Rovara's own words is not sent). The typed pull request card has no place for either line, so a ready line that carries one is the plain progress text (which keeps the verdict heading).
+        const evalLine = milestone.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(milestone.evalLine) ? milestone.evalLine : undefined;
+        await send(orgId, sessionId, key, () => tell(links.length === 1 && trust === undefined && evalLine === undefined
           ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened", ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }) } }
-          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${trust === undefined ? "" : `\n${trust}`}` } }));
+          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}${trust === undefined ? "" : `\n${trust}`}` } }));
         return;
       }
 

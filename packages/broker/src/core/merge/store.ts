@@ -23,7 +23,7 @@ export const recoveryRowKey = (taskId: string): { pk: "WORKFLOW_MERGE_RECOVERY";
 
 const TRACKING_FIELDS = [
   "orgId", "taskId", "repositoryId", "number", "version", "headSha", "draft", "state", "baseBranch", "ci", "ciBasis", "ciUnreadableSince", "ciMissingChecks", "ciMissingSince", "checksEverSeen", "failingChecks", "review", "approval",
-  "branch", "headByRovara", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "nudges", "syncs", "mergeClaim", "decisionDigest", "observedAt", "ciMarked", "ciMarkedSince",
+  "branch", "headByRovara", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "nudges", "syncs", "mergeClaim", "decisionDigest", "observedAt", "ciMarked", "ciMarkedSince", "ciEval", "ciEvalSince",
 ] as const;
 
 /** A stored item as the schema reads it, or undefined (never an item of another org or task). */
@@ -61,7 +61,7 @@ export function publicTrackingItem(item: MergeTrackingItem): Omit<MergeTrackingI
   return rest;
 }
 
-const OPTIONAL_FIELDS = ["approval", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "ciUnreadableSince", "ciMissingChecks", "ciMissingSince", "ciMarked", "ciMarkedSince"] as const;
+const OPTIONAL_FIELDS = ["approval", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "ciUnreadableSince", "ciMissingChecks", "ciMissingSince", "ciMarked", "ciMarkedSince", "ciEval", "ciEvalSince"] as const;
 
 /** The write of the next tracking item: a create when there is no readable prior one, else an update conditioned on the version read. It never removes `mergeClaim`. */
 export function trackingWriteItem(prior: MergeTrackingItem | undefined, next: MergeTrackingItem): TransactItem {
