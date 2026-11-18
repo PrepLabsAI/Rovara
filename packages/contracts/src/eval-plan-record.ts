@@ -18,6 +18,7 @@ import { evalCommandFingerprint } from "./eval-base-cache.js";
 import { isSafeE2ESourcePath } from "./e2e-source.js";
 import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalSpendInputsSchema } from "./eval-spend.js";
+import { standInSettingsFingerprint } from "./eval-stand-in-version.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 
 /** The sort key of the record in the project's setup partition. */
@@ -59,8 +60,10 @@ export function evalCommandFingerprintOf(command: EvalCommand, report: EvalRepor
 }
 
 /** The measurement settings fingerprint (setup measurement, refresh and task comparison share it; the worker's `evalSettingsFingerprint` is this one). */
-export function evalSettingsFingerprintOf(settings: { readonly imageDigest: string; readonly route: string }, judgePin: string): string {
-  return evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: settings.imageDigest, route: settings.route, judgePin }));
+export function evalSettingsFingerprintOf(settings: { readonly imageDigest: string; readonly route: string }, judgePin: string, standInSetVersion?: string): string {
+  const approved = evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: settings.imageDigest, route: settings.route, judgePin }));
+  // L4-E34 (E4): with no version this is byte-identical to before (the approved spend binds THIS value). A stand-in eval's cache identity binds the version too.
+  return standInSettingsFingerprint(approved, standInSetVersion);
 }
 
 /** The stored plan's fields (the worker extends them with the per-task key it receives). */

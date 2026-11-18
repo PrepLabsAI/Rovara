@@ -16,6 +16,7 @@ import { EvalQuestionRowsSchema, MeasuresFileEntrySchema } from "./measures-file
 import { EVIDENCE_MEASURES_MAX } from "./evidence.js";
 import { companyScoped } from "./ports/company-scope.js";
 import { DOCUMENT_STORE_LIMITS, when, type DocumentStore, type StoredDocument } from "./ports/document-store.js";
+import { isStandInSetVersion } from "./eval-stand-in-version.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 
 /** The longest a cached base score is used (DECISIONS 170: "a maximum age"). A project may set it lower (`maxAgeDays`), never higher. */
@@ -63,6 +64,11 @@ export interface EvalBaseCacheKeyParts {
   readonly modelVersion: string;
   /** Fingerprint of the rule, pinned judge, image and route used to measure the score. */
   readonly settingsFingerprint: string;
+  /**
+   * L4-E34 (E4): the version of the stand-in set (images, seeds, row generator, answer sets) the score was measured against (`standInSetVersion`). Absent: the eval used no stand-ins, and the key is what it was before this part
+   * existed. A new version is a new key: a fresh base run under the approved cap, never a score taken against other data.
+   */
+  readonly standInSetVersion?: string;
 }
 
 const PART_RULES: ReadonlyArray<readonly [keyof EvalBaseCacheKeyParts, RegExp]> = [
@@ -116,6 +122,11 @@ export function evalBaseCacheKey(parts: EvalBaseCacheKeyParts): string {
   }
   const named: Record<string, string> = {};
   for (const [name] of PART_RULES) named[name] = held[name] as string;
+  // Only a stand-in eval carries the part (`undefined` is absent). A value that is present but is not a version is refused, never ignored: a caller that meant a version must not get the plain key.
+  if (Object.hasOwn(held, "standInSetVersion") && held["standInSetVersion"] !== undefined) {
+    if (!isStandInSetVersion(held["standInSetVersion"])) throw new RangeError("the standInSetVersion is not a valid eval cache key part");
+    named["standInSetVersion"] = held["standInSetVersion"];
+  }
   if (parts.codeHash !== undefined || parts.judgePin !== undefined) {
     if (typeof parts.codeHash !== "string" || !/^[a-f0-9]{64}$/u.test(parts.codeHash) || typeof parts.judgePin !== "string" || !/^[a-f0-9]{64}$/u.test(parts.judgePin)) throw new RangeError("the code hash and judge pin are required together");
     delete named["baseCommit"];

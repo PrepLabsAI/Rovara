@@ -13,9 +13,9 @@ export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS } from "@agen
 import { evalSettingsFingerprintOf } from "@agentx/contracts";
 
 /** Shared by setup measurement, refresh and task comparison; preserve the existing key encoding. */
-export function evalSettingsFingerprint(settings: EvalRoundInput["settings"], judgePin: string): string {
-  // One formula with the broker's (DEC 253n: it builds the confirmed plan's inputs with `evalSettingsFingerprintOf`).
-  return evalSettingsFingerprintOf(settings, judgePin);
+export function evalSettingsFingerprint(settings: EvalRoundInput["settings"], judgePin: string, standInSetVersion?: string): string {
+  // One formula with the broker's (DEC 253n: it builds the confirmed plan's inputs with `evalSettingsFingerprintOf`). With no stand-in version this is the approved fingerprint, byte for byte (L4-E34).
+  return evalSettingsFingerprintOf(settings, judgePin, standInSetVersion);
 }
 
 /** The shape of F4's `PromptChangeDecision`: whether an eval is needed, and why. */
@@ -63,6 +63,12 @@ export interface EvalQuestionPlan {
     readonly calls: number; readonly costMicros: number; readonly changedPromptCalls: number;
     readonly attestation?: EvalBaseAttestation;
   }>;
+  /**
+   * L4-E34 (E3): the one fill-and-re-ask pass for stand-in databases. Called ONCE, after the change's first run on `ids`, with the ids just asked. It writes the rows that lookups found missing to BOTH sides' databases and returns the
+   * ids of the questions that asked for them (`createFillPass`, eval-database-prep.ts). The round then asks those questions again on both sides, once, inside the same cap (a stage estimate, like every other re-ask). Absent: no pass,
+   * and the round is exactly what it was. A pass that throws is no pass: a missing row never stops an eval.
+   */
+  readonly fillMissingRows?: (request: { readonly ids: readonly string[] }) => Promise<readonly string[]>;
 }
 export interface EvalRoundInput {
   readonly tier?: { readonly reasons: ReadonlyArray<{ readonly code: string; readonly path?: string }> };
@@ -233,7 +239,7 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   const definitions = config.questions;
   if (definitions.length > EVAL_QUESTION_LIMIT || new Set(definitions.map(q => q.id)).size !== definitions.length || definitions.some(q => !/^[a-f0-9]{64}$/u.test(q.baseHash) || !/^[a-f0-9]{64}$/u.test(q.headHash))) return refuse("invalid_question_data");
   const parts: EvalBaseCacheKeyParts = { ...input.key, evalSetHash: config.baseEvalSetHash ?? input.evalSetHash, hiddenSetHash: plan.hiddenHash,
-    settingsFingerprint: evalSettingsFingerprint(input.settings, config.judgePin) };
+    settingsFingerprint: evalSettingsFingerprint(input.settings, config.judgePin, input.key.standInSetVersion) };
   let base: EvalBaseRecord | undefined;
   try { evalBaseCacheKey(parts); base = await input.cache.read(parts); } catch { return refuse("no_base_score"); }
   if (base?.questions === undefined && input.prepareBaseline !== undefined) {
@@ -307,6 +313,25 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   if (first === undefined) return refuse(stop ?? "provider_error");
   let questions: EvalQuestionComparison[] = untouched.map(q => ({ id: q.id, category: q.category, old: byId.get(q.id)!.samples, first: first.get(q.id)!.samples[0]!, edited: q.baseHash !== q.headHash }));
   const judge = (): EvalCheckResult => { comparisonQuestions = questions; return evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true }); };
+  // L4-E34 (E3): the fill-and-re-ask pass, once, only for a runner that can ask a subset. It is OPTIONAL work: it never stops the round. It runs only when the budget has room for it AND for the suspect re-asks it could cause, and a
+  // pass that fails (a refused hold, a provider error) is dropped and the round goes on with what it had. The old side is asked afresh (three runs, the shape of a saved baseline) because its saved answers were given on data
+  // without these rows. The questions it re-asks are measured on the filled data (the fill pass only fills keys the old code also asked for: see `createFillPass`).
+  if (config.subsetSupported && config.fillMissingRows !== undefined && stop === undefined) {
+    const known = new Set(ids);
+    const found = await Promise.resolve().then(() => config.fillMissingRows!({ ids })).catch(() => undefined);
+    const gaps = Array.isArray(found) ? [...new Set(found.filter((id): id is string => typeof id === "string" && known.has(id)))].slice(0, ids.length) : [];
+    // Room for the pass AND for the suspect re-asks the round will really make: every suspect now, plus the gap questions (which may become suspects after the refill), at most 20 as `evalSuspects` caps them.
+    const current = evalSuspects(questions); const mayBeSuspects = new Set([...current.down, ...current.up, ...gaps]);
+    if (gaps.length > 0 && fits(4 * gaps.length + 6 * Math.min(mayBeSuspects.size, 20)) && reserve("re-asks", 4 * gaps.length)) {
+      const before = stop;
+      const oldAgain = await run("old", gaps, 3); const afterOld = stop;
+      const newAgain = oldAgain === undefined ? undefined : await run("new", gaps, 1);
+      if (oldAgain !== undefined && newAgain !== undefined) {
+        const refilled = new Set(gaps);
+        questions = questions.map(q => (refilled.has(q.id) ? { ...q, old: oldAgain.get(q.id)!.samples, first: newAgain.get(q.id)!.samples[0]! } : q));
+      } else if (oldAgain === undefined || afterOld === before) stop = before; // a failed stage is dropped; an overrun the old stage reported with data stays
+    }
+  }
   if (config.subsetSupported) {
     const suspects = evalSuspects(questions); const selected = [...suspects.down, ...suspects.up];
     if (selected.length > 0 && reserve("re-asks", 6 * selected.length)) {
