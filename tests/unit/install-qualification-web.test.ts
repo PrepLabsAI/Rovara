@@ -488,7 +488,9 @@ describe("install qualification CLI", () => {
     expect(() => webApiProbeRunnerConfig({ EXECUTOR_IMAGE: image }, "win32", "x64")).toThrow(/runtime directory/);
     // L4-NETG2: a gateway-mode worker's qualification builds (trusted fixtures) keep their bridge and take the host resolvers as --dns (read from the worker container's resolv.conf: tests/unit/e2e-model-check.test.ts); any other worker has none.
     const gateway = { EXECUTOR_IMAGE: image, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
-    expect(webApiProbeRunnerConfig({ ...gateway, AGENTX_SANDBOX_EGRESS: "" }, "linux", "arm64")).not.toHaveProperty("buildDns");
+    const resolvers = () => "nameserver 127.0.0.53\nnameserver 10.42.0.2\n";
+    expect(webApiProbeRunnerConfig(gateway, "linux", "arm64", resolvers).buildDns).toEqual(["10.42.0.2"]);
+    expect(webApiProbeRunnerConfig({ ...gateway, AGENTX_SANDBOX_EGRESS: "" }, "linux", "arm64", resolvers)).not.toHaveProperty("buildDns");
   });
 
   it("leaves the agent probes' model socket under the worker's run root a path a unix socket can bind (103 bytes)", () => {

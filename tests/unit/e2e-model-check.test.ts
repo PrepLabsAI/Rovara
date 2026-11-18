@@ -205,7 +205,8 @@ describe("the check the runner makes", () => {
     expect(buildDnsFromEnvironment({ ...gatewayEnvironment, AGENTX_SANDBOX_EGRESS: "bridge" }, resolvers)).toBeUndefined();
     expect(() => buildDnsFromEnvironment(gatewayEnvironment, () => "nameserver 127.0.0.53\n")).toThrow(/name servers/);
     expect(() => buildDnsFromEnvironment(gatewayEnvironment, () => { throw new Error("no file"); })).toThrow(/name servers/);
-    expect(drivingTestHostConfig({ ...gatewayEnvironment, AGENTX_SANDBOX_EGRESS: "bridge" }, "linux", "arm64")).not.toHaveProperty("buildDns");
+    expect(drivingTestHostConfig(gatewayEnvironment, "linux", "arm64", resolvers).buildDns).toEqual(["10.42.0.2", "169.254.169.253"]);
+    expect(drivingTestHostConfig({ ...gatewayEnvironment, AGENTX_SANDBOX_EGRESS: "bridge" }, "linux", "arm64", resolvers)).not.toHaveProperty("buildDns");
     expect(() => drivingTestHostConfig({}, "linux", "arm64")).toThrow(/EXECUTOR_IMAGE/);
     expect(() => drivingTestHostConfig({ EXECUTOR_IMAGE: "-bad" }, "linux", "arm64")).toThrow();
     expect(drivingTestHostConfig({ EXECUTOR_IMAGE: "111122223333.dkr.ecr.us-east-1.amazonaws.com/executor@sha256:" + "e".repeat(64) }, "linux", "arm64")).toMatchObject({ runRoot: expect.stringContaining("web-api-probes") as string });
