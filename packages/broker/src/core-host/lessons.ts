@@ -309,7 +309,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   const projectExists = async (project: string): Promise<boolean> => (await deps.projects.latest(project)) !== undefined;
 
   const replay = async (project: string, limit: number): Promise<ReturnType<typeof compareLessonReplay>> =>
-    (await import("../lessons/replay-project.js")).replayProjectLessons({ companyId, project, limit, store: deps.store, projects: deps.projects, runtime, now, planFacts: (task) => taskPlanLoadFacts(readText, task) });
+    (await import("../lessons/replay-project.js")).replayProjectLessons({ companyId, project, limit, store: deps.store, projects: deps.projects, runtime, now, planFacts: (task) => taskPlanFacts(readText, task) });
 
   return { companyId, runtime, host, milestones, sources: { source: sources.source, rows: sources.rows }, readTask: readOwnTask, projectExists, replay, attach, service };
 }

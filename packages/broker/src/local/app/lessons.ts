@@ -430,7 +430,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
   const replay: LocalLessons["replay"] = async (project, limit) => {
     const { replayProjectLessons } = await import("../../lessons/replay-project.js");
-    return replayProjectLessons({ companyId, project, limit, store: flow.store, projects: flow.projects, runtime, now, planFacts: (task) => taskPlanLoadFacts(readText, task) });
+    return replayProjectLessons({ companyId, project, limit, store: flow.store, projects: flow.projects, runtime, now, planFacts: (task) => taskPlanFacts(readText, task) });
   };
 
   const noteHumanEdit: LocalLessons["noteHumanEdit"] = (push) => host.noteHumanEdit(push);
