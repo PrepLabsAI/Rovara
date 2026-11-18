@@ -202,7 +202,7 @@ function harness(options: {
       recordThreadNote: async (input: { taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string; mention?: true }) => {
         threadNotes.push(input);
         if (options.threadNote?.throws) throw new Error("private note body must not appear in this error");
-        return { outcome: options.threadNote?.outcome ?? "captured", ...(options.threadNote?.extra ?? {}) } as never;
+        return { outcome: options.threadNote?.outcome ?? "captured", ...(options.threadNote?.extra ?? {}) };
       },
     }),
     ...(options.turnsPerMinute === undefined ? {} : {

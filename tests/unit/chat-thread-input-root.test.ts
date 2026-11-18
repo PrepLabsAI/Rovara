@@ -75,12 +75,12 @@ async function world(options: { chatThreads?: boolean } = {}) {
 describe("the hosted core root takes a Slack thread's later message as the task's input", () => {
   it("is on the core entry when the deployment wires its chat threads, and absent when it does not", async () => {
     const wired = (await world()).root.coreTasks;
-    expect(typeof wired?.threadInput).toBe("function");
+    expect(wired !== undefined && "threadInput" in wired).toBe(true);
     // The root's entry wrapper once kept only `route` and the admin stop: a start from a chat never remembered its thread (L4-U5b's `recordThread`), so a later message had no thread to belong to.
-    expect(typeof wired?.recordThread).toBe("function");
+    expect(wired !== undefined && "recordThread" in wired).toBe(true);
     const unwired = (await world({ chatThreads: false })).root.coreTasks;
-    expect(unwired?.threadInput).toBeUndefined();
-    expect(unwired?.recordThread).toBeUndefined();
+    expect(unwired !== undefined && "threadInput" in unwired).toBe(false);
+    expect(unwired !== undefined && "recordThread" in unwired).toBe(false);
   });
 
   it("the task's owner (live member of the thread's company, with the project grant) adds a note the task keeps, once", async () => {

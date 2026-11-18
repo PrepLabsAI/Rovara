@@ -26,6 +26,7 @@ import { tenantIsCompanys } from "../core/channel/company.js";
 import { readTaskThread } from "../core/channel/threads.js";
 import { developerIdOf, taskSessionId } from "../core/sessions/create.js";
 import { neutralizeSlackMentions } from "../core/sessions/slack-mentions.js";
+import { noteKey } from "../core/sessions/notes.js";
 import { routeOfTask, waitingForAnswers } from "../core/sessions/steer.js";
 import { answerRequestTaken, answerTaskOnRequest } from "../core/task-flow/answer-request.js";
 import type { TaskCaller, TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -132,14 +133,14 @@ export async function addChatThreadInput(deps: ChatThreadInputDeps, deployed: De
   const { companyId } = deployed.principal;
   // The conversation, its actor and the person's company are one workspace and one company: a workspace of another company is never this company's thread.
   if (input.conversation.channel !== input.actor.channel || input.conversation.tenant !== input.actor.tenant) return NOT_ALLOWED;
-  if (!(await tenantIsCompanys(deps.chatThreads.companyOf, companyId as OrgId, input.conversation.channel, input.conversation.tenant))) return NOT_ALLOWED;
+  if (!(await tenantIsCompanys(deps.chatThreads.companyOf, companyId, input.conversation.channel, input.conversation.tenant))) return NOT_ALLOWED;
   let flow: TaskFlowDeps;
   try { flow = (await deps.runtimeFor(companyId)).flow.deps; } catch { return NOT_SAVED; }
   if (flow.companyId !== companyId) return NOT_ALLOWED;
   const task = await readTask(flow, input.taskId);
   if (task === undefined || task.companyId !== companyId) return NOT_ALLOWED;
   // The thread the task was started from, when it was remembered, is this one.
-  const remembered = await readTaskThread(flow.store, companyId as OrgId, typeof task.sessionId === "string" ? task.sessionId : taskSessionId(task.taskId));
+  const remembered = await readTaskThread(flow.store, companyId, typeof task.sessionId === "string" ? task.sessionId : taskSessionId(task.taskId));
   if (remembered !== undefined && (remembered.conversation.channel !== input.conversation.channel || remembered.conversation.tenant !== input.conversation.tenant
     || remembered.conversation.space !== input.conversation.space || remembered.conversation.thread !== input.conversation.thread)) return NOT_ALLOWED;
   const text = cleanedReplyText(input.text);
@@ -196,9 +197,8 @@ export async function addChatThreadInput(deps: ChatThreadInputDeps, deployed: De
     const items: TransactItem[] = [...plan.items, ...standing];
     const written = await flow.store.transact(items);
     if (written.applied) return { outcome: "captured", notice: planReview ? "plan_note_saved" : "note_saved" };
-    // The note's own put failed: it was saved first by the other copy of the same reply.
-    const notePut = plan.items.findIndex((item) => item.kind === "put" && typeof item.item["sk"] === "string" && item.item["sk"].startsWith("NOTE#"));
-    if (notePut >= 0 && written.failed.includes(notePut)) return { outcome: "duplicate" };
+    // The note is there already: the other copy of the same reply saved it first.
+    if ((await flow.store.get(noteKey(task.taskId, noteMessageIdOf(digest)))) !== undefined) return { outcome: "duplicate" };
     // The owner's live access fence failed: who may act changed in between.
     if (written.failed.some((index) => index >= plan.items!.length)) return NOT_ALLOWED;
   }
