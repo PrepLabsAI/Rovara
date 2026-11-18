@@ -28,7 +28,7 @@ import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.j
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, WIKI_BUILD_WORDS, isContextSourceStage,
-  when, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
+  when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
@@ -57,6 +57,7 @@ import {
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
+import { createHostedSystemRuns, readSystemRunsSwitch, systemRunsGateOf, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -67,6 +68,7 @@ import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
+import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict } from "../core/system-runs/access.js";
 import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
@@ -334,10 +336,22 @@ export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) =
   };
 }
 
+/**
+ * L4-P1 (owner DEC 254zzl): puts the company's SystemRuns gate on its task flow. A hosted runtime ALWAYS gets one (flag off = `enabled()` false), because an ABSENT gate means ON (the laptop's rule) and every
+ * hosted company would then get Rovara's automatic re-checks. The root calls this for every company's runtime, whether or not the flag covers it; tests/unit/system-runs-hosted-gate.test.ts holds both the function and the call.
+ */
+export function hostedSystemRunsFor(deps: { systemRuns?: { enabled(): boolean } }, companyId: string, flag: Parameters<typeof systemRunsGateOf>[0]): { enabled(): boolean } {
+  const gate = systemRunsGateOf(flag, companyId);
+  deps.systemRuns = gate;
+  return gate;
+}
+
 export function hostedTaskAccess(inputs: {
   membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
   /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
   setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
+  /** L4-P1 (owner DEC 254zzl): whether this company's SystemRuns flag is on, read now. With it, a project's SYSTEM OWNER is accepted for the closed list of system purposes (core/system-runs/access.ts) and for nothing else; members' rules are unchanged. Absent: never. */
+  systemRunsOn?: () => boolean;
 }): TaskAccess {
   const liveMember = async (personId: string) => {
     const membership = await inputs.membershipOf(personId);
@@ -361,7 +375,9 @@ export function hostedTaskAccess(inputs: {
   };
   const owner = (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => resolve(principal, task, ["owner"]);
   return {
-    async checkStart(principal, project) {
+    async checkStart(principal, project, purpose) {
+      // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
+      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: inputs.systemRunsOn }, principal, project, purpose).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
       if (principal.companyId !== inputs.companyId || (await liveMember(principal.personId)) === undefined) return { allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE };
       return (await inputs.projectGrant(principal.personId, project)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
     },
@@ -382,6 +398,11 @@ export function hostedTaskAccess(inputs: {
       };
     },
     async checkStep(task) {
+      // A task whose developer is a system owner takes the system rule (the task's own stored row, read now), never the member rules.
+      if (isSystemOwnerId(task.developerId)) {
+        const stored = inputs.storage === undefined ? undefined : await (await inputs.storage()).get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
+        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: inputs.systemRunsOn }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
+      }
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
       if (inputs.setupRunStanding !== undefined && inputs.storage !== undefined) {
@@ -542,6 +563,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
   const readSettings = coreActive ? readHostedAdmissionSettings(env) : undefined;
   const admissionSettings = readSettings !== undefined && "settings" in readSettings ? readSettings.settings : undefined;
+  // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs, default off. A value that cannot be read is off (reported once).
+  const systemRunsFlag: ReturnType<typeof readSystemRunsSwitch> = coreActive ? readSystemRunsSwitch(env) : { value: { mode: "off" } };
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
@@ -580,7 +603,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, people: taskPeople }),
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => systemRunsGateOf(systemRunsFlag.value, companyId).enabled(), people: taskPeople }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
@@ -629,9 +652,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             flow.deps.contextSources = { stageHasSources: async (_task, mode) => isContextSourceStage(mode) && teamRecords.has(companyId) };
           }
         }
+        // L4-P1: the company's SystemRuns flag, on the flow itself (the free re-check at task start stands behind it), and the system starter and the upkeep night where the flag covers the company (nothing is built otherwise).
+        hostedSystemRunsFor(flow.deps, companyId, systemRunsFlag.value);
+        const systemRuns = createHostedSystemRuns({ flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
-          ...(inputs.services?.(companyId, flow, registry, attention === undefined ? wiring : { ...wiring, notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          ...(inputs.services?.(companyId, flow, registry, attention === undefined ? wiring : { ...wiring, notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }), ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
           "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
         };
@@ -639,6 +665,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     }),
   });
   if (lessonsSwitch.problem !== undefined) log({ event: "core_engine.lessons_switch_unreadable", problem: lessonsSwitch.problem });
+  if (systemRunsFlag.problem !== undefined) log({ event: "core_engine.system_runs_switch_unreadable", problem: systemRunsFlag.problem });
 
   // Off: nothing below is built. Invalid active settings leave only the fixed core refusal entry.
   let coreTasks: CoreTaskEntry | undefined;
@@ -717,8 +744,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             map: wikiMapWiring,
             displayName: displayNameOf,
           },
-          // Lead 4 N1: the nightly upkeep switch. The same live standing as the wiki controls; no scheduler is wired here yet (the switch is recorded; the hosted night waits for its scheduler).
-          upkeep: { standing: setupRunStanding },
+          // Lead 4 N1 + L4-P1: the nightly upkeep switch. The same live standing as the wiki controls. `available` follows the company's SystemRuns flag (default off): the system starter and the hourly `upkeep-night` job exist exactly there, so with the flag off the page hides the switch and a change is refused. (The per-project schedule is not used: one hourly job starts every due project.)
+          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value) },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,

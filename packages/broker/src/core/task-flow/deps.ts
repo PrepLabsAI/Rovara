@@ -102,7 +102,11 @@ export type StepVerdict = { allowed: true; items?: readonly TransactItem[] } | {
  * project roles. The flow asks `checkStart` at a start and `checkStep` before every step the system starts on its own, and never takes a caller's word for a role.
  */
 export interface TaskAccess {
-  checkStart(principal: Principal, project: string): Promise<StartVerdict>;
+  /**
+   * `purpose` is what a TASK start is for (`setup_agent`, `wiki_build`, ...): absent for an ordinary task. Only the hosted rule reads it, and only for a project's system owner (L4-P1): the system owner is accepted for
+   * a listed system purpose and for nothing else.
+   */
+  checkStart(principal: Principal, project: string, purpose?: string): Promise<StartVerdict>;
   /** Whether this principal may read and drive the task. A task of someone else is "not found" to a principal who may not (no leak). */
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
   /**

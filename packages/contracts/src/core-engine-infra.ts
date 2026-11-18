@@ -31,6 +31,8 @@ export const CORE_JOB_SCHEDULES: readonly CoreJobSchedule[] = [
   { job: "lessons", rate: "rate(5 minutes)" },
   // M7 slice 2: the after-merge watcher's pass (core-host/jobs.ts).
   { job: "after-merge", rate: "rate(1 minute)" },
+  // L4-P1 (owner DEC 254zzl): the upkeep night, hourly (core-host/jobs.ts). ENABLED only while the `CoreSystemRuns` flag is not off (infra/lib/core-engine.ts): merging this changes nothing until an operator turns it on.
+  { job: "upkeep-night", rate: "rate(1 hour)" },
 ];
 
 /**

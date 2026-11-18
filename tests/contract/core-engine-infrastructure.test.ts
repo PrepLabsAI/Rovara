@@ -261,11 +261,25 @@ describe("the core job schedules", () => {
     const conditions = json.Conditions!;
     const conditionId = Object.keys(conditions).find((id) => id.includes("CoreEngineIsOn"))!;
     expect(conditions[conditionId]).toEqual({ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreEngine" }, "off"] }] });
+    const systemRunsId = Object.keys(conditions).find((id) => id.includes("CoreSystemRunsIsOn"))!;
     for (const [id, schedule] of schedules) {
-      expect(schedule.Properties.State, id).toEqual({ "Fn::If": [conditionId, "ENABLED", "DISABLED"] });
+      const job = (JSON.parse(String((schedule.Properties.Target as { Input: string }).Input)) as { job: string }).job;
+      // L4-P1: every row but the upkeep night follows the engine switch alone; the upkeep night follows the engine switch AND the CoreSystemRuns flag (default off, so it is DISABLED until an operator turns it on).
+      expect(schedule.Properties.State, id).toEqual({ "Fn::If": [job === "upkeep-night" ? systemRunsId : conditionId, "ENABLED", "DISABLED"] });
       expect(schedule.Condition, id).toBeUndefined();
     }
     expect(group[1].Condition).toBeUndefined();
+  });
+
+  it("holds the hourly upkeep night off until both the engine and CoreSystemRuns are on, and adds exactly that one schedule (owner DEC 254zzl)", () => {
+    const conditions = json.Conditions!;
+    const systemRunsId = Object.keys(conditions).find((id) => id.includes("CoreSystemRunsIsOn"))!;
+    expect(conditions[systemRunsId]).toEqual({ "Fn::And": [{ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreEngine" }, "off"] }] }, { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreSystemRuns" }, "off"] }] }] });
+    const night = schedules.filter(([, schedule]) => (JSON.parse(String((schedule.Properties.Target as { Input: string }).Input)) as { job: string }).job === "upkeep-night");
+    expect(night).toHaveLength(1);
+    expect(night[0]![1].Properties.ScheduleExpression).toBe("rate(1 hour)");
+    expect(night[0]![1].Properties.GroupName).toEqual({ Ref: group[0] });
+    expect(json.Parameters.CoreSystemRuns).toMatchObject({ Type: "String", Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 });
   });
 
   it("use a role that only the scheduler can assume, for this group, that can invoke the broker and nothing else", () => {
@@ -526,11 +540,14 @@ describe("L1a broker environment derivation", () => {
       CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
+      CoreSystemRuns: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
       CorePolicyHook: { Default: "", AllowedPattern: "^[ -~]*$", MaxLength: POLICY_HOOK_PARAMETER_MAX_LENGTH },
     });
-    for (const logicalPrefix of ["Broker", "Dispatcher"]) {
+    // L4-P1: the system-runs flag is the broker's alone (the dispatcher refuses every access question, so it never reads it).
+    for (const [logicalPrefix, holdsSystemRuns] of [["Broker", true], ["Dispatcher", false]] as const) {
       const fn = Object.entries(inApp.Resources).find(([id, resource]) => id.startsWith(logicalPrefix) && resource.Type === "AWS::Lambda::Function")![1];
       const variables = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+      expect(JSON.stringify(variables).includes("CoreSystemRuns"), logicalPrefix).toBe(holdsSystemRuns);
       expect(variables.AGENTX_SETTINGS).toBeDefined();
       expect(variables.ROVARA_POLICY_HOOK).toEqual({ Ref: "CorePolicyHook" });
       expect(variables).not.toHaveProperty("ROVARA_CORE_ALLOWED_COMPANIES");

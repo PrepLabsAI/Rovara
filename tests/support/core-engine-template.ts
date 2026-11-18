@@ -16,9 +16,10 @@ export function withoutCoreEngine(template: unknown): unknown {
   expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
   // Web task channel C8 (option b): the attention email's three parameters (default off), its condition and its template rule (checked in core-engine-infrastructure).
   expect(synthesized.Parameters.CoreAttentionEmail).toMatchObject({ Type: "String", Default: "off", AllowedValues: ["off", "on"] });
-  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreModelGatewayHost", "CoreAgentModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender"]) delete synthesized.Parameters[name];
+  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
-  expect(conditions.map((id) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailAttentionEmailIsOn", "CoreEngineJobsCoreEngineIsOn"]);
+  expect(conditions.map((id) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailAttentionEmailIsOn", "CoreEngineJobsCoreEngineIsOn", "CoreEngineJobsCoreSystemRunsIsOn"]);
+  // (L4-P1: the upkeep night's own condition is the system-runs flag AND the switch.)
   for (const id of conditions) delete synthesized.Conditions[id];
   // Only the attention email's rule is taken out (an app's stack keeps CDK's own CheckBootstrapVersion).
   const rules = (template as { Rules?: Record<string, unknown> }).Rules ?? {};
@@ -94,7 +95,7 @@ export function withoutCoreEngine(template: unknown): unknown {
   // Web task channel C8 (option b): the attention email switch, packed (the web app's host is the sender function's alone).
   expect(settingsJoin).toMatch(/ae=",\{"Ref":"CoreAttentionEmail"\}/u);
   expect(settingsJoin).not.toContain("CoreAttentionEmailHost");
-  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "ae", "am", "cd", "cl", "ct", "gw", "sw"]);
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "ae", "am", "cd", "cl", "ct", "gw", "sw", "sy"]);
   delete variables.ROVARA_POLICY_HOOK;
   delete variables.ROVARA_CORE_ALLOWED_COMPANIES;
 

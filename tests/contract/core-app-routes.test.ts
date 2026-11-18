@@ -86,6 +86,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/org/report/tasks", "full"], ["GET", "/v1/app/org/report/features", "full"], ["POST", "/v1/app/org/report/features", "full"],
     ["POST", "/v1/app/org/report/features/ft_00000000000000000001/rename", "full"], ["POST", "/v1/app/org/report/features/ft_00000000000000000001/merge", "full"], ["POST", "/v1/app/org/report/features/ft_00000000000000000001/state", "full"],
     ["POST", "/v1/app/tasks/t1/feature", "full"],
+    // L4-P1: "Re-check setup".
+    ["GET", "/v1/app/projects/payments/setup-check", "full"], ["POST", "/v1/app/projects/payments/setup-check", "full"],
     // Lead 4 W4: the wiki build controls.
     ["GET", "/v1/app/projects/payments/wiki-build", "full"], ["POST", "/v1/app/projects/payments/wiki-build", "full"], ["POST", "/v1/app/projects/payments/wiki-build/continue", "full"], ["POST", "/v1/app/projects/payments/wiki-build/stop", "full"],
     ["POST", "/v1/app/projects/payments/wiki-build/refresh", "full"], ["POST", "/v1/app/projects/payments/wiki-build/agents", "full"], ["POST", "/v1/app/projects/payments/wiki-build/delete", "full"],
@@ -114,8 +116,8 @@ describe("the /v1/app route table", () => {
       ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"],
       ["POST", "/v1/app/projects/payments/test-environment/propose"], ["GET", "/v1/app/projects/payments/test-environment/approve"], ["PUT", "/v1/app/projects/payments/test-environment/approve"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
-      // The laptop page's own setup acts (a typed command, eval confirm, the setup check) are not served on AWS, nor other methods on the setup run.
-      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
+      // The laptop page's own setup acts (a typed command, eval confirm, the setup check's other methods) are not served on AWS, nor other methods on the setup run.
+      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["PUT", "/v1/app/projects/payments/setup-check"], ["DELETE", "/v1/app/projects/payments/setup-check"],
       ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
       // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.

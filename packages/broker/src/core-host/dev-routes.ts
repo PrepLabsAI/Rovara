@@ -59,7 +59,7 @@ import { testServicesSwitchedOn } from "../core/test-env/test-services-switch.js
 import type { CoreRuntime } from "./core-runtime.js";
 import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
 import type { AgentModelChoice } from "./gateway-model-selection.js";
-import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
+import { isSetupCheckPath, isSetupRunPath, routeHostedSetupCheck, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
 import { isWikiMapPath, routeHostedWikiMap, type HostedWikiMapWiring } from "./wiki-map-routes.js";
 import { scriptTokenRoute } from "../core/script-tokens/authenticate.js";
 import { isWikiPath, routeHostedWiki, type HostedWikiWiring } from "./wiki-routes.js";
@@ -240,7 +240,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
-  if (isSetupRunPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
+  if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
   if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
@@ -518,10 +518,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
           });
         }
-        if (isSetupRunPath(path, request.method)) {
+        if (isSetupRunPath(path, request.method) || isSetupCheckPath(path, request.method)) {
           // Guided onboarding L2-3: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.setupRun === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedSetupRun({
+          return await (isSetupCheckPath(path, request.method) ? routeHostedSetupCheck : routeHostedSetupRun)({
             request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
