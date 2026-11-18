@@ -13,7 +13,7 @@ import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory
 import { createPlaybookService } from "../../packages/broker/src/core/playbook/service.js";
 import { createCodeHostPlaybookSource } from "../../packages/broker/src/core/playbook/source.js";
 import { createStandingInstructions, STANDING_BLOCK_TOO_LONG } from "../../packages/broker/src/core/instructions/step-block.js";
-import { PINNED_STANDING_UNREADABLE } from "../../packages/broker/src/core/instructions/pinned.js";
+import { PINNED_STANDING_UNREADABLE, type PinnedStanding } from "../../packages/broker/src/core/instructions/pinned.js";
 import { hostedStandingInstructions } from "../../packages/broker/src/core-host/standing-instructions.js";
 import { hostedDispatcherFlow } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { addTeamRule } from "../../packages/broker/src/lessons/team-rules.js";
@@ -87,8 +87,8 @@ describe("a hosted step's block: company rules, then How we work, then team rule
   it("order: company rules, How we work (the file's rules, then the stage's), then team rules; the company part alone rides along for a second reviewer", async () => {
     const { h, dispatcher } = await setup({ file: FILE, company: [RULES], teamRule: "Ask about currency early." });
     const { workspace, machineId } = await startedAndPrepared(h, dispatcher);
-    expect(workspace.standingPin?.playbook?.file.rules).toContain("PROJECT-RULE");
-    expect(workspace.standingPin?.company?.version).toBe("3");
+    expect((workspace.standingPin as { playbook?: { file: { rules?: string } } } | undefined)?.playbook?.file.rules).toContain("PROJECT-RULE");
+    expect((workspace.standingPin as { company?: { version: string } } | undefined)?.company?.version).toBe("3");
     await drain(h);
     const understand = lastTask(h, machineId)!;
     expect(WorkerInvocationSchema.safeParse(understand).success).toBe(true);
@@ -165,7 +165,7 @@ describe("a task keeps the rules it started under (the pin)", () => {
     expect((await dispatcher.forOperation({ project: "payments", mode: "REVIEW", pinned: first.workspace.standingPin }))!.text).toContain("Never log customer data.");
     h.deps.standingInstructions = broker;
     const second = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Another", workflow: true });
-    const pinTwo = ((await h.store.get(workspaceKey(COMPANY, second.task.workspaceId))) as unknown as WorkspaceRecord).standingPin;
+    const pinTwo = ((await h.store.get(workspaceKey(COMPANY, second.task.workspaceId))) as unknown as WorkspaceRecord).standingPin as unknown as PinnedStanding | undefined;
     expect(pinTwo?.company?.version).toBe("4");
     expect(pinTwo?.playbook?.file.rules).toContain("RULES-TWO");
   });
@@ -337,7 +337,7 @@ describe("untrusted text", () => {
   it("a pinned copy tampered with in the store is refused in fixed words and never put in a prompt (shape, size limits, hidden text)", async () => {
     const { h, dispatcher } = await setup({ file: FILE, company: [RULES] });
     const { workspace } = await startedAndPrepared(h, dispatcher);
-    const good = workspace.standingPin!;
+    const good = workspace.standingPin as unknown as PinnedStanding;
     const refuse = async (pinned: unknown) => expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: pinned as never })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(PINNED_STANDING_UNREADABLE) as string });
     await refuse({ ...good, extra: "x" });
     await refuse({ company: "not a snapshot" });

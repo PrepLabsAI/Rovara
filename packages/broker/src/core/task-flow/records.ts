@@ -15,7 +15,7 @@ import type {
   WorkspaceStatus,
 } from "@agentx/contracts";
 import type { DeveloperTaskPointerRecord, DeveloperTaskRecord } from "../../developer/task-records.js";
-import type { WorkspaceCharge } from "./keys.js"; import type { PinnedStanding } from "../instructions/pinned.js";
+import type { WorkspaceCharge } from "./keys.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import type { OperationModelChoice } from "./step-model.js";
 
@@ -71,7 +71,7 @@ export interface WorkspaceRecord {
   projectName: string;
   projectRevision: number;
   /** The commit of the project's playbook the task pinned when it started (`StandingInstructionsSeam.pin`): every step of the task reads the file at it. Absent: the head of the default branch. */
-  playbookCommit?: string; /** Hosted only (`StandingInstructionsSeam.pinContent`): the project's How we work and the company's rules as they were when the task started; the dispatcher builds every step's block from this, never from a live read. */ standingPin?: PinnedStanding;
+  playbookCommit?: string; /** Hosted only (`StandingInstructionsSeam.pinContent`): the project's How we work and the company's rules as they were when the task started; the dispatcher builds every step's block from this, never from a live read. */ standingPin?: Record<string, JsonValue>;
   status: WorkspaceStatus;
   /** The one operation that holds the workspace (single writer); null when none does. */
   activeOperationId: string | null;

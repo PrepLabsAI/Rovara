@@ -188,7 +188,7 @@ export interface BuildSteps {
  * started after the rules changed carries the newest ones. A rejection with `CONFIG_INVALID` or `PROCESS_UNAVAILABLE` ends the operation with its sentence; any other waits and tries again.
  */
 export interface StandingInstructionsSeam {
-  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined; pinned?: PinnedStanding | undefined }): Promise<StandingInstructionsPayload | undefined>;
+  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined; pinned?: unknown }): Promise<StandingInstructionsPayload | undefined>;
   /** The playbook commit a task starting now is pinned to, kept on its workspace; the task's steps read the file at it. Refuses (as `forOperation`) when the rules cannot be read, so a task does not start under rules it cannot be given. */
   pin(project: string): Promise<string | undefined>;
   /** Hosted: the copy of the rules kept on the task's workspace for the dispatcher (see `createStandingInstructions`). Absent on a laptop. */
