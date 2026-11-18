@@ -1,3 +1,4 @@
+import { createUsageCheckpointer } from "../../packages/worker/src/usage.js";
 // Switch-on lane L8: a core task's model usage, as its worker reports it (`usage` events through the callback layer), is booked into the task's cost ledger before the batch is acknowledged,
 // once, and never at $0 when it cannot be priced: an unknown model is charged the cautious price, a higher reported cost wins, and an unreadable report makes the day's spend unknown.
 import { randomUUID } from "node:crypto";
@@ -234,4 +235,105 @@ describe("the broker root's money wiring (one company's runtime)", () => {
     const later = coreMoneyWiring(registry, COMPANY_A_ID, () => new Date(NOW.getTime() + 3 * 3_600_000));
     expect(await later.holdSweep.pass({ budgetMs: 10_000 })).toMatchObject({ released: 1 });
   });
+});
+
+import { chargeReceipt } from "./charge-receipt-fixture.js";
+it("ignores worker receipts, including final revisions and signed deltas, while booking all token totals", async () => {
+  const w = world(); await w.pointer();
+  const receipt = chargeReceipt({ companyId: ORG, taskId: w.taskId, operationId: w.operation.id });
+  // Seed authenticated evidence at the ledger seam; workers cannot revise it.
+  await w.ledger.applyChargeReceipt(receipt);
+  const forged = { ...receipt, revision: 2, replacesRevision: 1, status: "final", reason: "reported_cost", amountMicros: { state: "available", value: 0 }, providerCostMicros: { state: "available", value: 0 } };
+  const report = { ...telemetry("known", 1_000_000, 0), chargeReceipts: [forged] };
+  expect(await w.booking.bookOperationEvents(w.operation, [event(report)])).toMatchObject({ booked: 1, unreadable: 0 });
+  expect(await w.ledger.taskCost(ORG, w.taskId)).toMatchObject({ micros: 3_000_080, tokens: { input: 1_000_000 }, provisionalCalls: 1 });
+  expect(await w.ledger.companyDayCost(ORG, receipt.accountingDay)).toMatchObject({ usdMicros: 80 });
+  expect(await w.booking.bookOperationEvents(w.operation, [event(report)])).toMatchObject({ booked: 0 });
+  const chargeEntry = (await w.store.query({ pk: costPartition(ORG, w.taskId), sk: { op: "beginsWith", prefix: "ENTRY#usage-charge:" } })).items[0];
+  expect(chargeEntry).toMatchObject({ revision: 1, chargeStatus: "awaiting_usage" });
+});
+it("ignores even malformed worker receipts without dropping their aggregate tokens or inventing finality", async () => {
+  for (const chargeReceipts of [[], [{}], "bad", [chargeReceipt({ companyId: COMPANY_B_ID })]]) {
+    const w = world(); await w.pointer();
+    await w.booking.bookOperationEvents(w.operation, [event({ ...telemetry("known", 1_000_000, 0), chargeReceipts })]);
+    expect(await w.ledger.taskCost(ORG, w.taskId)).toMatchObject({ micros: 3_000_000, entries: 1, tokens: { input: 1_000_000 } });
+  }
+});
+it("books missing calls alongside reported tokens as awaiting_usage with no dollar amount, once, and blocks admission", async () => {
+  const w = world(); await w.pointer();
+  const report = { ...telemetry("known", 1_000_000, 0), usageMissingCalls: 2 };
+  await w.booking.bookOperationEvents(w.operation, [event(report)]);
+  await w.booking.bookOperationEvents(w.operation, [event(report)]);
+  expect(await w.ledger.taskCost(ORG, w.taskId)).toMatchObject({ micros: 3_000_000, unpricedEntries: 2, provisionalCalls: 2 });
+  const rows = (await w.store.query({ pk: costPartition(ORG, w.taskId), sk: { op: "beginsWith", prefix: "ENTRY#" } })).items;
+  const pending = rows.find(r => r["chargeStatus"] === "awaiting_usage");
+  expect(pending).toMatchObject({ usageMissingCalls: 2, reason: "missing_usage" });
+  expect(pending).not.toHaveProperty("micros");
+  expect(await w.ledger.companyDayCost(ORG, DAY)).toMatchObject({ usdMicros: 3_000_000, uncountedEntries: 2 });
+  const admission = createHostedAdmission({ store: w.store, ledger: w.ledger, settings: { allowedCompanies: "all", companyDayCapMicros: 100_000_000, taskCapMicros: 100_000_000 }, now: () => NOW });
+  expect(await admission.admit({ companyId: ORG, idempotencyKey: "missing", action: "task.start", subject: { type: "task", id: randomUUID() } })).toMatchObject({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
+});
+it("missing-only calls have no guessed empty-report amount; legacy empty reports are explicitly estimated", async () => {
+  const w = world(); await w.pointer();
+  await w.booking.bookOperationEvents(w.operation, [event({ ...telemetry("known", 0, 0), usageMissingCalls: 1 })]);
+  expect(await w.ledger.taskCost(ORG, w.taskId)).toMatchObject({ micros: 0, entries: 1, unpricedEntries: 1, provisionalCalls: 1 });
+  const empty = world(); await empty.pointer();
+  await empty.booking.bookOperationEvents(empty.operation, [event(telemetry("known", 0, 0))]);
+  expect(await empty.ledger.taskCost(ORG, empty.taskId)).toMatchObject({ micros: EMPTY_REPORT_CHARGE_MICROS, provisionalCalls: 1 });
+  expect((await empty.store.query({ pk: costPartition(ORG, empty.taskId), sk: { op: "beginsWith", prefix: "ENTRY#" } })).items[0]).toMatchObject({ chargeStatus: "estimated" });
+});
+
+// Exercise the worker evidence through booking and the company's real admission guard.
+it.each([
+  ["provider 429", [{ type: "message_end", message: { role: "assistant", provider: "anthropic", stopReason: "error", errorMessage: '429 {"error":{"type":"rate_limit_error"}}' } }], false],
+  ["routed 429", [{ type: "message_end", message: { role: "assistant", provider: "rovara-route", stopReason: "error", errorMessage: "Model source request failed; rate limited or out of credits; check the key's usage limits before retrying" } }], false],
+  ["gateway cap", [{ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "AI budget exhausted (org)" } }], false],
+  ["retry then success", [
+    { type: "message_start", message: { role: "assistant" } },
+    { type: "message_end", message: { role: "assistant", provider: "anthropic", stopReason: "error", errorMessage: "Anthropic request failed; upstream unavailable; check provider status before retrying" } },
+    { type: "auto_retry_start", attempt: 1 },
+    { type: "message_end", message: { role: "assistant", stopReason: "stop", usage: { input: 10, output: 1 } } },
+  ], false],
+  ["mid-answer abort", [
+    { type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", delta: "answer" } },
+    { type: "message_end", message: { role: "assistant", stopReason: "aborted", errorMessage: "Model source request cancelled" } },
+  ], true],
+  ["stream error despite HTTP diagnostic", [
+    { type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "start" } },
+    { type: "message_end", message: { role: "assistant", stopReason: "error", status: 503 } },
+  ], true],
+  ["started stream before empty abort", [
+    { type: "message_start", message: { role: "assistant", stopReason: "pending" } },
+    { type: "message_end", message: { role: "assistant", stopReason: "aborted", status: 503 } },
+  ], true],
+  ["ambiguous error", [{ type: "message_end", message: { role: "assistant", stopReason: "error" } }], false],
+  ["cancel before headers: Anthropic request cancelled", [
+    { type: "message_start", message: { role: "assistant", stopReason: "aborted", errorMessage: "Anthropic request cancelled" } },
+    { type: "message_end", message: { role: "assistant", stopReason: "aborted", errorMessage: "Anthropic request cancelled" } },
+  ], false],
+  ["cancel before headers: Model source request cancelled", [
+    { type: "message_start", message: { role: "assistant", stopReason: "aborted", errorMessage: "Model source request cancelled" } },
+    { type: "message_end", message: { role: "assistant", stopReason: "aborted", errorMessage: "Model source request cancelled" } },
+  ], false],
+  ["connection reset with no status", [
+    { type: "message_start", message: { role: "assistant", stopReason: "error", errorMessage: "connection reset" } },
+    { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "connection reset" } },
+  ], false],
+  ["cut-off after start with a refusal-looking message", [
+    { type: "message_start", message: { role: "assistant", stopReason: "pending" } },
+    { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "Model source request failed; rate limited or out of credits; check the key's usage limits before retrying" } },
+  ], true],
+  ["Bedrock refusal", [{ type: "message_end", message: { role: "assistant", provider: "amazon-bedrock", stopReason: "error", diagnostics: [{ details: { status: 503 } }] } }], false],
+  ["status refusal", [{ type: "message_end", message: { role: "assistant", stopReason: "error", status: 429 } }], false],
+])("%s counts only started calls with missing usage and preserves company admission", async (_name, events, missing) => {
+  const w = world(); await w.pointer();
+  const stats = { tokens: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, total: 11 }, cost: 0 };
+  const checkpointer = createUsageCheckpointer({ enabled: false, baseline: undefined, stats: () => stats, model: () => ({ provider: "anthropic", modelId: "known" }), requested: {}, send: () => undefined });
+  for (const e of events) checkpointer.observe(e);
+  const report = checkpointer.endReport(stats, { provider: "anthropic", modelId: "known" }, "SUCCEEDED", {});
+  expect(report?.usageMissingCalls ?? 0).toBe(missing ? 1 : 0);
+  await w.booking.bookOperationEvents(w.operation, [event(report)]);
+  expect(await w.ledger.companyDayCost(ORG, DAY)).toMatchObject({ uncountedEntries: missing ? 1 : 0 });
+  const admission = createHostedAdmission({ store: w.store, ledger: w.ledger, settings: { allowedCompanies: "all", companyDayCapMicros: 100_000_000, taskCapMicros: 100_000_000 }, now: () => NOW });
+  expect(await admission.admit({ companyId: ORG, idempotencyKey: "refusal-check", action: "task.start", subject: { type: "task", id: randomUUID() } })).toMatchObject(missing ? { allowed: false, code: "spend_unknown" } : { allowed: true });
 });

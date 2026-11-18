@@ -576,6 +576,7 @@ export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, comp
     // and the callback layer asks its worker to stop (core/task-flow/money-stop.ts `requestSpendStop`). Without the caps (`settings`) nothing is read.
     bookUsage: async (operation, events) => {
       if (operation.companyId !== companyId) throw new Error("operation belongs to another company");
+      // Worker usage is aggregate telemetry only; it cannot authenticate receipts or revise gateway charges.
       const booked = await booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events);
       if (settings === undefined || !events.some((event) => event.type === USAGE_EVENT_TYPE)) return booked;
       const taskId = (await store.get((await workspaceKeys({ store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
