@@ -11,7 +11,6 @@
 import { z } from "zod";
 import { forwardReader } from "./forward-reader.js";
 import { EvidenceHrefSchema } from "./evidence.js";
-import { PlanFeatureSchema } from "./cost-report.js";
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 function line(max: number, min = 1) {
@@ -138,6 +137,21 @@ export const EvidenceChipSchema = z
   .strict()
   .refine((chip) => (chip.kind === "thumbnail") === (chip.href !== undefined), { message: "only a thumbnail has an href", path: ["href"] });
 export type EvidenceChip = z.infer<typeof EvidenceChipSchema>;
+
+/** The sources a task's feature can have (Code's `FEATURE_SOURCES`, lead 4 cost report): a person moved it, chose it, confirmed the tracker's suggestion at plan review, or the tracker or an earlier task gave it. */
+export const PLAN_FEATURE_SOURCES = ["moved", "chosen", "confirmed_at_plan", "tracker", "inherited"] as const;
+export const PLAN_FEATURE_ID_PATTERN = /^ft_[a-f0-9]{20}$/u;
+/**
+ * A coding plan's card (lead 4, PCF): the task's feature in ONE line Code words ("Feature: Checkout v2 (from the Linear parent)"), the feature now (null: "No feature"), and whether this person may change it
+ * (`canChange`) or make a new feature to put the task under (`canCreate`). Code decides both on every read and again on every press; a card without `canChange` shows the line and no control.
+ */
+export const PlanFeatureSchema = z.object({
+  line: z.string().min(1).max(200).regex(NO_HIDDEN, "one plain line"),
+  feature: z.object({ id: z.string().regex(PLAN_FEATURE_ID_PATTERN), name: z.string().min(1).max(320), source: z.enum(PLAN_FEATURE_SOURCES) }).strict().nullable(),
+  canChange: z.boolean(),
+  canCreate: z.boolean(),
+}).strict();
+export type PlanFeature = z.infer<typeof PlanFeatureSchema>;
 
 export const DECISION_CARD_STATUSES = ["pending", "approved", "rejected", "answered_by_rule", "expired", "cancelled"] as const;
 export const DECISION_CARD_ID_PATTERN = new RegExp(`^(?:${DECISION_KINDS.join("|")}):[A-Za-z0-9_-]{1,150}$`, "u");
