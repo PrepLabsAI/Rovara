@@ -273,6 +273,10 @@ describe("ticketStartedShared: the rule itself", () => {
     const ticket = await w.task(A, "payments", "ENG-2");
     const throwing = async (): Promise<boolean> => { throw new Error("store down"); };
     expect(await ticketStartedShared({ store: w.store, now: () => w.clock.now, scope: { orgId: A } }, throwing)(A, ticket.taskId)).toBe(true);
+    // A store fault inside the ticket rule is no answer: the records still say shared.
+    const faulty = { get: async () => { throw new Error("store down"); } } as unknown as typeof w.store;
+    expect(await ticketStartedShared({ store: faulty, now: () => w.clock.now, scope: { orgId: A } }, base)(A, t.taskId)).toBe(true);
+    expect(await ticketStartedShared({ store: faulty, now: () => w.clock.now, scope: { orgId: A } })(A, t.taskId)).toBe(false);
     // Neither true nor shared: a throwing base on a not-ticket-started task is an error the caller fails closed on.
     await expect(ticketStartedShared({ store: w.store, now: () => w.clock.now, scope: { orgId: A } }, throwing)(A, t.taskId)).rejects.toThrow("store down");
   });

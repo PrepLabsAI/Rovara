@@ -23,7 +23,8 @@ export function ticketStartedShared(
   deps: Pick<TicketUpdatesDependencies, "store" | "now" | "scope">, base?: (orgId: OrgId, taskId: string) => Promise<boolean>,
 ): (orgId: OrgId, taskId: string) => Promise<boolean> {
   return async (orgId, taskId) => {
-    if (await startedFromTicket(deps, orgId, taskId)) return true;
+    // A fault in this rule is no answer: the records are still asked (and a fault there is the caller's, who takes it as "not shared").
+    if (await startedFromTicket(deps, orgId, taskId).catch(() => false)) return true;
     return base === undefined ? false : base(orgId, taskId);
   };
 }
