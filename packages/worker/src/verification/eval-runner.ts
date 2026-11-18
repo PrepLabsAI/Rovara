@@ -3,7 +3,7 @@
 // metered stage's `call`. The exec never receives the reservation, a key, a payer or a scope it could read.
 import {
   EVAL_QUESTION_LIMIT, MODEL_EGRESS_REFUSAL_HEADER, MODEL_EGRESS_SCHEMES, evalFactsAllRun, isEvalBaseAttestation,
-  type EvalBaseAttestation, type EvalMeterReservation, type ModelEgress, type ModelEgressEvent, type ModelEgressScope,
+  type EvalBaseAttestation, type EvalMeterReservation, type EvalStandInCounts, type ModelEgress, type ModelEgressEvent, type ModelEgressScope,
 } from "@agentx/contracts";
 import type { EvalFinalCheckPorts } from "./eval-final-check.js";
 import { EvalSandboxRunFailure, runFailureOf } from "./eval-run-diagnostic.js";
@@ -26,6 +26,8 @@ export interface EvalSandboxResult {
   readonly changedPromptCalls: number;
   /** For the old side only: made by `attestRovaraOnlyBaseCheckout` after the exec ran the base commit in a Rovara-only checkout. */
   readonly attestation?: EvalBaseAttestation | undefined;
+  /** L4-E56: only when the round has stand-ins: whether this run hit a gap (a made-up answer) and the round's counts as they stand. */
+  readonly standIns?: { readonly hitGap: boolean; readonly counts: EvalStandInCounts } | undefined;
 }
 export interface EvalSandboxExec {
   /** Runs the confirmed eval command for one side, then resolves only after the sandbox process and every call have joined, also on abort. Never reads the reservation. */
@@ -86,6 +88,7 @@ export function createEvalRunner(exec: EvalSandboxExec): EvalFinalCheckPorts["ru
     return {
       report: result.report, facts: evalFactsAllRun(ids.length * request.runs), calls: 0, costMicros: 0, changedPromptCalls: result.changedPromptCalls,
       ...(request.side === "old" && isEvalBaseAttestation(result.attestation) ? { attestation: result.attestation } : {}),
+      ...(result.standIns === undefined || typeof result.standIns.hitGap !== "boolean" ? {} : { standIns: result.standIns }),
     };
   };
 }
