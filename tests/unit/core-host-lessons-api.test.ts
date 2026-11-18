@@ -7,8 +7,9 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
-import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MEASURE_NEEDS_ADMIN, MODE_NEEDS_ADMIN, NO_SUCH_LESSON, NO_SUCH_PROJECT, SUMMARY_NEEDS_ADMIN, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
+import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MEASURE_NEEDS_ADMIN, MODE_NEEDS_ADMIN, NO_SUCH_LESSON, NO_SUCH_PROJECT, SUMMARY_NEEDS_ADMIN, TUNING_NEEDS_ADMIN, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
+import { documentMeasureSink } from "../../packages/broker/src/lessons/measure.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { DocumentPresetStore, DocumentTier0Settings, writeLearningMode } from "../../packages/broker/src/lessons/document-settings.js";
 import type { CoreSwitch } from "../../packages/broker/src/core-host/flags.js";
@@ -122,7 +123,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", `${P}/lessons/les_aaaa1111/retire-request`, {}], ["POST", `${P}/lessons/les_aaaa1111/keep`, {}], ["GET", `${P}/tasks/${randomUUID()}/lessons`],
   ["POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_aaaa1111", version: 1, decision: "keep" }] }], ["POST", `${P}/tasks/${randomUUID()}/lessons/les_aaaa1111/not-helpful`, {}],
   ["POST", `${P}/lessons/mode/trial-offer`, { decision: "accept" }],
-  ["GET", `${P}/lessons/weekly-summary`], ["PUT", `${P}/lessons/weekly-summary`, { on: true }], ["GET", `${P}/lessons/measure`],
+  ["GET", `${P}/lessons/weekly-summary`], ["PUT", `${P}/lessons/weekly-summary`, { on: true }], ["GET", `${P}/lessons/measure`], ["GET", `${P}/lessons/tuning`],
   ["GET", `${P}/skills`], ["POST", `${P}/lessons/les_aaaa1111/skill`, {}], ["PUT", `${P}/skills/add-a-queue`, { expectedVersion: 1, description: "d", when: "w", steps: ["one"] }],
   ["POST", `${P}/skills/add-a-queue/approve`, { version: 1 }], ["POST", `${P}/skills/add-a-queue/retire`, {}],
 ];
@@ -137,7 +138,7 @@ describe("the paths", () => {
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/skill", "POST /v1/dev/projects/{project}/lessons/{lessonId}/keep",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
-      "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary", "GET /v1/dev/projects/{project}/lessons/measure",
+      "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary", "GET /v1/dev/projects/{project}/lessons/measure", "GET /v1/dev/projects/{project}/lessons/tuning",
       // Lead 4 L4-LP3W: by code area, and where Rovara learns from (their own tests: lessons-by-area/lessons-areas-api.test.ts).
       "GET /v1/dev/projects/{project}/lessons/areas", "GET /v1/dev/projects/{project}/lessons/learning-sources", "PUT /v1/dev/projects/{project}/lessons/learning-sources/{source}",
     ]].sort());
@@ -885,12 +886,12 @@ describe("the weekly summary setting", () => {
   it("off by default; only a project admin or a company owner or admin turns it on, never a script token; audited before the write; two companies with one project name are apart", async () => {
     const w = await setUp();
     const { api: target } = api(w);
-    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: false, canChange: false } });
+    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: false, source: "default", canChange: false } });
     expect(await call(target, "a-contrib", "PUT", PATH, { on: true })).toEqual({ ok: false, code: "FORBIDDEN", status: 403, message: SUMMARY_NEEDS_ADMIN });
     expect(await call(target, "a-admin", "PUT", PATH, { on: true }, undefined, { scriptToken: { tokenId: "t1" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
     for (const body of [{}, { on: "yes" }, { on: true, extra: 1 }]) expect(await call(target, "a-admin", "PUT", PATH, body)).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
     expect(w.world.audit.filter((e) => e.action === "lesson.digest_switched")).toEqual([]);
-    expect(await call(target, "a-maint", "PUT", PATH, { on: true })).toEqual({ ok: true, body: { project: "payments", on: true, canChange: true } });
+    expect(await call(target, "a-maint", "PUT", PATH, { on: true })).toEqual({ ok: true, body: { project: "payments", on: true, source: "chosen", canChange: true } });
     expect(await call(target, "a-contrib", "GET", PATH)).toMatchObject({ ok: true, body: { on: true } });
     expect(await call(target, "b-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: false } });
     expect(await w.world.store.get({ pk: companyScoped(B, "LESSON_DIGEST#payments"), sk: "SETTING" })).toBeUndefined();
@@ -979,6 +980,77 @@ describe("lessons phase 0: the measurement read (GET lessons/measure)", () => {
     expect((await rowsOf(B, "LESSON_FIT")).length).toBe(1);
     expect((await rowsOf(B, "LESSON_MERGE")).length).toBe(0);
     expect(JSON.stringify(await rowsOf(A, "LESSON_FIT"))).not.toContain(B);
+  });
+
+  it("with the switch off nothing is read, and a company the switch does not cover is told lessons are off", async () => {
+    const w = await setUp({ [CORE_LESSONS_VARIABLE]: `on:${A}` });
+    const off = api(w, { lessonsSwitch: { mode: "off" } });
+    expect(await call(off.api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF", message: LESSONS_OFF });
+    expect(off.companyOf).not.toHaveBeenCalled();
+    expect(await call(api(w, { lessonsSwitch: { mode: "on-for", companies: [A] } }).api, "b-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF" });
+  });
+});
+
+describe("the weekly summary default for pilot companies (lane L4-WK)", () => {
+  const PATH = `${P}/lessons/weekly-summary`;
+  it("a pilot company's project that never chose reads as on with its source; a project admin can turn it off and the choice then wins; another company is unchanged", async () => {
+    const w = await setUp();
+    const { api: target } = api(w, { digestPilot: (companyId) => companyId === A });
+    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: true, source: "pilot_default", canChange: false } });
+    expect(await call(target, "b-admin", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: false, source: "default", canChange: true } });
+    expect(await call(target, "a-maint", "PUT", PATH, { on: false })).toEqual({ ok: true, body: { project: "payments", on: false, source: "chosen", canChange: true } });
+    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: false, source: "chosen", canChange: false } });
+    expect(w.world.audit.filter((e) => e.action === "lesson.digest_switched").map((e) => [e.actor.id, e.companyId, e.details])).toEqual([["a-maint", A, expect.objectContaining({ enabled: false })]]);
+    // Turning it on in the other company changes only that company.
+    expect(await call(target, "b-admin", "PUT", PATH, { on: true })).toMatchObject({ ok: true, body: { on: true, source: "chosen" } });
+    expect(await call(target, "a-contrib", "GET", PATH)).toMatchObject({ ok: true, body: { on: false, source: "chosen" } });
+  });
+
+  it("with no pilot list given the companies the lessons switch names are the pilot; 'on' for everyone names nobody", async () => {
+    const w = await setUp();
+    expect(await call(api(w, { lessonsSwitch: { mode: "on-for", companies: [A, B] } }).api, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: true, source: "pilot_default" } });
+    expect(await call(api(w, { lessonsSwitch: { mode: "on" } }).api, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: false, source: "default" } });
+  });
+});
+
+describe("the tuning report (GET lessons/tuning, lane L4-WK)", () => {
+  const PATH = `${P}/lessons/tuning`;
+  async function loads(w: World, companyId: OrgId, count: number): Promise<void> {
+    const sink = documentMeasureSink(w.lessons.get(companyId)!.runtime.documents, companyId, () => w.world.clock.now);
+    for (let i = 0; i < count; i += 1) {
+      await sink.load({
+        workspaceId: companyId, project: "payments", taskId: `task-${String(i)}`, stage: "IMPLEMENT", round: 1, at: w.world.clock.now - i * 60_000, budgetLessons: 5, activeCount: 6, eligibleCount: 6,
+        loaded: Array.from({ length: 5 }, (_unused, j) => ({ id: `les_${String(j).padStart(4, "0")}`, fit: 0.5, score: 0.5, words: 0.1 + 0.01 * ((i * 5 + j) % 50), cos: null })), leftOut: [],
+      });
+    }
+  }
+
+  it("a project admin and a company admin read it; a contributor is refused, an outsider is told nothing, a script token never reads, nothing else is a route", async () => {
+    const w = await setUp();
+    const { api: target } = api(w);
+    for (const person of ["a-admin", "a-maint"]) {
+      expect(await call(target, person, "GET", PATH), person).toMatchObject({ ok: true, body: { project: "payments", ready: false, message: "not enough data yet (0 of 20 loads)", windowDays: 30 } });
+    }
+    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: false, code: "FORBIDDEN", status: 403, message: TUNING_NEEDS_ADMIN });
+    expect(await call(target, "a-out", "GET", PATH)).toEqual({ ok: false, code: "NOT_FOUND", status: 404, message: NO_SUCH_PROJECT });
+    expect(await call(target, "a-admin", "GET", PATH, undefined, undefined, { scriptToken: { tokenId: "t1" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    for (const method of ["POST", "PUT", "DELETE"]) expect(await call(target, "a-admin", method, PATH, {})).toMatchObject({ ok: false, code: "NOT_FOUND" });
+  });
+
+  it("it suggests from the company's own rows, writes nothing, and a second company with the same project name sees only its own", async () => {
+    const w = await setUp();
+    await loads(w, A, 25);
+    const { api: target } = api(w);
+    const before = (await w.world.store.query({ pk: companyScoped(A, "LESSON_FIT#payments") })).items.length;
+    const answer = await call(target, "a-admin", "GET", PATH);
+    expect(answer).toMatchObject({ ok: true, body: { ready: true, evidence: { loads: 25, loadedLessons: 125, lessonsLoaded: 5 } } });
+    const body = (answer as { body: { suggestions: Array<{ setting: string; status: string }> } }).body;
+    expect(body.suggestions.map((one) => [one.setting, one.status])).toEqual([["fitFloorWords", "suggested"], ["fitFloorCosine", "not_enough_data"], ["priorWeightUses", "not_enough_data"], ["stepLessonCap", "keep"], ["weeklyPicks", "no_data_source"]]);
+    expect((await w.world.store.query({ pk: companyScoped(A, "LESSON_FIT#payments") })).items.length).toBe(before);
+    expect(await call(target, "b-admin", "GET", PATH)).toMatchObject({ ok: true, body: { ready: false, evidence: { loads: 0 } } });
+    await loads(w, B, 21);
+    expect(await call(target, "b-admin", "GET", PATH)).toMatchObject({ ok: true, body: { ready: true, evidence: { loads: 21 } } });
+    expect(await call(target, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { evidence: { loads: 25 } } });
   });
 
   it("with the switch off nothing is read, and a company the switch does not cover is told lessons are off", async () => {

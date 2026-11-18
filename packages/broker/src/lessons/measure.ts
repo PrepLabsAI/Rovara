@@ -156,7 +156,7 @@ export interface LessonMeasure {
 }
 
 const numberOf = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
-function samplesFrom(value: unknown): FitSample[] | undefined {
+export function samplesFrom(value: unknown): FitSample[] | undefined {
   if (!Array.isArray(value) || value.length > LOADED_MAX) return undefined;
   const out: FitSample[] = [];
   for (const entry of value as unknown[]) {

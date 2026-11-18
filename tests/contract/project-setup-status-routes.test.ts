@@ -834,3 +834,4 @@ describe("what did not change", () => {
 // Batch 17 (rule D): with batch 16's table and the batch's 15 new /v1/dev rows (#992 lessons areas, learning-sources and its PUT; #1003's 9 graduation, Tidy, check-draft and rule rows; #995's POST lessons and
 // knowledge/areas; #994's GET company/egress-addresses). All added, none changed: removing exactly those 15 rows still gives eaf715d5... (the batch-16 pin above).
 const EXISTING_ROUTES_DIGEST = "d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711";
+// L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
