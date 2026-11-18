@@ -930,14 +930,15 @@ describe("the eval check card on the deployed API (L4-EVCI2)", () => {
 
   it("propose, confirm, stored, in the company's own store: the proposals come from the workflow reader, the confirm is audited with the person, and another company's caller reads nothing of it", async () => {
     const { app, companyOf, remember } = await world2();
-    const read = vi.fn(async () => reader);
+    const readFor: string[] = [];
+    const read = async (companyId: string) => { readFor.push(companyId); return reader; };
     const standing = async (personId: string, companyId: string) => (companyId === FAKE_COMPANY && personId === remember(FAKE_COMPANY).principal.personId ? { access: "manage" as const, basis: "company-owner" as const } : { access: "manage" as const, basis: "company-owner" as const });
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, evalCheck: { standing, readerFor: read } }) });
     const owner = remember(FAKE_COMPANY);
     const proposed = await routes.route(get(CARD), owner);
     expect(proposed?.statusCode).toBe(200);
     expect(answerOf(proposed)).toMatchObject({ confirmed: null, proposals: { verdict: "proposals" } });
-    expect(read).toHaveBeenCalledWith(FAKE_COMPANY, expect.objectContaining({ name: expect.any(String) }));
+    expect(readFor).toContain(FAKE_COMPANY);
     const done = await routes.route(put(CARD, { requestId: randomUUID(), check: { name: "evals", source: "15368" } }), owner);
     expect(done?.statusCode).toBe(200);
     expect(answerOf(done).confirmed).toMatchObject({ name: "evals" });

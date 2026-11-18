@@ -53,7 +53,7 @@ export async function readEvalCheckSetting(deps: Pick<EvalCheckStoreDeps, "store
 export async function writeEvalCheckSetting(deps: Pick<EvalCheckStoreDeps, "store" | "companyId">, input: { project: string; check: EvalCheck | undefined; requestId: string; now: number }): Promise<EvalCheckSetting> {
   const changedAt = new Date(input.now).toISOString();
   const check = input.check === undefined ? undefined : EvalCheckSchema.parse(input.check);
-  await deps.store.put({ item: { ...evalCheckKey({ orgId: deps.companyId, project: input.project }), entityType: EVAL_CHECK_ENTITY, orgId: deps.companyId, project: input.project, ...(check === undefined ? {} : { check }), changedAt, requestId: input.requestId } });
+  await deps.store.put({ item: { ...evalCheckKey({ orgId: deps.companyId, project: input.project }), entityType: EVAL_CHECK_ENTITY, orgId: deps.companyId, project: input.project, ...(check === undefined ? {} : { check: { name: check.name, ...(check.source === undefined ? {} : { source: check.source }) } }), changedAt, requestId: input.requestId } });
   return { ...(check === undefined ? {} : { check }), changedAt };
 }
 

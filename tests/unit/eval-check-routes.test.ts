@@ -95,10 +95,11 @@ describe("propose, confirm, stored", () => {
     const answer = await w.call(OWNER, "GET", "beacon");
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({ project: "beacon", canManage: true, confirmed: null, explanation: "Rovara shows this check's result on its pull requests.", proposals: { verdict: "proposals", cut: false } });
-    const names = answer.body["proposals"].items.map((item: Body) => item["name"]);
+    const items = (answer.body["proposals"] as { items: Array<Record<string, unknown>> }).items;
+    const names = items.map((item) => item["name"]);
     // The job whose id or name says eval, the one whose commands run an eval tool and the "evals/" script: the plain unit job is not offered.
     expect(names).toEqual(["evals", "Quality gate"]);
-    expect(answer.body["proposals"].items[0]).toEqual({ name: "evals", source: ACTIONS, workflow: ".github/workflows/ci.yml", repository: "app", basis: "name" });
+    expect(items[0]).toEqual({ name: "evals", source: ACTIONS, workflow: ".github/workflows/ci.yml", repository: "app", basis: "name" });
     expect(w.audited).toEqual([]);
     expect(await w.port()(task(COMPANY_A, "beacon"))).toBeUndefined();
   });
@@ -149,7 +150,7 @@ describe("propose, confirm, stored", () => {
     for (const reader of [undefined, "throws" as const, readerOf({ "ci.yml": "jobs: [not a map" })]) {
       const w = hosted({ reader });
       const answer = await put(w, OWNER, "beacon", choose("evals"));
-      expect(answer, String(reader)).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: EVAL_CHECK_WORDS.cannotRead } } });
+      expect(answer).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: EVAL_CHECK_WORDS.cannotRead } } });
       expect(w.audited).toEqual([]);
       const read = await w.call(OWNER, "GET", "beacon");
       expect(read.body["proposals"]).toEqual({ verdict: "unknown", items: [], cut: false });
@@ -308,7 +309,7 @@ describe("two companies, two projects", () => {
     const store = new MemoryDocumentStore();
     const base = { ...evalCheckKey({ orgId: COMPANY_A, project: "beacon" }), entityType: "CI_EVAL_CHECK", orgId: COMPANY_A, project: "beacon", changedAt: new Date(T0).toISOString() };
     for (const damaged of [{ ...base, check: { name: "", secret: "do-not-echo" } }, { ...base, check: "evals" }, { ...base, entityType: "OTHER", check: EVALS }, { ...base, changedAt: 5, check: EVALS }]) {
-      await store.put({ item: damaged as never });
+      await store.put({ item: damaged });
       const port = evalCheckEvidencePort({ store, companyId: COMPANY_A, log: (event, fields) => { logs.push([event, fields]); } });
       expect(await port(task(COMPANY_A, "beacon"))).toBeUndefined();
     }
@@ -341,7 +342,7 @@ describe("the proposals across repositories", () => {
     });
     expect(reads.sort()).toEqual(["a", "b", "c"]);
     const body = JSON.parse(answer.body) as Body;
-    expect(body["proposals"].items.map((item: Body) => [item["name"], item["repository"]])).toEqual([["evals", "a"], ["Quality gate", "a"]]);
+    expect((body["proposals"] as { items: Array<Record<string, unknown>> }).items.map((item) => [item["name"], item["repository"]])).toEqual([["evals", "a"], ["Quality gate", "a"]]);
   });
 
   it("one repository that cannot be read makes a list with no proposal 'unknown', never 'none found'", async () => {
@@ -367,8 +368,8 @@ describe("on a laptop", () => {
       registry: {} as never, audit: { stage: () => [], record: options.audit ?? (async (event: AuditEvent) => { audited.push(event); }) }, now: () => T0,
       readerFor: async () => ("reader" in options ? options.reader : readerOf({ "ci.yml": WORKFLOW })),
     });
-    const call = async (method: "GET" | "PUT", path: string, body?: unknown, caller: Record<string, unknown> = {}) => {
-      const answer = await routes.routes({ method, path, headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, { principal: { companyId: IMPLICIT_COMPANY_ID, personId: OWNER_ID, displayName: "o", roles: ["owner"], provider: "local" }, ...caller } as never);
+    const call = async (method: "GET" | "PUT" | "POST", path: string, body?: unknown, caller: Record<string, unknown> = {}) => {
+      const answer = await routes.routes({ method, path, headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, { principal: { companyId: IMPLICIT_COMPANY_ID, personId: OWNER_ID, displayName: "o", roles: ["owner"], provider: "local" }, ...caller });
       return answer === undefined ? undefined : { status: answer.statusCode, body: JSON.parse(answer.body) as Body };
     };
     return { store, audited, call };

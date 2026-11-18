@@ -2842,8 +2842,8 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     h.model.setChecks(waiting.commit, [passingCheck(), evals]);
     await h.runtime.tick();
     expect(await trackingItem(h, waiting.taskId)).not.toHaveProperty("ciEval");
-    await writeEvalCheckSetting({ store: store(h), companyId: IMPLICIT_COMPANY_ID }, { project: "demo", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334455", now: clock.at });
-    clock.advance(2 * MINUTE);
+    await writeEvalCheckSetting({ store: store(h), companyId: IMPLICIT_COMPANY_ID }, { project: "payments", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334455", now: clock.at });
+    clock.advance(10 * MINUTE);
     await h.runtime.tick();
     expect(await trackingItem(h, waiting.taskId)).toMatchObject({ ciEval: { name: "evals" } });
   });

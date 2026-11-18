@@ -60,13 +60,15 @@ describe("the hosted job services", () => {
     await services["merge-tracking"].pass({ budgetMs: 1000 });
     expect(await w.world.trackingOf(pr)).not.toHaveProperty("ciEval");
     // Another company's confirmation, and another project's of this company, name nothing here.
-    const store = w.h.flow.store;
+    const store = w.h.flow.deps.store;
     await writeEvalCheckSetting({ store, companyId: B }, { project: "web", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334455", now: NOW });
     await writeEvalCheckSetting({ store, companyId: ORG }, { project: "docs", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334455", now: NOW });
+    w.clock.ms += 10 * 60_000;
     await services["merge-tracking"].pass({ budgetMs: 1000 });
     expect(await w.world.trackingOf(pr)).not.toHaveProperty("ciEval");
     // This company's own project's confirmation does.
     await writeEvalCheckSetting({ store, companyId: ORG }, { project: "web", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334456", now: NOW });
+    w.clock.ms += 10 * 60_000;
     await services["merge-tracking"].pass({ budgetMs: 1000 });
     expect(await w.world.trackingOf(pr)).toMatchObject({ ciEval: { name: "evals" } });
   });

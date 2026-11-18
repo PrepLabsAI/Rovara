@@ -26,7 +26,7 @@ const reader: CiDefinitionReader = {
   read: async () => ({ text: WORKFLOW }),
 };
 
-async function world(): Promise<{ w: MergeWorld; deps: MergeTrackingDependencies; card: ReturnType<typeof createLocalEvalCheck>; asked: unknown[] }> {
+async function world(withPort = true): Promise<{ w: MergeWorld; deps: MergeTrackingDependencies; card: ReturnType<typeof createLocalEvalCheck>; asked: unknown[] }> {
   const w = await mergeWorld();
   const at = new Date(CLOCK).toISOString();
   const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: w.prs[0]!.head, treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
@@ -48,7 +48,7 @@ async function world(): Promise<{ w: MergeWorld; deps: MergeTrackingDependencies
   const port = evalCheckEvidencePort({ store: w.store, companyId: IMPLICIT_COMPANY_ID });
   const deps: MergeTrackingDependencies = {
     ...w.tracking, autonomy: () => "run",
-    ciEvidence: (task) => { asked.push(task); return port(task as never); },
+    ...(withPort ? { ciEvidence: (task: Parameters<typeof port>[0]) => { asked.push(task); return port(task); } } : {}),
     repository: async (...args) => { const home = await w.tracking.repository(...args); return home === undefined ? undefined : { ...home, checkRunner: runner as CheckRunner }; },
   };
   const card = createLocalEvalCheck({
@@ -81,7 +81,7 @@ describe("propose, confirm, stored, and the line appears on the pull request", (
   it("the proposal is read from the workflow files, one is confirmed, and the next pass says the customer's CI result under the Proven line", async () => {
     const { w, deps, card, asked } = await world();
     const proposed = await call(card, "GET");
-    expect(proposed.body["proposals"].items.map((item: { name: string }) => item.name)).toEqual(["evals"]);
+    expect((proposed.body["proposals"] as { items: Array<{ name: string }> }).items.map((item) => item.name)).toEqual(["evals"]);
     expect((await call(card, "PUT", { requestId: randomUUID(), check: { name: "evals", source: ACTIONS } })).status).toBe(200);
     setChecks(w);
     await trackTask(deps, TASK_ID);
@@ -98,9 +98,9 @@ describe("propose, confirm, stored, and the line appears on the pull request", (
     await call(card, "PUT", { requestId: randomUUID(), check: null });
     setChecks(w);
     await trackTask(deps, TASK_ID);
-    const today = await world();
+    const today = await world(false);
     setChecks(today.w);
-    await trackTask({ ...today.deps, ciEvidence: undefined } as MergeTrackingDependencies, TASK_ID);
+    await trackTask(today.deps, TASK_ID);
     expect(body(w)).toBe(bodyOf());
     expect(body(w)).toBe(body(today.w));
     expect(await w.trackingOf(w.prs[0]!)).not.toHaveProperty("ciEval");
@@ -110,11 +110,11 @@ describe("propose, confirm, stored, and the line appears on the pull request", (
     const { w, deps, card } = await world();
     await call(card, "PUT", { requestId: randomUUID(), check: { name: "evals", source: ACTIONS } });
     // The same confirmation under another company, and under another project of this company, is not this task's.
-    const other = evalCheckEvidencePort({ store: w.store, companyId: OTHER_ORG as never });
+    const other = evalCheckEvidencePort({ store: w.store, companyId: OTHER_ORG });
     expect(await other({ orgId: OTHER_ORG, project: "web" })).toBeUndefined();
     expect(await evalCheckEvidencePort({ store: w.store, companyId: IMPLICIT_COMPANY_ID })({ orgId: IMPLICIT_COMPANY_ID, project: "docs" })).toBeUndefined();
     // A pass for a task of the other company's port (a wrong-company port) says nothing, even though the project's row exists in this store.
-    const wrong: MergeTrackingDependencies = { ...deps, ciEvidence: (task) => other(task as never) };
+    const wrong: MergeTrackingDependencies = { ...deps, ciEvidence: (task) => other(task) };
     setChecks(w);
     await trackTask(wrong, TASK_ID);
     expect(evalLines(body(w))).toEqual([]);

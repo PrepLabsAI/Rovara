@@ -529,7 +529,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const lessonsForHumanEdits: { current?: { noteHumanEdit: HumanEditSink } } = {};
   const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges,
     // L4-EVCI2: the customer's confirmed eval check (the setup card's), kept per company and project; nothing confirmed: a pass is what it was.
-    ciEvidence: evalCheckEvidencePort({ store: flow.deps.store, companyId, log: (event, fields) => log({ component: "eval_check", event, ...fields }) }), humanEdit: async (push) => { await lessonsForHumanEdits.current?.noteHumanEdit(push); } });
+    ciEvidence: evalCheckEvidencePort({ store, companyId, log: (event, fields) => log({ component: "eval_check", event, ...fields }) }), humanEdit: async (push) => { await lessonsForHumanEdits.current?.noteHumanEdit(push); } });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
