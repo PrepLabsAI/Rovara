@@ -282,16 +282,22 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
   let current = original;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const nextEntries: PersonEntry[] = [];
+    // Row 3674 #2: an owner this pass demotes stops being involved, so their involved row goes in the SAME transaction as the People change (the creator has none).
+    const demotedRows: TransactItem[] = [];
     for (const person of current.people) {
       if (person.role !== "owner") { nextEntries.push(person); continue; }
       const proof = await checked(deps, task, person.developerId, admission);
-      nextEntries.push(proof.eligible && taskPersonPresent(proof) ? person : { ...person, role: proof.eligible ? "commenter" : "denied" });
+      if (proof.eligible && taskPersonPresent(proof)) { nextEntries.push(person); continue; }
+      const role: StoredTaskRole = proof.eligible ? "commenter" : "denied";
+      nextEntries.push({ ...person, role });
+      const row = involvedStep(deps, task, person.developerId, role);
+      if (row !== undefined) demotedRows.push(row);
     }
     const orphaned = !nextEntries.some((person) => person.role === "owner");
     if (orphaned === current.orphaned && nextEntries.every((entry, index) => entry.role === current.people[index]!.role)) return current;
     const next: TaskPeople = { schemaVersion: 1, revision: current.revision + 1, orphaned, people: nextEntries };
     const item = { ...peopleKey(task.taskId), ...next };
-    preflight([{ Put: { TableName: deps.tableName, Item: item } }]);
+    preflight([{ Put: { TableName: deps.tableName, Item: item } }, ...demotedRows]);
     try {
       admission?.assertOpen();
       await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
@@ -300,7 +306,7 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
         ConditionExpression: "#revision = :expectedRevision",
         ExpressionAttributeNames: { "#revision": "revision", "#orphaned": "orphaned", "#people": "people" },
         ExpressionAttributeValues: { ":nextRevision": next.revision, ":orphaned": next.orphaned, ":people": next.people, ":expectedRevision": current.revision },
-      } }] }));
+      } }, ...demotedRows] }));
       return next;
     } catch (error) {
       if (!conditional(error)) throw error;
