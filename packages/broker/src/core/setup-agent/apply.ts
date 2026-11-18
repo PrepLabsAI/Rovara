@@ -25,14 +25,16 @@ import { refusedCommand } from "./refused-command.js";
 import { classifySetupChange, type SetupChangeRisk, type SetupRisk } from "./setup-risk.js";
 
 export const SETUP_APPLY_KIND = "setup-proposal";
+/** The most item ids one confirm may name: every setup and tests item a proposal may hold, and every prompt location. */
+export const SETUP_CONFIRM_ITEM_IDS_MAX = 128;
 /** The longest a command may be, as the approval page shows it: whole. */
 export const SETUP_COMMAND_SHOWN_MAX = 2_000;
 export const SetupConfirmBodySchema = z.object({
   requestId: z.string().uuid(),
   /** The project revision the person looked at. */
   expectedRevision: z.number().int().min(0),
-  /** Items to use, by id (setup and tests items only). Absent: every item that passed. */
-  itemIds: z.array(z.string().min(1).max(100)).max(64).optional(),
+  /** Items to use, by id (setup, tests and prompt-location items). Absent: every item that passed. At most the proposal's own item limits in all (32 + 32 commands, 40 locations). */
+  itemIds: z.array(z.string().min(1).max(100)).max(SETUP_CONFIRM_ITEM_IDS_MAX).optional(),
 }).strict();
 
 export const SETUP_CONFIRM_WORDS = {
@@ -134,13 +136,34 @@ export function promptLocationsFromProposal(
     const value = item.proposed.value as PromptLocation;
     if (!definition.repositories.some((repository) => repository.name === value.repo)) { out.left.push({ id: item.id, reason: "unverified" }); continue; }
     const key = promptLocationKey(value);
-    if (known.has(key)) { out.used.push(item.id); continue; }
+    // A location the project already has adds nothing: it is not "used", so a confirm of only such items is refused as "nothing" instead of making a candidate equal to the base.
+    if (known.has(key)) continue;
     if (out.locations.length >= PROMPT_LOCATIONS_MAX) { out.left.push({ id: item.id, reason: "too_many" }); continue; }
     known.add(key);
     out.locations.push(value);
     out.used.push(item.id);
   }
   return out;
+}
+
+/**
+ * L4-EVP: what a confirm takes from the proposal. The person's choice (`itemIds`) may name prompt-location items as well as command items; an id of neither kind is unknown and refuses the whole confirm. Nothing usable at all
+ * (an empty choice, only unverified or already-held locations, only failed commands) is refused as "nothing"; commands with nothing usable are no refusal while a prompt location is usable. Pure, so it is tested without a store.
+ */
+export function chooseCandidateItems(
+  proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string; path: string }>; promptLocations?: unknown }, itemIds: readonly string[] | undefined,
+): { made: CandidateCommands; locations: CandidatePromptLocations } {
+  const items = setupItemsOf(proposal);
+  const chosen = itemIds === undefined ? undefined : new Set(itemIds);
+  const kindOf = (id: string) => items.find((item) => item.id === id)?.kind;
+  const commandChoice = chosen === undefined ? undefined : new Set([...chosen].filter((id) => kindOf(id) !== "prompt_location"));
+  const onlyLocations = chosen !== undefined && chosen.size > 0 && commandChoice!.size === 0;
+  const locations = promptLocationsFromProposal(proposal, verification, definition, chosen);
+  const commands = onlyLocations ? { used: [], unchecked: [], left: [] } as CandidateCommands : commandsFromProposal(proposal, verification, definition, commandChoice);
+  if ("error" in commands && (commands.error !== "nothing" || locations.used.length === 0)) throw agentXError("CONFIG_INVALID", commands.error === "unknown_item" ? SETUP_CONFIRM_WORDS.unknownItem : SETUP_CONFIRM_WORDS.nothing);
+  const made: CandidateCommands = "error" in commands ? { used: [], unchecked: [], left: [] } : commands;
+  if (made.used.length === 0 && locations.used.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.nothing);
+  return { made, locations };
 }
 
 /** What the owner approves: the commands (and, when the candidate holds prompt locations, those), as a digest. The candidate check ran exactly these, and the approval names this digest. Without locations the digest is the commands' alone, as it always was. */
@@ -174,18 +197,7 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
   if (view.verified !== true || view.verification === undefined) throw agentXError("CHANGE_STALE", SETUP_CONFIRM_WORDS.notChecked);
   const full = await deps.flow.projects.latest(project);
   if (full === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
-  // L4-EVP: the person's choice may name prompt-location items as well as command items; an id of neither kind is unknown.
-  const items = setupItemsOf(view.proposal!);
-  const chosen = body.itemIds === undefined ? undefined : new Set(body.itemIds);
-  const kindOf = (id: string) => items.find((item) => item.id === id)?.kind;
-  const commandChoice = chosen === undefined ? undefined : new Set([...chosen].filter((id) => kindOf(id) !== "prompt_location"));
-  const onlyLocations = chosen !== undefined && chosen.size > 0 && commandChoice!.size === 0;
-  const locations = promptLocationsFromProposal(view.proposal!, view.verification, full.definition, chosen);
-  const commands = onlyLocations ? { used: [], unchecked: [], left: [] } as CandidateCommands : commandsFromProposal(view.proposal!, view.verification, full.definition, commandChoice);
-  // Nothing usable in the commands is no refusal when a prompt location is usable; anything else (an unknown id) is refused as before.
-  if ("error" in commands && (commands.error !== "nothing" || locations.used.length === 0)) throw agentXError("CONFIG_INVALID", commands.error === "unknown_item" ? SETUP_CONFIRM_WORDS.unknownItem : SETUP_CONFIRM_WORDS.nothing);
-  const made: CandidateCommands = "error" in commands ? { used: [], unchecked: [], left: [] } : commands;
-  if (made.used.length === 0 && locations.used.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.nothing);
+  const { made, locations } = chooseCandidateItems(view.proposal!, view.verification, full.definition, body.itemIds);
   const setup = made.setup ?? full.definition.setup;
   const readiness = made.readiness ?? full.definition.readiness;
   if (readiness.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.noTest);

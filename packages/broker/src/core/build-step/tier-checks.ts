@@ -27,7 +27,7 @@ import { readTask } from "../task-flow/reads.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { namedPaths, ownQuickChecks, quickCheckEntry, withQuickChecks } from "../task-flow/stage-selection.js";
 import { iso, log } from "../task-flow/support.js";
-import { isOutageReason, planScopeQuestion, readScopeQuestion, scopeBanner, scopeHolds, withScopeBanner, type ScopeQuestionRecord } from "./scope-question.js";
+import { isOutageOnly, planScopeQuestion, readScopeQuestion, scopeBanner, scopeHolds, withScopeBanner, type ScopeQuestionRecord } from "./scope-question.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "./plan-input.js";
 import { pathsIn, planFiles } from "../decisions/plan-facts.js";
@@ -181,7 +181,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // A head the record has no tier for (a person's push, or one the post-push writer could not read) is tiered here, from the same files.
     const flow = workflow.flow;
     // A reviewer outage holds the head it happened on, not the next ones: the head of the first tier an outage raised.
-    const outageOnly = flow?.tier !== undefined && flow.tier.reasons.length > 0 && flow.tier.reasons.every(isOutageReason);
+    const outageOnly = flow?.tier !== undefined && isOutageOnly(flow.tier.reasons);
     const outageHead = [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])].find((tier) => tier.reasons.some((reason) => reason.code === "reviewer_unavailable"))?.headSha;
     const outageElsewhere = outageOnly && outageHead !== head;
     const needsTier = flow?.tier?.headSha !== head || flow.tier.source === "estimate" || outageElsewhere;
@@ -204,7 +204,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       if (fresh === undefined) return current;
       // A reviewer outage holds the head it happened on, not the next ones: a tier raised by nothing but an outage on another head does not carry over (the new head is asked again).
       const previous = current?.tier;
-      if (current !== undefined && previous !== undefined && outageElsewhere && previous.reasons.length > 0 && previous.reasons.every(isOutageReason)) {
+      if (current !== undefined && previous !== undefined && outageElsewhere && isOutageOnly(previous.reasons)) {
         // The outage's raise is kept in the history (it is what happened on that head); the growth it alone caused does not stand for the new head.
         const { grewAfterBuild: _grew, ...rest } = current;
         void _grew;

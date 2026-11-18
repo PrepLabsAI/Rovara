@@ -4,7 +4,7 @@
 // the task's starting revision), and from then on they are plain data: NO model is asked at task time. Two readers use the same rules:
 //   - the broker's change tier reads a changed FILE against them (file level: it sees a patch, not the file), and asks for the eval when one matches (`eval_hint`);
 //   - the worker's changed-prompt classifier reads both sides of a changed file and, for Python and YAML where the region can be found whole, compares the REGION (region level). Any region that cannot be found on
-//     either side, or a language this module does not read, falls back to the file: a change to the file counts as touching the location. A guess that a region is untouched is never made.
+//     either side, or a language this module does not read, falls back to the file: a change to the file counts as touching the location. A region is called untouched only when both sides' regions were found whole and are equal; known blind spots of a text reader (a value built from another name, a YAML alias) are narrowed by returning "no region" where they can be seen, and are otherwise the project's to cover by naming the whole file.
 // Fixed words only; nothing from a file is echoed into a message.
 import { z } from "zod";
 import { AgentXNameSchema } from "./names.js";
@@ -57,14 +57,29 @@ export function promptLocationsInFile(locations: readonly PromptLocation[], file
 // ---- regions (Python and YAML)
 
 const MAX_LINES = 60_000;
+/** Characters of lines one region read may visit in all (a nested file cannot make it quadratic, and a very long line costs what it is): past it the region is "not found", which counts as touched. */
+const VISIT_BUDGET = 40_000_000;
+class NoRegion extends Error {}
+interface Budget { left: number }
+const spend = (budget: Budget, n = 1): void => { budget.left -= n; if (budget.left < 0) throw new NoRegion(); };
 const NO_REGION = undefined;
 type Region = string | undefined;
 const indentOf = (line: string): number => { let n = 0; while (n < line.length && (line[n] === " " || line[n] === "\t")) n += 1; return n; };
 const blank = (line: string): boolean => line.trim() === "" || line.trim().startsWith("#");
+const escapeRe = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
 interface PyScan { lines: string[]; /** The line starts inside a string or a bracket: a continuation, never the start or end of a block. */ cont: boolean[] }
-/** One pass over Python text: which lines start inside a string (triple-quoted or not) or an open bracket, or after a backslash. Linear. */
+/** One pass over Python text: which lines start inside a string (triple-quoted or not) or an open bracket, or after a backslash. Linear. The last text read is kept, so several locations in one file scan it once. */
+const scanCache = new Map<string, PyScan | null>();
 function scanPython(text: string): PyScan | undefined {
+  const known = scanCache.get(text);
+  if (known !== undefined) return known ?? undefined;
+  const made = scanPythonOnce(text);
+  if (scanCache.size >= 4) scanCache.delete(scanCache.keys().next().value as string);
+  scanCache.set(text, made ?? null);
+  return made;
+}
+function scanPythonOnce(text: string): PyScan | undefined {
   const lines = text.replace(/\r\n?/gu, "\n").split("\n");
   if (lines.length > MAX_LINES) return undefined;
   const cont: boolean[] = [];
@@ -98,16 +113,17 @@ function scanPython(text: string): PyScan | undefined {
 }
 
 /** The end (exclusive) of the statement that starts at line `start`: the first line after it that does not continue it. */
-function pyStatementEnd(scan: PyScan, start: number): number {
+function pyStatementEnd(scan: PyScan, start: number, budget: Budget): number {
   let end = start + 1;
-  while (end < scan.lines.length && scan.cont[end]) end += 1;
+  while (end < scan.lines.length && scan.cont[end]) { spend(budget, scan.lines[end]!.length + 1); end += 1; }
   return end;
 }
 /** The end (exclusive) of the block that starts at `start` (header at `start`, body indented deeper). */
-function pyBlockEnd(scan: PyScan, start: number, limit: number): number {
+function pyBlockEnd(scan: PyScan, start: number, limit: number, budget: Budget): number {
   const base = indentOf(scan.lines[start]!);
-  let end = pyStatementEnd(scan, start);
+  let end = pyStatementEnd(scan, start, budget);
   for (let i = end; i < limit; i += 1) {
+    spend(budget, scan.lines[i]!.length + 1);
     if (scan.cont[i] || blank(scan.lines[i]!)) { end = i + 1; continue; }
     if (indentOf(scan.lines[i]!) <= base) break;
     end = i + 1;
@@ -116,70 +132,83 @@ function pyBlockEnd(scan: PyScan, start: number, limit: number): number {
   while (end > start + 1 && blank(scan.lines[end - 1]!) && !scan.cont[end - 1]) end -= 1;
   return end;
 }
-
-const escapeRe = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/** Only the outermost of overlapping ranges: a region found inside another is already part of it, and keeping both makes a nested file quadratic. */
+function outermost<T extends [number, number, ...number[]]>(ranges: T[]): T[] {
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const kept: T[] = [];
+  for (const range of sorted) { const last = kept[kept.length - 1]; if (last === undefined || range[0] >= last[1]) kept.push(range); }
+  return kept;
+}
 
 function pyRegion(text: string, location: PromptLocation): Region {
   const scan = scanPython(text);
   if (scan === undefined || location.symbol === undefined) return NO_REGION;
-  const parts = location.symbol.split(".");
+  const budget: Budget = { left: VISIT_BUDGET };
+  // A decorator is named whole (`app.tool`, `agent.system_prompt`); the others are a dotted path of classes ending in the name.
+  const parts = location.kind === "decorator" ? [location.symbol] : location.symbol.split(".");
   let ranges: Array<[number, number]> = [[0, scan.lines.length]];
   for (const [index, part] of parts.entries()) {
     const last = index === parts.length - 1;
     const name = escapeRe(part);
+    const pattern = !last ? new RegExp(String.raw`^\s*class\s+${name}\b`, "u")
+      : location.kind === "function" ? new RegExp(String.raw`^\s*(?:async\s+)?def\s+${name}\s*\(`, "u")
+      // An assignment of the name, a plain one or an augmented one (`X += ...` changes the value too).
+      : location.kind === "variable" ? new RegExp(String.raw`^\s*(?:self\.)?${name}\s*(?::[^=\n]*)?(?:\*\*|//|<<|>>|[-+*/|&@%^])?=(?!=)`, "u")
+      : new RegExp(String.raw`^\s*@${name}(?![\w.])`, "u");
     const found: Array<[number, number]> = [];
     for (const [from, to] of ranges) {
       for (let i = from; i < to; i += 1) {
-        if (scan.cont[i]) continue;
-        const line = scan.lines[i]!;
-        let match: RegExpExecArray | null = null;
-        if (!last) match = new RegExp(String.raw`^\s*class\s+${name}\b`, "u").exec(line);
-        else if (location.kind === "function") match = new RegExp(String.raw`^\s*(?:async\s+)?def\s+${name}\s*\(`, "u").exec(line);
-        else if (location.kind === "variable") match = new RegExp(String.raw`^\s*(?:self\.)?${name}\s*(?::[^=\n]*)?=(?!=)`, "u").exec(line);
-        else if (location.kind === "decorator") match = new RegExp(String.raw`^\s*@${name}\b`, "u").exec(line);
-        if (match === null) continue;
-        if (!last || location.kind === "variable") {
-          const end = last ? pyStatementEnd(scan, i) : pyBlockEnd(scan, i, to);
-          found.push([i, last ? end : Math.min(end, to)]);
-        } else if (location.kind === "function") {
+        spend(budget, scan.lines[i]!.length + 1);
+        if (scan.cont[i] || !pattern.test(scan.lines[i]!)) continue;
+        if (!last) found.push([i, Math.min(pyBlockEnd(scan, i, to, budget), to)]);
+        else if (location.kind === "variable") found.push([i, pyStatementEnd(scan, i, budget)]);
+        else if (location.kind === "function") {
           // Decorators directly above the def are part of it.
           let start = i;
-          while (start > from && /^\s*@/u.test(scan.lines[start - 1]!) && !scan.cont[start - 1]) start -= 1;
-          found.push([start, pyBlockEnd(scan, i, to)]);
+          while (start > from && /^\s*@/u.test(scan.lines[start - 1]!) && !scan.cont[start - 1]) { spend(budget, scan.lines[start - 1]!.length + 1); start -= 1; }
+          found.push([start, pyBlockEnd(scan, i, to, budget)]);
         } else {
           // A decorator: its own lines through the block it decorates.
           let at = i;
-          while (at < to && (scan.cont[at] || /^\s*@/u.test(scan.lines[at]!))) at += 1;
-          found.push([i, at < to ? pyBlockEnd(scan, at, to) : to]);
+          while (at < to && (scan.cont[at] || /^\s*@/u.test(scan.lines[at]!))) { spend(budget, scan.lines[at]!.length + 1); at += 1; }
+          found.push([i, at < to ? pyBlockEnd(scan, at, to, budget) : to]);
         }
       }
     }
     if (found.length === 0) return NO_REGION;
-    ranges = found;
+    ranges = outermost(found);
   }
   return ranges.map(([from, to]) => scan.lines.slice(from, to).join("\n")).join("\n\u0000\n");
 }
 
+/** YAML that a line reader cannot follow whole: an alias (its value is another place's), a merge key. */
+const YAML_ALIAS = /(?:^|[\s:[,{-])\*[A-Za-z0-9_-]+|^\s*<<\s*:/mu;
+/** What may start the line that ends a key's block: another key, a list item, a comment, a document marker. Anything else (a quoted value continued at column 0) is a block this reader cannot bound. */
+const YAML_BLOCK_END = /^\s*(?:["']?[^\s"'#:][^:]*["']?\s*:(?:\s|$)|-(?:\s|$)|#|---|\.\.\.)/u;
+
 function yamlRegion(text: string, location: PromptLocation): Region {
   if (location.symbol === undefined) return NO_REGION;
   const lines = text.replace(/\r\n?/gu, "\n").split("\n");
-  if (lines.length > MAX_LINES) return NO_REGION;
-  const parts = location.symbol.split(".");
+  if (lines.length > MAX_LINES || YAML_ALIAS.test(text)) return NO_REGION;
+  const budget: Budget = { left: VISIT_BUDGET };
   let ranges: Array<[number, number, number]> = [[0, lines.length, -1]];
-  for (const part of parts) {
+  for (const part of location.symbol.split(".")) {
     const key = new RegExp(String.raw`^(\s*)(-\s+)?["']?${escapeRe(part)}["']?\s*:(?:\s|$)`, "u");
     const found: Array<[number, number, number]> = [];
     for (const [from, to, parentIndent] of ranges) {
       for (let i = from; i < to; i += 1) {
+        spend(budget, lines[i]!.length + 1);
         const match = key.exec(lines[i]!);
         if (match === null) continue;
         const indent = (match[1]?.length ?? 0) + (match[2]?.length ?? 0);
         if (indent <= parentIndent) continue;
         let end = i + 1;
         for (let j = i + 1; j < to; j += 1) {
+          spend(budget, lines[j]!.length + 1);
           // A blank line or a comment never ends the block (a region too long is safe; one too short is not).
           if (blank(lines[j]!)) { end = j + 1; continue; }
-          if (/^---(?:\s|$)/u.test(lines[j]!) || indentOf(lines[j]!) <= (match[1]?.length ?? 0)) break;
+          if (/^---(?:\s|$)/u.test(lines[j]!)) break;
+          if (indentOf(lines[j]!) <= (match[1]?.length ?? 0)) { if (!YAML_BLOCK_END.test(lines[j]!)) throw new NoRegion(); break; }
           end = j + 1;
         }
         while (end > i + 1 && blank(lines[end - 1]!)) end -= 1;
@@ -187,12 +216,12 @@ function yamlRegion(text: string, location: PromptLocation): Region {
       }
     }
     if (found.length === 0) return NO_REGION;
-    ranges = found.map(([from, to, indent]) => [from, to, indent] as [number, number, number]);
+    ranges = outermost(found);
   }
   return ranges.map(([from, to]) => lines.slice(from, to).join("\n")).join("\n\u0000\n");
 }
 
-/** The text of the location's region in `text`, whole, or undefined when it cannot be found or this module does not read the language. Never throws. */
+/** The text of the location's region in `text`, whole, or undefined when it cannot be found, the read ran out of its work bound, or this module does not read the language. Never throws. */
 export function promptRegionOf(text: string, location: PromptLocation): Region {
   try {
     if (location.kind === "file" || typeof text !== "string") return NO_REGION;

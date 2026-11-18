@@ -52,13 +52,13 @@ export type SetupJournalReply = z.infer<typeof SetupJournalReplySchema>;
 export const SetupConfirmRequestSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().min(0),
-  itemIds: z.array(z.string().min(1).max(100)).max(64).optional(),
+  itemIds: z.array(z.string().min(1).max(100)).max(128).optional(),
 }).strict();
 export const SETUP_CONFIRM_LEFT_OUT = ["unverified", "refused_command", "not_a_command_item", "too_many", "invalid_command"] as const;
 export const SetupConfirmReplySchema = z.object({
   digest: z.string().regex(/^[0-9a-f]{64}$/u),
-  used: z.array(z.string().min(1).max(100)).max(64),
-  unchecked: z.array(z.string().min(1).max(100)).max(64),
+  used: z.array(z.string().min(1).max(100)).max(128),
+  unchecked: z.array(z.string().min(1).max(100)).max(128),
   left: z.array(z.object({ id: z.string().min(1).max(100), reason: z.enum(SETUP_CONFIRM_LEFT_OUT) }).strict()).max(200),
   /** Always false here: the Prove is the wizard's, on the project's setup check. */
   proved: z.boolean(),

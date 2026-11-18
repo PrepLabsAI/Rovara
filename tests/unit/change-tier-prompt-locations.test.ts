@@ -88,3 +88,16 @@ describe("capReasons keeps both hints", () => {
     expect(capReasons([reason("a"), reason("b")], 1).map((r) => r.code)).toEqual(["a"]);
   });
 });
+
+describe("hints and the reviewer outage Retry", () => {
+  const OUTAGE = [{ code: "reviewer_unavailable" }];
+  it("a tier raised by an outage still counts as outage-only with the hints beside it, and not without an outage reason", async () => {
+    const { isOutageOnly } = await import("../../packages/broker/src/core/build-step/scope-question.js");
+    expect(isOutageOnly(OUTAGE)).toBe(true);
+    expect(isOutageOnly([...OUTAGE, { code: "ai_code_touched", path: "a.py" }, { code: "eval_hint", path: "b.py" }])).toBe(true);
+    expect(isOutageOnly([{ code: "ai_code_touched", path: "a.py" }])).toBe(false);
+    expect(isOutageOnly([])).toBe(false);
+    expect(isOutageOnly([...OUTAGE, { code: "sensitive_path", path: "auth/x.ts" }])).toBe(false);
+  });
+});
+

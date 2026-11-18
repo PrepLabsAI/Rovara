@@ -1,7 +1,7 @@
 // L4-EVP: the setup agent PROPOSES prompt locations, a maintainer confirms them with the setup candidate, and they are stored with the setup revision. Reader rules, the candidate, the risk and who approves it, and isolation between projects.
 import { describe, expect, it } from "vitest";
 import { ProjectDefinitionSchema, sanitizeSetupProposal, setupItemHandling, setupItemRisk, setupItemsOf, workerProjectDefinition, type PromptLocation, type SetupProposal, type SetupVerification } from "@agentx/contracts";
-import { promptLocationsFromProposal, setupApplyDigest } from "../../packages/broker/src/core/setup-agent/apply.js";
+import { SETUP_CONFIRM_WORDS, chooseCandidateItems, promptLocationsFromProposal, setupApplyDigest } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { classifySetupChange, setupApproverAllows } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
 import { setupProposalFormatLines } from "../../packages/worker/src/setup-draft.js";
 
@@ -96,7 +96,8 @@ describe("the candidate takes the confirmed locations", () => {
     const have: PromptLocation[] = [locationOf(ids[0]!), { repo: "app", path: "keep.py", kind: "file" }];
     const made = promptLocationsFromProposal(proposal, verdicts(), { ...definition, promptLocations: have });
     expect(made.locations.map((l) => l.path)).toEqual(["deskbot/agent.py", "keep.py", "web/prompt.ts"]);
-    expect(made.used).toEqual(ids);
+    // The one the project already held adds nothing, so it is not "used".
+    expect(made.used).toEqual([ids[1]]);
   });
   it("refuses to take the list past its limit", () => {
     const have = Array.from({ length: 40 }, (_, index): PromptLocation => ({ repo: "app", path: `p${index}.py`, kind: "file" }));
@@ -110,6 +111,37 @@ describe("the candidate takes the confirmed locations", () => {
     expect(setupApplyDigest(setup, setup, [])).toBe(setupApplyDigest(setup, setup));
     expect(setupApplyDigest(setup, setup, [locationOf(ids[0]!)])).not.toBe(setupApplyDigest(setup, setup));
     expect(setupApplyDigest(setup, setup, [locationOf(ids[0]!)])).not.toBe(setupApplyDigest(setup, setup, [locationOf(ids[1]!)]));
+  });
+});
+
+describe("what a confirm takes (chooseCandidateItems: the item ids a person may choose)", () => {
+  const withSetup = read({ ...SETUP, promptLocations: [ONE] });
+  const setupId = withSetup.setup[0]!.id;
+  const locId = withSetup.promptLocations![0]!.id;
+  const definition = { repositories: [{ name: "app", path: "repo/app" }], promptLocations: undefined as unknown };
+  const all: Record<string, SetupVerification> = { [setupId]: "verified", [locId]: "verified" };
+  const refused = (verdicts: Record<string, SetupVerification>, itemIds: string[] | undefined, def: typeof definition = definition) => () => chooseCandidateItems(withSetup, verdicts, def, itemIds);
+
+  it("no choice takes every verified item; a location-only choice works with no command in it", () => {
+    const both = chooseCandidateItems(withSetup, all, definition, undefined);
+    expect(both.made.used).toEqual([setupId]);
+    expect(both.locations.used).toEqual([locId]);
+    const only = chooseCandidateItems(withSetup, all, definition, [locId]);
+    expect(only.made.used).toEqual([]);
+    expect(only.locations.used).toEqual([locId]);
+    expect(chooseCandidateItems(withSetup, all, definition, [setupId]).locations.used).toEqual([]);
+  });
+  it("an empty choice is refused as nothing", () => { expect(refused(all, [])).toThrow(SETUP_CONFIRM_WORDS.nothing); });
+  it("an unknown id is refused, alone or beside a location id", () => {
+    expect(refused(all, ["nope"])).toThrow(SETUP_CONFIRM_WORDS.unknownItem);
+    expect(refused(all, [locId, "nope"])).toThrow(SETUP_CONFIRM_WORDS.unknownItem);
+  });
+  it("a location that failed its re-read, alone, is refused; with an unchecked one chosen by hand it is allowed", () => {
+    expect(refused({ ...all, [locId]: "unverified" }, [locId])).toThrow(SETUP_CONFIRM_WORDS.nothing);
+    expect(chooseCandidateItems(withSetup, { ...all, [locId]: "unchecked" }, definition, [locId]).locations.unchecked).toEqual([locId]);
+  });
+  it("a location the project already holds is refused as nothing (a candidate equal to the base is never made)", () => {
+    expect(refused(all, [locId], { ...definition, promptLocations: [{ repo: "app", path: "deskbot/agent.py", kind: "variable", symbol: "SYSTEM_PROMPT" }] })).toThrow(SETUP_CONFIRM_WORDS.nothing);
   });
 });
 

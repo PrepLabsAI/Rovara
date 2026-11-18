@@ -141,3 +141,39 @@ describe("regions in YAML, and the file fallback", () => {
     expect(touched(loc({ kind: "variable", symbol: "X" }), `X = 1\n${"y\n".repeat(70_000)}`, `X = 1\n${"y\n".repeat(70_000)}`)).toBe(true);
   });
 });
+
+describe("regions: narrowed blind spots and a work bound", () => {
+  it("an augmented assignment is the variable's region too", () => {
+    const text = 'PROMPT = "a"\nPROMPT += " b"\nX = 1\n';
+    expect(promptRegionOf(text, loc({ kind: "variable", symbol: "PROMPT" }))).toBe('PROMPT = "a"\n\u0000\nPROMPT += " b"');
+    expect(touched(loc({ kind: "variable", symbol: "PROMPT" }), text, text.replace('" b"', '" c"'))).toBe(true);
+  });
+  it("a dotted decorator is found by its whole name, and not by a prefix of it", () => {
+    const text = "@agent.system_prompt\ndef p():\n    return 'x'\n\n@agent.tool\ndef t():\n    return 1\n";
+    expect(promptRegionOf(text, loc({ kind: "decorator", symbol: "agent.system_prompt" }))).toBe("@agent.system_prompt\ndef p():\n    return 'x'");
+    expect(touched(loc({ kind: "decorator", symbol: "agent.system_prompt" }), text, text.replace("return 1", "return 2"))).toBe(false);
+    expect(promptRegionOf(text, loc({ kind: "decorator", symbol: "agent" }))).toBeUndefined();
+  });
+  it("YAML with an alias or a merge key, or a quoted value continued at column 0, has no region (so the file counts)", () => {
+    const key = { repo: "app", path: "c.yaml", kind: "yaml_key" as const, symbol: "tone" };
+    for (const text of ["base: &b warm\ntone: *b\n", "<<: *d\ntone: x\n", 'tone: "a\ncontinued"\nother: 1\n']) expect(promptRegionOf(text, key), text).toBeUndefined();
+    expect(promptRegionOf("tone: warm\nother: 1\n", key)).toBe("tone: warm");
+  });
+  it("deeply nested same-named blocks cost a bounded amount of work and read as not found, never as untouched", () => {
+    const depth = 3_000;
+    const py = Array.from({ length: depth }, (_, i) => `${" ".repeat(i)}class A:`).join("\n") + `\n${" ".repeat(depth)}P = "x"\n`;
+    const nested = loc({ kind: "variable", symbol: "A.A.A.P" });
+    const started = Date.now();
+    expect(promptLocationTouched(nested, { repo: "app", path: "deskbot/agent.py", before: py, after: py })).toBe(true);
+    const yaml = Array.from({ length: depth }, (_, i) => `${" ".repeat(i)}k:`).join("\n") + "\n";
+    expect(promptLocationTouched({ repo: "app", path: "c.yaml", kind: "yaml_key", symbol: "k.k.k" }, { repo: "app", path: "c.yaml", before: yaml, after: yaml })).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+  it("many siblings of the same name are read in linear time", () => {
+    const py = Array.from({ length: 4_000 }, () => "class A:\n    P = 1").join("\n") + "\n";
+    const started = Date.now();
+    expect(promptRegionOf(py, loc({ kind: "variable", symbol: "A.P" }))).toContain("P = 1");
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+});
+
