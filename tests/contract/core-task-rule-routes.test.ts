@@ -45,7 +45,8 @@ async function registerProject(world: FakeWorld, companyId: string): Promise<voi
 function appOver(world: FakeWorld): CoreHostApp {
   return createCoreHostApp({
     env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
+    // The company's rule as a deployment wires it: only the person the task runs for acts on it or reads it through the core's own rule (People are the old rules' here).
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: { ...createOwnerTaskAccess(), canAct: async (principal, task) => principal.personId === task.developerId, canRead: async (principal, task) => principal.personId === task.developerId }, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
 
@@ -230,5 +231,38 @@ describe("plan comments and People on a core task (the old routes' own functions
       expect(owner, suffix).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } } });
       expect(await h.dev(OMAR, method, `/v1/dev/tasks/${h.task.taskId}${suffix}`), suffix).toEqual(await h.missing(OMAR, method, suffix));
     }
+  });
+});
+
+describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it (the old task read's reader rule)", () => {
+  it("reads the task while shared and still a project member; never before sharing, after unsharing or after leaving the project; a member with no part reads no such task", async () => {
+    const h = await ruleWorld();
+    const path = `/v1/dev/tasks/${h.task.taskId}`;
+    const own = await h.dev(MAYA, "GET", path);
+    expect(own.status).toBe(200);
+    for (const who of [TESS, SAM]) expect(await h.dev(who, "GET", path), who.name).toEqual(await h.missing(who, "GET", ""));
+    await h.dev(MAYA, "PUT", `${path}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });
+    const shared = await h.dev(TESS, "GET", path);
+    expect(shared).toEqual(own);
+    expect(await h.dev(SAM, "GET", path)).toEqual(await h.missing(SAM, "GET", ""));
+    // Off the project: no longer a reader; back on it: a reader again; unshared (revoked): no longer.
+    h.db.delete(`MEMBER#${TESS.developerId}`, "PROJECT#payments");
+    expect(await h.dev(TESS, "GET", path)).toEqual(await h.missing(TESS, "GET", ""));
+    grantProject(h.db, TESS);
+    expect((await h.dev(TESS, "GET", path)).status).toBe(200);
+    await h.dev(MAYA, "DELETE", `${path}/readers/${TESS.developerId}`);
+    expect(await h.dev(TESS, "GET", path)).toEqual(await h.missing(TESS, "GET", ""));
+  });
+
+  it("another company's person reads no such task even with a reader row naming them; without the deployment's wiring a reader row gives nothing", async () => {
+    const h = await ruleWorld();
+    const path = `/v1/dev/tasks/${h.task.taskId}`;
+    for (const who of [OMAR, TESS]) h.db.set({ pk: `DEVTASK#${h.task.taskId}`, sk: `READER#${who.developerId}`, schemaVersion: 1, developerId: who.developerId, role: "viewer", grantedBy: MAYA.developerId, grantedAt: "2026-11-15T00:00:00.000Z" });
+    grantProject(h.db, OMAR);
+    expect(await h.dev(OMAR, "GET", path)).toEqual(await h.missing(OMAR, "GET", ""));
+    expect((await h.dev(TESS, "GET", path)).status).toBe(200);
+    const unwired = await ruleWorld({ rules: false });
+    unwired.db.set({ pk: `DEVTASK#${unwired.task.taskId}`, sk: `READER#${TESS.developerId}`, schemaVersion: 1, developerId: TESS.developerId, role: "viewer", grantedBy: MAYA.developerId, grantedAt: "2026-11-15T00:00:00.000Z" });
+    expect(await unwired.dev(TESS, "GET", `/v1/dev/tasks/${unwired.task.taskId}`)).toEqual(await unwired.missing(TESS, "GET", ""));
   });
 });

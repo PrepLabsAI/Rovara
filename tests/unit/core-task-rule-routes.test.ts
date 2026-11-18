@@ -54,3 +54,12 @@ describe("the core task rule routes' own guards", () => {
     expect(send).not.toHaveBeenCalled();
   });
 });
+
+describe("DEC 254zzz44 (a): the old reader rule for the core task read", () => {
+  it("says no for a task of another company without building any dependency", async () => {
+    const depsFor = vi.fn((): DeveloperTaskRouteDependencies => { throw new Error("never built"); });
+    const routes = createCoreTaskRuleRoutes(depsFor);
+    expect(await routes.readsAsReader({ person: { developerId: OWNER, name: "Maya" }, companyId: A, task: task(B) })).toBe(false);
+    expect(depsFor).not.toHaveBeenCalled();
+  });
+});
