@@ -702,7 +702,7 @@ describe("the MCP tools against a hosted install (the CLI client targets the sam
       if (method === "GET" && url.pathname === "/v1/dev/projects") return json(200, { developer: { id: "a".repeat(64), name: "Ada", provider: "oidc" }, projects: [{ name: "billing", latestRevision: 1, access: "granted", channels: [] }, { name: "payments", latestRevision: 1, access: "granted", channels: [] }], notices: [] });
       try { return json(200, await b.api.answer({ method, path: url.pathname, body: typeof init?.body === "string" ? init.body : "{}" }, person(personId))); }
       catch (error) { if (!(error instanceof AgentXError)) throw error; return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } }); }
-    }) as typeof fetch;
+    });
   }
   const contextOf = (b: Built, personId: string, seen: string[]): ToolContext => ({
     client: httpControlPlaneClient({ session: async () => ({ baseUrl: "https://api.hosted.test", accessToken: "cli-token-for-the-test", signInCommand: "x" }), fetch: hostedFetch(b, personId, seen), sleep: async () => undefined }),
@@ -1035,7 +1035,7 @@ describe("suggestions: limits (10 a person a UTC day for tools)", () => {
     for (let n = 0; n < 12; n += 1) expect(await askAs(b, "a-contrib", { advice: "Grant the agent access to production" })).toMatchObject({ ok: true, body: { status: "refused", reason: "asks_for_change" } });
     expect((await w.world.store.query({ pk: companyScoped(A, "KNOWLEDGE_PROPOSE_DAY") })).items).toEqual([]);
     const real = w.world.store.update.bind(w.world.store);
-    w.world.store.update = (async (request: Parameters<typeof real>[0]) => { if (String(request.key.pk).includes("KNOWLEDGE_PROPOSE_DAY")) throw new Error("store down"); return real(request); }) as typeof w.world.store.update;
+    w.world.store.update = (async (request: Parameters<typeof real>[0]) => { if (String(request.key.pk).includes("KNOWLEDGE_PROPOSE_DAY")) throw new Error("store down"); return real(request); });
     expect(await askAs(b, "a-contrib", GOOD)).toMatchObject({ ok: true, body: { status: "refused", reason: "unavailable", message: KNOWLEDGE_PROPOSE_MESSAGES.unavailable } });
     expect(await stored(w)).toEqual([]);
     expect(proposedAudit(w)).toEqual([]);
@@ -1205,7 +1205,7 @@ describe("the team_propose MCP tool against a hosted install", () => {
       const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
       try { return json(200, await b.api.answer({ method, path: url.pathname, body: typeof init?.body === "string" ? init.body : "{}" }, person(personId))); }
       catch (error) { if (!(error instanceof AgentXError)) throw error; return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } }); }
-    }) as typeof fetch;
+    });
   }
   const contextOf = (b: Built, personId: string, seen: string[]): ToolContext => ({
     client: httpControlPlaneClient({ session: async () => ({ baseUrl: "https://api.hosted.test", accessToken: "cli-token-for-the-test", signInCommand: "x" }), fetch: hostedFetch(b, personId, seen), sleep: async () => undefined }),
