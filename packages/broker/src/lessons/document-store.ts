@@ -32,8 +32,7 @@ import {
   AgentXError, DOCUMENT_STORE_LIMITS, DocumentStoreError, INDEX_EXPIRY_ATTRIBUTE, agentXError, change, lessonKey, lessonSetKey, lessonVersionKey, loadManifestKey, when,
   type Condition, type DocumentKey, type DocumentStore, type JsonValue, type OrgId, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
-import type { CommitResult, DeletionIntent, LessonStore, LoadManifest, PendingOutcome, ProjectFlags, ScopeKey, SetSnapshot } from "./store.js";
-import { updateFlags } from "./flags-fence.js";
+import type { CommitResult, DeletionIntent, LessonStore, LoadManifest, PendingOutcome, ProjectFlags, ScopeKey, SetSnapshot } from "./store.js"; import { updateFlags } from "./flags-fence.js";
 import { applyWriteFence, planRollback, withUsageOf, type FenceView } from "./store-rules.js";
 import { LessonSchema, normId, normSource, peopleOf, recordIdsOf, type Lesson, type LessonStatus, type VOLATILE_FIELDS } from "./types.js";
 
