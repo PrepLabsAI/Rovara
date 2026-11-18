@@ -117,15 +117,15 @@ export const coreAnswersModel = (key: string) => (value: string): string => {
 };
 
 /**
- * coreEngine.learningModel (DEC 254zzz58): empty (the first Claude model the model gateway offers the company), or ONE Anthropic model id this Rovara's catalog knows (such as claude-haiku-5-5) that
- * the hosted lessons' learning calls run on, separate from the agent model. A Claude engine name only: the learning route used runs on the company's own Anthropic account, so a Bedrock
+ * coreEngine.learningModel (DEC 254zzz58/63): the INSTALL default; empty (Claude Haiku 5.5, claude-haiku-5-5), or ONE Anthropic model id this Rovara's catalog knows (such as claude-haiku-5-5) that
+ * the hosted lessons' learning calls run on, separate from the agent model. A company may choose its own (its AI settings), which wins for it. A Claude engine name only: the learning route used runs on the company's own Anthropic account, so a Bedrock
  * `us.anthropic....` id or a model such as zai.glm-5 is refused here, before any deploy. The catalog must know it (the per-call cap is priced from it). The refusal never echoes the value.
  */
 export const coreLearningModel = (key: string) => (value: string): string => {
   const trimmed = value.trim();
   if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
   if (!isCoreLearningModelId(trimmed) || catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined) {
-    return refuse(key, `empty (none: the first Claude model the model gateway offers the company) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: lessons learn on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_LEARNING_MODEL_MAX_LENGTH} characters)`);
+    return refuse(key, `empty (none: Claude Haiku 5.5, claude-haiku-5-5) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: lessons learn on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_LEARNING_MODEL_MAX_LENGTH} characters)`);
   }
   return trimmed;
 };
@@ -210,7 +210,7 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     target: parameter("control-plane", "TestServiceImages"), defaultValue: "none", parse: oneOf("testServices.images", ["none", "mirrored"]) },
   { key: "coreEngine.answersModel", description: "the model the hosted Just answer and the start-box classifier run on through the model gateway (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses coreEngine.agentModel, as before",
     target: parameter("control-plane", CORE_ANSWERS_MODEL_PARAMETER), defaultValue: "", parse: coreAnswersModel("coreEngine.answersModel") },
-  { key: "coreEngine.learningModel", description: "the model the hosted lessons learn with (the reflector and the judges) through the model gateway, on the company's own Anthropic account (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses the first Claude model the gateway offers the company",
+  { key: "coreEngine.learningModel", description: "the model the hosted lessons learn with (the reflector and the judges) through the model gateway, on the company's own Anthropic account (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses claude-haiku-5-5; a company may choose its own in its AI settings, which wins for that company",
     target: parameter("control-plane", CORE_LEARNING_MODEL_PARAMETER), defaultValue: "", parse: coreLearningModel("coreEngine.learningModel") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
   // DEC 254zg (a): Code's company layer, one switch for every function that reads COMPANY_SIGNIN and every company-only grant; the Slack service's stack takes the same value.

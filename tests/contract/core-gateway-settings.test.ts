@@ -479,11 +479,11 @@ describe("coreEngine.answersModel (the hosted answers model)", () => {
   });
 });
 
-// DEC 254zzz58: the hosted lessons learning model, `agentx config set coreEngine.learningModel`. Empty = the first Claude model the gateway offers the company.
+// DEC 254zzz58/63: the hosted lessons learning model, `agentx config set coreEngine.learningModel`. Empty = claude-haiku-5-5 (a company may choose its own).
 describe("coreEngine.learningModel (the hosted lessons learning model)", () => {
   const LEARNING_KEY = "coreEngine.learningModel";
   const LEARNING_MODEL = "claude-haiku-5-5";
-  const LEARNING_ALLOWED = `${LEARNING_KEY} must be empty (none: the first Claude model the model gateway offers the company) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: lessons learn on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_LEARNING_MODEL_MAX_LENGTH} characters)`;
+  const LEARNING_ALLOWED = `${LEARNING_KEY} must be empty (none: Claude Haiku 5.5, claude-haiku-5-5) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: lessons learn on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_LEARNING_MODEL_MAX_LENGTH} characters)`;
   const controlPlane = (parameters: Record<string, string>) => stacks({ "agentx-staging-control-plane": { CoreEngine: "off", CoreModelGatewayHost: HOST, CoreAgentModel: GLM, CoreLearningModel: "", ...parameters } });
 
   it("is the stack parameter CoreLearningModel of the control plane, empty by default, with no model role and no live gateway check", () => {
@@ -496,7 +496,7 @@ describe("coreEngine.learningModel (the hosted lessons learning model)", () => {
     expect(OPERATOR_PARAMETERS["control-plane"]).toContain("CoreLearningModel");
   });
 
-  it.each(["", "none", " none "])("reads %j as empty (the first Claude model the gateway offers)", (value) => {
+  it.each(["", "none", " none "])("reads %j as empty (the default, claude-haiku-5-5)", (value) => {
     expect(configKey(LEARNING_KEY).parse(value)).toBe("");
   });
 
@@ -533,7 +533,7 @@ describe("coreEngine.learningModel (the hosted lessons learning model)", () => {
     expect(asked.filter((url) => url.includes(CORE_OFFERED_MODELS_ADMIN_PATH))).toEqual([]);
   });
 
-  it("clears with none (back to the gateway's first Claude model), changing only CoreLearningModel", async () => {
+  it("clears with none (back to the default), changing only CoreLearningModel", async () => {
     const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: GLM, CoreLearningModel: LEARNING_MODEL } });
     const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreLearningModel: LEARNING_MODEL }) });
     expect((await runConfigSet(run, ENV, { key: LEARNING_KEY, value: "none", yes: true })).changed).toBe(true);

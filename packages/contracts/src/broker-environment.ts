@@ -209,7 +209,7 @@ export const BROKER_SETTINGS = {
   testServiceImages: { code: "ti", variable: TEST_SERVICE_IMAGES_SETTING_VARIABLE },
   // L4-AM (DEC 254zzn(2)): the hosted answers model (the stack parameter CoreAnswersModel), the BROKER only (the dispatcher does not answer), empty = the agent model.
   coreAnswersModel: { code: "aa", variable: CORE_ANSWERS_MODEL_VARIABLE },
-  // DEC 254zzz58: the hosted lessons' learning model (the stack parameter CoreLearningModel), the BROKER only (the lessons' learning calls run there), empty = the first Claude model the gateway offers the company.
+  // DEC 254zzz58: the hosted lessons' learning model (the stack parameter CoreLearningModel), the BROKER only (the lessons' learning calls run there), empty = claude-haiku-5-5 (DEC 254zzz63).
   coreLearningModel: { code: "lm", variable: CORE_LEARNING_MODEL_VARIABLE },
   // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
   channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },

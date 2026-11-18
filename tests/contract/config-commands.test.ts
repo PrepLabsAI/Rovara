@@ -47,7 +47,7 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "coreEngine.agentModel")).toMatchObject({ value: "", where: "stack parameter CoreAgentModel on agentx-staging-control-plane" });
     // Batch 13 (#906, DEC 254zm): the hosted test service images setting, none until the starter copies are checked.
     expect(rows.find((row) => row.key === "testServices.images")).toMatchObject({ where: "stack parameter TestServiceImages on agentx-staging-control-plane" });
-    // DEC 254zzz58: the hosted lessons learning model, empty (the first Claude model the gateway offers the company) until set.
+    // DEC 254zzz58: the hosted lessons learning model, empty (claude-haiku-5-5, unless a company chooses its own) until set.
     expect(rows.find((row) => row.key === "coreEngine.learningModel")).toMatchObject({ value: "", where: "stack parameter CoreLearningModel on agentx-staging-control-plane" });
     expect(rows).toHaveLength(27);
   });

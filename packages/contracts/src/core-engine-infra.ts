@@ -99,16 +99,19 @@ export function isCoreAnswersModelId(value: string): boolean {
   return typeof value === "string" && value.length <= CORE_ANSWERS_MODEL_MAX_LENGTH && new RegExp(CORE_ANSWERS_MODEL_PATTERN, "u").test(value) && value !== "" && isCoreAgentModelId(value);
 }
 /**
- * DEC 254zzz58: the hosted lessons' LEARNING model, a stack parameter of its own (`CoreLearningModel`, the broker's ROVARA_CORE_LEARNING_MODEL, packed `lm`), separate from the task agent model.
- * Empty (the default) means the first Claude model the model gateway offers the company (read live per company, core-host/hosted-learning.ts); set, it is ONE Claude engine name and the
- * learning calls (the reflector, the curator's judge, the outcome judge) run on it and ONLY they do (every task step keeps ROVARA_CORE_AGENT_MODEL). The gateway's learning route used here is
- * Anthropic Messages on the company's own Anthropic account, so the value is a Claude engine name, never a Bedrock id and never a non-Claude model: the same rule and length as the answers model.
+ * DEC 254zzz58, 254zzz63: the hosted lessons' LEARNING model, a stack parameter of its own (`CoreLearningModel`, the broker's ROVARA_CORE_LEARNING_MODEL, packed `lm`), separate from the task
+ * agent model. It is the INSTALL default; a company may choose its own (contracts company-learning-model.ts), which wins for that company. Empty (the default) means
+ * CORE_LEARNING_MODEL_DEFAULT (Claude Haiku 5.5); set, it is ONE Claude engine name. Only the learning calls (the reflector, the curator's judge, the outcome judge) use it (every task step keeps
+ * ROVARA_CORE_AGENT_MODEL). The gateway's learning route used here is Anthropic Messages on the company's own Anthropic account, so the value is a Claude engine name, never a Bedrock id and
+ * never a non-Claude model: the same rule and length as the answers model.
  */
 export const CORE_LEARNING_MODEL_VARIABLE = "ROVARA_CORE_LEARNING_MODEL";
 export const CORE_LEARNING_MODEL_PARAMETER = "CoreLearningModel";
 export const CORE_LEARNING_MODEL_PATTERN = CORE_ANSWERS_MODEL_PATTERN;
 export const CORE_LEARNING_MODEL_MAX_LENGTH = CORE_ANSWERS_MODEL_MAX_LENGTH;
-/** Whether `value` is a well-formed learning model id: a Claude engine name (the answers model's rule). Empty is not an id (it means "the first Claude model the gateway offers the company"). */
+/** DEC 254zzz63: the learning model when neither the company nor the install chose one: Claude Haiku 5.5, by the model gateway's own name for it. */
+export const CORE_LEARNING_MODEL_DEFAULT = "claude-haiku-5-5";
+/** Whether `value` is a well-formed learning model id: a Claude engine name (the answers model's rule). Empty is not an id (it means CORE_LEARNING_MODEL_DEFAULT). */
 export function isCoreLearningModelId(value: string): boolean {
   return isCoreAnswersModelId(value);
 }

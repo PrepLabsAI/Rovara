@@ -138,6 +138,7 @@ import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
 import { hostedAnswersModel } from "../core-host/gateway-answers.js";
+import type { HostedLearningContext } from "../core-host/hosted-learning.js";
 import { hostedStartRoute } from "../core/answers/model-start-router.js";
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE, adminOfferedModelsFromEnvironment, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { companyEngineModelRoute, companyEngineModelStartCheck, type EngineModelOfferedReader } from "../core-host/company-engine-model.js";
@@ -209,7 +210,7 @@ export interface BrokerCoreRootInputs {
    * The learning model port for one company's lessons (`hostedLessonsLearning`: the gateway's learning route, on the company's own provider account and inside its learning cap). Asked only for a company
    * the lessons switch names. Absent, or undefined for a company (or a throw): learning calls refuse and nothing is spent.
    */
-  lessonsLearning?: (companyId: OrgId, context?: { log: (entry: Record<string, unknown>) => void }) => CoreLessonsOptions["learning"];
+  lessonsLearning?: (companyId: OrgId, context?: HostedLearningContext) => CoreLessonsOptions["learning"];
   /**
    * The lessons' Slack source for one company (`hostedLessonsSlack`, aws/hosted-slack-thread.ts, L4-HW8): which company a Slack workspace is (the reader never takes "every tenant is yours" on an install of many
    * companies) and the one signed `thread_messages` command to the deployment's Slack adapter. Absent: no Slack source, as before.
@@ -738,10 +739,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const upkeepCapFor = (companyId: OrgId): UpkeepCapReader | undefined => inputs.upkeepCap !== undefined ? inputs.upkeepCap(companyId) : upkeepCapReaderFromEnvironment(env, inputs.taskTokens, companyId);
   const lessonsByCompany = new Map<string, CoreLessons>();
   // L4-HW2: the company's learning port, asked for only where the lessons switch names the company (nothing is made, no token minted, for any other), and never allowed to break the runtime: a throw is "no port".
-  const learningOf = (companyId: OrgId): CoreLessonsOptions["learning"] => {
+  // DEC 254zzz63: the port reads the company's own learning model from the company's own core store (its settings row), per call.
+  const learningOf = (companyId: OrgId, settings: NonNullable<HostedLearningContext["settings"]>): CoreLessonsOptions["learning"] => {
     if (inputs.lessonsLearning === undefined || !switchCovers(lessonsSwitch.value, companyId)) return undefined;
     try {
-      const port = inputs.lessonsLearning(companyId, { log });
+      const port = inputs.lessonsLearning(companyId, { settings });
       // Said once per company build: a covered company with no port (no gateway settings, no task-token key, a SET learning model that is not Claude; DEC 254zzz58: never the agent model) learns nothing, and that is never silent.
       if (port === undefined) log({ event: "core_engine.lessons_learning_not_set_up", companyId });
       return port;
@@ -837,7 +839,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, digestPilot: lessonsDigestPilot, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
             // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
             knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
-            ...((learning) => (learning === undefined ? {} : { learning }))(learningOf(companyId)),
+            ...((learning) => (learning === undefined ? {} : { learning }))(learningOf(companyId, { get: async (key) => await registry.require("storage").get(key) })),
             // L4-SRC-TK: ticket comments as a (weak) lessons source, through the company's own Linear connection and its own account links only.
             ...(inputs.linearIntake === undefined ? {} : {
               tickets: {

@@ -140,7 +140,7 @@ describe("the hosted answers model (stack parameter CoreAnswersModel)", () => {
 
 // DEC 254zzz58: the hosted lessons' learning model, a stack parameter of its own, for the BROKER only. Additive: a new parameter (default empty) and one packed piece (`lm`), no IAM.
 describe("the hosted lessons learning model (stack parameter CoreLearningModel)", () => {
-  it("is declared empty by default (the first Claude model the gateway offers the company), with the Claude-only pattern and length", () => {
+  it("is declared empty by default (claude-haiku-5-5), with the Claude-only pattern and length", () => {
     expect(json.Parameters.CoreLearningModel).toMatchObject({ Type: "String", Default: "", AllowedPattern: CORE_LEARNING_MODEL_PATTERN, MaxLength: CORE_LEARNING_MODEL_MAX_LENGTH });
     expect(CORE_LEARNING_MODEL_MAX_LENGTH).toBe(39);
     const pattern = new RegExp(CORE_LEARNING_MODEL_PATTERN, "u");

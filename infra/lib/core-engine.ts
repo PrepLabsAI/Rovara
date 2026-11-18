@@ -15,7 +15,7 @@
 //   - (web task channel C8, option b) the attention email: CoreAttentionEmail (default off), CoreAttentionEmailHost and CoreAttentionEmailSender, and the small sender function the broker invokes,
 //     which with its role and invoke permission exists only while CoreAttentionEmail is on (attention-email.ts);
 //   - the `CoreAnswersModel` parameter (L4-AM, default empty = the agent model; broker only, packed `aa`, ROVARA_CORE_ANSWERS_MODEL, hosted answers and classifier only)
-//   - the `CoreLearningModel` parameter (DEC 254zzz58, default empty = the first Claude model the gateway offers the company; broker only, packed `lm`, ROVARA_CORE_LEARNING_MODEL, lessons learning only)
+//   - the `CoreLearningModel` parameter (DEC 254zzz58/63, default empty = claude-haiku-5-5; a company may choose its own; broker only, packed `lm`, ROVARA_CORE_LEARNING_MODEL, lessons learning only)
 //   - the `CoreModelGatewayHost` and `CoreAgentModel` parameters (default empty), packed for the broker and the dispatcher, which read them as ROVARA_CORE_MODEL_GATEWAY_URL
 //     (`https://<host>`) and ROVARA_CORE_AGENT_MODEL.
 //
@@ -149,9 +149,9 @@ export class CoreEngine extends Construct {
     this.answersModel = new CfnParameter(stack, "CoreAnswersModel", { type: "String", default: "", maxLength: CORE_ANSWERS_MODEL_MAX_LENGTH, allowedPattern: CORE_ANSWERS_MODEL_PATTERN, description: "Core engine hosted answers model, a Claude model id such as claude-haiku-4-5 used for the Just answer and the start-box classifier only; empty (the default) uses the agent model" });
     addBrokerSetting(broker, props.naming, "coreAnswersModel", this.answersModel.valueAsString);
     // DEC 254zzz58: the hosted lessons' learning model, for the BROKER only (the lessons' learning calls run there), separate from the agent model. A stack parameter (OPERATOR_PARAMETERS keeps it
-    // across upgrades), packed (`lm`). Empty (the default): the first Claude model the model gateway offers the company. A Claude engine name only (the learning route used is the company's own
-    // Anthropic account). No IAM, no secret: the broker already reads the offered models and mints learning tokens with its task key.
-    this.learningModel = new CfnParameter(stack, "CoreLearningModel", { type: "String", default: "", maxLength: CORE_LEARNING_MODEL_MAX_LENGTH, allowedPattern: CORE_LEARNING_MODEL_PATTERN, description: "Core engine hosted lessons learning model, a Claude model id such as claude-haiku-4-5 used for lessons learning only; empty (the default) uses the first Claude model the model gateway offers the company" });
+    // across upgrades), packed (`lm`). Empty (the default): claude-haiku-5-5 (DEC 254zzz63); a company may choose its own learning model. A Claude engine name only (the learning route used is the company's own
+    // Anthropic account). No IAM, no secret: the broker already mints learning tokens with its task key.
+    this.learningModel = new CfnParameter(stack, "CoreLearningModel", { type: "String", default: "", maxLength: CORE_LEARNING_MODEL_MAX_LENGTH, allowedPattern: CORE_LEARNING_MODEL_PATTERN, description: "Core engine hosted lessons learning model, a Claude model id such as claude-haiku-4-5 used for lessons learning only; empty (the default) uses claude-haiku-5-5, unless a company chose its own" });
     addBrokerSetting(broker, props.naming, "coreLearningModel", this.learningModel.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
