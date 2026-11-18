@@ -17,6 +17,7 @@ import { VersionedBucket } from "../support/versioned-bucket.js";
 import { prefsKey } from "../../packages/broker/src/core/notify/prefs.js";
 import { notifySentKey } from "../../packages/broker/src/core/notify/attention.js";
 import { inboxKey, inboxPartition, inboxRow } from "../../packages/broker/src/core/notify/inbox-rows.js";
+import { involvedPartition, involvedRowPut } from "../../packages/broker/src/core/task-flow/involved.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -165,6 +166,36 @@ describe("person erase: what it removes", () => {
     expect((await w.store.query({ pk: inboxPartition(A, MALLORY) })).items).toEqual([]);
     expect(await w.store.get(inboxKey(B, MALLORY, session, "needs_you"))).toBeDefined();
     expect(await w.store.get(inboxKey(A, "someone-else", session, "needs_you"))).toBeDefined();
+  });
+
+  it("removes the person's involved-task pointers across every task in this company, and nobody else's, nor their pointers in another company", async () => {
+    const w = world();
+    const task = (n: number) => `bbbbbbbb-bbbb-4bbb-8bbb-${String(n).padStart(12, "0")}`;
+    const at = (n: number) => `2026-11-0${n}T10:00:00.000Z`;
+    const put = async (company: string, person: string, n: number) => w.store.put({ item: involvedRowPut({ companyId: company, personId: person, taskId: task(n), createdAt: at(n) }, "2026-11-09T10:00:00.000Z").item });
+    for (const n of [1, 2, 3]) await put(A, MALLORY, n);
+    await put(B, MALLORY, 4);
+    await put(A, "someone-else", 5);
+    await put(B, "someone-else", 6);
+    await erase(w);
+    expect((await w.store.query({ pk: involvedPartition(A, MALLORY) })).items).toEqual([]);
+    expect((await w.store.query({ pk: involvedPartition(B, MALLORY) })).items).toHaveLength(1);
+    expect((await w.store.query({ pk: involvedPartition(A, "someone-else") })).items).toHaveLength(1);
+    expect((await w.store.query({ pk: involvedPartition(B, "someone-else") })).items).toHaveLength(1);
+  });
+
+  it("removes more involved pointers than one page holds", async () => {
+    const w = world();
+    for (let n = 0; n < 130; n += 1) {
+      await w.store.put({ item: involvedRowPut({ companyId: A, personId: MALLORY, taskId: `cccccccc-cccc-4ccc-8ccc-${String(n).padStart(12, "0")}`, createdAt: `2026-11-01T10:00:00.${String(n).padStart(3, "0")}Z` }, "2026-11-09T10:00:00.000Z").item });
+    }
+    await erase(w);
+    expect((await w.store.query({ pk: involvedPartition(A, MALLORY) })).items).toEqual([]);
+  });
+
+  it("erases a person whose id can never name an involved partition without error (nothing to read)", async () => {
+    const w = world();
+    await expect(erasePerson(w.deps, { companyId: A, personId: "_odd", by: ADMIN, requestId: REQ })).resolves.toMatchObject({ personId: "_odd" });
   });
 
   it("removes the person's chat links in this company, but not an actor row a re-link gave someone else, nor their links in another company", async () => {

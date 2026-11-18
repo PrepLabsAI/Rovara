@@ -13,6 +13,8 @@ export interface ProjectAuthorityRevision {
   sk?: string;
   revision: number;
   definition: { developerTasks?: unknown };
+  /** The company the revision row names (`companyId`), when the reader projects it; absent on an unstamped (implicit company) row. Only the web proof's company check reads it. */
+  companyId?: unknown;
 }
 
 export interface ProjectDeveloperMembership { pk?: string; sk?: string; projectName: string; role?: string }

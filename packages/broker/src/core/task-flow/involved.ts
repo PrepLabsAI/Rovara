@@ -73,6 +73,29 @@ export async function deleteInvolvedRow(deps: { store: Pick<DocumentStore, "dele
   await deps.store.delete({ key: involvedRowKey(input) });
 }
 
+/**
+ * A person erase: every involved row of this person in this company (the partition is theirs alone: ids and timestamps only, but still leftover personal data). Answers how many rows went.
+ * Company-scoped: only `<company>#INVOLVED#<person>` is read, so the same person's rows in another company stay. A company or person id that can never name a partition has no rows, so nothing is read.
+ * Each row is deleted by a key rebuilt from the caller's company and person plus the row's own sort-key parts (never forwarded); a damaged row whose sort key does not parse is skipped, not guessed.
+ */
+export async function eraseInvolvedRows(store: Pick<DocumentStore, "query" | "delete">, companyId: string, personId: string): Promise<number> {
+  try { involvedPartition(companyId, personId); } catch { return 0; }
+  const pk = involvedPartition(companyId, personId);
+  let removed = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await store.query({ pk, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+    for (const item of page.items) {
+      const match = typeof item.sk === "string" ? ROW_SK.exec(item.sk) : null;
+      if (match === null) continue;
+      await store.delete({ key: involvedRowKey({ companyId, personId, taskId: match[2]!, createdAt: match[1]! }) });
+      removed += 1;
+    }
+    cursor = page.cursor;
+  } while (cursor !== undefined);
+  return removed;
+}
+
 // ---- the read
 
 export const INVOLVED_LIST_DEFAULT = 20;
