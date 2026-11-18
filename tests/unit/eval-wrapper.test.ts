@@ -510,6 +510,14 @@ describe("two companies", () => {
     const [row] = await listEvalWrappers(w.deps(A), PROJECT);
     await w.store.put({ item: { pk: `ORG#${B}#SETUP_DRAFT#${PROJECT}`, sk: `EVAL_WRAPPER#${row!.id}`, ...row, company: A } as never });
     expect(await listEvalWrappers(w.deps(B), PROJECT)).toEqual([]);
+    // The same for what was found on the default branch and for "Not now": another company's row copied under this company's key is not read.
+    const [file] = await listEvalWrapperFiles(w.deps(A), PROJECT);
+    await w.store.put({ item: { pk: setupPartition(B, PROJECT), sk: `EVAL_WRAPPER_FILE#${file!.id}`, ...file, company: A } as never });
+    expect(await listEvalWrapperFiles(w.deps(B), PROJECT)).toEqual([]);
+    await w.store.put({ item: { pk: setupPartition(B, PROJECT), sk: "EVAL_WRAPPER_DISMISSED", entityType: "EVAL_WRAPPER_DISMISSED", schemaVersion: 1, company: A, project: PROJECT, reportDigest: "d".repeat(64), by: "x", at: "2026-11-18T08:00:00.000Z" } as never });
+    expect(await readEvalWrapperDismissed(w.deps(B), PROJECT)).toBeUndefined();
+    await w.store.put({ item: { pk: setupPartition(A, "other-project"), sk: "EVAL_WRAPPER_DISMISSED", entityType: "EVAL_WRAPPER_DISMISSED", schemaVersion: 1, company: A, project: PROJECT, reportDigest: "d".repeat(64), by: "x", at: "2026-11-18T08:00:00.000Z" } as never });
+    expect(await readEvalWrapperDismissed(w.deps(A), "other-project")).toBeUndefined();
     const forB = world();
     await openEvalWrapperPullRequest(forB.deps(B), PROJECT, { report: reportOf(suiteOf(ROWS)), selection: "evals/agent", taskId: "t", by: "x" });
     expect((await listEvalWrappers(forB.deps(B), PROJECT))).toHaveLength(1);
