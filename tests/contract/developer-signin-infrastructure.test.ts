@@ -18,6 +18,7 @@ import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
 import { withoutCompanyImportReads, withoutSignInCompanyGrants } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
+import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import type { DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
@@ -675,6 +676,8 @@ describe("task-token key and membership IAM", () => {
     withoutDispatcherHookSigner(remainder);
     // L4-HW8b (DEC 254zzz42 (a)): the broker's Slack poster variables and the Slack adapter secret's policy are exactly what broker-slack-poster-infrastructure.test.ts asserts; taken out so the digest still pins everything else.
     withoutBrokerSlackPoster(remainder, "staging");
+    // L4-NETG (DEC 254zzz77, rule D): the WorkerSandboxEgress parameter and the session steps' one variable, asserted and taken out so the pin stays the one recorded before.
+    withoutWorkerSandboxEgress(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),

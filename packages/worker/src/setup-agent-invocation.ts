@@ -10,7 +10,7 @@ import { runSetupAgent, type SetupRunResult } from "./setup-agent-run.js";
 import { createSetupSandbox } from "./setup-agent.js";
 import { assertSetupIsolation } from "./setup-isolation.js";
 import { setupWorkspaceKey, startRunNetwork } from "./setup-network.js";
-import { TASK_SANDBOX_IMAGE_ENVIRONMENT, sandboxNetworkFromEnvironment, type TaskShellSelection } from "./task-sandbox.js";
+import { TASK_SANDBOX_IMAGE_ENVIRONMENT, gatewayEgressFor, sandboxNetworkFromEnvironment, type TaskShellSelection } from "./task-sandbox.js";
 import type { RunNetwork } from "./setup-network.js";
 import { setupModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
@@ -37,7 +37,17 @@ export function cancelledWithReport(controller: WorkerCancellationController | u
   return controller?.isCancelled(operationId) === true ? new WorkerOperationCancelledError(operationId, result) : undefined;
 }
 
-/** The run's network on a laptop: the machine's own sandbox network, which the run neither makes nor removes. It reports no blocked website (nothing watches DNS there). */
+/**
+ * The shared sandbox network a setup run joins, or undefined when it gets a run network of its own (an EC2 worker without the gateway). A gateway-mode worker (L4-NETG) always returns its internal network, or refuses
+ * (RUNTIME_UNAVAILABLE) when the network or name server is missing: a setup run never falls back to a bridge with a way out. A laptop returns the network `rovara up` named.
+ */
+export function setupSharedNetwork(environment: NodeJS.ProcessEnv): string | undefined {
+  const gateway = gatewayEgressFor(environment);
+  if (gateway !== undefined) return gateway.network;
+  return environment["AGENTX_RUNTIME"] === "ec2" ? undefined : sandboxNetworkFromEnvironment(environment);
+}
+
+/** The run's network on a laptop (or a gateway-mode worker): the machine's own sandbox network, which the run neither makes nor removes. It reports no blocked website (nothing watches DNS there). */
 export function sharedRunNetwork(name: string): RunNetwork {
   return { name, subnet: "", gateway: "", helperName: "", helperIp: "", sandboxIp: "", readBlocked: async () => [], stop: async () => undefined };
 }
@@ -68,7 +78,9 @@ export async function runSetupAgentInvocation(
   const callback = dependencies.setupAgent;
   // On a laptop (`rovara up`) the worker is walled in by its own sandbox network and name server: the run joins that network, and the Docker socket guard does not let a worker make a network of its own or
   // start a helper container. So there is no DNS watch there: no website is reported blocked, and a command that needs one fails like any other (the owner adds the site to the install's list).
-  const sharedNetwork = environment["AGENTX_RUNTIME"] === "ec2" ? undefined : sandboxNetworkFromEnvironment(environment);
+  // L4-NETG: on an EC2 worker whose sandboxes go through the egress gateway (AGENTX_SANDBOX_EGRESS=gateway) the setup run joins the same internal network as every sandbox. Its own run network (setup-network.ts) is a bridge with a way
+  // out, which is exactly what the gateway mode closes; so, as on a laptop, there is no DNS watch there (the gateway logs what it refused) and a command that needs a blocked site fails like any other.
+  const sharedNetwork = setupSharedNetwork(environment);
   const events = new EventBatcher(dependencies.eventSink);
   const conversationId = invocation.payload.conversationId;
   const result = await runSetupAgent({

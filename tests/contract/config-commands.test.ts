@@ -47,7 +47,8 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "coreEngine.agentModel")).toMatchObject({ value: "", where: "stack parameter CoreAgentModel on agentx-staging-control-plane" });
     // Batch 13 (#906, DEC 254zm): the hosted test service images setting, none until the starter copies are checked.
     expect(rows.find((row) => row.key === "testServices.images")).toMatchObject({ where: "stack parameter TestServiceImages on agentx-staging-control-plane" });
-    expect(rows).toHaveLength(26);
+    // L4-NETG (DEC 254zzz77): workerSandboxEgress.
+    expect(rows).toHaveLength(27);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

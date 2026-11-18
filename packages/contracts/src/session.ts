@@ -462,6 +462,11 @@ export const Ec2WorkerBootConfigSchema = z
      */
     testServices: z.literal(true).optional(),
     /**
+     * AGENTX_SANDBOX_EGRESS=gateway (lane L4-NETG, DEC 254zzz77): the worker host walls its task sandboxes and devcontainers behind the egress gateway (packages/worker/ec2/sandbox-egress.sh), and the boot FAILS if it cannot.
+     * Absent for `bridge` (the default): nothing is added and the boot script is byte-identical to before.
+     */
+    sandboxEgress: z.literal("gateway").optional(),
+    /**
      * AGENTX_BOOT_STAGE2_SHA256: the SHA-256 of the stage 2 boot script (`boot-stage2.sh`) that the worker image carries at /opt/agentx/boot/stage2.sh.
      * boot.sh reads it out of the image it pulled by digest and runs it only if its hash is this. Required for a named environment, whose boot is
      * two stages; absent for the legacy deployment, whose single-file boot has no stage 2.
@@ -507,6 +512,7 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.modelProxyUrl) variables.push(["AGENTX_MODEL_PROXY_URL", parsed.modelProxyUrl]);
   if (parsed.environmentKind) variables.push(["AGENTX_ENVIRONMENT_KIND", parsed.environmentKind]);
   if (parsed.testServices) variables.push(["AGENTX_TEST_SERVICES", "1"]);
+  if (parsed.sandboxEgress) variables.push(["AGENTX_SANDBOX_EGRESS", parsed.sandboxEgress]);
   if (parsed.bootStage2Sha256) variables.push([AGENTX_BOOT_STAGE2_SHA256, parsed.bootStage2Sha256]);
   if (parsed.executorImage) variables.push(["EXECUTOR_IMAGE", parsed.executorImage]);
   if (parsed.modelFallback) variables.push(["AGENTX_MODEL_FALLBACK", parsed.modelFallback]);

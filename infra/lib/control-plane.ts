@@ -32,7 +32,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
@@ -1245,6 +1245,14 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) {
       sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
       sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
+      // L4-NETG (DEC 254zzz77): how a worker host's sandboxes and devcontainers reach the internet. `bridge` (the default) is today's behaviour; `gateway` walls them behind the host's egress gateway and a launch carries
+      // AGENTX_SANDBOX_EGRESS=gateway (the boot fails closed if the gateway cannot start). Only the session steps build the boot configuration, so only they read it: a plain variable, no packed setting, no IAM. A stack parameter,
+      // so an upgrade keeps it (OPERATOR_PARAMETERS); `agentx config set workerSandboxEgress gateway|bridge`.
+      const workerSandboxEgress = new CfnParameter(this, "WorkerSandboxEgress", {
+        type: "String", default: WORKER_SANDBOX_EGRESS_DEFAULT, allowedValues: [...WORKER_SANDBOX_EGRESS_VALUES],
+        description: "How a worker host's task sandboxes and devcontainers reach the internet: bridge (the default, today's behaviour) or gateway (an internal network whose only exit is the host's egress gateway; the worker boot fails if the gateway cannot start)",
+      });
+      sessions.steps.addEnvironment(WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, workerSandboxEgress.valueAsString);
     }
     // L4-EGR: Rovara's fixed outbound addresses (the foundation's NatEgressAddresses output, which the release and `agentx deploy` pass when the foundation has it), shown to a company's owners
     // and admins (aws/company-egress-routes.ts). Empty until then. A plain variable, not a packed setting: a packed value cannot hold the commas, and the broker has the room.

@@ -6,6 +6,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./dns-helper": "./dist/dns-helper.js",
+    "./egress-gateway-source": "./dist/egress-gateway-source.js",
     "./model-helper": "./dist/model-helper-entry.js",
     "./general-fakes-helper": "./dist/general-fakes-helper-entry.js"
   },

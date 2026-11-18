@@ -29,7 +29,7 @@ import {
 import { inertContextText } from "./context-text.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
-import { sandboxNetworkFromEnvironment } from "./task-sandbox.js";
+import { gatewayEgressFor, sandboxNetworkFromEnvironment } from "./task-sandbox.js";
 import type { CommandResult } from "./readiness.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
@@ -879,16 +879,32 @@ function devcontainerExec(cli: DevcontainerCli, target: DevcontainerTarget): Con
 }
 
 /** The `devcontainer` CLI bundled with the worker, run with this Node. */
-export function createDevcontainerCli(options: { dockerPath?: string } = {}): DevcontainerCli {
+/**
+ * L4-NETG (DEC 254zzz77): the docker program a gateway-mode worker hands the devcontainer CLI (`--docker-path`). It puts `--network <the internal network> --dns <the gateway> --cap-drop NET_RAW` on every `docker run` and
+ * `docker create` the CLI makes and passes everything else through (packages/worker/ec2/devcontainer-docker.sh, which ships in the worker image beside boot.sh's stages).
+ */
+export const DEVCONTAINER_GATEWAY_DOCKER = "/opt/agentx/packages/worker/ec2/devcontainer-docker.sh";
+
+/** The network a gateway-mode devcontainer must be on: it exists, is a bridge and is internal (no route out). Refuses (RUNTIME_UNAVAILABLE) and never starts a container on anything else. */
+export async function ensureGatewayNetwork(name: string, run: (args: readonly string[]) => Promise<string> = async (args) => (await execFile("docker", [...args], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS })).stdout): Promise<void> {
+  const answer = await run(["network", "inspect", "--format", "{{.Driver}}|{{.Internal}}", name]).then((text) => text.trim(), () => "");
+  if (answer !== "bridge|true") throw agentXError("RUNTIME_UNAVAILABLE", "this worker's dev containers must go through the egress gateway, but its internal network is missing or not internal, so AgentX did not start the dev container");
+}
+
+export function createDevcontainerCli(options: { dockerPath?: string; environment?: NodeJS.ProcessEnv } = {}): DevcontainerCli {
   const require = createRequire(import.meta.url);
   const script = resolve(dirname(require.resolve("@devcontainers/cli/package.json")), "devcontainer.js");
-  const docker = options.dockerPath ?? "docker";
+  // A gateway-mode worker: every container the CLI starts joins the internal network through the wrapper, whatever else a caller asked for. Half-configured (the network or the name server is missing): refuses here.
+  const gateway = gatewayEgressFor(options.environment ?? process.env);
+  const dockerPath = gateway === undefined ? options.dockerPath : DEVCONTAINER_GATEWAY_DOCKER;
+  const docker = dockerPath ?? "docker";
   const run: DevcontainerCli["run"] = (args, runOptions) => runCollected(process.execPath, [
     script,
-    ...(options.dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", options.dockerPath, ...args.slice(1)]),
+    ...(dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", dockerPath, ...args.slice(1)]),
   ], runOptions);
   return {
     run,
+    ...(gateway === undefined ? {} : { walledNetwork: { name: gateway.network, ensure: () => ensureGatewayNetwork(gateway.network) } }),
     // The same `docker` the devcontainer CLI runs.
     checks: {
       async fullConfiguration(target) {

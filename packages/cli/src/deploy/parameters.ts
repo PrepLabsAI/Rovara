@@ -87,6 +87,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "TestServices",
     // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
     "TestServiceImages",
+    // L4-NETG (DEC 254zzz77): how the worker hosts' sandboxes reach the internet (bridge | gateway), set with `agentx config set workerSandboxEgress`, kept across upgrades.
+    "WorkerSandboxEgress",
     // Web task channel C8 (option b): the attention email switch, the web app's host and the attention email's own SES identity, as the operator set them.
     "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
     // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.
