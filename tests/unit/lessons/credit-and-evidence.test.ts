@@ -7,7 +7,7 @@ import { readTaskUseReports } from "../../../packages/broker/src/lessons/use-rep
 import { betaStrength } from "../../../packages/broker/src/lessons/strength.js";
 import { recordFeedback, recordTaskOutcome, settleHelpful, REVERT_WINDOW_MS, type TaskOutcome } from "../../../packages/broker/src/lessons/counters.js";
 import { lessonAreaOverlap, lessonCreditShares, lessonIdOfUnit } from "../../../packages/broker/src/lessons/credit.js";
-import { readEvidenceTotals } from "../../../packages/broker/src/lessons/evidence.js";
+import { evidencePk, readEvidenceTotals } from "../../../packages/broker/src/lessons/evidence.js";
 import { Judge, KEY, PROJECT, WS, allowAllAccess, lessonRecord } from "./lesson-helpers.js";
 import { A, B, DAY, manifest, world } from "./phase12-helpers.js";
 
@@ -213,6 +213,9 @@ describe("evidence is written once, whenever it is delivered", () => {
     expect(await w.evidence.note({ workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", kind: "against", weight: 1, at: w.clock.now(), id: "ignored:task-1" })).toBe(true);
     for (let i = 0; i < 5; i += 1) { w.clock.advance(DAY); await w.evidence.note({ workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", kind: "against", weight: 1, at: w.clock.now(), id: "ignored:task-1" }); }
     expect((await totalsOf(w)).evidence.get("les_aaaa1111")).toEqual({ forW: 0, againstW: 1 });
+    // The first delivery decides its time (a later delivery does not move the piece forward in the window).
+    const rows = (await w.documents.query({ pk: evidencePk(WS, PROJECT) })).items;
+    expect(rows.map((r) => r["at"])).toEqual([1_800_000_000_000]);
     // A different id is a different piece.
     await w.evidence.note({ workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", kind: "against", weight: 1, at: w.clock.now(), id: "ignored:task-2" });
     expect((await totalsOf(w)).evidence.get("les_aaaa1111")).toEqual({ forW: 0, againstW: 2 });
