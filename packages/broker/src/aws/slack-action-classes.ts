@@ -20,6 +20,8 @@ export const SLACK_ACTION_CLASSES: Readonly<Record<string, SlackActionClass>> = 
   agentx_confirm_approve: "member", agentx_confirm_cancel: "member", "slack.confirmation": "member", agentx_workflow_stop: "member",
   // HW5b: the plan card's Approve and Request changes (and the box Request changes opens), for a low or medium risk plan. A member's press is a request; the core decides (slack-core-plan-press.ts). Reject and Skip are NOT here.
   rovara_decide_APPROVE: "member", rovara_decide_REQUEST_CHANGES: "member", rovara_changes: "member",
+  // The plan card's "Open the task" is a link button: Slack still reports its press, and there is nothing to do (it carries no value, so no handler takes it). Not a decision: a member's press of it is simply let through, with no notice.
+  rovara_open_task: "member",
 });
 export function slackActionClass(action: unknown): SlackActionClass | undefined {
   return typeof action === "string" && Object.hasOwn(SLACK_ACTION_CLASSES, action) ? SLACK_ACTION_CLASSES[action] : undefined;
