@@ -10,13 +10,11 @@ export const CompanyMember = Membership.extend({
   updatedAt: z.iso.datetime().optional(),
   updatedBy: z.union([z.literal("operator"), MemberPersonId]).optional(),
 });
-export const MEMBER_STEP_UP = "this role change needs a fresh sign-in check; sign in again and retry";
 export const MEMBER_LAST_OWNER = "a company must keep at least one active owner";
 export const MEMBER_ONLY_OWNER = "only an owner can change or remove an owner";
 export const MEMBER_REVOKED = "restore this member before changing their role";
 export const MemberFailure = z.union([
   z.object({ ok: z.literal(false), error: z.enum(["invalid_request", "unavailable", "not_found"]) }).strict(),
-  z.object({ ok: z.literal(false), error: z.literal("step_up_required"), message: z.literal(MEMBER_STEP_UP) }).strict(),
   z.object({ ok: z.literal(false), error: z.literal("unavailable"), message: z.enum([MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_ONLY_OWNER]) }).strict(),
 ]);
 export class CompanyMemberRefusal extends Error {

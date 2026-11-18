@@ -9,7 +9,7 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import type { HostedSetupRunWiring, SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createHostedSetupApproval, setupDecisionRequestId } from "../../packages/broker/src/core-host/setup-approval.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { createSetupRegistryMirror } from "../../packages/broker/src/aws/setup-registry-mirror.js";
 import { projectKey } from "../../packages/broker/src/aws/project-records.js";
@@ -17,7 +17,7 @@ import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "./core-host-fakes
 
 export { FAKE_COMPANY };
 export const OTHER = "org_corehost00000000000b" as OrgId;
-export const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+export const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 export const command = (executable: string, args: string[] = []) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });

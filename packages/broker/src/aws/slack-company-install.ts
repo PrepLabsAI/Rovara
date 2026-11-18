@@ -3,7 +3,7 @@
 //
 //   POST /v1/dev/company/slack/install           { redirectUri }            owner/admin: a single-use state and Slack's OAuth v2 address (bot scopes only)
 //   POST /v1/dev/company/slack/install/complete  { state, code } | { state, error }  owner/admin: spend the state, exchange the code, bind, store the token
-//   POST /v1/dev/company/slack/disconnect        {}                         OWNER + fresh step-up: revoke, drop the token, unbind, unlink channels
+//   POST /v1/dev/company/slack/disconnect        {}                         OWNER: revoke, drop the token, unbind, unlink channels
 //   GET  /v1/dev/company/slack                                              any member: the company's workspace (no token)
 //   event agentx.slack-workspace-removed (from the Slack ingress after Slack's signature check): app_uninstalled / tokens_revoked mark it disconnected
 //
@@ -25,8 +25,6 @@ import { agentXError, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CH
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
-import type { CallerStepUp } from "./step-up-check.js";
-import { requireFreshStepUp } from "./step-up-check.js";
 import { companyWorkspaceKey, companyWorkspaceView, markerKey, parseBinding, slackWorkspaceTeam, teamKey, type BindingRow } from "./slack-workspace-binding.js";
 import type { SlackExchange, SlackInstallGrant } from "./slack-install-identity.js";
 import type { SlackWorkspaceRemovedEvent } from "./slack-workspace-removal.js";
@@ -39,7 +37,6 @@ const DISCONNECT = `${SLACK_INSTALL_PATH}/disconnect`;
 export const START_AGAIN = "Start again from Rovara.";
 export const SLACK_ADMIN_ONLY = "Only a company owner or admin can add Rovara to Slack.";
 export const SLACK_OWNER_ONLY = "Only a company owner can disconnect Slack.";
-export const SLACK_DISCONNECT_STEP_UP = "Disconnecting Slack needs a fresh sign-in check; sign in again and retry.";
 export const SLACK_NOT_SET_UP = "Adding Rovara to Slack isn't set up on this Rovara yet. Ask the Rovara team.";
 export const SLACK_UNAVAILABLE = "Slack could not be connected just now. Start again from Rovara.";
 export const SLACK_READ_UNAVAILABLE = "The company's Slack connection could not be read just now; try again.";
@@ -335,9 +332,8 @@ async function channelLinks(ctx: SlackInstallContext, teamId: string): Promise<A
   return links;
 }
 
-async function disconnect(ctx: SlackInstallContext, member: z.infer<typeof Membership>, caller: DeveloperCaller, stepUp: CallerStepUp | undefined, request: AdaptedHttpRequest): Promise<unknown> {
+async function disconnect(ctx: SlackInstallContext, member: z.infer<typeof Membership>, caller: DeveloperCaller, request: AdaptedHttpRequest): Promise<unknown> {
   if (member.role !== "owner") throw agentXError("FORBIDDEN", SLACK_OWNER_ONLY);
-  requireFreshStepUp(stepUp, ctx.now(), SLACK_DISCONNECT_STEP_UP);
   if (!DisconnectBody.safeParse(body(request)).success) throw agentXError("CONFIG_INVALID", "disconnecting Slack takes no body");
   const companyId = member.companyId;
   const send: Send = (command) => ctx.documentClient.send(command);
@@ -412,9 +408,9 @@ async function readConnection(ctx: SlackInstallContext, companyId: string): Prom
 
 /**
  * The routes. The caller is authenticated and its route row (`full`) applied; `companyId` is its live membership's company (resolveCompany). The membership row is read again
- * here, so a role or company that changed since is what counts. `stepUp` is the verified token's step-up (disconnect only).
+ * here, so a role or company that changed since is what counts.
  */
-export async function routeSlackInstall(ctx: SlackInstallContext, caller: DeveloperCaller, stepUp: CallerStepUp | undefined, companyId: string, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+export async function routeSlackInstall(ctx: SlackInstallContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const member = await liveMembership(ctx, caller, companyId);
   if (url.pathname === SLACK_INSTALL_PATH) {
     if (request.method !== "GET") throw agentXError("NOT_FOUND", "not found");
@@ -441,7 +437,7 @@ export async function routeSlackInstall(ctx: SlackInstallContext, caller: Develo
     if (!isAdmin(member)) throw startAgain();
     return complete(ctx, member, caller, request);
   }
-  if (url.pathname === DISCONNECT) return disconnect(ctx, member, caller, stepUp, request);
+  if (url.pathname === DISCONNECT) return disconnect(ctx, member, caller, request);
   throw agentXError("NOT_FOUND", "not found");
 }
 

@@ -7,7 +7,7 @@ import {
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import {
-  STEP_UP_APPROVAL_METHOD, STEP_UP_CLAIM_MS, STEP_UP_PROOF_LIFETIME_MS, createHostedApprovers, issueStepUpApproval, stepUpApprovalKeyOf, stepUpClaimKey, type StepUpApprovalInput,
+  APPROVAL_PROOF_METHOD, APPROVAL_PROOF_CLAIM_MS, APPROVAL_PROOF_LIFETIME_MS, createHostedApprovers, issueApprovalProof, approvalProofKeyOf, approvalProofClaimKey, type ApprovalProofInput,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity, hostedSecurityModules } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
@@ -25,7 +25,7 @@ const TASK_B = "1f0e9d8c-7b6a-4594-8382-716f5e4d3c2b";
 const DIGEST = "a".repeat(64);
 const NOW = Date.parse("2026-11-15T10:00:00.000Z");
 const SIGNING_KEY = "callback-signing-key-for-tests-0123456789abcdef";
-const KEY = stepUpApprovalKeyOf(SIGNING_KEY);
+const KEY = approvalProofKeyOf(SIGNING_KEY);
 const STEP_UP = { at: new Date(NOW - 60_000).toISOString(), method: "passkey" };
 
 /** Ada owns TASK_A in company A; Bea is another member of A; Cy owns TASK_B in company B. */
@@ -47,14 +47,14 @@ const requestFor = (overrides: Partial<ApprovalRequest> = {}): ApprovalRequest =
   companyId: A, requestId: "decision-request-0001", kind: "plan", subject: { type: "task", id: TASK_A }, projectName: "demo", revision: 3, artifactDigest: DIGEST,
   risk: "high", outcome: "approve", card: cardOf(TASK_A), settlesClaims: true, ...overrides,
 });
-const input = (overrides: Partial<StepUpApprovalInput> = {}): StepUpApprovalInput => ({
+const input = (overrides: Partial<ApprovalProofInput> = {}): ApprovalProofInput => ({
   companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "decision-request-0001", kind: "plan", taskId: TASK_A, revision: 3, artifactDigest: DIGEST, outcome: "approve", card: cardOf(TASK_A), ...overrides,
 });
 let proofs = 0;
 const proofFor = (request: ApprovalRequest, token: string): ApprovalProof => ({
-  proofId: `proof-${++proofs}`, method: STEP_UP_APPROVAL_METHOD, requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token,
+  proofId: `proof-${++proofs}`, method: APPROVAL_PROOF_METHOD, requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token,
 });
-const issued = (overrides: Partial<StepUpApprovalInput> = {}, at = NOW): string => issueStepUpApproval(KEY, input(overrides), at).token;
+const issued = (overrides: Partial<ApprovalProofInput> = {}, at = NOW): string => issueApprovalProof(KEY, input(overrides), at).token;
 
 function world(options: { now?: () => number; key?: Buffer | undefined; identity?: IdentityProvider } = {}) {
   const store = seededStore();
@@ -75,7 +75,7 @@ runApproversConformance("deployed approvers (task owner, fresh step-up, card-bou
     proof: proofFor(requestFor(), STANDING),
     withClock: async () => {
       let now = NOW;
-      return { approvers: world({ now: () => now }).approvers, lapse: () => { now += STEP_UP_CLAIM_MS + 1_000; } };
+      return { approvers: world({ now: () => now }).approvers, lapse: () => { now += APPROVAL_PROOF_CLAIM_MS + 1_000; } };
     },
   },
   cardBound: { request: requestFor(), proof: proofFor(requestFor(), STANDING) },
@@ -84,8 +84,8 @@ runApproversConformance("deployed approvers (task owner, fresh step-up, card-bou
 describe("the deployed approvers point", () => {
   it("offers one method for every answer, a step-up within the default ten minutes, and the task owner may approve their own task", async () => {
     expect(await world().approvers.requirement(requestFor())).toEqual({
-      methods: [STEP_UP_APPROVAL_METHOD], minApprovers: 1, selfApprovalAllowed: true,
-      strongMethods: [STEP_UP_APPROVAL_METHOD], rejectMethods: [STEP_UP_APPROVAL_METHOD], changesMethods: [STEP_UP_APPROVAL_METHOD],
+      methods: [APPROVAL_PROOF_METHOD], minApprovers: 1, selfApprovalAllowed: true,
+      strongMethods: [APPROVAL_PROOF_METHOD], rejectMethods: [APPROVAL_PROOF_METHOD], changesMethods: [APPROVAL_PROOF_METHOD],
       signIn: { mode: "window", seconds: 600 },
     });
   });
@@ -94,12 +94,12 @@ describe("the deployed approvers point", () => {
     const { approvers, store } = world();
     const request = requestFor();
     const verdict = await approvers.verify(request, proofFor(request, issued()));
-    expect(verdict).toMatchObject({ approved: true, method: STEP_UP_APPROVAL_METHOD, approver: { companyId: A, personId: "ada", provider: HOSTED_IDENTITY_PROVIDER, roles: ["member"], authTime: STEP_UP.at, methods: ["passkey"] } });
+    expect(verdict).toMatchObject({ approved: true, method: APPROVAL_PROOF_METHOD, approver: { companyId: A, personId: "ada", provider: HOSTED_IDENTITY_PROVIDER, roles: ["member"], authTime: STEP_UP.at, methods: ["passkey"] } });
     const claimId = verdict.approved ? verdict.claimId! : "";
     const [company, hash] = claimId.split(".");
     expect(company).toBe(A);
-    expect(await store.get(stepUpClaimKey(A, hash!))).toMatchObject({ entityType: "APPROVAL_STEP_UP_CLAIM", companyId: A, state: "claimed" });
-    expect((await store.get(stepUpClaimKey(A, hash!)))?.pk).toBe(`ORG#${A}#APPROVAL_STEP_UP_CLAIM`);
+    expect(await store.get(approvalProofClaimKey(A, hash!))).toMatchObject({ entityType: "APPROVAL_STEP_UP_CLAIM", companyId: A, state: "claimed" });
+    expect((await store.get(approvalProofClaimKey(A, hash!)))?.pk).toBe(`ORG#${A}#APPROVAL_STEP_UP_CLAIM`);
   });
 
   it("works under the policy hook's stricter-only wrapper without losing the claim operations", async () => {
@@ -119,7 +119,7 @@ describe("the deployed approvers point", () => {
       ["a caller that does not settle claims", async () => { const r = requestFor(); const { settlesClaims: _drop, ...plain } = r; void _drop; return { request: plain, proof: proofFor(r, issued()) }; }, NEEDS_SETTLING_CALLER],
       ["a subject that is not a task", async () => { const r = requestFor({ subject: { type: "project", id: TASK_A } }); return { request: r, proof: proofFor(r, issued()) }; }, "no_rule_for_this_request"],
       ["a malformed company", async () => { const r = requestFor({ companyId: "not-a-company" }); return { request: r, proof: proofFor(r, issued()) }; }, "no_rule_for_this_request"],
-      ["a token it did not sign", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issueStepUpApproval(stepUpApprovalKeyOf("another-install-key-0123456789abcdef"), input(), NOW).token) }; }, "not_a_valid_proof"],
+      ["a token it did not sign", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issueApprovalProof(approvalProofKeyOf("another-install-key-0123456789abcdef"), input(), NOW).token) }; }, "not_a_valid_proof"],
       ["an empty token", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, "") }; }, "not_a_valid_proof"],
       ["a proof issued for another decision", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ requestId: "decision-request-0002" })) }; }, "other_request"],
       ["a proof issued for another kind of decision", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ kind: "design" })) }; }, "other_kind"],
@@ -132,7 +132,7 @@ describe("the deployed approvers point", () => {
       ["a card the proof was not issued for", async () => { const r = requestFor({ card: { cardId: `spec_choice:${TASK_A}`, contentVersion: DIGEST } }); return { request: r, proof: proofFor(r, issued()) }; }, "other_card"],
       ["a card of another task", async () => { const card = cardOf(TASK_B); const r = requestFor({ card }); return { request: r, proof: proofFor(r, issued({ card })) }; }, "card_not_for_this_request"],
       ["a card version that is not the content seen", async () => { const card = cardOf(TASK_A, "v2"); const r = requestFor({ card }); return { request: r, proof: proofFor(r, issued({ card })) }; }, "card_not_for_this_request"],
-      ["a proof past its two minutes", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({}, NOW - STEP_UP_PROOF_LIFETIME_MS)) }; }, "proof_expired"],
+      ["a proof past its two minutes", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({}, NOW - APPROVAL_PROOF_LIFETIME_MS)) }; }, "proof_expired"],
       ["a request past its own expiry", async () => { const r = requestFor({ expiresAt: new Date(NOW).toISOString() }); return { request: r, proof: proofFor(r, issued()) }; }, "expired"],
       ["a step-up older than ten minutes", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ stepUp: { at: new Date(NOW - 600_001).toISOString(), method: "passkey" } })) }; }, "sign_in_not_fresh"],
       ["a step-up from the future beyond the clock skew", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ stepUp: { at: new Date(NOW + 120_001).toISOString(), method: "email_code" } })) }; }, "sign_in_not_fresh"],
@@ -153,7 +153,7 @@ describe("the deployed approvers point", () => {
     });
 
     it("refuses a step-up factor Code does not own, and an unreadable people read, without throwing", async () => {
-      expect(() => issueStepUpApproval(KEY, input({ stepUp: { at: STEP_UP.at, method: "slack" } }), NOW)).toThrow("a step-up approval cannot be issued for this input");
+      expect(() => issueApprovalProof(KEY, input({ stepUp: { at: STEP_UP.at, method: "slack" } }), NOW)).toThrow("a step-up approval cannot be issued for this input");
       const failing = world({ identity: { capabilities: { interactiveSignIn: false, externalAccounts: false }, getPrincipal: async () => { throw new Error("dynamo down ada"); } } as unknown as IdentityProvider });
       const request = requestFor();
       expect(await failing.approvers.verify(request, proofFor(request, issued()))).toEqual({ approved: false, reason: "people_unreadable" });
@@ -185,7 +185,7 @@ describe("the deployed approvers point", () => {
     const other = issued();
     const request = requestFor({ requestId: "decision-request-0001.e" });
     const lapsing = await approvers.verify(request, proofFor(request, other));
-    clock.now += STEP_UP_CLAIM_MS;
+    clock.now += APPROVAL_PROOF_CLAIM_MS;
     const claimId = lapsing.approved ? lapsing.claimId! : "";
     expect(await approvers.commitClaim!(claimId)).toEqual({ applied: false });
     await approvers.releaseClaim!(claimId);
@@ -337,7 +337,7 @@ describe("two companies", () => {
     expect(verdict).toMatchObject({ approved: true, approver: { companyId: B, personId: "cy" } });
     const [company, hash] = (verdict.approved ? verdict.claimId! : "").split(".");
     expect(company).toBe(B);
-    expect(await store.get(stepUpClaimKey(A, hash!))).toBeUndefined();
+    expect(await store.get(approvalProofClaimKey(A, hash!))).toBeUndefined();
     // A claim id rewritten to name company A settles nothing, and B's claim is still live.
     const forged = (verdict.approved ? verdict.claimId! : "").replace(B, A);
     expect(await approvers.commitClaim!(forged)).toEqual({ applied: false });
@@ -391,9 +391,9 @@ describe("the decision gate as this point's caller (lane L11: it settles claims 
       apply(_loaded, attempt) { applied.push(attempt.requestId); return { ops: [{ op: "set", path: ["decided"], value: true }] }; },
     };
     const gate = createDecisionGate({ store, approvers, audit: { stage: () => [], record: async () => undefined }, subjects: [subject], now: () => new Date(NOW) });
-    const claims = async () => (await store.query({ pk: stepUpClaimKey(A, "x").pk })).items;
+    const claims = async () => (await store.query({ pk: approvalProofClaimKey(A, "x").pk })).items;
     const outcome: ApprovalAnswer = "approve";
-    const attempt = (token: string, extra: Record<string, unknown> = {}) => ({ companyId: A, kind: "plan-doc", subjectId: TASK_A, requestId: "decision-request-0001", outcome, seen: { revision: 3, artifactDigest: DIGEST }, credentials: [{ method: STEP_UP_APPROVAL_METHOD, token }], ...extra });
+    const attempt = (token: string, extra: Record<string, unknown> = {}) => ({ companyId: A, kind: "plan-doc", subjectId: TASK_A, requestId: "decision-request-0001", outcome, seen: { revision: 3, artifactDigest: DIGEST }, credentials: [{ method: APPROVAL_PROOF_METHOD, token }], ...extra });
     return { gate, applied, claims, attempt };
   };
 
@@ -439,7 +439,7 @@ describe("the deployed approvers point: co-owners (the task-owner seam)", () => 
       const r = requestFor();
       const verdict = await approvers.verify(r, proofFor(r, issued({ personId: "ada" })));
       expect(verdict).toMatchObject({ approved: false });
-      expect((await store.query({ pk: stepUpClaimKey(A, "x").pk })).items).toEqual([]);
+      expect((await store.query({ pk: approvalProofClaimKey(A, "x").pk })).items).toEqual([]);
     }
     const { approvers } = seamWorld(async () => { throw new Error("people down zzq"); });
     const r = requestFor();

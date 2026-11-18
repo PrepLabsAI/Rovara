@@ -91,8 +91,6 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
     // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.
     "CoreAnswersModel",
-    // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
-    "StepUpEmailSender",
     // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).
     "CompanySignIn", "CompanySelfServe",
     // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).

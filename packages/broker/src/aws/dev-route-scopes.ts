@@ -36,15 +36,14 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/access", requires: "none" },
   // #634: the person chooses their own name.
   { method: "PUT", path: "/v1/dev/me/name", requires: "profile:name" },
-  // DEC 254w: connected sign-ins. Full access only (the web app); DeveloperIdentity also checks the session, the step-up and the person.
+  // DEC 254w: connected sign-ins. Full access only (the web app); DeveloperIdentity also checks the session and the person.
   { method: "GET", path: "/v1/dev/me/sign-ins", requires: "full" },
   { method: "POST", path: "/v1/dev/me/sign-ins/link", requires: "full" },
   { method: "POST", path: "/v1/dev/me/sign-ins/link/finish", requires: "full" },
   { method: "DELETE", path: "/v1/dev/me/sign-ins/{method}", requires: "full" },
   { method: "GET", path: "/v1/dev/company/members/{personId}/sign-ins", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/members/{personId}/sign-ins/{method}", requires: "full" },
-  // L4-MF4: the caller's OWN confirmation email (masked) and passkeys, for the web account page. Full access only; no path or parameter names a person.
-  { method: "GET", path: "/v1/dev/me/sign-in-factors", requires: "full" },
+  // DEC 254zzz73: GET /v1/dev/me/sign-in-factors (the step-up confirmation email and passkeys) is removed with the step-up.
   // Spec 065b: a project from a repository the GitHub App can reach.
   { method: "POST", path: "/v1/dev/client/projects", requires: "projects:create" },
   { method: "GET", path: "/v1/dev/client/repositories", requires: "projects:create" },
@@ -61,7 +60,7 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/client/projects/{project}/members", requires: "projects:members" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/members/{developerId}", requires: "projects:members" },
   { method: "DELETE", path: "/v1/dev/client/projects/{project}/members/{developerId}", requires: "projects:members" },
-  // Lane W: a project's merge rules; full access only (the route also checks the project and, to loosen, a fresh step-up).
+  // Lane W: a project's merge rules; full access only (the route also checks the project and who may change it).
   { method: "GET", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
   { method: "PUT", path: "/v1/dev/client/projects/{project}/code-settings", requires: "full" },
   // Guided onboarding PR 8: a project's setup checklist state (any member of the project's company) and its skipped optional rows (company owner or admin, or the project's administrator); full access only.
@@ -118,7 +117,7 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/tasks/{taskId}/readers", requires: "tasks:share" },
   { method: "PUT", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
   { method: "DELETE", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
-  // Lane W: merge a task's pull request; full access only, and a fresh step-up from a web client's verified token.
+  // Lane W: merge a task's pull request; full access only, then the task, the company and the merge rules.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/merge", requires: "full" },
   // Decisions: approve a plan or request changes; decide on the pull-request feedback proposal.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/decision", requires: "decisions:decide" },
@@ -180,7 +179,7 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (core-host/lessons-slack-switch-api.ts). Full access only; the person is the signed-in caller, never a path or body.
   { method: "GET", path: "/v1/dev/me/lessons-slack", requires: "full" },
   { method: "PUT", path: "/v1/dev/me/lessons-slack", requires: "full" },
-  // Lane W part 4: the company administrator's routes; full access only (DEC ANSWER-4), then a live admin or owner membership, and a fresh step-up to change anyone.
+  // Lane W part 4: the company administrator's routes; full access only (DEC ANSWER-4), then a live admin or owner membership to change anyone.
   { method: "GET", path: "/v1/dev/company/members", requires: "full" },
   { method: "GET", path: "/v1/dev/company/members/{personId}/removal-preview", requires: "full" },
   { method: "POST", path: "/v1/dev/company/members/{personId}/removal", requires: "full" },
@@ -190,14 +189,14 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/company/github/claim", requires: "full" },
   { method: "POST", path: "/v1/dev/company/github/choose", requires: "full" },
   { method: "GET", path: "/v1/dev/company/github", requires: "full" },
-  // Guided onboarding PR 3: disconnect one installation (live owner, fresh step-up, refused while the company's projects use it).
+  // Guided onboarding PR 3: disconnect one installation (live owner, refused while the company's projects use it).
   { method: "DELETE", path: "/v1/dev/company/github/{installationId}", requires: "full" },
-  // L4-GH: a person links their own GitHub account to themselves (the web app only; Code checks the live membership, the fresh step-up and the GitHub user authorization itself).
+  // L4-GH: a person links their own GitHub account to themselves (the web app only; Code checks the live membership and the GitHub user authorization itself).
   { method: "GET", path: "/v1/dev/me/github", requires: "full" },
   { method: "DELETE", path: "/v1/dev/me/github", requires: "full" },
   { method: "POST", path: "/v1/dev/me/github/link", requires: "full" },
   { method: "POST", path: "/v1/dev/me/github/link/claim", requires: "full" },
-  // Guided onboarding PR 4: Add to Slack (live owner/admin; disconnect owner + step-up) and the company's Slack connection (any member).
+  // Guided onboarding PR 4: Add to Slack (live owner/admin; disconnect owner) and the company's Slack connection (any member).
   { method: "POST", path: "/v1/dev/company/slack/install", requires: "full" },
   { method: "POST", path: "/v1/dev/company/slack/install/complete", requires: "full" },
   { method: "POST", path: "/v1/dev/company/slack/disconnect", requires: "full" },
@@ -208,7 +207,7 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "PUT", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
   { method: "POST", path: "/v1/dev/company/slack/projects/{project}/channel/check", requires: "full" },
-  // Guided onboarding PR 7: connect Linear by OAuth (live owner/admin), the connection's status (any member), disconnect (live owner, fresh step-up), and a project's Linear team
+  // Guided onboarding PR 7: connect Linear by OAuth (live owner/admin), the connection's status (any member), disconnect (live owner), and a project's Linear team
   // (owner/admin or the project's admin).
   { method: "POST", path: "/v1/dev/company/linear/connect", requires: "full" },
   { method: "POST", path: "/v1/dev/company/linear/complete", requires: "full" },
@@ -266,7 +265,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/sessions/{sessionId}/answers", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/revise-plan", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/close", requires: "tasks:act" },
-  // Decision cards: the list and every act on a card (an act also needs a fresh step-up, which a sign-in client's token never carries).
+  // Decision cards: the list and every act on a card (the performer checks the person's live authority).
   { method: "GET", path: "/v1/app/decisions", requires: "decisions:decide" },
   { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/approve", requires: "decisions:decide" },
   { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/reject", requires: "decisions:decide" },
@@ -277,7 +276,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/playbook", requires: "full" },
   // DEC 254z-amend3: a project's test environment state (read only: whether test services are on, why they are not available here, the catalog). Like how we work, no named scope reads it: full access only.
   { method: "GET", path: "/v1/app/projects/{project}/test-environment", requires: "full" },
-  // L4-B3b (DEC 254zm item 4): approving the proposal that waits (a fresh step-up, then the risk-based approver rule: a company owner or admin, or the project's maintainer for low and medium risk, an owner or admin for high).
+  // L4-B3b (DEC 254zm item 4): approving the proposal that waits (the risk-based approver rule: a company owner or admin, or the project's maintainer for low and medium risk, an owner or admin for high).
   { method: "POST", path: "/v1/app/projects/{project}/test-environment/approve", requires: "full" },
   // L4-MF1: a project's saved environment image panel (read only: fixed words, counts and times; off with the install's saved-environments switch). Like the test environment: full access only.
   { method: "GET", path: "/v1/app/projects/{project}/environment-image", requires: "full" },
@@ -304,7 +303,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/agents", requires: "full" },
   // Lead 4 L4-LP3W: the team's approved lessons an agent is told in the page's code area (any live role on the project; nothing is written).
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/lessons", requires: "full" },
-  // L4-D (DEC 254z b): "Use this setup" (a candidate and its check), dropping it, and deciding it (a fresh step-up, then the risk-based approver rule: a project maintainer for low and
+  // L4-D (DEC 254z b): "Use this setup" (a candidate and its check), dropping it, and deciding it (the risk-based approver rule: a project maintainer for low and
   // medium risk, a company owner or admin for high).
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/discard", requires: "full" },
@@ -348,7 +347,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // Lead 4 J5: answers feed the wiki. "Not right" is the asker's own press (core-host/answer-routes.ts); the gap list is read from the answer records, maintainers only (core-host/wiki-corrections-routes.ts). Additive.
   { method: "POST", path: "/v1/app/projects/{project}/answers/{answerId}/not-right", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/gaps", requires: "full" },
-  // L4-SF (d): allow or refuse a website a setup run asked for: a company owner or admin (the high-risk rule), a fresh step-up, bound to the exact ask.
+  // L4-SF (d): allow or refuse a website a setup run asked for: a company owner or admin (the high-risk rule), bound to the exact ask.
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/host-decide", requires: "full" },
   // Lead 4 N1: the nightly upkeep switch (core-host/upkeep-routes.ts): full access only, then any live role on the project reads it; a live company owner or admin, or the project's administrator, switches it.
   { method: "GET", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
@@ -362,10 +361,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "PUT", path: "/v1/app/projects/{project}/intake/updates", requires: "full" },
   // Lead 4 PCF: the plan card's "Change" lists the open features to pick from; the same people as the filing above (the task's starter, a maintainer, an owner or admin).
   { method: "GET", path: "/v1/app/tasks/{taskId}/feature-choices", requires: "full" },
-  // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it (a fresh step-up) or withdraws it.
+  // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it or withdraws it.
   { method: "GET", path: "/v1/app/company/system-runs", requires: "full" },
   { method: "PUT", path: "/v1/app/company/system-runs", requires: "full" },
-  // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: a fresh step-up, then the live owner/admin/maintainer rule). Full access only, like the setup candidate.
+  // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: the live owner/admin/maintainer rule). Full access only, like the setup candidate.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/eval", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },
   // L4-EVW2 (DEC 254zzz20 D2): "Try again" for Rovara's proposed wrapper file (a pull request on the repository that a person merges; Rovara never merges it): full access only, then the live owner/admin/maintainer rule.
@@ -373,9 +372,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-decide", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-health", requires: "full" },
   // DEC 254zzz39 (6): the task owner's "Accept findings" on the web page, the one route that may accept a SECURITY finding on a core task (core-host/dev-routes.ts TASK_PAGE_FINDINGS): full access only, then the
-  // web app's own client, a fresh step-up and the task's owner. Additive: no existing row changed.
+  // web app's own client and the task's owner. Additive: no existing row changed.
   { method: "POST", path: "/v1/app/tasks/{taskId}/review-findings", requires: "full" },
-  // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
+  // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a live owner or admin to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens/{tokenId}/revoke", requires: "full" },

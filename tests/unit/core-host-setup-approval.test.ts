@@ -21,7 +21,7 @@ import {
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { SETUP_NEEDS_ADMIN, SETUP_NEEDS_MAINTAINER, createHostedSetupApproval, setupDecisionRequestId } from "../../packages/broker/src/core-host/setup-approval.js";
 import {
-  SETUP_PROPOSAL_SUBJECT, STEP_UP_APPROVAL_METHOD, createHostedApprovers, issueSetupStepUpApproval, issueStepUpApproval, stepUpApprovalKeyOf,
+  SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, createHostedApprovers, issueSetupApprovalProof, issueApprovalProof, approvalProofKeyOf,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -29,7 +29,7 @@ import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
 
 const OTHER = "org_corehost00000000000b";
-const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const command = (executable: string, args: string[] = []) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });
@@ -435,8 +435,8 @@ describe("hosted approvers: a setup candidate's proof", () => {
     companyId: A, requestId: "setup-request-0001.x", kind: "setup", subject: { type: SETUP_PROPOSAL_SUBJECT, id: "payments" }, projectName: "payments", revision: 2, artifactDigest: DIGEST,
     risk: "low", outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, settlesClaims: true, ...overrides,
   });
-  const token = (overrides: Record<string, unknown> = {}) => issueSetupStepUpApproval(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", project: "payments", revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, ...overrides } as never, NOW).token;
-  const proof = (req: ApprovalRequest, value: string): ApprovalProof => ({ proofId: randomUUID(), method: STEP_UP_APPROVAL_METHOD, requestId: req.requestId, revision: req.revision, artifactDigest: req.artifactDigest, token: value });
+  const token = (overrides: Record<string, unknown> = {}) => issueSetupApprovalProof(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", project: "payments", revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, ...overrides } as never, NOW).token;
+  const proof = (req: ApprovalRequest, value: string): ApprovalProof => ({ proofId: randomUUID(), method: APPROVAL_PROOF_METHOD, requestId: req.requestId, revision: req.revision, artifactDigest: req.artifactDigest, token: value });
   const point = () => createHostedApprovers({ store: createFakeWorld().store, identity, key: KEY, now: () => new Date(NOW) });
 
   it("accepts a live member's setup proof for exactly this project, revision, digest, card and answer", async () => {
@@ -461,7 +461,7 @@ describe("hosted approvers: a setup candidate's proof", () => {
   it("never lets a task proof stand for a setup candidate, nor a setup proof for a task", async () => {
     const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
     // A task proof is refused on the setup subject (and a setup proof on a task): the proof's subject type is signed into it.
-    const taskToken = issueStepUpApproval(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: TASK, revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST } }, NOW).token;
+    const taskToken = issueApprovalProof(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: TASK, revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST } }, NOW).token;
     expect(await point().verify(request(), proof(request(), taskToken))).toEqual({ approved: false, reason: "other_subject" });
     const taskRequest = request({ subject: { type: "task", id: TASK }, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
     const setupForTask = token({ project: TASK, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
@@ -472,7 +472,7 @@ describe("hosted approvers: a setup candidate's proof", () => {
     const UUID_PROJECT = "3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f";
     const card = { cardId: `setup_proposal:${UUID_PROJECT}`, contentVersion: DIGEST };
     const req = request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: UUID_PROJECT }, projectName: UUID_PROJECT, card });
-    const taskProof = issueStepUpApproval(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: UUID_PROJECT, revision: 2, artifactDigest: DIGEST, outcome: "approve", card }, NOW).token;
+    const taskProof = issueApprovalProof(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: UUID_PROJECT, revision: 2, artifactDigest: DIGEST, outcome: "approve", card }, NOW).token;
     expect(await point().verify(req, proof(req, taskProof))).toEqual({ approved: false, reason: "other_subject" });
     // The same act as a setup proof is accepted.
     expect(await point().verify(req, proof(req, token({ project: UUID_PROJECT, card })))).toMatchObject({ approved: true });

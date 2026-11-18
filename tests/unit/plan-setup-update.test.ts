@@ -18,13 +18,13 @@ import {
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createHostedSetupApproval, setupDecisionRequestId } from "../../packages/broker/src/core-host/setup-approval.js";
 import {
-  createHostedApprovers, stepUpApprovalKeyOf,
+  createHostedApprovers, approvalProofKeyOf,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
 const OTHER = "org_corehost00000000000b";
-const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const command = (executable: string, args: string[] = []) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });

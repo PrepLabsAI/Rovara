@@ -1,12 +1,11 @@
 // The company's ONE control over Rovara's automatic runs (L4-P3, owner 2026-11-17): read it, allow it, withdraw it, as a live company owner or admin (route: core-host/system-runs-routes.ts).
 //
-//   - ALLOWING needs a FRESH STEP-UP (`requireStepUp`, the same check that guards making a script token), after the role check and before anything is read for the change or written. A host with no such check cannot allow
-//     (it refuses, never lets it through). WITHDRAWING never needs one: turning it off must be easy. It needs only the live role, and it works while the operator's ceiling is off.
-//   - The audit record (naming the person, why they were allowed and, for an allow, the factor) is written BEFORE the row: an act whose record cannot be written is not done.
+//   - ALLOWING needs the live role and the operator's ceiling (DEC 254zzz73: no step-up). WITHDRAWING needs only the live role (turning it off must be easy), and it works while the operator's ceiling is off.
+//   - The audit record (naming the person and why they were allowed) is written BEFORE the row: an act whose record cannot be written is not done.
 //   - A withdrawal changes ONLY the company's consent row. Projects keep their own switch (they read as off while the consent is off, `effectiveSystemRunsGate`), and the nightly job is not touched: the effective gate is
 //     read on every use, so the next run is refused at once.
 //   - The row changes only if it is still the row this act read (a concurrent change loses and is told to try again). The same choice again is no change and records nothing.
-import { SYSTEM_RUNS_CONSENT_WORDS, SystemRunsBodySchema, agentXError, AgentXError, type DocumentStore, type OrgId, type SystemRunsView } from "@agentx/contracts";
+import { SystemRunsBodySchema, agentXError, type DocumentStore, type OrgId, type SystemRunsView } from "@agentx/contracts";
 import { readSystemRunsConsentRow, seenRowFence, systemRunsConsentKey } from "./consent.js";
 
 export const SYSTEM_RUNS_WORDS = {
@@ -24,8 +23,6 @@ export interface SystemRunsControlDeps {
   isCompanyAdmin(): Promise<boolean>;
   /** Whether the operator's ceiling covers this company (`CoreSystemRuns`). Absent, a throw and anything but `true` read as not available. */
   available?: (() => boolean | Promise<boolean>) | undefined;
-  /** The fresh step-up check (throws REAUTH_REQUIRED, or a 503 when the company's window cannot be read). Absent: nobody can ALLOW through this host. */
-  requireStepUp?: (() => Promise<void>) | undefined;
   /** The audit record, written before the row. Throws when it could not write. `previous` names the row this act replaces (its `changedAt`, or "none"). */
   record(details: { requestId: string; on: boolean; previous: string }): Promise<void>;
 }
@@ -50,17 +47,14 @@ export async function systemRunsView(deps: SystemRunsControlDeps): Promise<Syste
   return view(deps);
 }
 
-/** Allows or withdraws the company's consent. Order: role, body, (allow only: ceiling, step-up), then the read, the audit record and the fenced write. Answers the view after the change. */
+/** Allows or withdraws the company's consent. Order: role, body, (allow only: ceiling), then the read, the audit record and the fenced write. Answers the view after the change. */
 export async function setSystemRunsConsent(deps: SystemRunsControlDeps, readBody: () => unknown): Promise<SystemRunsView> {
   if (!(await adminOf(deps))) throw agentXError("FORBIDDEN", SYSTEM_RUNS_WORDS.notAllowed);
   // The body is read only after the role check: a person who may not change this is refused for that, whatever they sent.
   const body = SystemRunsBodySchema.safeParse(readBody());
   if (!body.success) throw agentXError("CONFIG_INVALID", "the request is not valid");
   const { requestId, allowed } = body.data;
-  if (allowed) {
-    if (!(await availableOf(deps))) throw agentXError("NOT_AVAILABLE_HERE", SYSTEM_RUNS_WORDS.unavailable);
-    await requireFreshStepUp(deps);
-  }
+  if (allowed && !(await availableOf(deps))) throw agentXError("NOT_AVAILABLE_HERE", SYSTEM_RUNS_WORDS.unavailable);
   const key = systemRunsConsentKey(deps.companyId);
   const before = await deps.store.get(key).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", SYSTEM_RUNS_WORDS.unreadable); });
   // Only this company's own `enabled: true` row is a consent (the same rule as every reader): the same choice again changes nothing and records nothing.
@@ -72,13 +66,4 @@ export async function setSystemRunsConsent(deps: SystemRunsControlDeps, readBody
   ]).catch(() => ({ applied: false as const }));
   if (!written.applied) throw agentXError("RUNTIME_UNAVAILABLE", SYSTEM_RUNS_WORDS.unreadable);
   return view(deps);
-}
-
-/** The fresh step-up that ALLOWING needs: a host without the check cannot allow, and a check that fails in any way other than its own words is a sign-in refusal (never a pass). */
-export async function requireFreshStepUp(deps: { requireStepUp?: (() => Promise<void>) | undefined }): Promise<void> {
-  if (deps.requireStepUp === undefined) throw agentXError("REAUTH_REQUIRED", SYSTEM_RUNS_CONSENT_WORDS.needsSignIn);
-  try { await deps.requireStepUp(); } catch (error) {
-    if (error instanceof AgentXError) throw error;
-    throw agentXError("REAUTH_REQUIRED", SYSTEM_RUNS_CONSENT_WORDS.needsSignIn);
-  }
 }

@@ -11,10 +11,10 @@
 //     the broker's exchange verifies, and the services: lessons (`createCoreLessons`, where ROVARA_CORE_LESSONS covers the company and the deployment gives its people) plus the
 //     deployment's own.
 //   - the developer task routes' core entry (`coreTasks`): the core host's dev routes over the caller mapping (the broker's signed-in developer -> the principal the core knows, company
-//     from MEMBERSHIP, never a claim; the verified token's step-up rides along), with the session cap (hosted wiring (f)) and every audit event of a script token naming the caller it came
+//     from MEMBERSHIP, never a claim; the verified token's sign-in method rides along), with the session cap (hosted wiring (f)) and every audit event of a script token naming the caller it came
 //     through (hosted wiring (d)).
 //     Lane L11 adds, per company: the session levels (live membership role, the broker's project grant), the decision cards (the task's own person's waiting documents; an act goes
-//     through the approval gate with the approvers point's own signed step-up proof, lane L2a) and how we work (the code host, with the deployment's `codeSettings`). Each part the
+//     through the approval gate with the approvers point's own signed one-act proof, lane L2a) and how we work (the code host, with the deployment's `codeSettings`). Each part the
 //     deployment does not give answers "not on the core yet".
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
@@ -51,7 +51,7 @@ import { createSetupRegistryMirror } from "./setup-registry-mirror.js";
 import { hostedStandingInstructions } from "../core-host/standing-instructions.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
-import { deployedDevWiringParts, deployedSessionMembers, hostedChatApproval, hostedDecisionService, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
+import { deployedDevWiringParts, deployedSessionMembers, hostedChatApproval, hostedDecisionService, approvalDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { decideFromChat } from "../core-host/chat-decision.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
@@ -59,7 +59,7 @@ import { boundEvalMonthlyCap, boundEvalProviderConnected } from "../core/setup-a
 import { createEvalWrapperTargets } from "../core/setup-agent/eval-wrapper-targets.js";
 import { createEvalEnvironmentSource, evalSavedEnvDepsOf, repositoryPathsOf, type EvalEnvironmentSource } from "../core/setup-agent/eval-environment-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
-import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
+import { approvalProofKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
 import {
   HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, readHostedAdmissionSettings, runSpendState, runStopWiredFrom, taskCapOf, type HostedAdmissionSettings, type HostedIdentityOptions, type ProjectTaskCap,
@@ -547,14 +547,14 @@ export function hostedTaskOwner(inputs: { membershipOf: Parameters<typeof hosted
 
 /**
  * The deployment's caller mapping (lane ID): the broker's signed-in developer -> the principal the core knows. The company and role come from the person's LIVE membership, read on every
- * call (never a token claim); the step-up and the client ride along only as the broker's sign-in set them from the verified token. No membership: undefined (the sign-in refusal).
+ * call (never a token claim); the sign-in method and the client ride along only as the broker's sign-in set them from the verified token. No membership: undefined (the sign-in refusal).
  */
 export function deployedCallerFromMembership(membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>): (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined> {
   return async (caller) => {
     const membership = await membershipOf(caller.developerId);
     if (membership === undefined) return undefined;
     const principal: Principal = { companyId: membership.companyId, personId: caller.developerId, displayName: caller.name, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
-    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }), ...(caller.webApp === true ? { webApp: true as const } : {}) };
+    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.amr === undefined ? {} : { amr: caller.amr }), ...(caller.webApp === true ? { webApp: true as const } : {}) };
   };
 }
 
@@ -671,7 +671,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   // HW5b: where the deployment serves ONE chat that can name a person (`ChatThreads.personOf`), a press in it may approve a low or medium risk plan (`hosted-approvers.ts` `chat`).
-  const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, inputs.callbackSigningKey === undefined ? undefined : stepUpApprovalKeyOf(inputs.callbackSigningKey));
+  const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, inputs.callbackSigningKey === undefined ? undefined : approvalProofKeyOf(inputs.callbackSigningKey));
   const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
   const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true; 
   // Web task channel C8 (option b): the attention email, OFF unless ROVARA_ATTENTION_EMAIL is `on` (attention-email.ts). One attempt per invoke: a send whose answer was lost is never sent again.
@@ -969,7 +969,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     setCoreLessonsGate(env);
     const companyOf = async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => membershipOf(caller.principal.personId);
     // Lane L11: an act on a decision card carries the approvers point's own proof (lane L2a), signed with the key the point verifies with.
-    const decisionProofs = stepUpDecisionProofs(stepUpApprovalKeyOf(inputs.callbackSigningKey), () => now().getTime());
+    const decisionProofs = approvalDecisionProofs(approvalProofKeyOf(inputs.callbackSigningKey), () => now().getTime());
     const routes = createCoreDevRoutes({
       app, companyOf, log,
       wiring: async (runtime) => {
@@ -984,7 +984,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants (also the live members the eval health run reads).
         const setupApproval = createHostedSetupApproval({
           flow: runtime.flow.deps, store: runtime.flow.deps.store, approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
-          people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
+          people: { membershipOf, projectGrantRole }, proofKey: approvalProofKeyOf(inputs.callbackSigningKey), now,
           // L4-SF (c): an approval keeps the old broker's project registry in step with the core's, in the same decision.
           registryMirror: createSetupRegistryMirror({ store: runtime.flow.deps.store, companyId: runtime.companyId }),
         });
@@ -1003,12 +1003,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
           testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },
-          // L4-B3b (DEC 254zm item 4): approving that environment, with a fresh step-up, the risk-based approver rule read live (company role and project grant) and the approvers point's own proof.
+          // L4-B3b (DEC 254zm item 4): approving that environment, with the risk-based approver rule read live (company role and project grant) and the approvers point's own proof.
           testEnvironmentApproval: createHostedTestEnvironmentApproval({
             companyId: runtime.companyId,
             deps: { store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) },
             store: registry.require("storage"), approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
-            people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
+            people: { membershipOf, projectGrantRole }, proofKey: approvalProofKeyOf(inputs.callbackSigningKey), now,
           }),
           // L4-MF1: the project's saved environment image panel, read only. Hosted has no image registry wired, so it stays off (404) until the install switch is on.
           savedEnv: { enabled: savedEnvEnabled(env) },
@@ -1122,7 +1122,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       chatThreads === undefined ? undefined : (deployed, input) => addChatThreadInput({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input),
       // HW5b: a press of Approve, or the words for Request changes, on the plan card (one line here; the rule is core-host/chat-decision.ts and the approvers' `chat-<channel>` method).
       chatApproval === undefined || chatThreads?.personOf === undefined ? undefined : (deployed, press) => decideFromChat({
-        chatThreads, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log: (entry) => log({ ...entry, companyId: deployed.principal.companyId }),
+        chatThreads, proofKey: approvalProofKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log: (entry) => log({ ...entry, companyId: deployed.principal.companyId }),
         companyFor: async (companyId) => {
           const runtime = await app.runtimeFor(companyId);
           const registry = await app.registry();

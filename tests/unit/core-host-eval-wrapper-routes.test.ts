@@ -8,14 +8,14 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { SETUP_RUN_PROJECT_NOT_FOUND, EVAL_WRAPPER_UNAVAILABLE, type HostedSetupRunWiring, type SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../../packages/broker/src/core-host/setup-approval.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { CAP, company, filesOf, gitReader, project as PROJECT, reportOf } from "../support/eval-card-world.js";
 
 const OTHER = "org_corehost00000000000b";
-const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const definition = (name: string): ProjectDefinition => ({

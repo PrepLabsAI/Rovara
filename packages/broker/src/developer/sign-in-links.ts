@@ -1,6 +1,6 @@
 // DEC 254w: account linking between sign-in methods, inside DeveloperIdentity (the only writer of the sign-in table).
 //
-//   start   the caller's LIVE web-app session, with a FRESH step-up, asks to connect a second method (Slack or GitHub). A link row is written
+//   start   the caller's LIVE web-app session asks to connect a second method (Slack or GitHub). A link row is written
 //           (`SIGNIN_LINK#<id>`): bound to that session, the person, their company, the method, the web app's PKCE challenge and its return URL
 //           (exactly one of the web app's registered redirect URLs); single use, five minutes. The answer is the provider's authorize URL.
 //   callback the provider sends the browser back to /v1/auth/callback/<method> with state = the link id. The row is consumed (once), the provider's
@@ -10,7 +10,7 @@
 //           in that browser's web-app session), attaches the identity: one transaction writes the identity's record pointing at the person
 //           (`mergedInto`, which every sign-in already follows: the session, membership and role are the person's), the person's connected-method
 //           row (`SIGNIN_LINKS#<person>` / `METHOD#<method>`, one per method), the company log row, and checks the person's membership and session.
-//   unlink  the person, or an owner or admin of their company, with a fresh step-up, removes a connected method (never the first one), ends every
+//   unlink  the person, or an owner or admin of their company, removes a connected method (never the first one), ends every
 //           session of the person (a removed method's sessions must not live on), and logs it. The identity's record is kept, marked unlinked (when, from
 //           whom, from which company; DEC 254zzz33, 254zzz39).
 //   relink  (DEC 254zzz39) a kept unlinked identity is linked again by the same finish, in place: to the person it was unlinked from or another person of
@@ -24,7 +24,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  DEVELOPER_STEP_UP_METHODS, DEVELOPER_STEP_UP_WINDOW_SECONDS, IMPLICIT_COMPANY_ID, OrgIdSchema, SIGN_IN_LINK_SECONDS, SIGN_IN_LINK_TEXT,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, SIGN_IN_LINK_SECONDS, SIGN_IN_LINK_TEXT,
   SignInLinkFinishRequestSchema, SignInLinkStartRequestSchema, SignInLinksListRequestSchema, SignInUnlinkRequestSchema, companyScoped,
   type ConnectedSignIn, type DeveloperSignInMethod, type LinkableSignInMethod, type SignInClientRecord, type SignInLinkFinishResponse,
   type SignInLinkRefusal, type SignInLinkStartResponse, type SignInLinksListResponse, type SignInUnlinkResponse,
@@ -60,8 +60,6 @@ export interface SignInLinkOptions {
 }
 
 const LINK_ID = /^lnk_[A-Za-z0-9_-]{43}$/;
-/** A step-up time this far ahead of the clock is still believed (as factor-admin.ts). */
-const STEP_UP_SKEW_SECONDS = 60;
 /** At most this many connected-method rows are read for one person (one per linkable method; more is an error, never a partial list). */
 const LINK_ROWS_MAX = 10;
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -142,7 +140,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
     return parsed.success && parsed.data.id === id ? parsed.data : undefined;
   };
 
-  /** The caller's live session, read from this table (as factor-admin.ts): theirs, not revoked, not ended, their record on, its method still on. */
+  /** The caller's live session, read from this table: theirs, not revoked, not ended, their record on, its method still on. */
   async function liveSession(developerId: string, sessionId: string): Promise<{ session: SessionRecord; developer: DeveloperRecord } | SignInLinkRefusal> {
     const signedOut = refusal("signed_out", SIGN_IN_LINK_TEXT.signedOut);
     const session = await store.getSession(sessionId);
@@ -150,14 +148,6 @@ export function createSignInLinks(options: SignInLinkOptions) {
     const developer = await store.getDeveloper(developerId);
     if (developer === undefined || developer.revoked !== false || endedByAdmin(session.startedAt, developer.sessionsEndedAt) || !options.methodLive(session)) return signedOut;
     return { session, developer };
-  }
-  /** The session's own step-up (never anything a request carries) is one of Code's factors, inside the window, and not from the future. */
-  function freshStepUp(session: SessionRecord): boolean {
-    const at = session.stepUpAt;
-    if (typeof at !== "number" || !Number.isSafeInteger(at) || at <= 0) return false;
-    if (!(DEVELOPER_STEP_UP_METHODS as readonly unknown[]).includes(session.stepUpMethod)) return false;
-    const age = seconds() - at;
-    return age <= DEVELOPER_STEP_UP_WINDOW_SECONDS && -age <= Math.min(STEP_UP_SKEW_SECONDS, DEVELOPER_STEP_UP_WINDOW_SECONDS);
   }
   /** The person's live membership, or undefined when there is none, it was revoked, or it does not read. */
   async function liveMember(company: CompanySignInStore, personId: string): Promise<{ companyId: string; role: string } | undefined> {
@@ -221,7 +211,6 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const { developerId, sessionId, method, challenge, returnTo, state } = parsed.data;
       const live = await liveSession(developerId, sessionId);
       if ("ok" in live) return live;
-      if (!freshStepUp(live.session)) return refusal("reauth", SIGN_IN_LINK_TEXT.reauth);
       // Only the web app's own sign-in client starts a link, and it comes back only to one of that client's exact registered URLs.
       const client = live.session.clientId === undefined ? undefined : await options.registeredClient(live.session.clientId);
       if (client === undefined || client.webApp !== true || client.fullAccess !== true || !client.redirectUris.includes(returnTo)) return refuse("signin.link_refused", developerId, "not_web_app");
@@ -352,7 +341,6 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const { developerId, sessionId, personDeveloperId, method } = parsed.data;
       const live = await liveSession(developerId, sessionId);
       if ("ok" in live) return live;
-      if (!freshStepUp(live.session)) return refusal("reauth", SIGN_IN_LINK_TEXT.reauth);
       const self = personDeveloperId === developerId;
       if (!self && !await adminOver(company, developerId, personDeveloperId)) return refusal("forbidden", SIGN_IN_LINK_TEXT.forbidden);
       const person = self ? live.developer : await store.getDeveloper(personDeveloperId);
@@ -376,7 +364,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
         // DEC 254zzz33 (4): the linked identity's record is kept, never deleted (the sign-in role deletes no DEVELOPER# row): it no longer points at the person, and records when and
         // from whom it was unlinked. One an admin turned off stays turned off. Any other signs in again as nobody's person, as a deleted record did: `companyless` (DEC 253z) so the
         // kept record is never "legacy" (company-membership.ts join would otherwise seat it in the built-in company with no invitation) and it may take a company-less session.
-        // DEC 254zzz39: and the person's company, the only one it may be linked into again; its first-sign-in mark goes, so its own next sign-in captures its factor email (store.ts).
+        // DEC 254zzz39: and the person's company, the only one it may be linked into again; a legacy first-sign-in mark (from the removed step-up factor email, DEC 254zzz73) goes too.
         { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" },
           UpdateExpression: "REMOVE mergedInto, firstSignInMark SET unlinkedAt = :at, unlinkedFrom = :person, unlinkedCompany = :company, companyless = :true",
           ConditionExpression: "mergedInto = :person AND revoked = :revoked",

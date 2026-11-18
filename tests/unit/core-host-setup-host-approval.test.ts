@@ -9,7 +9,7 @@ import { hostAskKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { hostRequestId } from "../../packages/broker/src/local/app/setup-agent.js";
 import { SETUP_HOST_NEEDS_ADMIN, setupHostCardOf } from "../../packages/broker/src/core-host/setup-approval.js";
 import { SETUP_DECIDE_ON_A_PAGE, SETUP_NO_HOST_WAITING, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND } from "../../packages/broker/src/core-host/setup-run-routes.js";
-import { SETUP_HOST_SUBJECT, SETUP_PROPOSAL_SUBJECT, STEP_UP_APPROVAL_METHOD, createHostedApprovers, issueSetupHostStepUpApproval, issueSetupStepUpApproval } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { SETUP_HOST_SUBJECT, SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, createHostedApprovers, issueSetupHostApprovalProof, issueSetupApprovalProof } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { setupHostApproverAllows } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
 import type { FakeWorld } from "../support/core-host-fakes.js";
@@ -193,20 +193,20 @@ describe("L4-SF (d): the decision is bound to the exact ask", () => {
     const stepUp = { at: new Date(world.clock.now - 60_000).toISOString(), method: "passkey" };
     const requestId = hostDecisionRequestId(ask);
     const request = { companyId: FAKE_COMPANY, requestId, kind: "setup_host", outcome: "approve" as const, subject: { type: SETUP_HOST_SUBJECT, id: subjectId }, projectName: "payments", revision: 1, artifactDigest: digest, risk: "high", settlesClaims: true, card: setupHostCardOf(subjectId, digest) };
-    const proofOf = (token: string) => ({ method: STEP_UP_APPROVAL_METHOD, token, requestId, revision: 1, artifactDigest: digest } as never);
+    const proofOf = (token: string) => ({ method: APPROVAL_PROOF_METHOD, token, requestId, revision: 1, artifactDigest: digest } as never);
     const base = { companyId: FAKE_COMPANY, personId: "p-admin", stepUp, requestId, kind: "setup_host", revision: 1, artifactDigest: digest, outcome: "approve" as const, card: setupHostCardOf(subjectId, digest) };
     // Positive control: a website proof for this ask is believed.
-    const good = await approvers.verify(request as never, proofOf(issueSetupHostStepUpApproval(KEY, { ...base, subjectId }, world.clock.now).token));
+    const good = await approvers.verify(request as never, proofOf(issueSetupHostApprovalProof(KEY, { ...base, subjectId }, world.clock.now).token));
     expect(good).toMatchObject({ approved: true });
     // A setup-candidate proof made for the same words (the project name as its subject) is refused for the website subject.
-    const asProposal = issueSetupStepUpApproval(KEY, { ...base, kind: "setup_host", project: "payments" }, world.clock.now);
+    const asProposal = issueSetupApprovalProof(KEY, { ...base, kind: "setup_host", project: "payments" }, world.clock.now);
     expect(await approvers.verify(request as never, proofOf(asProposal.token))).toMatchObject({ approved: false, reason: "other_subject" });
     // And a website proof is refused for a setup candidate.
     const proposalRequest = { ...request, kind: "setup", subject: { type: SETUP_PROPOSAL_SUBJECT, id: "payments" }, card: { cardId: "setup_proposal:payments", contentVersion: digest } };
-    const hostProof = issueSetupHostStepUpApproval(KEY, { ...base, subjectId }, world.clock.now);
+    const hostProof = issueSetupHostApprovalProof(KEY, { ...base, subjectId }, world.clock.now);
     expect(await approvers.verify(proposalRequest as never, proofOf(hostProof.token))).toMatchObject({ approved: false });
     // The proof cannot name a subject that is not a website ask's id.
-    expect(() => issueSetupHostStepUpApproval(KEY, { ...base, subjectId: "payments" }, world.clock.now)).toThrow();
+    expect(() => issueSetupHostApprovalProof(KEY, { ...base, subjectId: "payments" }, world.clock.now)).toThrow();
   });
 });
 
@@ -223,15 +223,15 @@ describe("L4-SF (d): the approvers point keeps the three kinds of proof apart ev
     const base = { companyId: FAKE_COMPANY, personId: "p-admin", stepUp, requestId, revision: 1, artifactDigest: digest, outcome: "approve" as const };
     const hostRequest = { companyId: FAKE_COMPANY, requestId, kind: "setup_host", outcome: "approve" as const, subject: { type: SETUP_HOST_SUBJECT, id: same }, projectName: "payments", revision: 1, artifactDigest: digest, risk: "high", settlesClaims: true, card: setupHostCardOf(same, digest) };
     const proposalRequest = { ...hostRequest, kind: "setup", subject: { type: SETUP_PROPOSAL_SUBJECT, id: same }, projectName: same, card: { cardId: `setup_proposal:${same}`, contentVersion: digest } };
-    const proofOf = (token: string) => ({ method: STEP_UP_APPROVAL_METHOD, token, requestId, revision: 1, artifactDigest: digest } as never);
+    const proofOf = (token: string) => ({ method: APPROVAL_PROOF_METHOD, token, requestId, revision: 1, artifactDigest: digest } as never);
     // The wrong-type proofs are made for the other request's kind, card and id, so the signed subject type is the only thing that differs.
-    const proposalProofForHost = issueSetupStepUpApproval(KEY, { ...base, kind: "setup_host", project: same, card: hostRequest.card }, world.clock.now);
-    const hostProofForProposal = issueSetupHostStepUpApproval(KEY, { ...base, kind: "setup", subjectId: same, card: proposalRequest.card }, world.clock.now);
+    const proposalProofForHost = issueSetupApprovalProof(KEY, { ...base, kind: "setup_host", project: same, card: hostRequest.card }, world.clock.now);
+    const hostProofForProposal = issueSetupHostApprovalProof(KEY, { ...base, kind: "setup", subjectId: same, card: proposalRequest.card }, world.clock.now);
     expect(await approvers.verify(hostRequest as never, proofOf(proposalProofForHost.token))).toMatchObject({ approved: false, reason: "other_subject" });
     expect(await approvers.verify(proposalRequest as never, proofOf(hostProofForProposal.token))).toMatchObject({ approved: false, reason: "other_subject" });
     // Positive controls: each proof stands for its own subject.
-    const hostProof = issueSetupHostStepUpApproval(KEY, { ...base, kind: "setup_host", subjectId: same, card: hostRequest.card }, world.clock.now);
-    const proposalProof = issueSetupStepUpApproval(KEY, { ...base, kind: "setup", project: same, card: proposalRequest.card }, world.clock.now);
+    const hostProof = issueSetupHostApprovalProof(KEY, { ...base, kind: "setup_host", subjectId: same, card: hostRequest.card }, world.clock.now);
+    const proposalProof = issueSetupApprovalProof(KEY, { ...base, kind: "setup", project: same, card: proposalRequest.card }, world.clock.now);
     expect(await approvers.verify(hostRequest as never, proofOf(hostProof.token))).toMatchObject({ approved: true });
     expect(await approvers.verify(proposalRequest as never, proofOf(proposalProof.token))).toMatchObject({ approved: true });
   });
@@ -243,7 +243,7 @@ describe("L4-SF (d): the approvers point keeps the three kinds of proof apart ev
     const digest = "a".repeat(64);
     const subjectId = hostAskSubjectId(FAKE_COMPANY, "payments", HOST);
     const make = (subject: { type: string; id: string }, projectName: string | undefined) => ({ companyId: FAKE_COMPANY, requestId: `host-${"b".repeat(40)}`, kind: "setup_host", outcome: "approve" as const, subject, ...(projectName === undefined ? {} : { projectName }), revision: 1, artifactDigest: digest, risk: "high", settlesClaims: true, card: setupHostCardOf(subjectId, digest) });
-    const proof = { method: STEP_UP_APPROVAL_METHOD, token: "su1.x.y", requestId: `host-${"b".repeat(40)}`, revision: 1, artifactDigest: digest } as never;
+    const proof = { method: APPROVAL_PROOF_METHOD, token: "su1.x.y", requestId: `host-${"b".repeat(40)}`, revision: 1, artifactDigest: digest } as never;
     for (const request of [make({ type: SETUP_HOST_SUBJECT, id: "payments" }, "payments"), make({ type: SETUP_HOST_SUBJECT, id: subjectId.toUpperCase() }, "payments"), make({ type: SETUP_HOST_SUBJECT, id: subjectId }, undefined), make({ type: SETUP_HOST_SUBJECT, id: subjectId }, "../x")]) {
       expect(await approvers.verify(request as never, proof), JSON.stringify(request.subject)).toEqual({ approved: false, reason: "no_rule_for_this_request" });
     }

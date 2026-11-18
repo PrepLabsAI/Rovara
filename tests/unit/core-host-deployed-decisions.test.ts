@@ -12,12 +12,12 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type DeployedDecisionCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  DECISION_SOURCE_TASKS_MAX, INVOLVED_TASKS_MAX, deployedDecisionCards, deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs,
+  DECISION_SOURCE_TASKS_MAX, INVOLVED_TASKS_MAX, deployedDecisionCards, deployedDevWiringParts, deployedSessionMembers, approvalDecisionProofs,
   type DecisionAct, type DecisionProofIssuer, type DeployedPeople,
 } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import type { CoreRuntime } from "../../packages/broker/src/core-host/core-runtime.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
 import { routeDecisionCards } from "../../packages/broker/src/core/decisions/routes.js";
 import { decisionCardPath, projectDecisionCards } from "../../packages/broker/src/core/decisions/project.js";
@@ -83,9 +83,9 @@ async function setup(options: { permissive?: boolean; people?: boolean; involved
   const world = createFakeWorld({ without: ["approvers", "identity"] });
   const { memberships, grants, people } = records();
   const identity = createHostedIdentity({ membershipOf: people.membershipOf, displayNameOf: async (personId) => personId });
-  const key = stepUpApprovalKeyOf("k".repeat(32));
+  const key = approvalProofKeyOf("k".repeat(32));
   const acts: DecisionAct[] = [];
-  const hosted = stepUpDecisionProofs(key, () => world.clock.now);
+  const hosted = approvalDecisionProofs(key, () => world.clock.now);
   const fake = permissivePoint();
   const proofs: DecisionProofIssuer = options.permissive === true ? fake.proofs : { method: hosted.method, issue: vi.fn((act: DecisionAct) => { acts.push(act); return hosted.issue(act); }) };
   const point = { proofs, acts: options.permissive === true ? fake.acts : acts };

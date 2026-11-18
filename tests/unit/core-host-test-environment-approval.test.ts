@@ -15,7 +15,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, NOT_ON_THE_CORE_YET, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_PROPOSAL_SUBJECT, STEP_UP_APPROVAL_METHOD, TEST_ENVIRONMENT_SUBJECT, createHostedApprovers, issueSetupStepUpApproval, issueStepUpApproval, issueTestEnvironmentStepUpApproval, stepUpApprovalKeyOf,
+  SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, TEST_ENVIRONMENT_SUBJECT, createHostedApprovers, issueSetupApprovalProof, issueApprovalProof, issueTestEnvironmentApprovalProof, approvalProofKeyOf,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { createHostedTestEnvironmentApproval, testEnvironmentCardOf } from "../../packages/broker/src/core-host/test-environment-approval.js";
@@ -33,7 +33,7 @@ import { join } from "node:path";
 
 const OTHER = "org_corehost00000000000b" as OrgId;
 const A = FAKE_COMPANY as OrgId;
-const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const NOW = Date.parse("2026-11-15T10:00:00.000Z");
 const SHA = (c: string) => c.repeat(64);
 
@@ -61,8 +61,8 @@ describe("hosted approvers: a test environment's proof", () => {
     risk: "medium", outcome: "approve", card: card(), settlesClaims: true, ...overrides,
   });
   const base = { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "req_0123456789", kind: "setting", revision: 1, artifactDigest: DIGEST, outcome: "approve" as const, card: card() };
-  const token = (overrides: Record<string, unknown> = {}, at = NOW) => issueTestEnvironmentStepUpApproval(KEY, { ...base, project: "payments", ...overrides }, at).token;
-  const proof = (req: ApprovalRequest, value: string): ApprovalProof => ({ proofId: randomUUID(), method: STEP_UP_APPROVAL_METHOD, requestId: req.requestId, revision: req.revision, artifactDigest: req.artifactDigest, token: value });
+  const token = (overrides: Record<string, unknown> = {}, at = NOW) => issueTestEnvironmentApprovalProof(KEY, { ...base, project: "payments", ...overrides }, at).token;
+  const proof = (req: ApprovalRequest, value: string): ApprovalProof => ({ proofId: randomUUID(), method: APPROVAL_PROOF_METHOD, requestId: req.requestId, revision: req.revision, artifactDigest: req.artifactDigest, token: value });
   const point = (nowMs = NOW) => createHostedApprovers({ store: new MemoryDocumentStore(), identity, key: KEY, now: () => new Date(nowMs) });
 
   it("accepts a live member's proof for exactly this project, revision, digest, card and answer", async () => {
@@ -103,8 +103,8 @@ describe("hosted approvers: a test environment's proof", () => {
   it("a forged or re-signed token is no proof, and a caller that does not settle claims gets none", async () => {
     const good = token();
     expect(await point().verify(request(), proof(request(), `${good.slice(0, -4)}AAAA`))).toEqual({ approved: false, reason: "not_a_valid_proof" });
-    const otherKey = stepUpApprovalKeyOf("another-signing-key-for-tests-0123456789abcdef");
-    const foreign = issueTestEnvironmentStepUpApproval(otherKey, { ...base, project: "payments" }, NOW).token;
+    const otherKey = approvalProofKeyOf("another-signing-key-for-tests-0123456789abcdef");
+    const foreign = issueTestEnvironmentApprovalProof(otherKey, { ...base, project: "payments" }, NOW).token;
     expect(await point().verify(request(), proof(request(), foreign))).toEqual({ approved: false, reason: "not_a_valid_proof" });
     expect((await point().verify({ ...request(), settlesClaims: false } as unknown as ApprovalRequest, proof(request(), good))).approved).toBe(false);
   });
@@ -113,8 +113,8 @@ describe("hosted approvers: a test environment's proof", () => {
     const taskCard = { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST };
     const setupCard = { cardId: "setup_proposal:payments", contentVersion: DIGEST };
     const tokens = {
-      task: issueStepUpApproval(KEY, { ...base, kind: "setting", taskId: TASK, card: taskCard }, NOW).token,
-      setup: issueSetupStepUpApproval(KEY, { ...base, kind: "setting", project: "payments", card: setupCard }, NOW).token,
+      task: issueApprovalProof(KEY, { ...base, kind: "setting", taskId: TASK, card: taskCard }, NOW).token,
+      setup: issueSetupApprovalProof(KEY, { ...base, kind: "setting", project: "payments", card: setupCard }, NOW).token,
       env: token(),
     };
     const requests = {
@@ -141,7 +141,7 @@ describe("hosted approvers: a test environment's proof", () => {
     const UUID_PROJECT = "3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f";
     const c = card(UUID_PROJECT);
     const req = request({ subject: { type: TEST_ENVIRONMENT_SUBJECT, id: UUID_PROJECT }, projectName: UUID_PROJECT, card: c });
-    const taskProof = issueStepUpApproval(KEY, { ...base, kind: "setting", taskId: UUID_PROJECT, card: c }, NOW).token;
+    const taskProof = issueApprovalProof(KEY, { ...base, kind: "setting", taskId: UUID_PROJECT, card: c }, NOW).token;
     expect(await point().verify(req, proof(req, taskProof))).toEqual({ approved: false, reason: "other_subject" });
     expect(await point().verify(req, proof(req, token({ project: UUID_PROJECT, card: c })))).toMatchObject({ approved: true });
   });
@@ -466,12 +466,12 @@ describe("approving a test environment on the deployed API: the gate refuses ano
       companyId: A, kind: TEST_ENVIRONMENT_KIND, subjectId: testEnvironmentSubjectId("payments", seen.digest), requestId, outcome: "approve",
       seen: { revision: seen.revision, artifactDigest: seen.digest }, credentials: [credential], details: {}, card,
     });
-    const taskProof = issueStepUpApproval(KEY, { ...common, requestId: "req_task_00001", taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6" }, w.clock.now);
-    const setupProof = issueSetupStepUpApproval(KEY, { ...common, requestId: "req_setup_0001", project: "payments" }, w.clock.now);
+    const taskProof = issueApprovalProof(KEY, { ...common, requestId: "req_task_00001", taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6" }, w.clock.now);
+    const setupProof = issueSetupApprovalProof(KEY, { ...common, requestId: "req_setup_0001", project: "payments" }, w.clock.now);
     expect(await attempt("req_task_00001", taskProof)).toMatchObject({ status: "refused" });
     expect(await attempt("req_setup_0001", setupProof)).toMatchObject({ status: "refused" });
     expect(await w.approved(A, "payments")).toBeUndefined();
-    const own = issueTestEnvironmentStepUpApproval(KEY, { ...common, requestId: "req_envproof_01", project: "payments" }, w.clock.now);
+    const own = issueTestEnvironmentApprovalProof(KEY, { ...common, requestId: "req_envproof_01", project: "payments" }, w.clock.now);
     expect(await attempt("req_envproof_01", own)).toMatchObject({ status: "decided" });
     expect((await w.approved(A, "payments"))?.revision).toBe(1);
   });
@@ -482,9 +482,9 @@ describe("approving a test environment on the deployed API: the gate refuses ano
     const approvers = createHostedApprovers({ store: new MemoryDocumentStore(), identity, key: KEY, now: () => new Date(NOW) });
     const DIGEST = SHA("d");
     const taskCard = { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST };
-    const envProof = issueTestEnvironmentStepUpApproval(KEY, { companyId: A, personId: "ada", stepUp: { at: new Date(NOW - 60_000).toISOString(), method: "passkey" }, requestId: "req_0123456789", kind: "plan", project: "payments", revision: 3, artifactDigest: DIGEST, outcome: "approve", card: taskCard }, NOW);
+    const envProof = issueTestEnvironmentApprovalProof(KEY, { companyId: A, personId: "ada", stepUp: { at: new Date(NOW - 60_000).toISOString(), method: "passkey" }, requestId: "req_0123456789", kind: "plan", project: "payments", revision: 3, artifactDigest: DIGEST, outcome: "approve", card: taskCard }, NOW);
     const req: ApprovalRequest = { companyId: A, requestId: "req_0123456789.x", kind: "plan", subject: { type: "task", id: TASK }, projectName: "payments", revision: 3, artifactDigest: DIGEST, risk: "high", outcome: "approve", card: taskCard, settlesClaims: true };
-    expect(await approvers.verify(req, { proofId: "p1", method: STEP_UP_APPROVAL_METHOD, requestId: req.requestId, revision: 3, artifactDigest: DIGEST, token: envProof.token })).toEqual({ approved: false, reason: "other_subject" });
+    expect(await approvers.verify(req, { proofId: "p1", method: APPROVAL_PROOF_METHOD, requestId: req.requestId, revision: 3, artifactDigest: DIGEST, token: envProof.token })).toEqual({ approved: false, reason: "other_subject" });
   });
 });
 
