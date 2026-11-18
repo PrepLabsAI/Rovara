@@ -342,6 +342,20 @@ describe("Google APIs: the project", () => {
     expect(reason(run("GET", `https://pubsub.googleapis.com/v1/projects/${PROD_PROJECT.toUpperCase()}/topics`, {}, misconfigured))).toBe("prod");
   });
 
+  it("a BigQuery default dataset is exactly {projectId, datasetId}: another spelling of a member is a second way to name a project", () => {
+    for (const dataset of [{ project_id: "acme-prod-1234", dataset_id: "sales" }, { projectId: GCP_PROJECT, project_id: "acme-prod-1234", datasetId: "sales" }, { projectId: GCP_PROJECT, datasetId: "sales", x: 1 }, { datasetId: "sales", dataset_id: "other" }]) {
+      expect(reason(query("SELECT * FROM orders", { defaultDataset: dataset })), JSON.stringify(dataset)).toBe("not_allowed");
+    }
+    for (const dataset of [{}, { projectId: GCP_PROJECT }, { datasetId: "" }, { datasetId: 5 }, { datasetId: "a b" }, { datasetId: "x".repeat(1025) }]) expect(reason(query("SELECT 1", { defaultDataset: dataset })), JSON.stringify(dataset)).toBe("unreadable");
+    const own = query("SELECT * FROM orders", { defaultDataset: { datasetId: "sales" } });
+    expect(own).toMatchObject({ allow: true });
+    if (!own.allow) throw new Error("expected allow");
+    expect((JSON.parse(own.forwardBody ?? "{}") as { defaultDataset: unknown }).defaultDataset).toEqual({ datasetId: "sales" });
+    const both = query("SELECT * FROM orders", { defaultDataset: { datasetId: "sales", projectId: GCP_PROJECT } });
+    if (!both.allow) throw new Error("expected allow");
+    expect((JSON.parse(both.forwardBody ?? "{}") as { defaultDataset: unknown }).defaultDataset).toEqual({ projectId: GCP_PROJECT, datasetId: "sales" });
+  });
+
   it("a BigQuery default dataset in another project is not allowed", () => {
     expect(reason(query("SELECT 1", { defaultDataset: { projectId: "other-project-1", datasetId: "d" } }))).toBe("not_allowed");
     expect(reason(query("SELECT 1", { defaultDataset: { projectId: GCP_PROJECT, datasetId: "d" } }))).toBe("allowed");
@@ -445,16 +459,22 @@ describe("BigQuery: a SELECT with a forced cap, never a write", () => {
     if (!explicit.allow) throw new Error("expected allow");
     expect(JSON.parse(explicit.forwardBody ?? "{}")).toMatchObject({ useLegacySql: false });
     expect(reason(query("SELECT 1", { useLegacySql: true }))).toBe("not_allowed");
-    for (const sql of ["#legacySQL\nSELECT 1", "  # LegacySQL\nSELECT 1", "#legacysql\nSELECT * FROM [acme-prod-1234:sales.orders]"]) expect(reason(query(sql)), sql).toBe("not_allowed");
-    expect(reason(query("SELECT * FROM [acme-prod-1234:sales.orders]"))).toBe("allowed");
-    const rewritten = query("SELECT * FROM [acme-prod-1234:sales.orders]");
-    if (!rewritten.allow) throw new Error("expected allow");
-    expect((JSON.parse(rewritten.forwardBody ?? "{}") as { useLegacySql: boolean }).useLegacySql).toBe(false);
+    for (const sql of ["#legacySQL\nSELECT 1", "  # LegacySQL\nSELECT 1"]) expect(reason(query(sql)), sql).toBe("not_allowed");
+    expect(query("#legacysql\nSELECT * FROM [acme-prod-1234:sales.orders]").allow).toBe(false);
+    // The legacy table form has a colon, which is refused outright (and would be a syntax error in standard SQL).
+    expect(reason(query("SELECT * FROM [acme-prod-1234:sales.orders]"))).toBe("write");
     expect(reason(query("SELECT * FROM `acme-prod-1234:sales.orders`"))).toBe("prod");
     expect(reason(query("SELECT * FROM `other-project-9:sales.orders`"))).toBe("not_allowed");
     expect(reason(query("SELECT * FROM `.acme-prod-1234.sales.orders`"))).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM `acme-prod-1234:sales`.orders"))).toBe("prod");
+    expect(reason(query("SELECT * FROM `acme-prod-1234:sales`.`orders`"))).toBe("prod");
+    for (const sql of ["SELECT * FROM `acme-prod-1234`:sales.orders", "SELECT * FROM acme-prod-1234:sales.orders", "SELECT * FROM [acme-prod-1234:sales.orders]", "SELECT a ? b : c"]) expect(query(sql).allow, sql).toBe(false);
     expect(reason(query("SELECT * FROM `google.com:x`.d.t"))).toBe("not_allowed");
     expect(bigQueryProjectRefs("SELECT * FROM `acme-prod-1234:sales.orders`")).toEqual(["acme-prod-1234"]);
+  });
+
+  it("a call that reaches a Cloud KMS key is not a read: KEYS.* is no built-in namespace here and a key reference is refused", () => {
+    for (const sql of ["SELECT KEYS.KEYSET_CHAIN('gcp-kms://projects/acme-prod-1234/locations/us/keyRings/r/cryptoKeys/k', b'x') FROM t", "SELECT AEAD.DECRYPT_STRING(k, c, 'x') FROM d.t", "SELECT 'GCP-KMS://projects/p' AS s"]) expect(query(sql).allow, sql).toBe(false);
   });
 
   it("a user-defined, remote or model function is not a read, however far the parenthesis is from its name", () => {

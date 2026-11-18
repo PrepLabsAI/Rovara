@@ -398,7 +398,7 @@ function bigQueryWords(sql: string): { words: string[]; cleaned: string } | unde
 /** A dotted name: unquoted words and quoted names joined by dots (`p.d.t`, `\`p-1.d.t\``, `p.\`d\`.t`). */
 const NAME_CHAIN = /(?:`[^`]*`|[A-Za-z0-9_][A-Za-z0-9_-]*)(?:\s*\.\s*(?:`[^`]*`|[A-Za-z0-9_]+))*/gu;
 /** Namespaces of BigQuery's own functions (`SAFE.PARSE_DATE(..)`): the only dotted names that may be called. */
-const BUILTIN_NAMESPACES = new Set(["SAFE", "NET", "KEYS", "AEAD", "HLL_COUNT", "DETERMINISTIC_ENCRYPT"]);
+const BUILTIN_NAMESPACES = new Set(["SAFE", "NET", "HLL_COUNT"]);
 
 const CALL_PAREN = /\s*\(/uy;
 const nameParts = (chain: string): string[] => chain.replace(/\s+/gu, "").match(/`[^`]*`|[^.`]+/gu)?.flatMap((part) => (part.startsWith("`") ? part.slice(1, -1).split(".") : [part])) ?? [];
@@ -415,12 +415,11 @@ export function bigQueryProjectRefs(sql: unknown): string[] | undefined {
   for (const match of read.cleaned.matchAll(NAME_CHAIN)) {
     const parts = nameParts(match[0]);
     if (parts.length >= 3) refs.push(parts[0] as string);
-    // A quoted name with a colon is the legacy `project:dataset.table` form: the part before the colon is its project. A name with an empty first part (`.p.d.t`) names none we know: refused as a project of "".
-    else if (match[0].includes("`") && match[0].replace(/`[^`]*`/gu, "").trim() === "") {
-      const inner = match[0].slice(1, -1);
-      if (inner.includes(":")) refs.push(inner.slice(0, inner.indexOf(":")));
-    }
-    if (parts.length >= 2 && parts[0] === "") refs.push("");
+  }
+  // A quoted name with a colon is the legacy `project:dataset.table` form wherever it stands in a chain: the part before the colon is its project. (A name with an empty first part, `.p.d.t`, has a project of "", which is none of the connection's.)
+  for (const quoted of read.cleaned.matchAll(/`([^`]*)`/gu)) {
+    const inner = quoted[1] as string;
+    if (inner.includes(":")) refs.push(inner.slice(0, inner.indexOf(":")));
   }
   return refs;
 }
@@ -431,6 +430,8 @@ export function bigQueryStatementIsRead(sql: unknown): "read" | "write" | "unrea
   const read = bigQueryWords(sql);
   if (read === undefined) return "unreadable";
   const { words, cleaned } = read;
+  // A colon outside a quoted name is the legacy table form (`p:d.t`) or nothing GoogleSQL has: refused. A Cloud KMS key reference names a key in some project and the run's identity would call it: refused.
+  if (cleaned.replace(/`[^`]*`/gu, "").includes(":") || /gcp-kms:/iu.test(sql)) return "write";
   while (words.length > 0 && words[words.length - 1] === ";") words.pop();
   const first = words[0];
   if (first !== "SELECT" && first !== "WITH") return "write";
@@ -512,10 +513,16 @@ function classifyBigQueryQuery(members: Record<string, unknown>, label: string, 
   if (typeof members.query === "string" && /^\s*#\s*legacysql/iu.test(members.query)) return refuse("not_allowed", label);
   for (const flag of ["useLegacySql", "useQueryCache"]) if (members[flag] !== undefined && typeof members[flag] !== "boolean") return refuse("unreadable", label);
   const dataset = members.defaultDataset;
+  let rebuiltDataset: Record<string, string> | undefined;
   if (dataset !== undefined) {
     if (typeof dataset !== "object" || dataset === null || Array.isArray(dataset)) return refuse("unreadable", label);
-    const projectId = (dataset as Record<string, unknown>).projectId;
+    // Exactly {projectId, datasetId}: another spelling of a member (`project_id`, which protobuf JSON also accepts) is a second way to name a project that this check does not read, so any other member is refused and the object is rebuilt below from these two.
+    const given = dataset as Record<string, unknown>;
+    if (Object.keys(given).some((key) => key !== "projectId" && key !== "datasetId")) return refuse("not_allowed", label);
+    const { projectId, datasetId } = given;
     if (projectId !== undefined && (typeof projectId !== "string" || !(policy.gcpProjects ?? []).includes(projectId))) return refuse("not_allowed", label);
+    if (typeof datasetId !== "string" || !/^[A-Za-z0-9_]{1,1024}$/u.test(datasetId)) return refuse("unreadable", label);
+    rebuiltDataset = projectId === undefined ? { datasetId } : { projectId, datasetId };
   }
   // A table of another project (`p.d.t`), or one on the production list, is not this connection's: only its own project's tables are read.
   const refs = bigQueryProjectRefs(members.query) ?? [];
@@ -531,7 +538,7 @@ function classifyBigQueryQuery(members: Record<string, unknown>, label: string, 
     requested = Math.min(Number(text), cap);
   }
   const maximumBytesBilled = String(requested);
-  const forwarded = JSON.stringify({ ...members, maximumBytesBilled, useLegacySql: false });
+  const forwarded = JSON.stringify({ ...members, ...(rebuiltDataset === undefined ? {} : { defaultDataset: rebuiltDataset }), maximumBytesBilled, useLegacySql: false });
   return { allow: true, protocol: "google", method: "POST", host, operation: label, bigQuery: { maximumBytesBilled, dryRun: members.dryRun === true }, forwardBody: forwarded };
 }
 
