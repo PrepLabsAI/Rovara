@@ -16,7 +16,6 @@ import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { taskKey } from "../core/task-flow/keys.js";
 import { systemPrincipalOf } from "../core/system-runs/access.js";
 import { systemRunsGateSaysOn, type SystemRunsGate } from "../core/system-runs/consent.js";
-import { systemRunRequestId } from "../core/system-runs/starter.js";
 import { startUpkeepWikiRefresh, type UpkeepRefreshAnswer } from "../core/upkeep/refresh.js";
 import type { FileMapRepository } from "../core/wiki/file-map.js";
 import { createWikiStore } from "../core/wiki/store.js";
@@ -114,9 +113,6 @@ export function createHostedWikiRefresh(inputs: HostedWikiRefreshInputs): (proje
     }, { project, day, includeUnwritten: options.includeUnwritten });
   };
 }
-
-/** The night's request id for a wiki refresh, for a test or a reader (the same derivation the refresh uses). */
-export const wikiRefreshRequestId = (companyId: string, project: string, day: string): string => systemRunRequestId(companyId, project, "wiki_refresh", day);
 
 /**
  * The `automation-stop` job's hosted service for a company the system runs ceiling covers: it settles the reservation of each open unattended run whose task ended and stops one that outlived its minutes

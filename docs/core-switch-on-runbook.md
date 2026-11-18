@@ -177,6 +177,15 @@ Rovara's own runs (the free setup re-check at task start, and the hourly `upkeep
 - Proof on staging: press "Re-check setup" on a project (`POST /v1/app/projects/{p}/setup-check`, a person's check, no flag needed); then turn the flag on for the founders' company, switch one project's upkeep on, and watch one night.
 - Machine time of system runs is attributed to the company and project (rows `SYSTEM_RUN_USAGE`), counted and not yet limited: no machine-minute meter or cap exists (the gap is in the PR body).
 
+### Two locks (L4-P2, owner DEC 254zzt, option A)
+
+`CoreSystemRuns` is now only the CEILING (what the operator allows). Rovara's automatic runs also need the COMPANY'S CONSENT: a stored row (`ORG#<company>#SYSTEM_RUNS` / `CONSENT`) written only by a live company owner or admin, through the setup step `PUT /v1/app/projects/{p}/upkeep { requestId, on: true, allowSystemRuns: true }`, which sets the consent and the project's upkeep switch in one transaction with an audit record for each (`system_runs.consent_set`, `upkeep.upkeep_switched`). Effective system runs = ceiling AND consent, read on every use (the task access rule, the re-check at task start and its retry on the dispatcher, the starter, the night, each wiki page). Taking either away stops the next step.
+
+- Turning the ceiling on alone changes nothing for a company until its owner or admin consents. Withdraw: `allowSystemRuns: false` (with `on: false`).
+- The dispatcher now also receives the packed `coreSystemRuns` value (environment only, no IAM): its setup gate before a build can retry a re-check, and that retry must stop when the flag goes off. The preview shows the dispatcher's AGENTX_SETTINGS changing in addition to the broker's.
+- AI: the nightly wiki refresh (the only AI kind live) starts only where the registered Admission declares an enforced dollar cap (`enforcesCost`, the per-run stop wired), both locks are open, the project's upkeep is ON, Admission says yes (hold keyed by the night) and the audit record `system_run.requested` (kind `wiki_refresh`) is written first. Model calls carry the work origin `nightly`, so the gateway's upkeep cap (Cloud #125) counts them. The repair draft stays refused on hosted.
+- The cap number is not stored in Code: `GET .../upkeep` answers `cap.monthlyUsd: null` until the host has a gateway read for it.
+
 ## Rollback: unattended off → drain → off
 
 ```sh

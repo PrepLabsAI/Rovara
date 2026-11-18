@@ -652,7 +652,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
         const systemRuns = createHostedSystemRuns({
           flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log,
-          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: upkeep.pauses.paused,
+          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input),
           refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, log }),
         });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.

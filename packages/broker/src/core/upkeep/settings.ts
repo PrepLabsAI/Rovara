@@ -7,7 +7,7 @@
 //   - The schedule follows the switch: ON puts the project's upkeep night on the scheduler, OFF removes it. A schedule that could not be changed is thrown AFTER the row is written (the switch is what is true; a retry of
 //     the same request puts it right).
 // The monthly dollar cap is NOT here: the gateway holds it (Cloud's `upkeep_month`), so no number written in Code can lift it.
-import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, type DocumentStore, type OrgId, type UpkeepView } from "@agentx/contracts";
+import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, when, type DocumentStore, type OrgId, type UpkeepView } from "@agentx/contracts";
 import { readSystemRunsConsentRow, systemRunsConsentKey } from "../system-runs/consent.js";
 import { upkeepSettingsKey, type UpkeepScope } from "./keys.js";
 
@@ -106,14 +106,15 @@ export async function upkeepView(deps: UpkeepControlDeps, personId: string, proj
   if (standing.access === "none") throw agentXError("PROJECT_NOT_FOUND", UPKEEP_WORDS.projectNotFound);
   const available = await availableOf(deps);
   const companyAdmin = standing.access === "manage" && standing.companyAdmin === true;
-  let monthlyUsd: number | null = null;
-  try {
-    const read = deps.cap === undefined ? null : await deps.cap();
-    monthlyUsd = typeof read === "number" && Number.isFinite(read) && read >= 0 ? read : null;
-  } catch { monthlyUsd = null; }
+  const monthlyUsd = await (async (): Promise<number | null> => {
+    try {
+      const read = deps.cap === undefined ? null : await deps.cap();
+      return typeof read === "number" && Number.isFinite(read) && read >= 0 ? read : null;
+    } catch { return null; }
+  })();
   return {
     enabled: (await readUpkeepSetting(deps, project)).enabled, canManage: standing.access === "manage", available,
-    systemRunsOn: available && (deps.noConsentNeeded === true || (await readSystemRunsConsentRow(deps)).enabled), canEnableSystemRuns: available && companyAdmin, cap: { monthlyUsd, canRaise: companyAdmin },
+    systemRunsOn: available && (deps.noConsentNeeded === true || (await readSystemRunsConsentRow(deps)).enabled), canEnableSystemRuns: available && companyAdmin, cap: { monthlyUsd: standing.access === "manage" ? monthlyUsd : null, canRaise: companyAdmin },
   };
 }
 
@@ -166,9 +167,12 @@ export async function setSystemRunsAndUpkeep(deps: UpkeepSettingsDeps, input: { 
     await deps.record("upkeep_switched", input.project, { requestId: input.requestId, on: input.on, previous: previousOf(beforeSettings) });
   } catch { throw agentXError("AUDIT_UNAVAILABLE", UPKEEP_WORDS.auditUnavailable); }
   const changedAt = new Date(deps.now()).toISOString();
+  // Each row changes only if it is still the one this act read (a concurrent setup request, or a change between the read and the write, loses and is told to try again).
+  const fence = (row: Record<string, unknown> | undefined): { condition?: ReturnType<typeof when.absent> } =>
+    row === undefined ? { condition: when.absent() } : typeof row["changedAt"] === "string" ? { condition: when.eq("changedAt", row["changedAt"]) } : {};
   const written = await deps.store.transact([
-    { kind: "put", item: { ...consentKey, entityType: "SYSTEM_RUNS_CONSENT", orgId: deps.companyId, enabled: input.allow, changedAt, requestId: input.requestId } },
-    { kind: "put", item: { ...settingsKey, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId } },
+    { kind: "put", item: { ...consentKey, entityType: "SYSTEM_RUNS_CONSENT", orgId: deps.companyId, enabled: input.allow, changedAt, requestId: input.requestId }, ...fence(beforeConsent) },
+    { kind: "put", item: { ...settingsKey, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId }, ...fence(beforeSettings) },
   ]).catch(() => ({ applied: false as const }));
   if (!written.applied) throw agentXError("RUNTIME_UNAVAILABLE", UPKEEP_WORDS.unreadable);
   if (deps.schedule !== undefined) {

@@ -43,7 +43,7 @@ function hosted(options: Options = {}) {
   const store = new Proxy(base, {
     get: (target, key) => {
       const value = Reflect.get(target, key, target) as unknown;
-      if (key === "transact") return async (items: readonly unknown[]) => { transacts.push(items.length); return options.transact === "fail" ? { applied: false, reason: "condition_failed", failed: [0] } : (target.transact as any)(items); };
+      if (key === "transact") return async (items: readonly unknown[]) => { transacts.push(items.length); return options.transact === "fail" ? { applied: false, reason: "condition_failed", failed: [0] } : (target.transact.bind(target))(items as never); };
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
   });
@@ -62,6 +62,7 @@ function hosted(options: Options = {}) {
   if (options.consent === true) void base.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: new Date(T0).toISOString(), requestId: randomUUID() } });
   return { store: base, company, audited, call, transacts };
 }
+const errorOf = (answer: { body: Body }): { code: string; message: string } => answer.body["error"] as { code: string; message: string };
 const setup = (w: ReturnType<typeof hosted>, person: string, body: Record<string, unknown> = {}) => w.call(person, "PUT", "beacon", { requestId: randomUUID(), on: true, allowSystemRuns: true, ...body });
 const consentOf = (store: MemoryDocumentStore, company: OrgId = COMPANY_A) => readSystemRunsConsentRow({ store, companyId: company });
 const nothingWritten = async (w: ReturnType<typeof hosted>) => {
@@ -84,11 +85,19 @@ describe("the consent is written only by a live company owner or admin", () => {
       const answer = await setup(w, person);
       expect(answer.status, person).toBe(403);
       // The maintainer MAY manage the project, so the words are the consent's own; a reader gets the project switch's.
-      expect((answer.body["error"] as any).message).toBe(person === MAINTAINER ? SYSTEM_RUNS_CONSENT_WORDS.notAllowed : "Only company owners and admins, or this project's admins, can switch nightly upkeep on or off.");
+      expect(errorOf(answer).message).toBe(person === MAINTAINER ? SYSTEM_RUNS_CONSENT_WORDS.notAllowed : "Only company owners and admins, or this project's admins, can switch nightly upkeep on or off.");
       await nothingWritten(w);
       expect(w.audited).toEqual([]);
       expect(w.transacts).toEqual([]);
     }
+  });
+
+  // MUTANT M2: the setup step's owner/admin gate before the availability check is dropped (the in-core check still refuses, but the ceiling-off answer would then leak "unavailable" to a maintainer).
+  it("a maintainer asking for the consent step is told 403 (not 'unavailable') even while the ceiling is off", async () => {
+    const w = hosted({ ceiling: false });
+    const answer = await setup(w, MAINTAINER);
+    expect(answer.status).toBe(403);
+    expect(errorOf(answer).message).toBe(SYSTEM_RUNS_CONSENT_WORDS.notAllowed);
   });
 
   it("no role on the project is the uniform 404 and another company's person has no standing here", async () => {
@@ -104,7 +113,7 @@ describe("the consent is written only by a live company owner or admin", () => {
     const w = hosted({ standing: async (person, org, project) => { reads += 1; return reads <= 2 ? standingOf(org, project, person) : { access: "manage", basis: "project-admin" }; } });
     const answer = await setup(w, OWNER);
     expect(answer.status).toBe(403);
-    expect((answer.body["error"] as any).message).toBe(SYSTEM_RUNS_CONSENT_WORDS.notAllowed);
+    expect(errorOf(answer).message).toBe(SYSTEM_RUNS_CONSENT_WORDS.notAllowed);
     await nothingWritten(w);
     expect(w.audited).toEqual([]);
   });
@@ -115,7 +124,7 @@ describe("the consent is written only by a live company owner or admin", () => {
     expect((await consentOf(w.store)).enabled).toBe(true);
     const contradiction = await setup(w, OWNER, { on: true, allowSystemRuns: false });
     expect(contradiction.status).toBe(400);
-    expect((contradiction.body["error"] as any).message).toBe(SYSTEM_RUNS_CONSENT_WORDS.contradiction);
+    expect(errorOf(contradiction).message).toBe(SYSTEM_RUNS_CONSENT_WORDS.contradiction);
     expect((await consentOf(w.store)).enabled).toBe(true);
     const off = await setup(w, ADMIN, { on: false, allowSystemRuns: false });
     expect(off.status).toBe(200);
@@ -152,7 +161,7 @@ describe("effective = ceiling AND consent (the four combinations, as the page re
     const read = hosted({ consent: true, cap: async (company, project) => (company === COMPANY_A && project === "beacon" ? 40 : null) });
     expect((await read.call(OWNER, "GET", "beacon")).body["cap"]).toEqual({ monthlyUsd: 40, canRaise: true });
     expect((await read.call(MAINTAINER, "GET", "beacon")).body["cap"]).toEqual({ monthlyUsd: 40, canRaise: false });
-    expect((await read.call(VIEWER, "GET", "beacon")).body["cap"]).toEqual({ monthlyUsd: 40, canRaise: false });
+    expect((await read.call(VIEWER, "GET", "beacon")).body["cap"]).toEqual({ monthlyUsd: null, canRaise: false });
     for (const bad of [async () => { throw new Error("down"); }, async () => Number.NaN, async () => -1, async () => "25" as never, async () => Infinity]) {
       expect((await hosted({ consent: true, cap: bad }).call(OWNER, "GET", "beacon")).body["cap"]).toEqual({ monthlyUsd: null, canRaise: true });
     }
@@ -219,7 +228,7 @@ describe("the setup PUT: consent and the project switch in ONE transaction, audi
     for (const failing of ["system_runs.consent_set", "upkeep.upkeep_switched"]) {
       const w = hosted({ audit: async (event) => { if (event.action === failing) throw new Error("audit down"); } });
       const answer = await setup(w, OWNER);
-      expect((answer.body["error"] as any).code, failing).toBe("AUDIT_UNAVAILABLE");
+      expect(errorOf(answer).code, failing).toBe("AUDIT_UNAVAILABLE");
       expect(answer.status).toBeGreaterThanOrEqual(500);
       await nothingWritten(w);
       expect(w.transacts).toEqual([]);
@@ -240,6 +249,17 @@ describe("the setup PUT: consent and the project switch in ONE transaction, audi
     const consents = [...seen.values()].filter((event) => event.action === "system_runs.consent_set").map((event) => event.details?.["on"]);
     expect(consents).toEqual([true, false, true]);
     expect((await consentOf(w.store)).enabled).toBe(true);
+  });
+
+  // MUTANT (review L2): the two puts are unconditional, so a concurrent change between the read and the write is overwritten.
+  it("a row that changed between the read and the write loses: the setup step writes neither row and says to try again", async () => {
+    const w = hosted({ audit: async (event, store) => {
+      if (event.action === "system_runs.consent_set") await store.put({ item: { ...systemRunsConsentKey(COMPANY_A), entityType: "SYSTEM_RUNS_CONSENT", orgId: COMPANY_A, enabled: false, changedAt: "2026-11-17T11:59:59.000Z", requestId: randomUUID() } });
+    } });
+    const answer = await setup(w, OWNER);
+    expect(answer.status).toBe(503);
+    expect((await consentOf(w.store)).enabled).toBe(false);
+    expect(await queryAll(w.store, { pk: `ORG#${COMPANY_A}#UPKEEP#beacon` })).toHaveLength(0);
   });
 
   it("the schedule follows the project's switch in the setup step", async () => {

@@ -106,6 +106,13 @@ describe("the root and the dispatcher each call it, directly, for every company'
     expect(readFileSync(file, "utf8")).not.toMatch(/\.systemRuns\s*=/u);
   });
 
+  // MUTANT (review L5): the root's task-access gate falls back to the ceiling alone.
+  it("the broker root's task-access gate reads BOTH locks (the effective gate), never the ceiling alone", () => {
+    const root = readFileSync("packages/broker/src/aws/core-engine-root.ts", "utf8");
+    expect(root).toMatch(/systemRunsOn: \(\) => effectiveSystemRunsGateOf\(systemRunsFlag\.value, companyId, registry\.require\("storage"\)\)\.enabled\(\)/u);
+    expect(root).not.toMatch(/systemRunsGateOf\(/u);
+  });
+
   it("the dispatcher: one call, a direct statement of `depsFor`, which every dispatched step's deps come from", () => {
     const file = "packages/broker/src/aws/worker-machines/dispatcher-core.ts";
     expect(directCallsIn(file, "depsFor")).toEqual({ calls: 1, direct: 1 });

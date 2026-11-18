@@ -5,10 +5,11 @@
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, change, WORKER_INVOCATION_FEATURES, WIKI_BUILD_FEATURE, PREPARE_PINS_FEATURE, projectMetaKey, systemOwnerIdOf, type Admission, type OrgId, type ProjectDefinition, type WikiPageWrite } from "@agentx/contracts";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
-import { createHostedAutomationStop, createHostedWikiRefresh, hostedUnattendedTasks, wikiRefreshRequestId } from "../../packages/broker/src/core-host/wiki-refresh.js";
+import { createHostedAutomationStop, createHostedWikiRefresh, hostedUnattendedTasks } from "../../packages/broker/src/core-host/wiki-refresh.js";
 import { effectiveSystemRunsGateOf } from "../../packages/broker/src/core-host/system-runs.js";
 import { parseCoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
+import { nightRequestId } from "../../packages/broker/src/core/upkeep/refresh.js";
 import { setUpkeepEnabled } from "../../packages/broker/src/core/upkeep/settings.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
@@ -70,7 +71,7 @@ async function build(options: Options = {}) {
       await real.record(event);
     },
   };
-  const refresh = createHostedWikiRefresh({ flow: h.deps, companyId: company, now: () => h.clock.now, gate, admission: options.enforces === false ? { ...admission, enforcesCost: false } : admission, modelAccessConfigured: true, map: { standing: async () => ({ access: "none" }), hostFor: () => host as never } });
+  const refresh = createHostedWikiRefresh({ flow: h.deps, companyId: company, now: () => h.clock.now, gate, admission: options.enforces === false ? { ...admission, enforcesCost: false } : admission, modelAccessConfigured: true, map: { standing: async () => ({ access: "none" }), hostFor: () => host } });
   return { h, wiki, refresh, admitted, released, auditBefore, gate, company };
 }
 const go = (w: Awaited<ReturnType<typeof build>>) => w.refresh("payments", DAY, { includeUnwritten: false });
@@ -113,7 +114,9 @@ describe("a started refresh", () => {
     expect(pointer).toMatchObject({ unattended: true, requestedBy: systemOwnerIdOf(w.company, "payments"), buildKind: "refresh" });
     const task = (await w.h.store.get(taskKey(pointer.taskId)))!;
     expect(task).toMatchObject({ developerId: systemOwnerIdOf(w.company, "payments"), purpose: "wiki_build", origin: "nightly", companyId: w.company, project: "payments" });
-    expect(w.admitted.filter((entry) => entry.action === "automation.run")).toEqual([{ key: `automation.run#${wikiRefreshRequestId(w.company, "payments", DAY)}`, action: "automation.run" }].map((entry) => ({ ...entry, key: expect.stringMatching(/^automation\.run#[0-9a-f-]{36}$/u) as unknown as string })));
+    const holds = w.admitted.filter((entry) => entry.action === "automation.run");
+    expect(holds).toHaveLength(1);
+    expect(holds[0]!.key).toBe(`automation.run#${nightRequestId(w.company, "payments", DAY)}`);
     // The audit record: written before the pointer (and so before the task), naming the kind and the project's system owner.
     expect(w.auditBefore).toEqual([{ action: "system_run.requested", pointerPresent: false }]);
     const event = w.h.audit.find((entry: { action: string }) => entry.action === "system_run.requested") as { actor: unknown; details: unknown };
