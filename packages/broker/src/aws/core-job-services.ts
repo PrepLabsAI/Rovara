@@ -15,7 +15,7 @@ import { createMergeTrackingService, createMilestoneService } from "../services/
 import { rovaraCheckSource } from "../services/rovara-check.js";
 import { createIdentityMergePeople, type MergePeople } from "../core/merge/people.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
-import type { CodeSettingsReader } from "../core/merge/seams.js";
+import type { CodeSettingsReader, HumanEditSink } from "../core/merge/seams.js";
 import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
 import type { SummaryDependencies } from "../core/sessions/summary.js";
@@ -86,6 +86,8 @@ export interface BrokerCoreServicesOptions {
   settings?: CodeSettingsReader;
   /** The "Rovara" Check's source (its gate, facts and address). Absent: no Check. The merge tracking service adds the verdict that the description's words come from. */
   summaryCheck?: SummaryCheckSource;
+  /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request (the core engine gives it with the company's own lessons). Absent: nothing is told. */
+  humanEdit?: HumanEditSink | undefined;
   summary?: Pick<SummaryDependencies, "facts" | "cost">;
   notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep"> & Pick<NoticeServiceOptions, "remember">;
   now?: () => Date;
@@ -146,7 +148,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         log();
       };
       const tracking = createMergeTrackingService({ flow: depsFor(recoveryStore(store, companyId)), registry, companyId, scan: mergeScan, people, settings, milestones: createMilestoneService({ store, now }), now, log: trackingLog,
-        ciMode: ci.ciMode, ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }),
+        ciMode: ci.ciMode, ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
       });
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });
       const tierChecked = now() < deadlineMs ? await tracking.tierChecks() : 0;

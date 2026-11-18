@@ -59,6 +59,11 @@ export interface GitHubPullRequestUpdate {
   state?: "open" | "closed";
 }
 
+/** One account of a commit's author or committer as GitHub linked it. */
+export interface GitHubCommitAccount { login: string; id: number | undefined; type: string | undefined }
+/** Who GitHub says wrote a commit (L4-LM1c): the accounts it linked (absent when it linked none), and whether the committer is GitHub's own web committer. */
+export interface GitHubCommitIdentity { author?: GitHubCommitAccount; committer?: GitHubCommitAccount; webFlow: boolean }
+
 export interface GitHubPullRequestChangedFile {
   filename: string;
   status: string;
@@ -158,7 +163,7 @@ export interface GitHubCodeHostProvider {
   listWorkingBranches(repositoryUrl: string, expected: { installationId: number; repositoryId: number }, scope: GitHubTokenScope, page?: number): Promise<WorkingBranchPage>;
   getCommitParents(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string[]>;
   /** Optional (DEC 213): one commit's own changes, its parents, and whether GitHub gave the whole list. A client without it leaves the adapter without `commitChanges`. */
-  getCommitChanges?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }>;
+  getCommitChanges?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[]; /** L4-LM1c: who GitHub says wrote the commit (optional: a client that does not say leaves it out). */ identity?: GitHubCommitIdentity }>;
   /** Optional (DEC 213): a commit's changes against a commit it builds on (a merge against its second parent), and whether GitHub gave the whole list. A client without it leaves the adapter without `compareChanges`. */
   getCompareChanges?(repositoryUrl: string, baseSha: string, headSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean }>;
   /** Optional (M7 slice 2, decision 252b): the latest state of each deployment of a commit, read only and bounded, with a token that asks for `deployments: read`. A client without it leaves the adapter without `deploymentStatuses`. */

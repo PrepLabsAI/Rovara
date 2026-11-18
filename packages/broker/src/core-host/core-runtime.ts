@@ -16,6 +16,7 @@ import { startFenceItems } from "../core/task-flow/start-fence.js";
 import { reportStartItems } from "../core/report/task-row.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
+import type { HumanEditSink } from "../core/merge/seams.js";
 import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js"; import type { AttentionDeliveryDependencies } from "../core/notify/attention.js"; import type { SessionChange } from "../core/sessions/summary.js";
 
 /** A core service a scheduled job runs, per company. */
@@ -47,6 +48,8 @@ export interface CoreServiceWiring {
   ciMode?: CheckedCiReporting["ciMode"] | undefined; /** The attention email's own seams (hosted core, switch on): the person's address and per-person links. Absent: as before. */ notification?: (Pick<AttentionDeliveryDependencies, "address" | "emailLinks"> & { remember?: (change: SessionChange) => Promise<void> }) | undefined;
   /** L4-P2: the notice service's live "does this person still administer the project" read for the admins' upkeep notice (`createUpkeepAdministers`). Absent: no upkeep row is delivered. */
   upkeep?: { administers(orgId: OrgId, developerId: string, project: string): Promise<boolean> } | undefined;
+  /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request, for merge tracking to tell. Undefined when lessons are not built for the company. */
+  humanEdit?: HumanEditSink | undefined;
 }
 
 export interface CoreRuntimeOptions {

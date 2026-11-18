@@ -33,7 +33,7 @@ import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
 import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import { createPullRequestVerdictSource } from "../core/build-step/pull-request-verdict.js";
-import type { CodeMilestones, CodeSettingsReader, MergeTask, SessionTimeline } from "../core/merge/seams.js";
+import type { CodeMilestones, CodeSettingsReader, HumanEditSink, MergeTask, SessionTimeline } from "../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { sessionEventItem } from "../core/sessions/store.js";
@@ -159,6 +159,8 @@ export interface MergeTrackingServiceOptions {
   summaryCheck?: SummaryCheckSource;
   /** MR3b: the dependency facts between a task's repositories (`createRepositoryEdgesSeam`). Absent: a pull request merged out of order is not warned about, and no pull request is held for the order. */
   repositoryEdges?: ((task: MergeTask) => unknown) | undefined;
+  /** L4-LM1c: told when a pass sees a head a person pushed (learning from people's edits to Rovara's pull requests). Absent: nothing is told. */
+  humanEdit?: HumanEditSink | undefined;
   /** Milliseconds since the epoch. The host's clock, so a test can move it. */
   now: () => number;
   log?: Log;
@@ -223,6 +225,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     // L4-PRP: the verdict of a pull request, the words of its description: for the Check (when the host asks for one) and for the "ready for review" line.
     verdict: verdictSource,
     ...(options.summaryCheck === undefined ? {} : { summaryCheck: { ...options.summaryCheck, verdict: options.summaryCheck.verdict ?? verdictSource } }),
+    ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 

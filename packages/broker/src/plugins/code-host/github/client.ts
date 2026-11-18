@@ -290,6 +290,11 @@ export interface GitHubPullRequestUpdate {
   state?: "open" | "closed";
 }
 
+/** One account of a commit's author or committer as GitHub linked it (same shape as provider.ts's). */
+export interface GitHubCommitAccount { login: string; id: number | undefined; type: string | undefined }
+/** Who GitHub says wrote a commit (L4-LM1c): the accounts it linked (absent when it linked none), and whether the committer is GitHub's own web committer. */
+export interface GitHubCommitIdentity { author?: GitHubCommitAccount; committer?: GitHubCommitAccount; webFlow: boolean }
+
 export interface GitHubPullRequestChangedFile {
   filename: string;
   status: string;
@@ -2140,7 +2145,7 @@ export class GitHubAppCredentialProvider {
    * pages than `COMMIT_FILES_PAGES_MAX`, a changed file it gave no patch for (too large, or binary), or file counts that do not add up to the commit's own totals (GitHub's 3,000-file limit). Throws when GitHub cannot answer.
    * `beforePage` is called before EVERY page is asked for (one unit of the pass's allowance a page; it throws when the allowance or the pass's time is used up, and the read stops with it).
    */
-  async getCommitChanges(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }> {
+  async getCommitChanges(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[]; identity: GitHubCommitIdentity }> {
     if (!/^[a-f0-9]{40}$/u.test(commitSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
     const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
     const token = await this.readTokenFor(repository, scope);
@@ -2148,6 +2153,7 @@ export class GitHubAppCredentialProvider {
     let complete = true;
     let parents: string[] | undefined;
     let stats: { additions: number; deletions: number } | undefined;
+    let identity: GitHubCommitIdentity | undefined;
     for (let page = 1; ; page += 1) {
       if (page > COMMIT_FILES_PAGES_MAX) { complete = false; break; }
       beforePage?.();
@@ -2165,6 +2171,8 @@ export class GitHubAppCredentialProvider {
       });
       if (parents !== undefined && JSON.stringify(parents) !== JSON.stringify(pageParents)) throw agentXError("RUNTIME_UNAVAILABLE", "The commit read changed between pages.");
       parents = pageParents;
+      // L4-LM1c: who GitHub says wrote the commit, from the first page (the accounts GitHub linked, by id; never a name or an email).
+      identity ??= githubCommitIdentityOf(value);
       if (stats === undefined && value.stats !== undefined) {
         const read = feedbackRecord(value.stats);
         if (Number.isSafeInteger(read.additions) && Number.isSafeInteger(read.deletions)) stats = { additions: read.additions as number, deletions: read.deletions as number };
@@ -2177,7 +2185,7 @@ export class GitHubAppCredentialProvider {
     if (files.some((file) => file.patch === undefined && file.status !== "removed" && file.additions + file.deletions > 0)) complete = false;
     // The files must add up to the commit's own totals: GitHub lists at most 3,000 files of a commit and says nothing else about the rest.
     if (complete && stats !== undefined && (files.reduce((total, file) => total + file.additions, 0) !== stats.additions || files.reduce((total, file) => total + file.deletions, 0) !== stats.deletions)) complete = false;
-    return { files, complete, parents: parents ?? [] };
+    return { files, complete, parents: parents ?? [], identity: identity ?? { webFlow: false } };
   }
 
   /**
@@ -3594,6 +3602,23 @@ async function workingBranchPageJson(response: Response): Promise<unknown> {
 
 /** DEC 213: the most pages of one commit's files read (100 a page); past them the commit's list is cut. */
 const COMMIT_FILES_PAGES_MAX = 3;
+/** GitHub's own web committer (the account that commits an edit or a squash made on github.com): its numeric id, never its login. */
+const GITHUB_WEB_FLOW_ID = 19864447;
+
+/** One account of a commit's author or committer as GitHub linked it, checked: a login and a numeric id, or none (an unlinked identity is `null`, or an object with no login). */
+function githubCommitAccountOf(value: unknown): { login: string; id: number | undefined; type: string | undefined } | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const account = value as Record<string, unknown>;
+  if (typeof account.login !== "string" || account.login === "" || account.login.length > 200) return undefined;
+  const id = Number.isSafeInteger(account.id) && (account.id as number) > 0 ? account.id as number : undefined;
+  return { login: account.login, id, type: typeof account.type === "string" ? account.type : undefined };
+}
+/** Who GitHub says wrote a commit (`GET /commits/<sha>`'s `author` and `committer`, the accounts it linked). */
+function githubCommitIdentityOf(commit: Record<string, unknown>): GitHubCommitIdentity {
+  const author = githubCommitAccountOf(commit.author);
+  const committer = githubCommitAccountOf(commit.committer);
+  return { ...(author === undefined ? {} : { author }), ...(committer === undefined ? {} : { committer }), webFlow: committer?.id === GITHUB_WEB_FLOW_ID };
+}
 /** M7 slice 2: the most deployments of one commit `getDeploymentStatuses` reads the status of (one request each). */
 const DEPLOYMENTS_LISTED_MAX = 10;
 /** GitHub's own web committer (`web-flow`, the committer of a squash or web edit made on github.com): decided by this numeric account id, never by a login or a message. */
