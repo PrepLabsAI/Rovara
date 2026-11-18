@@ -141,7 +141,8 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
   it("the boot scripts' docker pull sites are exactly the ones this scope was derived from", () => {
     // every EC2 boot script except the swebench one (its own role): a new script cannot add a pull unseen
     const scripts = readdirSync("packages/worker/ec2").filter((name) => name.endsWith(".sh") && name !== "swebench-boot.sh").sort();
-    expect(scripts).toEqual(["boot.sh", "test-services-stage.sh"]);
+    // L4-NETG: sandbox-egress.sh and devcontainer-docker.sh pull nothing (checked just below); the only image they start is the worker image the boot already pulled, inside the scope above.
+    expect(scripts).toEqual(["boot.sh", "devcontainer-docker.sh", "sandbox-egress.sh", "test-services-stage.sh"]);
     const read = (name: string) => readFileSync(`packages/worker/ec2/${name}`, "utf8");
     const boot = read("boot.sh");
     const stage = read("test-services-stage.sh");
@@ -154,6 +155,20 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
     expect(boot).toContain("AGENTX_SANDBOX_IMAGE=$AGENTX_WORKER_IMAGE");
     expect(boot).toContain("readonly CONTAINED_IMAGE=node@sha256:"); // Docker Hub: no ECR
     expect(pulls(stage)).toEqual(["$reference"]);
+    // L4-NETG (DEC 254zzz77): the gateway stage and the devcontainer wrapper make no pull and no ECR login. The gateway container, the program and deny-list reads and the boot probe all start `$AGENTX_WORKER_IMAGE`
+    // (already on the host, pulled by pull_worker_image from agentx-<env>/worker, inside the pull-through prefix the role reads); `docker run`/`create` of a present image never pulls, and the wrapper only passes
+    // `run`/`create` of whatever image the dev container CLI names to the same Docker daemon, exactly as the CLI did before (a dev container's own base image comes from its public registry through the host's dockerd, not through this role).
+    const egress = read("sandbox-egress.sh");
+    const wrapper = read("devcontainer-docker.sh");
+    for (const [name, text] of [["sandbox-egress.sh", egress], ["devcontainer-docker.sh", wrapper]] as const) {
+      expect(pulls(text), name).toEqual([]);
+      expect(helperCalls(text), name).toEqual([]);
+      expect([...text.matchAll(/ecr get-login-password|docker login|--pull(?:=|\s)always/gu)], name).toHaveLength(0);
+    }
+    // Every image the egress stage starts is the worker image, and nothing else names an image.
+    expect([...egress.matchAll(/"\$AGENTX_WORKER_IMAGE"/gu)]).toHaveLength(3); // se_image_node (reads from the image), the gateway container, the boot probe
+    expect([...egress.matchAll(/docker (?:run|create)/gu)]).toHaveLength(3);
+    expect(egress.split("\n").filter((line) => !/^\s*#/u.test(line)).join("\n")).not.toMatch(/\.dkr\.ecr\.|docker\.io\/|ghcr\.io\/|amazonaws\.com\/|node@sha256/u);
     expect(helperCalls(stage)).toEqual([]);
     // every ECR login is for this account's registry: the worker image's (boot.sh), the executor's (qualification), the starter copies' (stage)
     expect([...boot.matchAll(/ecr get-login-password/gu)]).toHaveLength(2);
