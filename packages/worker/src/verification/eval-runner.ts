@@ -6,6 +6,7 @@ import {
   type EvalBaseAttestation, type EvalMeterReservation, type ModelEgress, type ModelEgressEvent, type ModelEgressScope,
 } from "@agentx/contracts";
 import type { EvalFinalCheckPorts } from "./eval-final-check.js";
+import { EvalSandboxRunFailure, runFailureOf } from "./eval-run-diagnostic.js";
 import type { EvalReportLocation } from "./eval-round.js";
 
 export interface EvalSandboxRequest {
@@ -74,7 +75,12 @@ export function createEvalRunner(exec: EvalSandboxExec): EvalFinalCheckPorts["ru
     let refusedCall = false;
     const call: typeof request.call = frame => request.call(frame).catch((error: unknown) => { refusedCall = true; throw error; });
     try { result = await exec.run({ side: request.side, ids, runs: request.runs, egress: modelEgressFromEvalCall(call), scope, signal: request.signal }); }
-    catch { throw new Error("eval run failed"); }
+    catch (error) {
+      // L4-EVS: a failed install step or eval command carries its diagnostic (a fixed code, one allow-listed name, a redacted bounded tail) up to the check. When the stage refused or failed a model call the cause is the
+      // call (the eval most likely crashed on the error it was handed), so no diagnostic is passed on and the stage's own reason stands.
+      const failure = refusedCall ? undefined : runFailureOf(error);
+      throw failure === undefined ? new Error("eval run failed") : new EvalSandboxRunFailure(failure);
+    }
     if (refusedCall || request.signal.aborted) throw stopped();
     if (typeof result !== "object" || result === null || !location(result.report) || !Number.isSafeInteger(result.changedPromptCalls) || result.changedPromptCalls < 0) throw new Error("eval run unreadable");
     return {

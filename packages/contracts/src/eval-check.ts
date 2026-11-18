@@ -3,9 +3,10 @@ import { inertEvidenceText } from "./evidence-inert.js";
 import { HIDDEN_EVAL_NEEDS_SEALED_SENTENCE, type EvalRoundKind } from "./eval-hidden-set.js";
 import { EVAL_NOT_RUN_CLASSES, type EvalRoundFacts } from "./eval-pacing.js";
 import { NOT_RUN_SENTENCES } from "./model-egress/classify.js";
+import { EvalRunDiagnosticSchema, evalRunFailureSentence, type EvalRunDiagnostic } from "./eval-run-diagnostic.js";
 
 export const EVAL_NOT_RUN_REASONS = [
-  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured", "not_connected", "spend_not_approved", "needs_fresh_sandbox", "checks_failed", "stopped", "questions_changed",
+  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured", "not_connected", "spend_not_approved", "needs_fresh_sandbox", "checks_failed", "stopped", "questions_changed", "eval_run_failed",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
@@ -44,6 +45,7 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   no_measures_file: "not run: the eval wrote no readable rovara-measures.json",
   eval_set_changed: "not run: the eval set changed, so main's score is not comparable",
   eval_set_unknown: "not run: the eval did not say which eval set it ran",
+  eval_run_failed: "not run: the eval could not run",
 };
 
 
@@ -71,7 +73,7 @@ export interface EvalCheckResult {
   readonly roundKind: EvalRoundKind;
   readonly outcome: "ran" | "not_run";
   readonly label: EvalLabel;
-  readonly notRun?: { readonly reason: EvalNotRunReason; readonly sentence: string };
+  readonly notRun?: { readonly reason: EvalNotRunReason; readonly sentence: string; /** L4-EVS: why the eval could not run, only with `eval_run_failed`. */ readonly runFailure?: EvalRunDiagnostic };
   readonly usedHiddenSet: boolean;
   readonly casesRun: number;
   readonly casesTotal: number;
@@ -138,11 +140,13 @@ export function evalSuspects(questions: readonly EvalQuestionComparison[]): { do
   }
   return { down, up, omitted };
 }
-export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean }): EvalCheckResult {
+export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean; readonly runFailure?: EvalRunDiagnostic }): EvalCheckResult {
   const reason = fixedNotRunReason(args.reason);
-  const sentence = EVAL_NOT_RUN_SENTENCES[reason];
+  // L4-EVS: a run failure is read through its schema (a name, a code, a bounded tail); anything else is dropped and the fixed sentence of the reason stays.
+  const failure = reason === "eval_run_failed" && args.runFailure !== undefined ? EvalRunDiagnosticSchema.safeParse(args.runFailure) : undefined;
+  const sentence = failure?.success ? `not run: ${evalRunFailureSentence(failure.data)}` : EVAL_NOT_RUN_SENTENCES[reason];
   const ending = reason === "baseline_measuring" ? "Not a pass or a fail." : reason === "baseline_not_confirmed" ? "" : "Retry.";
-  return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason, sentence }, usedHiddenSet: args.hiddenSetUsed === true,
+  return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason, sentence, ...(failure?.success ? { runFailure: failure.data } : {}) }, usedHiddenSet: args.hiddenSetUsed === true,
     casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], fixRequested: false,
     summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}.${ending === "" ? "" : ` ${ending}`}`, disposition: { draft: false, check: "neutral", retry: true } };
 }
@@ -153,7 +157,8 @@ function fixedNotRunReason(reason: unknown): EvalNotRunReason {
 /** Pure projection for the evidence writer; later cache writes cannot change a round's evidence. */
 export function evalNotTestedEntry(result: EvalCheckResult): { kind: "check"; id: "eval"; what: "Eval comparison"; reason: string } | undefined {
   if (typeof result !== "object" || result === null || result.kind !== "eval" || result.outcome !== "not_run") return undefined;
-  return { kind: "check", id: "eval", what: "Eval comparison", reason: EVAL_NOT_RUN_SENTENCES[fixedNotRunReason(result.notRun?.reason)].replace(/^not run: /iu, "") };
+  const failure = result.notRun?.reason === "eval_run_failed" && result.notRun.runFailure !== undefined ? EvalRunDiagnosticSchema.safeParse(result.notRun.runFailure) : undefined;
+  return { kind: "check", id: "eval", what: "Eval comparison", reason: failure?.success ? evalRunFailureSentence(failure.data) : EVAL_NOT_RUN_SENTENCES[fixedNotRunReason(result.notRun?.reason)].replace(/^not run: /iu, "") };
 }
 /** First-look p in [.01,.2) justifies exactly two more new runs; mirror upward. */
 export function evalNeedsSecondLook(questions: readonly EvalQuestionComparison[]): boolean {
