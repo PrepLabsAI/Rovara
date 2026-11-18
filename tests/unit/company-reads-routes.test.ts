@@ -2,7 +2,7 @@
 //   GET /v1/dev/client/company/audit/records   and   GET /v1/dev/client/company/events
 // The handler is checked here with fakes; the mount on the developer API is checked in tests/contract/company-reads-mount.test.ts.
 import { describe, expect, it } from "vitest";
-import { routeCompanyReads, type CompanyReadsConfiguration } from "../../packages/broker/src/developer/company-reads.js";
+import { routeCompanyReads, type CompanyReadCaller, type CompanyReadsConfiguration } from "../../packages/broker/src/developer/company-reads.js";
 import { COMPANY_A, COMPANY_B, IMPLICIT_COMPANY_ID, TASK_IN_SHARD, countingReadOnly, newStore, plantAuditRow, seedAudit, seedEvent } from "../support/company-reads-fixtures.js";
 
 const NOW = Date.parse("2026-11-20T00:00:00.000Z");
@@ -32,7 +32,7 @@ async function world() {
   };
   return { store, config, a, b };
 }
-const read = (config: CompanyReadsConfiguration, caller: { developerId: string; administrator: boolean }, target: URL) => routeCompanyReads(config, caller, target, NOW);
+const read = (config: CompanyReadsConfiguration, caller: CompanyReadCaller, target: URL) => routeCompanyReads(config, caller, target, NOW);
 const failure = async (promise: Promise<unknown>) => promise.then(() => { throw new Error("expected a refusal"); }, (error: Error & { code?: string; status?: number }) => error);
 
 describe("two companies, both routes: each administrator sees their own company and nothing else", () => {

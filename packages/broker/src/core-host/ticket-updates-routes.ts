@@ -42,6 +42,7 @@ export const TICKET_UPDATES_WORDS = {
   notAllowed: "Only a company owner or admin, or the project's admin, can change what Rovara writes on its tickets.",
   unreadable: "The ticket sharing settings could not be read just now; try again.",
   badRequest: "Send { requestId, settings } with the ticket sharing settings.",
+  requestIdReused: "This request id was already used for other settings.",
 } as const;
 
 const TICKET_UPDATES_PATH = /^\/v1\/app\/projects\/([^/]+)\/intake\/updates$/u;
@@ -98,6 +99,10 @@ export async function routeHostedTicketUpdates(input: HostedTicketUpdatesInput):
     if (!isManage(standing)) throw agentXError("FORBIDDEN", TICKET_UPDATES_WORDS.notAllowed);
     const body = putBodyOf(input.request);
     const basis: SetupRunBasis = standing.basis;
+    // A request id already used for other settings is refused before anything is recorded (the save would refuse it too): the audit trail never names a change that did not happen.
+    let current: Awaited<ReturnType<typeof readTicketUpdates>>;
+    try { current = await readTicketUpdates(table, companyId, project); } catch { throw unavailable(); }
+    if (current.requestId === body.requestId && JSON.stringify(current.settings) !== JSON.stringify(body.settings)) throw agentXError("CONFIG_INVALID", TICKET_UPDATES_WORDS.requestIdReused);
     // The settings are in the id: the same request id with other settings is another act (the save then refuses it), never deduped as a replay.
     const digest = createHash("sha256").update(JSON.stringify(body.settings)).digest("hex").slice(0, 32);
     const event: AuditEvent = {

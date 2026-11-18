@@ -21,7 +21,7 @@ import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-se
 import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { CLIENT_MEMBERS_NOT_ALLOWED } from "../../packages/broker/src/aws/developer-routes.js";
-import { LinearConnections, linearTeamKey } from "../../packages/broker/src/aws/linear-connections.js";
+import { LinearConnections, linearConnectionKey, linearTeamKey } from "../../packages/broker/src/aws/linear-connections.js";
 import type { LinearConnectWiring } from "../../packages/broker/src/aws/linear-connect-routes.js";
 
 const NOW = Date.parse("2026-11-17T12:00:00.000Z");
@@ -78,11 +78,15 @@ function harness(options: HarnessOptions = {}) {
 /** The deployed Linear wiring's connections (linear-wiring.ts builds the same class) over the same table; nothing here talks to Linear. */
 function linearWiring(db: FakeDynamoDb): LinearConnectWiring {
   const never = async () => { throw new Error("no Linear call in these tests"); };
-  const connections = new LinearConnections({ documentClient: db, tableName: "State", sealer: { seal: never, open: never }, fetch: never as never, now: () => NOW, app: async () => undefined, log: () => undefined });
-  return { connections, app: async () => undefined, fetch: never as never, log: () => undefined };
+  const connections = new LinearConnections({ documentClient: db, tableName: "State", sealer: { seal: never, open: never }, fetch: never, now: () => NOW, app: async () => undefined, log: () => undefined });
+  return { connections, app: async () => undefined, fetch: never, log: () => undefined };
 }
 const pickTeam = (h: { db: FakeDynamoDb }, company: string, project: string, over: Record<string, unknown> = {}) => h.db.set({
   ...linearTeamKey(company, project), entityType: "LINEAR_PROJECT_TEAM", companyId: company, project, teamId: "team-1234", teamKey: "ENG", teamName: "Engineering", setBy: "a".repeat(64), setAt: TIME, ...over,
+});
+const linearConnected = (h: { db: FakeDynamoDb }, company: string, status: "connected" | "needs_reconnect" | "disconnected" = "connected") => h.db.set({
+  ...linearConnectionKey(company), entityType: "LINEAR_CONNECTION", companyId: company, organizationId: "ws-1", workspaceName: "Acme", urlKey: "acme", status, statusAt: TIME,
+  connectedBy: "a".repeat(64), connectedAt: TIME, version: 1,
 });
 type Harness = ReturnType<typeof harness>;
 const error = (code: string, message: string) => ({ error: { code, message } });
@@ -853,6 +857,7 @@ const EXISTING_ROUTES_DIGEST = "d036ff79418d38716e0e2487692bc4bacce9e4974f24e701
 describe("the Linear row reads the project's picked team", () => {
   it("is done with the team's id and name once the project has a pick in its own company, and optional without one", async () => {
     const h = companyA({ linear: true });
+    linearConnected(h, A);
     expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
     pickTeam(h, A, "alpha");
     const body = await h.ok();
@@ -862,6 +867,7 @@ describe("the Linear row reads the project's picked team", () => {
 
   it("never reads another company's pick, nor another project's", async () => {
     const h = companyA({ linear: true });
+    linearConnected(h, A);
     pickTeam(h, B, "alpha");
     pickTeam(h, A, "beta", { project: "beta" });
     expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
@@ -869,6 +875,7 @@ describe("the Linear row reads the project's picked team", () => {
 
   it("a pick filed in this company's partition that names another company is no pick; one that does not read back is the fixed unreadable answer, never a guess", async () => {
     const h = companyA({ linear: true });
+    linearConnected(h, A);
     pickTeam(h, A, "alpha", { companyId: B });
     expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
     pickTeam(h, A, "alpha", { teamId: "bad id with spaces" });
@@ -877,10 +884,26 @@ describe("the Linear row reads the project's picked team", () => {
 
   it("keeps the name within the contract's bounds, and leaves out an empty one", async () => {
     const h = companyA({ linear: true });
+    linearConnected(h, A);
     pickTeam(h, A, "alpha", { teamName: "N".repeat(256) });
     expect((await h.ok()).linear.team).toEqual({ id: "team-1234", name: "N".repeat(200) });
     pickTeam(h, A, "alpha", { teamName: "  " });
     expect((await h.ok()).linear.team).toEqual({ id: "team-1234" });
+  });
+
+  it("a pick whose company connection is disconnected, needs reconnecting, or missing leaves the row not done", async () => {
+    const h = companyA({ linear: true });
+    pickTeam(h, A, "alpha");
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+    for (const status of ["disconnected", "needs_reconnect"] as const) {
+      linearConnected(h, A, status);
+      expect((await h.ok()).linear, status).toEqual({ state: "optional", team: null });
+    }
+    // Another company's live connection does not count for this one.
+    linearConnected(h, B);
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+    linearConnected(h, A);
+    expect((await h.ok()).linear.state).toBe("done");
   });
 
   it("without Linear wired the row stays optional whatever is stored (today's behaviour)", async () => {
