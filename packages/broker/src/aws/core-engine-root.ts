@@ -143,6 +143,11 @@ export interface BrokerCoreRootInputs {
   codeSettings?: CodeSettingsReader;
   /** D1 policy resolved per company/project. Absent: D1 today (their_ci_fix); never default on a failed read. */
   policySource?: PolicySource;
+  /**
+   * L4-HW3d: builds the deployed policy source over the root's own company rules service (the same one the per-task limit reader asks; `hostedPolicySource`, core-policy-source.ts), once
+   * per root. Used only when no `policySource` was given. Absent as well: D1 today.
+   */
+  hostedPolicySource?: (hook: () => ProjectSettingsHook | undefined) => PolicySource;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
   services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry, wiring: CoreServiceWiring) => Partial<Record<CoreServiceName, CoreService>>;
   /**
@@ -472,7 +477,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
   // L2-5 (b): each task's cap is lowered to its project's own per-task limit (model_budget_usd) when one is set.
   // The company's rules service, when the install has one, as the settings page reads it (read each time: unreadable settings or no install signer refuse).
-  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall));
+  const engineHook = () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall);
+  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, engineHook);
+  // L4-HW3d: one cached, company-scoped source for every company's CI mode (its cache is per company and project).
+  const policySource = inputs.policySource ?? inputs.hostedPolicySource?.(engineHook);
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
@@ -540,7 +548,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
       log,
-      ciReporting: inputs.ciReporting === undefined ? policyCiReporting(inputs.policySource) : inputs.ciReporting,
+      ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
         const choice = modelChoices.choiceFor(companyId);
         if (choice !== undefined) {
