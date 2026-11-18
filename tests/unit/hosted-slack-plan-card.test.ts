@@ -336,12 +336,13 @@ describe("what needs a person also reaches the hosted thread", () => {
 
 describe("a start from a chat thread gets its session (the plan card and the notices are told through it)", () => {
   const input = (client: string, ticket = false): StartExtrasInput => ({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", project: "payments", title: "Add a retry", workspaceId: "ws-1", principal: principalOf("dev-a"), client, receivedAt: "2026-11-15T10:00:00.000Z", ...(ticket ? { ticket: { system: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" } } : {}) });
-  it("only a start from Slack, only where chat threads are served; a web start and a start with no chat seam get nothing (as before)", () => {
+  // Batch b18: #1045 (core task web routes, DEC 254zzz39 (6)) gives EVERY person's hosted start its session (web, Slack, API, intake), so a Slack start keeps its session whatever the chat seam says, and a web start now has one too.
+  it("a start from Slack gets its session, with or without the chat seam, and so does a web start (#1045)", () => {
     const chat = ticketSessionStartExtras(ORG, { chatThreads: true });
     expect(chat(input("slack")).sessionId).toBe(taskSessionId(input("slack").taskId));
     expect(chat(input("slack")).items.length).toBeGreaterThan(0);
-    expect(chat(input("web"))).toEqual({ items: [] });
-    expect(ticketSessionStartExtras(ORG)(input("slack"))).toEqual({ items: [] });
+    expect(chat(input("web")).sessionId).toBe(taskSessionId(input("web").taskId));
+    expect(ticketSessionStartExtras(ORG)(input("slack")).sessionId).toBe(taskSessionId(input("slack").taskId));
     // A ticket still gets its session and binding, with or without chat threads.
     expect(ticketSessionStartExtras(ORG)(input("web", true)).items.length).toBeGreaterThan(1);
   });
