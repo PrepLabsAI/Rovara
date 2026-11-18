@@ -19,7 +19,7 @@ import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } fro
 import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
 import { routeHostedIntake } from "./hosted-intake-routes.js";
 import type { HostedIntake } from "./hosted-intake.js";
-import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
+import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js"; import { knowledgeSwitchedOff, type KnowledgeApi } from "../core-host/knowledge-api.js"; import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
@@ -234,7 +234,7 @@ export interface DeveloperRouteDependencies {
   /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
   tasks?: DeveloperTaskActions;
   /** Lane LM8: the Code lessons API (`core-host/lessons-api.ts`), behind the lessons switch. Absent (the default, until the deployment wires it): every lessons route answers "Lessons are off." and reads nothing. */
-  lessons?: Pick<LessonsApi, "answer">;
+  lessons?: Pick<LessonsApi, "answer">; /** L4-AK1H: the hosted team knowledge reads for tools outside Rovara (`core-host/knowledge-api.ts`), behind the same lessons switch. Absent: a person gets the fixed "off" answer, a script token is refused, and nothing is read. */ knowledge?: Pick<KnowledgeApi, "answer">;
   /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
   lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
@@ -2034,6 +2034,9 @@ async function companySelfCreateRoute(deps: DeveloperRouteDependencies, request:
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
 export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
+/** L4-AK1H: the team knowledge reads' paths (`core-host/knowledge-api.ts` parses the same paths; a test holds the two equal). Both are POSTs (a repository's address stays out of addresses and access logs). */
+export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/areas)$/u;
+
 /** The Home number's paths (`core-host/lessons-repeats-api.ts` parses the same paths; a test holds the two equal). */
 export const LESSONS_REPEATS_ROUTES = /^\/v1\/dev\/(?:projects\/([^/]+)\/)?lessons\/repeats$/u;
 
@@ -2142,6 +2145,21 @@ async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request
   return routeCompanyEngineModel({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request);
 }
 
+/**
+ * L4-AK1H: `POST /v1/dev/projects/{project}/lessons` and `POST .../knowledge/areas` on a hosted install. A script token (`Bearer rvst_...`) is checked by the knowledge API itself (it reaches only these two reads, and only with the
+ * `lessons` permission naming the project); anything else is a person's sign-in, verified like every other developer route (the row's scope applies). The company is never read from the request.
+ */
+async function knowledgeRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL, route: DevRoute): Promise<unknown> {
+  const wire = { method: request.method, path: url.pathname, authorization: request.headers.authorization, ...(request.body === undefined ? {} : { body: request.body }) };
+  if (isScriptTokenHeader(request.headers.authorization)) {
+    if (deps.knowledge === undefined) throw agentXError("AUTH_REQUIRED", "Script tokens are turned off here.");
+    return deps.knowledge.answer(wire, { kind: "token" });
+  }
+  const { caller } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  if (deps.knowledge === undefined) return knowledgeSwitchedOff(wire, deps.now());
+  return deps.knowledge.answer(wire, { kind: "person", personId: caller.developerId });
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
@@ -2222,6 +2240,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   // Spec 065: a registered service acting as its signed-in person, within its scopes.
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
+  // L4-AK1H: team knowledge for a tool outside Rovara: a signed-in person, or a script token with the Team knowledge permission. It is answered before the person sign-in below because a script token is not a JWT.
+  if (request.method === "POST" && KNOWLEDGE_API_ROUTES.test(url.pathname)) return knowledgeRoute(deps, request, url, route);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
   const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
