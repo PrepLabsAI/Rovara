@@ -43,7 +43,7 @@ function harness(options: {
   pendingChoice?: Record<string, string>;
   shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean; taskId?: string; workflowThread?: true }>; lookupThrows?: boolean; claimThrows?: boolean };
   feedbackCapture?: { captured?: boolean; throws?: boolean };
-  threadNote?: { outcome?: "captured" | "duplicate" | "refused"; throws?: boolean };
+  threadNote?: { outcome?: "captured" | "duplicate" | "refused" | "small_talk"; throws?: boolean; /** L4-U5d: what a core task's answer adds (`notice`, `core`). */ extra?: Record<string, unknown> };
   /** Task 21: plain top-level requests are queued for the Slack service to route; `fail` routes throw first. */
   routing?: { fail?: number };
   /** Task 21: the requester's typed `answer` sends the waiting request to the chat agent. */
@@ -199,10 +199,10 @@ function harness(options: {
       },
     }),
     ...(options.threadNote === undefined ? {} : {
-      recordThreadNote: async (input: { taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string }) => {
+      recordThreadNote: async (input: { taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string; mention?: true }) => {
         threadNotes.push(input);
         if (options.threadNote?.throws) throw new Error("private note body must not appear in this error");
-        return { outcome: options.threadNote?.outcome ?? "captured" };
+        return { outcome: options.threadNote?.outcome ?? "captured", ...(options.threadNote?.extra ?? {}) };
       },
     }),
     ...(options.turnsPerMinute === undefined ? {} : {
@@ -1400,5 +1400,82 @@ describe("chat.postEphemeral", () => {
     expect(strict.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text: "Saved." }]);
     strict.failNext("chat.postEphemeral", "user_not_in_channel");
     await expect(chatPostEphemeral("xoxb-test", { channel, user: pratik, text: "Saved." }, strict.fetch)).rejects.toMatchObject({ slackError: "user_not_in_channel" });
+  });
+});
+
+// L4-U5d: a later message in the thread of a task the core owns. The broker names the notice (a code); the ingress says its fixed words privately to the sender (a mention only), never sends the reply on as a question to the old task reader,
+// and tells the broker whether the reply was a mention (only a mention answers a core task's questions).
+describe("a reply in a thread whose task the core owns (L4-U5d)", () => {
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  const threads = { "1695500000.000001": { mode: "view" as const, taskId, workflowThread: true as const } };
+  const reply = (eventId: string, ts: string, text: string, event: Record<string, unknown> = {}) =>
+    signedEvent(mention({ eventId, event: { thread_ts: "1695500000.000001", ts, text, ...event } }));
+  const words = {
+    answers_saved: "Thanks. I gave your answers to the task, and it is planning again.",
+    plan_note_saved: "Saved as a note for the plan. To ask for changes to it, use Request changes on the task page.",
+    note_saved: "Saved for the next step.",
+    not_allowed: "Only the person who owns this task can add to it from Slack. Ask them, or open the task page.",
+    answers_unclear: "This task is waiting for answers. Reply with one numbered line for each question, like `1. a` or `2. your own words`, or say `your call`. You can also answer on the task page.",
+    rate_limited: "You have sent a lot of messages to this task in the last hour. Wait a little, then try again.",
+    not_saved: "I couldn't save this reply for the task. It may be closed, or it already has as many replies as I keep.",
+  } as const;
+
+  it.each(Object.entries(words))("says the fixed words for %s, privately to the sender, and routes nothing to the old question reader", async (notice, text) => {
+    const h = harness({ shared: { threads }, threadNote: { outcome: notice.endsWith("saved") && notice !== "not_saved" ? "captured" : "refused", extra: { notice, core: true } }, routing: {} });
+    expect((await send(h.handler, reply(`EvCore-${notice}`, "1695500002.000001", `<@${bot}> 1. a`))).status).toBe(200);
+    expect(h.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text }]);
+    expect(h.routed).toEqual([]);
+    expect(h.posts).toEqual([]);
+    expect([...h.pending.values()]).toEqual([]);
+  });
+
+  it("tells the broker that a mention is a mention, and that a plain reply is not", async () => {
+    const h = harness({ shared: { threads }, threadNote: { outcome: "captured", extra: { notice: "note_saved", core: true } } });
+    await send(h.handler, reply("EvCoreMention", "1695500002.000002", `<@${bot}> a note`));
+    await send(h.handler, signedEvent(mention({ eventId: "EvCorePlain", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500002.000003", text: "a plain reply" } })));
+    expect(h.threadNotes.map((note) => [note.messageTs, (note as { mention?: true }).mention])).toEqual([["1695500002.000002", true], ["1695500002.000003", undefined]]);
+  });
+
+  it("a plain reply is never answered in the thread, whatever the broker says", async () => {
+    const h = harness({ shared: { threads }, threadNote: { outcome: "captured", extra: { notice: "note_saved", core: true } } });
+    await send(h.handler, signedEvent(mention({ eventId: "EvCorePlain2", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500002.000004", text: "a plain reply" } })));
+    expect(h.ephemerals).toEqual([]);
+    expect(h.posts).toEqual([]);
+  });
+
+  it("a duplicate (a retry, or the other copy of the same mention) says nothing again", async () => {
+    const h = harness({ shared: { threads }, threadNote: { outcome: "duplicate", extra: { core: true } }, routing: {} });
+    await send(h.handler, reply("EvCoreDup", "1695500002.000005", `<@${bot}> a note`));
+    expect(h.ephemerals).toEqual([]);
+    expect(h.routed).toEqual([]);
+  });
+
+  it("small talk from the core is answered as small talk, with the fixed reply and nothing saved", async () => {
+    const h = harness({ shared: { threads }, threadNote: { outcome: "small_talk", extra: { core: true } } });
+    await send(h.handler, reply("EvCoreThanks", "1695500002.000006", `<@${bot}> thanks`));
+    expect(h.posts).toHaveLength(1);
+    expect(h.ephemerals).toEqual([]);
+  });
+
+  it("a core answer with an unknown notice says the 'could not save' words (a notice that is not ours is never said)", async () => {
+    const h = harness({ shared: { threads }, threadNote: { outcome: "refused", extra: { notice: "<script>", core: true } } });
+    await send(h.handler, reply("EvCoreOdd", "1695500002.000007", `<@${bot}> a note`));
+    expect(h.ephemerals.map((entry) => entry.text)).toEqual([words.not_saved]);
+  });
+
+  it("an old task's answer (no `core`) is handled as before: the saved words, the question route", async () => {
+    const h = harness({ shared: { threads }, threadNote: { outcome: "captured", extra: { notice: "answers_saved" } }, routing: {} });
+    await send(h.handler, reply("EvOld0001", "1695500002.000008", `<@${bot}> why?`));
+    expect(h.routed).toHaveLength(1);
+    expect(h.ephemerals).toEqual([]);
+  });
+
+  it("the broker's answer is read strictly: the notice and `core` come through only when both are ours", async () => {
+    const answering = (body: unknown) => async () => ({ statusCode: 200, body: JSON.stringify(body) });
+    const input = { taskId, thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, messageTs: "1695500002.000009", eventId: "Ev1", text: "x" };
+    expect(await recordThreadNoteThroughBroker(answering({ outcome: "captured", notice: "answers_saved", core: true }), input)).toEqual({ outcome: "captured", notice: "answers_saved", core: true });
+    expect(await recordThreadNoteThroughBroker(answering({ outcome: "captured", notice: "answers_saved" }), input)).toEqual({ outcome: "captured" });
+    expect(await recordThreadNoteThroughBroker(answering({ outcome: "captured", notice: "hello", core: true }), input)).toEqual({ outcome: "captured", core: true });
+    expect(await recordThreadNoteThroughBroker(answering({ outcome: "captured", core: true }), input)).toEqual({ outcome: "captured", core: true });
   });
 });

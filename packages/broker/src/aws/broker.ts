@@ -286,7 +286,7 @@ import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js"; import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
@@ -6872,7 +6872,7 @@ async function captureSlackWorkflowFeedbackNote(dependencies: AwsBrokerDependenc
 
 export interface SlackThreadNoteEvent {
   source: "agentx.slack-ingress"; action: "thread-note"; taskId: string; userId: string; thread: SlackThread;
-  eventId: string; messageTs: string; text: string;
+  eventId: string; messageTs: string; text: string; /** L4-U5d: the reply is an @mention of Rovara (as against a plain reply); only a mention answers a core task's questions. */ mention?: true;
   /** Decision 134: the ingress read the reply as small talk; it is saved only when the task waits on this person. */
   smallTalk?: true;
 }
@@ -6892,16 +6892,16 @@ export function isSlackThreadNoteEvent(event: unknown): event is SlackThreadNote
  * Every expected answer (saved, already saved, or not saved because the thread or task no longer takes notes)
  * is a 200 with its outcome, so Slack is never asked to retry it.
  */
-async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackThreadNoteEvent): Promise<{ outcome: "captured" | "duplicate" | "refused" | "small_talk" }> {
+async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackThreadNoteEvent): Promise<{ outcome: "captured" | "duplicate" | "refused" | "small_talk"; notice?: ThreadInputNotice; core?: true }> {
   if (dependencies.developer === undefined) return { outcome: "refused" };
   const thread = SlackThreadSchema.safeParse(event.thread);
   const userId = SlackRequesterSchema.shape.userId.safeParse(event.userId);
   const taskId = event.taskId;
   const messageTs = SlackMessageTimestampSchema.safeParse(event.messageTs);
   if (!thread.success || !userId.success || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId) || !messageTs.success || !await slackWorkspaceEnabled(dependencies, thread.data)) return { outcome: "refused" };
-  const shared = await getItem<{ taskId?: string; workflowThread?: unknown; closedAt?: string }>(dependencies, sharedTaskKey(thread.data));
+  const shared = await getItem<{ taskId?: string; workflowThread?: unknown; closedAt?: string; companyId?: unknown }>(dependencies, sharedTaskKey(thread.data));
   if (shared === undefined || shared.taskId !== taskId || shared.workflowThread !== true || shared.closedAt !== undefined) return { outcome: "refused" };
-  let access: TaskAccess;
+  const forCore = await coreThreadNote(dependencies, dependencies.developer.coreTasks, { shared: { taskId, companyId: shared.companyId }, thread: thread.data, userId: userId.data, messageTs: messageTs.data, text: event.text, mention: event.mention === true, smallTalk: event.smallTalk === true, companyOf: async () => dependencies.workspaces?.requireCompany(thread.data.teamId), caller: () => companySlackCaller(dependencies, thread.data, userId.data) }); if (forCore !== undefined) return forCore; /* L4-U5d: a task the core owns takes the reply as the core's own input (slack-core-thread-input.ts); anything else goes on as before. */ let access: TaskAccess;
   try { ({ access } = await slackTaskAccess(dependencies, tasks, taskId, userId.data, "comment", true, thread.data)); }
   catch { return { outcome: "refused" }; }
   if (access.task.share?.teamId !== thread.data.teamId || access.task.share.channelId !== thread.data.channelId
