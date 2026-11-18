@@ -36,7 +36,7 @@ export function uuidFrom(text: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((parseInt(hex[16] ?? "0", 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-export interface RowRef { taskId: string; workflowRevision: number }
+export interface RowRef { taskId: string; workflowRevision: number; firstEvent?: string }
 
 /** The task a row stands for, when it is still open at the revision the row was written for; the workspace, when it can take a step. */
 export interface Located { task: TaskRecord & { workflow: WorkflowSnapshot }; workspace: WorkspaceRecord }
@@ -213,7 +213,8 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE]),
     ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source"],
-    ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),
+    ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId }),
+    ...((row.firstEvent === undefined && graph?.note === undefined) ? {} : { firstEvent: [row.firstEvent, graph?.note].filter((line): line is string => line !== undefined).join("\n") }),
   });
   return settled(deps, row, accepted.result);
 }

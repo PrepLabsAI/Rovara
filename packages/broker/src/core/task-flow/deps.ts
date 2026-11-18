@@ -177,7 +177,7 @@ export interface ArtifactReader {
  */
 export interface BuildSteps {
   /** Starts the step a dispatch row stands for. Same answers as the stage machine's own runner: STARTED, DUPLICATE, STALE (the row is no longer wanted), WAITING (try again). */
-  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
+  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind" | "firstEvent">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
   /** After a coding run, a rerun of the checks, the reviews or a publication ended (the operation's result is committed). Idempotent; never throws for a task that moved on. */
   onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void>;
 }

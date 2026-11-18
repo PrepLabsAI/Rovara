@@ -212,6 +212,10 @@ export async function closeSetupCheck(deps: TaskFlowDeps, workspaceId: string): 
     if (!closed.applied) return false;
     if (workspace.machine !== undefined) await deps.machines.terminate(workspace.machine.machineId).catch((error: unknown) => log(deps, { event: "setup_check.terminate_failed", error: error instanceof Error ? error.name : "unknown" }));
     await releaseAdmission(deps, workspace.machineReservationId);
+    if (workspace.status === "READY" && record["candidate"] !== true && typeof record["project"] === "string" && typeof record["revision"] === "number") {
+      const { resumeSetupPausedTasks } = await import("./auto-resume.js");
+      await resumeSetupPausedTasks(deps, record["project"], { kind: "check_passed", revision: record["revision"], workspaceId }).catch((error: unknown) => log(deps, { event: "setup_check.resume_failed", error: error instanceof Error ? error.name : "unknown" }));
+    }
     return true;
   } catch (error) {
     log(deps, { event: "setup_check.close_failed", error: error instanceof Error ? error.name : "unknown" });

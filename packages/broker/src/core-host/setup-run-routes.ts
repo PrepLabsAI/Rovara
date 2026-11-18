@@ -48,6 +48,8 @@ import { HOST_ASK_REVISION, SETUP_HOST_KIND, hostAskDigest, hostAskSubjectId, ho
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { ensureCoreInUse } from "./engine-stamp.js";
 import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.js";
+import { resumeSetupPausedTasks } from "../core/setup-agent/auto-resume.js";
+import { log as logTaskFlow } from "../core/task-flow/support.js";
 
 export const SETUP_RUN_PROJECT_NOT_FOUND = "project not found";
 export const SETUP_RUN_NOT_ALLOWED = "Only company owners and admins, or this project's admins, can run the project's setup.";
@@ -232,6 +234,7 @@ async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval,
   if (result.status === "refused") throw gateRefusal(result);
   // L4-SC: a candidate that came from a merged plan's "Update setup" retires its offer once approved (best effort; a rejected one leaves the offer to try again).
   if (body.outcome === "approve" && result.status !== "replayed") await markSetupUpdateApplied({ store: flow.store, companyId, now: input.now }, project, waiting.reply, personId);
+  if (body.outcome === "approve") void resumeSetupPausedTasks(flow, project, { kind: "approved", revision: body.seen.revision }).catch((error: unknown) => logTaskFlow(flow, { event: "setup_apply.resume_failed", error: error instanceof Error ? error.name : "unknown" }));
   const decision = body.outcome === "approve" ? "approved" : "rejected";
   return json(200, { project, decision, risk: result.record.risk, revision: result.record.revision, replayed: result.status === "replayed" });
 }
