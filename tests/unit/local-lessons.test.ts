@@ -84,7 +84,7 @@ async function world(options: { defaultSwitch?: boolean; codeHost?: boolean; cod
     model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: providerFetch(prompts, options.candidates ?? (() => [])) },
     ...(options.defaultSwitch === true ? {} : { enabled: () => enabled }), now: () => h.clock.now, log: (entry) => { logs.push(JSON.stringify(entry)); },
   });
-  const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
+  const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200 and wrap network calls in withRetry from the retry helper", workflow: true, workflowPath: "QUICK" });
   return { h, lessons, handlers, taskId: task.taskId, workspaceId: task.workspaceId, key: { workspaceId: COMPANY, project: "payments" }, prompts, logs, setEnabled: (value) => { enabled = value; } };
 }
 

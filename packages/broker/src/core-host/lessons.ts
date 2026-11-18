@@ -21,6 +21,8 @@ import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
+import { codeHostAreaPorts } from "../lessons/area-check-hosts.js";
+import { codeHostForRecord } from "../plugins/routing.js";
 import type { ChannelCompanyOf } from "../core/channel/company.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
@@ -159,6 +161,8 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
       if (found.some((repository) => repository.private === false)) return "public";
       return found.every((repository) => repository.private === true) ? "private" : "unknown";
     },
+    // The nightly area checks read the project's repositories through the company's own code hosts (a host that is not registered is "not known": nothing is marked).
+    areaChecks: codeHostAreaPorts({ projects: deps.projects, companyId, hostOf: (repository) => { try { return codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }); } catch { return undefined; } } }),
     now, log,
   });
 

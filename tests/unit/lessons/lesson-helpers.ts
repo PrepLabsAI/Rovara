@@ -251,3 +251,9 @@ export function presetFakes(options: { eligible?: string[]; owners?: string[]; c
   };
   return { deps, rows, changes, audit, state };
 }
+
+/**
+ * The fit floor off (lessons phase 1, `scoring-settings.ts`): for a test whose subject is NOT how well a lesson fits the task (the budget, twins, visibility, approvals), its fixtures are short unrelated sentences that the
+ * floor would drop. The floor's own tests (`fit-floor.test.ts`) use the real settings.
+ */
+export const NO_FIT_FLOOR = { fitFloorWords: 0, fitFloorCosine: 0 } as const;

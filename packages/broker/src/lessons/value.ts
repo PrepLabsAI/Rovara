@@ -36,6 +36,8 @@ export function independentSources(provenance: Pick<Lesson["provenance"], "autho
 }
 
 const SEVERITY: Record<Lesson["type"], number> = { pitfall: 3, review_check: 3, fact: 2, convention: 2, procedure: 1, preference: 0 };
+/** How costly the mistake is if it comes back, by lesson type (pitfall and review check, then fact and convention, then procedure, then preference): the weekly list's severity tie-break. */
+export const severityOfType = (type: Lesson["type"]): number => SEVERITY[type];
 
 /** A number to sort by, larger is more important. The three groups never overlap: measured outcomes outrank recurrence, which outranks severity. */
 export function lessonValue(lesson: Pick<Lesson, "provenance" | "type" | "tier" | "counters">): number {

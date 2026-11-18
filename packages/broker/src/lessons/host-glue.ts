@@ -24,6 +24,8 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import type { LessonsUsedSection } from "../core/proof/pull-request-body.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { applyLoadReport } from "./counters.js";
+import type { FadePorts } from "./expiry.js";
+import { runAreaChecks, type AreaCheckPorts } from "./area-check.js";
 import { logTaskCorrections } from "./correction-log.js";
 import { learnedContextForDispatch } from "./load.js";
 import { modeAllows, resolveLearning } from "./policy.js";
@@ -64,6 +66,8 @@ export interface LessonsHostInput {
   sources: { source: TaskLearningDeps["source"]; rows: OutcomeRowReader };
   /** Whether the repositories a pull request of the project is in are public, private or unknown (for which lessons a description may name). */
   visibility: (project: string) => Promise<RepositoryVisibility>;
+  /** The nightly area checks' reads of the project's repositories (`area-check.ts`). Absent: the checks do not run. */
+  areaChecks?: AreaCheckPorts;
   now: () => number;
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
@@ -252,13 +256,21 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
 
   async function nightly(projects: readonly string[]): Promise<void> {
     const { sweepExpired } = await import("./expiry.js");
+    const { countLessonUses } = await import("./use-count.js");
     const { promoteStableTrials } = await import("./trial.js");
     for (const project of projects) {
       const key = { workspaceId: companyId, project };
       const resolved = await resolveLearning(runtime.settings, companyId, project);
       if (!modeAllows(resolved.chosenMode, "capture")) continue;
-      await sweepExpired({ ...runtime.counters, vectors: runtime.vectors }, runtime.store, key, {}).catch(() => undefined);
+      // Fade by chances (phase 2): a lesson no task had a chance to use is renewed once and then a person is asked; one that had chances and never helped fades (`expiry.ts`). The chance count is the lesson's use rows in its window.
+      const fade: FadePorts = {
+        evidence: runtime.evidence, expiryDays: resolved.expiryDays,
+        chances: async (scope, lessonId, since) => { const counted = await countLessonUses(flow.store, { companyId, project: scope.project, lessonIds: [lessonId], now: now(), since }); return counted.counts.get(lessonId)?.tasks; },
+      };
+      await sweepExpired({ ...runtime.counters, vectors: runtime.vectors }, runtime.store, key, { fade }).catch(() => undefined);
       await promoteStableTrials({ ...runtime.counters, store: runtime.store }, key).catch(() => undefined);
+      // The nightly area checks (no model): a lesson whose code area is gone goes under question; one whose area was rewritten asks a person (`area-check.ts`). A fault is information only.
+      if (input.areaChecks !== undefined) await runAreaChecks({ lessons: runtime.store, docs: flow.store, companyId, now, ports: input.areaChecks, log: (event, fields) => log(event, fields) }, key).catch(() => undefined);
     }
     // The erasure sweep comes first and has its own budget; then the weekly lessons file pass (each repository is off until a person switches it on).
     const repoFile = runtime.repoFile;

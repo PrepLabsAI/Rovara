@@ -39,6 +39,8 @@ import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
 import type { RepoFileRuntime } from "../../lessons/repo-file-job.js";
 import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
 import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
+import { codeHostAreaPorts } from "../../lessons/area-check-hosts.js";
+import { codeHostForRecord } from "../../plugins/routing.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources } from "./lessons-sources.js";
@@ -191,6 +193,8 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
       if (found.some((repository) => repository.private === false)) return "public";
       return found.every((repository) => repository.private === true) ? "private" : "unknown";
     },
+    // The nightly area checks read the project's repositories through the install's own code hosts (a host that is not registered is "not known": nothing is marked).
+    areaChecks: codeHostAreaPorts({ projects: flow.projects, companyId, hostOf: (repository) => { try { return codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }); } catch { return undefined; } } }),
     now, log: (event, fields) => log(event, fields),
   });
   options.milestones.register(host.milestone);
