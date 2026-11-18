@@ -24,6 +24,7 @@ import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-route
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { taskPointerKey } from "../developer/task-records.js";
 import type { ChatThreadInput, ChatThreadInputResult } from "../core-host/chat-thread-input.js";
+import type { ChatDecisionPress, ChatDecisionResult } from "../core-host/chat-decision.js";
 
 /** The state table, as every AWS reader holds it. */
 export interface EngineStateTable {
@@ -176,6 +177,12 @@ export interface CoreTaskEntry {
    * act on; `undefined` for anything else (and for any failure). Absent: the deployment gives the list no money for core tasks.
    */
   taskMoney?(caller: CoreEntryCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
+  /**
+   * HW5b: a press of Approve (or the words typed for Request changes) on the plan card a core task's chat thread was given, as a request to the company's approval gate (`core-host/chat-decision.ts`): the caller is the person the broker
+   * resolved from the chat account, and the core checks the account, the workspace, the card, the risk and the person's authority again. A refusal writes nothing and is an answer, not a throw; a throw means nothing was decided (the chat
+   * may try again). Absent: the deployment takes no decision from a chat (the card is the sign-in card).
+   */
+  chatDecision?(caller: CoreEntryCaller, press: ChatDecisionPress): Promise<ChatDecisionResult>;
 }
 
 /**
@@ -221,9 +228,20 @@ export function coreTaskEntryFrom(
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
   /** L4-U5d: the deployment's thread input, asked with the caller as the core knows them. Absent: the entry has no `threadInput`. */
   threadInput?: (deployed: DeployedCaller, input: ChatThreadInput) => Promise<ChatThreadInputResult>,
+  /** HW5b: the deployment's chat decision, asked with the caller as the core knows them. Absent: the entry has no `chatDecision`. */
+  chatDecision?: (deployed: DeployedCaller, press: ChatDecisionPress) => Promise<ChatDecisionResult>,
 ): CoreTaskEntry {
   const taskMoney = routes.taskMoney?.bind(routes);
   return {
+    ...(chatDecision === undefined ? {} : {
+      async chatDecision(caller: CoreEntryCaller, press: ChatDecisionPress): Promise<ChatDecisionResult> {
+        // No membership is the same refusal as a person who may not: nothing is written.
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { deployed = undefined; }
+        if (deployed === undefined) return { outcome: "refused", reason: "not_approved" };
+        return await chatDecision(deployed, press);
+      },
+    }),
     ...(threadInput === undefined ? {} : {
       async threadInput(caller: CoreEntryCaller, input: ChatThreadInput): Promise<ChatThreadInputResult> {
         // No membership is the same refusal as a person who may not: nothing is written.

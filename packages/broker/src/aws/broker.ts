@@ -2,7 +2,7 @@ import "./broker-environment-init.js"; import { companyMembershipFromDynamo, res
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
-import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { createSlackLinkCodes, createSlackPersonResolver, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
@@ -288,7 +288,7 @@ import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js"; import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js"; import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js"; import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
@@ -1241,7 +1241,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
-    if (isSlackThreadNoteEvent(event)) {
+    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(dependencies.developer?.coreTasks, event, (thread, userId) => companySlackCaller(dependencies, thread, userId)); if (isSlackThreadNoteEvent(event)) {
       try {
         const result = await recordSlackThreadNote(dependencies, tasks, event);
         // Never the note's text: only who and where.
@@ -15667,7 +15667,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     // L2-4: the tracker intake and ticket write-back over the company's own Linear connection, where Linear is wired.
     ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections } }),
     // L4-U5b: where Slack runs in company mode, a core task started from a Slack thread is told its milestones there, through its own company's workspace token only.
-    ...(slackCompany === undefined ? {} : { chatThreads: hostedSlackThreads({ workspaces: slackCompany.workspaces, log: brokerLogLine }) }),
+    ...(slackCompany === undefined ? {} : { chatThreads: hostedSlackThreads({ workspaces: slackCompany.workspaces, log: brokerLogLine, ...(slackCompany.companies === undefined ? {} : { person: createSlackPersonResolver({ workspaces: slackCompany.workspaces, store: slackCompany.workspaces.store, companies: slackCompany.companies }) }) }) }),
   });
   builtCoreRoot = coreRoot;
   // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.

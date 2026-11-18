@@ -36,7 +36,7 @@ import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "./hosted-approvers.js";
+import { createHostedApprovers, stepUpApprovalKeyOf, type HostedChatApproval } from "./hosted-approvers.js";
 import { GITHUB_LINK_PROVIDER, githubLinkReaderOver, type GithubLinkReader } from "../core/people/github-links.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
@@ -535,6 +535,8 @@ export interface HostedSecurityInputs {
   taskOwner?: (input: { companyId: OrgId; store: DocumentStore; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => Promise<boolean>;
   /** L2-5 (b): the project's own per-task limit (see `HostedAdmissionOptions.projectTaskCap`). */
   projectTaskCap?: ProjectTaskCap | undefined;
+  /** HW5b: the chat a press may approve a low or medium risk plan in (see `HostedChatApproval`). Absent (the dispatcher): the approvers point takes the step-up alone. */
+  chat?: HostedChatApproval | undefined;
 }
 
 /**
@@ -561,6 +563,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
         store: registry.require("storage"), identity: registry.require("identity"), now: context.now,
         ...(inputs.callbackSigningKey === undefined ? {} : { key: stepUpApprovalKeyOf(inputs.callbackSigningKey) }),
         ...(inputs.taskOwner === undefined ? {} : { taskOwner: (asked: { companyId: OrgId; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => inputs.taskOwner!({ ...asked, store: registry.require("storage") }) }),
+        ...(inputs.chat === undefined ? {} : { chat: inputs.chat }),
       }),
     }),
     coreAdapter({

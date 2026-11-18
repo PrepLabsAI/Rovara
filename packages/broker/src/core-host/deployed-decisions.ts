@@ -45,7 +45,8 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import type { CoreRuntime } from "./core-runtime.js";
 import type { CoreDevWiring, DeployedDecisionCaller } from "./dev-routes.js";
-import { STEP_UP_APPROVAL_METHOD, issueStepUpApproval, type StepUpApprovalInput } from "./hosted-approvers.js";
+import { STEP_UP_APPROVAL_METHOD, issueStepUpApproval, type HostedChatApproval, type StepUpApprovalInput } from "./hosted-approvers.js";
+import type { ChatThreads } from "./chat-threads.js";
 
 /** The company's own records of its people, as the broker keeps them. A read that fails throws (the caller refuses); `undefined` is "none". */
 export interface DeployedPeople {
@@ -65,6 +66,23 @@ export async function liveMemberRole(people: DeployedPeople, companyId: OrgId, p
   try { membership = await people.membershipOf(personId); } catch { return undefined; }
   if (membership === undefined || membership === null || typeof membership !== "object" || membership.companyId !== companyId || !OrgRoleSchema.safeParse(membership.role).success) return undefined;
   return membership.role;
+}
+
+/**
+ * HW5b: the chat the approvers point lets a person approve a low or medium risk plan in, from the deployment's chat seam (`ChatThreads`) and the company's own records of its people. ONE chat that can name a person
+ * (`personOf`), else none (the install takes the step-up alone). Everything is read at each use: the workspace's company, the account's link or sign-in, the person's live membership in THAT company and their project grant.
+ */
+export function hostedChatApproval(threads: Pick<ChatThreads, "channels" | "companyOf" | "personOf"> | undefined, people: DeployedPeople): HostedChatApproval | undefined {
+  const personOf = threads?.personOf;
+  // A seam of a test double may carry no `channels` at all: then it names no chat.
+  const channels: readonly string[] | undefined = threads?.channels;
+  const channel = channels !== undefined && channels.length === 1 ? channels[0] : undefined;
+  if (threads === undefined || personOf === undefined || channel === undefined) return undefined;
+  return {
+    channel, companyOf: threads.companyOf,
+    personOf: async (companyId, account) => (await personOf.call(threads, companyId, { channel: account.provider, tenant: account.tenant, userId: account.accountId }))?.personId,
+    holdsProjectGrant: async (companyId, personId, project) => (await liveMemberRole(people, companyId, personId)) !== undefined && (await liveGrant(people, personId, project)) !== undefined,
+  };
 }
 
 /** The person's live project grant, read fresh. A failed read is no grant. */
