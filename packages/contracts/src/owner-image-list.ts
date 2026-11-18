@@ -11,6 +11,7 @@
 import { z } from "zod";
 import { registerOwnerListCatalog, isOwnerListCatalog } from "./service-catalog-brand.js";
 import { ServiceCatalogSchema, type CatalogEntry, type ServiceCatalog } from "./service-catalog.js";
+import { GCP_PACK, GCP_PACK_FAMILIES, gcpPackSourceMatches, isGcpPackFamily, type GcpPackFamily } from "./gcp-pack-images.js";
 import type { VerifiedCatalog } from "./service-catalog-images.js";
 
 export { isOwnerListCatalog };
@@ -91,6 +92,14 @@ export const OWNER_IMAGE_FAMILIES = ["postgres", "mysql", "redis", "mongodb"] as
 export type OwnerImageFamily = (typeof OWNER_IMAGE_FAMILIES)[number];
 export const OwnerImageFamilySchema = z.enum(OWNER_IMAGE_FAMILIES);
 
+/**
+ * Every family a list ENTRY may have: the four an owner may approve, and the GCP pack's (gcp-pack-images.ts). The pack's families are in the STARTER list only (owner-starter-images.ts, `OWNER_GCP_PACK_IMAGES`): an owner's own approval
+ * (`ownerImageRequest`, the env list, a stored approval) stays on the four, so a repository or a person can never name an image for a pack family. An entry of a pack family must name exactly the repository the pack gives it.
+ */
+export type OwnerListFamily = OwnerImageFamily | GcpPackFamily;
+export const OWNER_LIST_FAMILIES = [...OWNER_IMAGE_FAMILIES, ...GCP_PACK_FAMILIES] as const;
+export const OwnerListFamilySchema = z.enum(OWNER_LIST_FAMILIES);
+
 /** The family an image is by its repository's last name (`postgres`, `mysql`, `redis`, `mongo`; `valkey` runs as Redis), or undefined for any other image: nothing else has a run profile, so nothing else can be approved. */
 export function familyOfRepository(repository: string): OwnerImageFamily | undefined {
   const name = repository.split("/").at(-1);
@@ -103,13 +112,25 @@ export function versionOfTag(tag: string | undefined): string | undefined {
 }
 export const majorOfVersion = (version: string): string => version.split(".")[0] ?? version;
 /** The catalog id an owner-approved image has: `postgres@16`. */
-export const ownerCatalogIdOf = (family: OwnerImageFamily, version: string): string => `${family}@${majorOfVersion(version)}`;
+export const ownerCatalogIdOf = (family: OwnerListFamily, version: string): string => `${family}@${majorOfVersion(version)}`;
+
+/** A pack family served by Google's SDK `emulators` image: a JVM or Go emulator started through `gcloud`, from a numeric non-root user, with gcloud's settings on a tmpfs. */
+function sdkProfile(family: "pubsub" | "firestore" | "datastore" | "bigtable", startArg: "gcp_pubsub_start" | "gcp_firestore_start" | "gcp_datastore_start" | "gcp_bigtable_start", port: number, memMiB: number): Pick<CatalogEntry, "run" | "health" | "resources" | "connect" | "reset"> & { licence: string } {
+  return {
+    run: { user: "65532:65532", readOnlyRoot: true, tmpfs: [{ path: "/tmp", sizeMiB: 128 }], ports: [port], extraArgs: [startArg] },
+    health: { kind: "tcp", port, startTimeoutS: 90 },
+    resources: { memMiB, cpus: 1, pids: 512 },
+    connect: { templates: { ...GCP_PACK[family].env }, defaultAliases: [GCP_PACK[family].alias] },
+    reset: { kind: "restart" },
+    licence: GCP_PACK[family].licence,
+  };
+}
 
 /**
  * What Rovara starts a family with, fixed here and read from nowhere else: the same profile the signed catalog gives Postgres 16, MySQL 8 and Redis 7 (a non-root user, a read-only root, bounded memory, processes and CPUs, only
  * named tmpfs mounts that fit in the memory, one port, a health check from the closed list, the reset kind). The official Debian-based images run as user 999; an image that expects another user fails its health check.
  */
-const PROFILES: Record<OwnerImageFamily, Pick<CatalogEntry, "run" | "health" | "resources" | "connect" | "reset">> = {
+const PROFILES: Record<OwnerListFamily, Pick<CatalogEntry, "run" | "health" | "resources" | "connect" | "reset"> & { licence?: string }> = {
   postgres: {
     run: { user: "999:999", readOnlyRoot: true, tmpfs: [{ path: "/var/lib/postgresql/data", sizeMiB: 256 }, { path: "/run/postgresql", sizeMiB: 8 }, { path: "/tmp", sizeMiB: 32 }], ports: [5432], extraArgs: ["postgres_fsync_off", "postgres_synchronous_commit_off", "postgres_full_page_writes_off"] },
     health: { kind: "command", check: "pg_isready", startTimeoutS: 30 },
@@ -139,6 +160,40 @@ const PROFILES: Record<OwnerImageFamily, Pick<CatalogEntry, "run" | "health" | "
     connect: { templates: { MONGODB_URL: "mongodb://{host}:{port}/{db}" }, defaultAliases: ["mongo"] },
     reset: { kind: "restart" },
   },
+  // ---- the GCP pack (gcp-pack-images.ts). Each emulator runs as a non-root user with no capability and a read-only root, sealed on the run's network, in memory only. The profiles come from the spike's reading of the images (L4-E8S), which
+  // started no container: the user, the tmpfs mounts and the memory are the first sealed run's to confirm. Reset is a restart for all of them: the emulators keep their data in memory, so a new process is an empty one.
+  // Google's SDK image runs `gcloud` as the command (a fixed argument id per family, service-catalog.ts) and needs a writable home for gcloud's own settings: the launcher gives it one on the tmpfs (service-helpers.ts).
+  pubsub: sdkProfile("pubsub", "gcp_pubsub_start", 8085, 512),
+  firestore: sdkProfile("firestore", "gcp_firestore_start", 8080, 768),
+  datastore: sdkProfile("datastore", "gcp_datastore_start", 8080, 768),
+  bigtable: sdkProfile("bigtable", "gcp_bigtable_start", 8086, 384),
+  // The image's own entrypoint (`gateway_main --hostname 0.0.0.0`) is kept: nothing is added to it. gRPC on 9010. The image's user is root; a numeric non-root user is forced (unverified that it runs as one: the sealed run's first check).
+  spanner: {
+    run: { user: "65532:65532", readOnlyRoot: true, tmpfs: [{ path: "/tmp", sizeMiB: 32 }], ports: [9010], extraArgs: [] },
+    health: { kind: "tcp", port: 9010, startTimeoutS: 30 },
+    resources: { memMiB: 384, cpus: 1, pids: 256 },
+    connect: { templates: { ...GCP_PACK.spanner.env }, defaultAliases: [GCP_PACK.spanner.alias] },
+    reset: { kind: "restart" },
+    licence: GCP_PACK.spanner.licence,
+  },
+  // Plain HTTP and memory only (the image defaults to a self-signed https server and a data directory).
+  gcs: {
+    run: { user: "65532:65532", readOnlyRoot: true, tmpfs: [{ path: "/tmp", sizeMiB: 16 }], ports: [4443], extraArgs: ["gcs_http_memory"] },
+    health: { kind: "tcp", port: 4443, startTimeoutS: 20 },
+    resources: { memMiB: 192, cpus: 0.5, pids: 128 },
+    connect: { templates: { ...GCP_PACK.gcs.env }, defaultAliases: [GCP_PACK.gcs.alias] },
+    reset: { kind: "restart" },
+    licence: GCP_PACK.gcs.licence,
+  },
+  // REST on 9050 (the connection variables name the first port), gRPC on 9060.
+  bigquery: {
+    run: { user: "65532:65532", readOnlyRoot: true, tmpfs: [{ path: "/tmp", sizeMiB: 64 }], ports: [9050, 9060], extraArgs: ["bigquery_fake_project"] },
+    health: { kind: "tcp", port: 9050, startTimeoutS: 30 },
+    resources: { memMiB: 512, cpus: 1, pids: 256 },
+    connect: { templates: { ...GCP_PACK.bigquery.env }, defaultAliases: [GCP_PACK.bigquery.alias] },
+    reset: { kind: "restart" },
+    licence: GCP_PACK.bigquery.licence,
+  },
 };
 
 // ---- the owner's entries
@@ -147,14 +202,14 @@ const Hex64 = /^[a-f0-9]{64}$/u;
 
 /** The least an entry carries that the worker needs to rebuild the same catalog: the pinned reference, its family and its version. */
 export const OwnerListEntrySchema = z
-  .object({ reference: z.string().max(OWNER_IMAGE_REFERENCE_MAX), family: OwnerImageFamilySchema, version: z.string().regex(/^\d{1,3}(?:\.\d{1,3}){0,2}$/u) })
+  .object({ reference: z.string().max(OWNER_IMAGE_REFERENCE_MAX), family: OwnerListFamilySchema, version: z.string().regex(/^\d{1,3}(?:\.\d{1,3}){0,2}$/u) })
   .strict()
   .superRefine((entry, context) => {
     const parsed = parseImageReference(entry.reference);
     // Pinned means a digest and NOTHING else: a tag is a name that can move, so a reference with one is refused here, in the broker, in the worker and in the guard's list alike.
     if (parsed === undefined || parsed.digest === undefined || parsed.tag !== undefined || !Hex64.test(parsed.digest)) context.addIssue({ code: "custom", path: ["reference"], message: "an owner-approved image is named by registry, repository and digest only" });
     else if (entry.reference !== pinnedImageReference(parsed, parsed.digest)) context.addIssue({ code: "custom", path: ["reference"], message: "the reference is written in its full form" });
-    else if (familyOfRepository(parsed.repository) !== entry.family) context.addIssue({ code: "custom", path: ["family"], message: "the family is the image's own" });
+    else if (isGcpPackFamily(entry.family) ? !gcpPackSourceMatches(entry.family, parsed.registry, parsed.repository) : familyOfRepository(parsed.repository) !== entry.family) context.addIssue({ code: "custom", path: ["family"], message: "the family is the image's own" });
   });
 export type OwnerListEntry = z.infer<typeof OwnerListEntrySchema>;
 
@@ -250,7 +305,7 @@ export const OWNER_LIST_CATALOG_ENV = "owner";
 export function ownerCatalogOf(entries: readonly unknown[]): VerifiedCatalog | undefined {
   const list = normalizeOwnerList(entries);
   if (list.length === 0) return undefined;
-  const highest = new Map<OwnerImageFamily, number>();
+  const highest = new Map<OwnerListFamily, number>();
   for (const entry of list) highest.set(entry.family, Math.max(highest.get(entry.family) ?? -1, Number(majorOfVersion(entry.version))));
   const catalogEntries = list.map((entry): CatalogEntry => {
     const digest = parseImageReference(entry.reference)!.digest!;
@@ -260,7 +315,7 @@ export function ownerCatalogOf(entries: readonly unknown[]): VerifiedCatalog | u
       status: Number(majorOfVersion(entry.version)) === highest.get(entry.family) ? "default" : "available",
       image: { repository: `svc/${entry.family}`, digest, platforms: ["linux/arm64", "linux/amd64"] },
       run: structuredClone(profile.run), health: structuredClone(profile.health), resources: structuredClone(profile.resources), connect: structuredClone(profile.connect), reset: structuredClone(profile.reset),
-      licence: "owner-approved", editions: ["public"], ownerApproved: true,
+      licence: profile.licence ?? "owner-approved", editions: ["public"], ownerApproved: true,
     };
   });
   const catalog: ServiceCatalog = ServiceCatalogSchema.parse({ schemaVersion: 1, revision: OWNER_LIST_CATALOG_REVISION, pinned: true, entries: catalogEntries });
