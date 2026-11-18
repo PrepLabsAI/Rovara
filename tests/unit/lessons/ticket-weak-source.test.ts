@@ -233,7 +233,7 @@ describe("the curator: a weak sighting waits as a candidate, with no alert, even
   });
   it("a possible duplicate: a weak-only draft is a candidate; the same draft from a strong source is pending", async () => {
     for (const [kinds, status] of [[["ticket_comment"], "candidate"], [["human_edit"], "pending"]] as const) {
-      const { deps, store } = setup("same");
+      const { deps } = setup("same");
       await curateDraft(deps, KEY, text("Retries", a, ["human_edit"]));
       const out = await curateDraft(deps, KEY, text("Retries", reworded, [...kinds]));
       expect(out.outcome, kinds.join()).toBe("possible_duplicate");
