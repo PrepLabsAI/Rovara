@@ -108,7 +108,7 @@ describe("GET /v1/dev/company/egress-addresses", () => {
     const w = world();
     const send = async (item: Record<string, unknown> | undefined, asked: string = A) => {
       if (item !== undefined) w.h.db.set({ ...membershipKey(PERSON_B), entityType: "COMPANY_MEMBERSHIP", joinedAt: TIME, ...item });
-      return routeCompanyEgress({ documentClient: w.h.db as never, signInTableName: "SignIn", wiring: { addresses: () => ADDRESSES } }, { developerId: PERSON_B } as never, asked, { method: "GET", headers: {}, path: PATH } as never);
+      return routeCompanyEgress({ documentClient: w.h.db, signInTableName: "SignIn", wiring: { addresses: () => ADDRESSES } }, { developerId: PERSON_B } as never, asked, { method: "GET", headers: {}, path: PATH } as never);
     };
     // The control: an owner of A asking for A reads the list.
     expect(await send({ personId: PERSON_B, companyId: A, role: "owner" })).toEqual({ addresses: ["44.235.136.195", "44.226.134.187"] });
