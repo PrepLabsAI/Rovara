@@ -895,6 +895,7 @@ describe("the deployed decision cards fed by the involved rows (the host's own w
     expect(await t.list(PA)).toEqual([t.taskId]);
     broken.mockRestore();
   });
+});
 
 it.each(["tracker", "chosen", "none"] as const)("real approve_plan confirms only a suggestion (%s)", async (kind) => {
   const t = await setup();

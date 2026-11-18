@@ -129,25 +129,26 @@ describe("PR review comments run on hosted", () => {
 });
 
 describe("NOT wired on hosted today (the gaps, pinned; reverts are wired and pinned below)", () => {
-  it("human edits: nothing queues the job, and the worker answers 'unavailable' (retry, then the dead-letter queue) because the hosted worker is given no human-edit handler", async () => {
+  // Batch 14: #965 (L4-LM1c) gives the hosted worker its human-edit handler, so a message for a push it cannot prove reads no facts (done, no retry) instead of "unavailable".
+  it("human edits: the hosted worker has a human-edit handler (#965); a message whose push yields nothing to learn is done with no facts, never retried", async () => {
     const w = await hostedWorld();
     const message = humanEditMessageOf({
       repo: { host: "github", id: "1", fullName: "example/demo", isPrivate: true, workspaceId: A, project: "payments" }, project: "payments", taskId: w.taskId,
       pullRequest: { number: 7, url: "https://github.com/example/demo/pull/7" }, candidateHeadSha: "a".repeat(40), headSha: "b".repeat(40),
     }, randomUUID());
-    expect(await w.lessons.host.reflectOne(JSON.stringify(message))).toMatchObject({ result: "failed", retry: true });
+    expect(await w.lessons.host.reflectOne(JSON.stringify(message))).toMatchObject({ result: "no_facts", retry: false });
   });
 
-  it("human edits have no producer: no production module builds the extractor or queues a human-edit message", () => {
+  // Batch 14: #965 (L4-LM1c) wires human edits; the callers are pinned exactly, as the reverts' are below.
+  it("human edits ARE wired (#965): the host glue builds the extractor, the producer queues the message, and the work and glue call learnFromHumanEdit, nothing else", () => {
     const root = join(process.cwd(), "packages/broker/src");
     const files: string[] = [];
     const walk = (dir: string): void => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const path = join(dir, entry.name); if (entry.isDirectory()) walk(path); else if (path.endsWith(".ts")) files.push(path); } };
     walk(root);
     const where = (needle: string): string[] => files.filter((file) => readFileSync(file, "utf8").includes(needle)).map((file) => relative(root, file).split(sep).join("/")).sort();
-    // The only files that name them are their own definitions and the host's wrapper (no caller).
-    expect(where("createHumanEditExtractor")).toEqual(["lessons/human-edit.ts"]);
-    expect(where("humanEditMessageOf")).toEqual(["lessons/reflect-queue.ts"]);
-    expect(where("learnFromHumanEdit")).toEqual(["lessons/human-edit.ts"]);
+    expect(where("createHumanEditExtractor")).toEqual(["lessons/host-glue.ts", "lessons/human-edit.ts"]);
+    expect(where("humanEditMessageOf")).toEqual(["lessons/human-edit-producer.ts", "lessons/reflect-queue.ts"]);
+    expect(where("learnFromHumanEdit")).toEqual(["lessons/host-glue.ts", "lessons/human-edit-producer.ts", "lessons/human-edit-work.ts", "lessons/human-edit.ts"]);
   });
 
   it("reverts ARE wired (lane L4-LM1b): the revert watch is the one caller of the two detectors, and the lessons glue is the one caller of the host's noteReverted", () => {

@@ -345,7 +345,8 @@ describe("the vendor spec check on a fake's evidence row (L4-VS)", () => {
     const { store, h } = await chosenFor(stripeSet(GOOD));
     const broken = { ...store, specSlice: () => Promise.reject(new Error("store down")) } as FixtureStore;
     const chosen = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => broken }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
-    expect(chosen.dependencies![0]!.fake).toEqual({ origin: "recorded", revision: 2, recordedAt: "2026-10-20T08:00:00.000Z" });
+    // Batch 14: #926 also states when the set was approved.
+    expect(chosen.dependencies![0]!.fake).toEqual({ origin: "recorded", revision: 2, recordedAt: "2026-10-20T08:00:00.000Z", approvedAt: "2026-11-03T10:00:00.000Z" });
     const noMethod = { ...store, specSlice: undefined } as unknown as FixtureStore;
     expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => noMethod }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies![0]!.fake).not.toHaveProperty("mockSpec");
     expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: OTHER_ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies).toBeUndefined();

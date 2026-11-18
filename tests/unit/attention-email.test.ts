@@ -105,11 +105,13 @@ describe("the switch", () => {
     const root = readFileSync("packages/broker/src/aws/core-engine-root.ts", "utf8");
     expect(root).toContain("const attention = coreActive ? attentionEmailFromEnvironment({ env, lambda: () => new LambdaClient({ maxAttempts: 1 }),");
     expect(root).toContain("...(attention === undefined ? [] : [attentionEmailModule(attention.sender)])");
-    expect(root).toContain("attention === undefined ? wiring : { ...wiring, notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }");
+    // Batch 14: the same seams, now spread next to the upkeep and human-edit ones.
+    expect(root).toContain("...(attention === undefined ? {} : { notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } })");
     expect(root).toContain("...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey })");
     expect(root).not.toContain("client-sesv2");
     const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
-    expect(broker).toContain("...(wiring.notification === undefined ? {} : { notification: wiring.notification })");
+    // Batch 14: the email seams travel together with the upkeep notice's (#959) in one notification object.
+    expect(broker).toContain("...(wiring.notification === undefined && wiring.upkeep === undefined ? {} : { notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }) } })");
     expect(broker).not.toContain("attention-email-sender");
     const sender = readFileSync("packages/broker/src/aws/attention-email-sender.ts", "utf8");
     expect(sender).toContain("new SESv2Client({ maxAttempts: 1 })");

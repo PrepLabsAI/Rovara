@@ -804,6 +804,9 @@ describe("revert detection on a laptop (lane L4-LM1b): the lessons timer runs th
     await w.lessons.tick();
     expect(calls).toEqual(["recent:main"]);
     expect((await w.h.store.query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items).toEqual([]);
+  });
+});
+
 describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () => {
   const sha = (n: number): string => n.toString(16).padStart(40, "0");
   const BASE = sha(1);

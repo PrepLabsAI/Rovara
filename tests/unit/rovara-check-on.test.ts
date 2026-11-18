@@ -59,7 +59,9 @@ describe("the hosted job services", () => {
   // Mutant H2: the deployed broker builds its services with the plain composition again.
   it("the deployed broker's root uses the hosted composition", () => {
     const text = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
-    expect(text).toContain("createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode! })");
+    // Batch 14: the call also passes the attention/upkeep notification seams and the human-edit sink after ciMode.
+    expect(text).toContain("createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!");
+    expect(text).not.toContain("createBrokerCoreServices({");
     expect(text).not.toMatch(/createBrokerCoreServices\(/u);
   });
 
