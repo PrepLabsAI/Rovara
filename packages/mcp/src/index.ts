@@ -11,3 +11,4 @@ export * from "./server.js";
 export * from "./tools.js";
 export * from "./wait.js";
 export * from "./admin-expiry.js";
+export * from "./knowledge-tools.js";

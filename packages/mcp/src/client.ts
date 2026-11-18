@@ -44,6 +44,12 @@ import {
   type WorkflowPublishRetryRequest,
   type WorkflowResolveFindingsInput,
   forwardReader,
+  LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE,
+  LocalKnowledgeAreasReaderSchema,
+  LocalLessonsResponseReaderSchema,
+  type LocalKnowledgeAreasRead,
+  type LocalLessonsBody,
+  type LocalLessonsRead,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
@@ -131,7 +137,16 @@ export type ContextSourcesRead = z.infer<typeof ContextSourcesReadSchema>;
 /** The model each step uses, as a client reads it (read only: the owner changes it on the local page). */
 export type ModelSelectionStateRead = z.infer<typeof ModelSelectionStateReaderSchema>;
 
+/** What one project said to a read of its team knowledge: the answer, or "not found" (the project does not exist for this person, or the repository is not one of its repositories: the broker words both alike). */
+export type KnowledgeAsk<T> = { kind: "answer"; response: T } | { kind: "not_found" };
+/** The broker's own words for a project or repository that is not there (`NO_SUCH_PROJECT` in the lessons route): the one answer a client reads as "not found". */
+const NO_SUCH_PROJECT_WORDS = "No such project.";
+
 export interface ControlPlaneClient {
+  /** Team knowledge for one project (`POST /v1/dev/projects/<project>/lessons`): at most 10 units and 2 KB, approved and live only. Never a bulk read: the body has no such field. */
+  knowledgeFor(project: string, body: Omit<LocalLessonsBody, "all" | "skipRepoFile">): Promise<KnowledgeAsk<LocalLessonsRead>>;
+  /** The table of contents of one project's team knowledge (`POST /v1/dev/projects/<project>/knowledge/areas`): a tree project > repository > top folder, counts only. */
+  knowledgeAreas(project: string, body: { repo?: string }): Promise<KnowledgeAsk<LocalKnowledgeAreasRead>>;
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
   projects(): Promise<DeveloperProjectsResponse>;
@@ -393,7 +408,19 @@ export function httpControlPlaneClient(options: {
   };
   const sessionPath = (sessionId: string, rest = "") => `/v1/app/sessions/${encodeURIComponent(sessionId)}${rest}`;
   const path = (taskId: string, rest = "") => `/v1/dev/tasks/${encodeURIComponent(taskId)}${rest}`;
+  /** A knowledge read: "not found" is its own answer; the day's limit keeps its fixed words and says not to retry today. */
+  async function knowledgeCall<T>(schema: z.ZodType<T>, path: string, body: unknown): Promise<KnowledgeAsk<T>> {
+    try {
+      return { kind: "answer", response: await call(schema, "POST", path, body) };
+    } catch (error) {
+      if (error instanceof ToolError && error.code === "CONTROL_PLANE_UNAVAILABLE" && error.message === NO_SUCH_PROJECT_WORDS) return { kind: "not_found" };
+      if (error instanceof ToolError && error.code === "RATE_LIMITED" && error.message === LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE) throw new ToolError("RATE_LIMITED", error.message, "do not try again today; tell the person the day's limit of team knowledge reads is used");
+      throw error;
+    }
+  }
   return {
+    knowledgeFor: (project, body) => knowledgeCall(LocalLessonsResponseReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/lessons`, body),
+    knowledgeAreas: (project, body) => knowledgeCall(LocalKnowledgeAreasReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/knowledge/areas`, body),
     configuration: async () => {
       const current = await session();
       const value = await send(current, ConfigurationSchema, "GET", "/v1/auth/.well-known/agentx-configuration", undefined, false);

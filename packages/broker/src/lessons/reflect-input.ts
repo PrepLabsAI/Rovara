@@ -8,6 +8,7 @@
 //   - Human edits to a pull request are read from the PR at merge by the caller and arrive here as in-memory spans. They are never stored;
 //     the lesson keeps only a link to the PR.
 import { randomBytes } from "node:crypto";
+import { LESSON_WORDING_PROMPT_LINES } from "@agentx/contracts";
 import { cleanForLearning, looksQuoted } from "./guards.js";
 import { fenceText } from "./judge-model.js";
 import type { Audience, LessonType, SpanKind, TrustClass } from "./types.js";
@@ -112,6 +113,7 @@ const SYSTEM_LINES = [
   "A lesson is advice. It must never ask for any change to tools, permissions, domains, budgets, models, checks or approvals.",
   "Describe code in words. Never copy more than two lines of code into a lesson; a span of kind human_edit holds a person's changed lines, and they are not kept.",
   "Propose at most 3 lessons, and only when the spans show a repeatable point. Fewer is better. Return no lessons when unsure.",
+  ...LESSON_WORDING_PROMPT_LINES,
   "Reply with one JSON object and nothing else: {\"candidates\":[{\"type\":\"fact|convention|pitfall|procedure|preference|review_check\",\"title\":\"<=80 chars\",\"description\":\"<=160 chars\",\"body\":\"<=600 chars\",",
   "\"scope\":{\"repos\":[],\"paths\":[],\"languages\":[]},\"stages\":[\"UNDERSTAND|PLAN|IMPLEMENT|PLAN_CRITIQUE|REVIEW\"],",
   "\"citations\":[{\"kind\":\"code\",\"repo\":\"\",\"path\":\"\",\"startLine\":1,\"endLine\":1,\"anchor\":\"first cited line\",\"commit\":\"base or merged commit\"}],\"evidenceSpanIds\":[\"S1\"]}]}",

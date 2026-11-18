@@ -32,6 +32,17 @@ type Log = (entry: Record<string, unknown>) => void;
 /** What a person is told about. */
 export type AttentionKind = "needs_you" | "paused" | "ready" | "failed" | "done";
 
+/**
+ * A notice for the company's admins that is not about a task (owner decision 2026-11-17: one person's tools were served an unusual amount of team knowledge in a day). It rides the same pending queue, so it is batched,
+ * held for quiet hours, tried again and told through the same chats and email as a task notice; it has no session, so nothing is read for it and it makes no inbox row. The words are fixed here: no name, no text.
+ */
+export type AdminNoticeKind = "knowledge_read";
+type PendingKind = AttentionKind | AdminNoticeKind;
+export const ADMIN_NOTICE_KINDS: readonly AdminNoticeKind[] = ["knowledge_read"];
+export const ADMIN_NOTICE_LINE: Readonly<Record<AdminNoticeKind, { title: string; status: string }>> = {
+  knowledge_read: { title: "Team knowledge", status: "An AI tool was given an unusual amount of team knowledge today. The audit record has the details." },
+};
+
 export const PENDING_PK = "NOTIFY_PENDING";
 const PENDING_KEEP_SECONDS = 3 * 86_400;
 const SENT_KEEP_SECONDS = 86_400;
@@ -50,7 +61,7 @@ export const ATTENTION_READ_MAX = 2000;
 
 /** The row of what was last sent to a person (exported for the person erase). */
 export const notifySentKey = (orgId: string, developerId: string) => ({ pk: `NOTIFY_SENT#${orgId}`, sk: `DEV#${developerId}` });
-const pendingKey = (orgId: string, developerId: string, sessionId: string, kind: AttentionKind) => ({ pk: PENDING_PK, sk: `${orgId}#${developerId}#${sessionId}#${kind}` });
+const pendingKey = (orgId: string, developerId: string, sessionId: string, kind: PendingKind) => ({ pk: PENDING_PK, sk: `${orgId}#${developerId}#${sessionId}#${kind}` });
 
 /** The kind of message a status calls for, or undefined for a status nobody is told about. */
 export function attentionKindOf(summary: Pick<SessionSummary, "status" | "lastRunFailed"> & { display?: unknown }): AttentionKind | undefined {
@@ -133,6 +144,27 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
 }
 
 
+/**
+ * Queues one admin notice for each person named (the caller says who the admins are). `noticeId` makes the row: the same notice again (the same day's alert) replaces it, so nothing piles up. Never throws.
+ * `pending: false` (a host that can tell nobody) writes nothing. Answers how many rows were written.
+ */
+export async function queueAdminNotice(deps: { store: Pick<DocumentStore, "put">; now?: () => Date; log?: Log; pending?: boolean }, notice: { orgId: string; developerIds: readonly string[]; noticeId: string; kind: AdminNoticeKind }): Promise<number> {
+  if (deps.pending === false || !/^[A-Za-z0-9_-]{1,64}$/u.test(notice.noticeId) || !ADMIN_NOTICE_KINDS.includes(notice.kind)) return 0;
+  let written = 0;
+  try {
+    const nowMs = (deps.now ?? (() => new Date()))().getTime();
+    for (const developerId of [...new Set(notice.developerIds)].slice(0, RECIPIENTS_MAX)) {
+      await deps.store.put({
+        item: { ...pendingKey(notice.orgId, developerId, notice.noticeId, notice.kind), entityType: "NOTIFY_PENDING", orgId: notice.orgId, developerId, sessionId: notice.noticeId, kind: notice.kind, at: new Date(nowMs).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
+      });
+      written += 1;
+    }
+  } catch (error) {
+    (deps.log ?? ((entry) => console.log(JSON.stringify({ component: "broker", ...entry }))))({ event: "attention.admin_notice_failed", error: error instanceof Error ? error.name : "unknown" });
+  }
+  return written;
+}
+
 // ---- deliver
 
 export interface AttentionDeliveryDependencies {
@@ -174,12 +206,16 @@ export interface AttentionDeliveryDependencies {
    * Whether a pending row is urgent: it breaks through quiet hours and is not held for a digest (owner answer Q20: a high-risk item). Absent, or a failure: not urgent. Called only for a row that would wait.
    */
   urgent?: (orgId: OrgId, row: { developerId: string; sessionId: string; kind: AttentionKind }) => Promise<boolean>;
+  /**
+   * Whether the person may be told an admin notice now (they are an owner or admin of the company), read at delivery. Absent, or a failure: they may not, and the row goes (fail closed).
+   */
+  adminNotice?: (orgId: OrgId, developerId: string) => Promise<boolean>;
   /** The links an email carries (change the setting, stop these emails, the list of everything waiting); each only when it is a plain https link. */
   emailLinks?: AttentionEmailLinks;
   log?: Log;
 }
 
-interface Line { title: string; status: string; link?: string | undefined; kind: AttentionKind }
+interface Line { title: string; status: string; link?: string | undefined; kind: PendingKind }
 
 export const oneLine = (text: string, max: number): string => {
   const flat = text.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim();
@@ -205,6 +241,7 @@ export function attentionText(lines: readonly Line[], more: number, maxLength: n
 }
 
 const doneText = (lines: readonly Line[], maxLength: number, footer?: string): string => attentionText(lines, 0, maxLength, footer).replace(/^A task needs your attention in Rovara:/u, "A task finished in Rovara:").replace(/^These tasks need your attention in Rovara:/u, "These tasks finished in Rovara:");
+const noticeText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need) your attention in Rovara:/u, "A notice from Rovara:");
 const digestText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need) your attention in Rovara:/u, "Your Rovara digest:");
 
 /** The event id of a batch: the same rows to the same target are the same event, so an adapter that is told twice drops the repeat. */
@@ -216,19 +253,19 @@ export function batchEventId(orgId: string, developerId: string, target: string,
 /** The email route's key among a person's targets (a chat target's key always has a `:`). */
 export const EMAIL_TARGET = "email";
 
-interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerId: string; sessionId: string; kind: AttentionKind; at: string; done: Set<string> }
+interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerId: string; sessionId: string; kind: PendingKind; at: string; done: Set<string> }
 
 function pendingRowOf(item: StoredDocument, nowSeconds: number): PendingRow | undefined {
   const { orgId, developerId, sessionId, kind, at, sk } = item;
   if (typeof orgId !== "string" || typeof developerId !== "string" || typeof sessionId !== "string" || typeof at !== "string" || typeof sk !== "string") return undefined;
-  if (typeof kind !== "string" || !["needs_you", "paused", "ready", "failed", "done"].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
+  if (typeof kind !== "string" || ![...["needs_you", "paused", "ready", "failed", "done"], ...ADMIN_NOTICE_KINDS].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
   // A row past its expiry is not delivered (the store deletes expired items late).
   const expires = item[INDEX_EXPIRY_ATTRIBUTE];
   if (typeof expires === "number" && expires <= nowSeconds) return undefined;
   const done = new Set(Array.isArray(item["doneTargets"]) ? item["doneTargets"].filter((entry): entry is string => typeof entry === "string") : []);
   // The email is sent at most once: a row claimed for an email (the hosted product's `emailClaimed`, written before the send) or marked sent counts as sent.
   if (item["emailSent"] === true || typeof item["emailClaimed"] === "number") done.add(EMAIL_TARGET);
-  return { key: { pk: PENDING_PK, sk }, orgId: orgId, developerId, sessionId, kind: kind as AttentionKind, at, done };
+  return { key: { pk: PENDING_PK, sk }, orgId: orgId, developerId, sessionId, kind: kind as PendingKind, at, done };
 }
 
 /** One person's marker: when it last sent anything, per target how many tries failed in a row and when it may try again, and the local day whose digest was last sent. */
@@ -319,7 +356,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     if (hold !== "none") {
       sendable = [];
       for (const row of rows) {
-        const urgent = deps.urgent === undefined ? false : await deps.urgent(orgId, { developerId, sessionId: row.sessionId, kind: row.kind }).catch(() => false);
+        const urgent = deps.urgent === undefined || row.kind === "knowledge_read" ? false : await deps.urgent(orgId, { developerId, sessionId: row.sessionId, kind: row.kind }).catch(() => false);
         if (urgent === true) sendable.push(row);
       }
       outcome.held += rows.length - sendable.length;
@@ -340,6 +377,13 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     const stale: PendingRow[] = [];
     const carded = new Set<string>();
     for (const row of rows) {
+      // An admin notice has no session: it is told only to a person who is an admin now (read at delivery; no reader means no one), in its own fixed words.
+      if (row.kind === "knowledge_read") {
+        const still = deps.adminNotice === undefined ? false : await deps.adminNotice(orgId, developerId).catch(() => false);
+        if (!still) { stale.push(row); continue; }
+        current.push({ row, line: { ...ADMIN_NOTICE_LINE[row.kind], kind: row.kind } });
+        continue;
+      }
       const earlier = current.find((entry) => entry.row.sessionId === row.sessionId);
       if (earlier !== undefined) { current.push({ row, line: earlier.line }); continue; }
       const session = await sessions.get(orgId, row.sessionId);
@@ -358,7 +402,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     // Where each session's change is also told: the conversation it was started from, when this person started it.
     const threadSessions = new Map<string, { target: NotifyTarget; sessions: Set<string> }>();
     if (deps.thread !== undefined) {
-      for (const sessionId of new Set(current.map(({ row }) => row.sessionId))) {
+      for (const sessionId of new Set(current.filter(({ row }) => row.kind !== "knowledge_read").map(({ row }) => row.sessionId))) {
         const thread = await deps.thread(orgId, sessionId).catch(() => undefined);
         if (thread === undefined || thread.personId !== developerId) continue;
         const target: NotifyTarget = { channel: thread.conversation.channel, conversation: thread.conversation };
@@ -413,10 +457,10 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       }
       const lines = [...new Map(owed.map(({ row, line }) => [row.sessionId, line])).values()];
       const shown = lines.slice(0, NOTIFY_ITEMS_MAX), more = lines.length - shown.length;
-      const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done");
+      const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done"), allNotice = lines.every((line) => line.kind === "knowledge_read");
       let ok = false, refused = false;
       if (tkey === EMAIL_TARGET) {
-        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : "attention", deps.emailLinks);
+        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : allNotice ? "notice" : "attention", deps.emailLinks);
         try {
           await email!.send({ companyId: orgId, purpose: "attention", to: address!, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
           ok = true;
@@ -426,7 +470,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
         }
       } else {
         const maxLength = adapter!.capabilities.maxTextLength;
-        const text = digest ? digestText(shown, more, maxLength, deps.footer) : allDone ? doneText(shown, maxLength, deps.footer) : attentionText(shown, more, maxLength, deps.footer);
+        const text = digest ? digestText(shown, more, maxLength, deps.footer) : allDone ? doneText(shown, maxLength, deps.footer) : allNotice ? noticeText(shown, more, maxLength, deps.footer) : attentionText(shown, more, maxLength, deps.footer);
         const base = { version: 1 as const, id: batchEventId(orgId, developerId, tkey, owed.map(({ row }) => ({ sk: row.key.sk, at: row.at }))), channel: target!.channel, conversation: target!.conversation, createdAt: new Date(nowMs).toISOString() };
         const event = (allDone && !digest ? { ...base, type: "done", data: { text } } : allFailed && !digest ? { ...base, type: "error", data: { code: "task_failed", text } } : { ...base, type: "progress", data: { text } }) as ChannelEvent;
         let timer: ReturnType<typeof setTimeout> | undefined;

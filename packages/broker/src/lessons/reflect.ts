@@ -1,6 +1,7 @@
 // The reflector. One tool-less model call per finished task, and a nightly pass. Its output is schema-checked JSON that
 // code turns into lesson drafts; the model never writes to a store. Any parse failure drops the whole output, with no retry loop.
 import { randomUUID } from "node:crypto";
+import { lessonWordingWarnings } from "@agentx/contracts";
 import { cleanForLearning } from "./guards.js";
 import { currentLearningAttempt } from "./learning-deadline.js";
 import { isLearningRefusal, noteModelFailure, notePause, noteRecovered, pauseOfLook, spendLook, type LessonsPauseStore } from "./pause.js";
@@ -243,6 +244,8 @@ async function toDraft(
   const description = cleanForLearning(candidate.description, 160);
   const body = cleanForLearning(candidate.body, 600);
   if (title === "" || body === "") return undefined;
+  // Agent knowledge (a): how the lesson reads is checked SOFTLY. A lesson that departs from the shape is kept as it is; only a count (fixed codes, no text) says how often the drafter does it.
+  for (const code of lessonWordingWarnings({ title, description, body })) deps.metrics?.count("learning.lesson_wording_warning", { code });
   // C6: a lesson that asks for a change to tools, permissions, domains, budgets, models or approvals is NOT dropped. It is kept as a person-approval lesson with a fixed reason
   // (`capability_request`, set by the tier step), so the approver sees it and decides; nothing is silently lost.
 

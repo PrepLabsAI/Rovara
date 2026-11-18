@@ -12,15 +12,22 @@
 // POST /v1/app/org/lessons/local-tools refused: the switch is on the lessons page
 // POST /v1/dev/projects/{p}/lessons a local coding tool's read (decision 46b): the lessons the whole project may read, stable or person-approved, for the repository its git remote names. The owner's API token or a
 // script token with the `lessons` permission for that project; 60 a minute per person; the day's count per person and project holds numbers only (no lesson, task, file or repository text).
+// POST /v1/dev/projects/{p}/knowledge/areas the table of contents: a tree project > repository > top folder of the project's team knowledge with unit counts by kind, names and numbers only (same permission, same limits)
+// Both reads are for tools OUTSIDE Rovara, so they carry the owner's limits (2026-11-17): at most 10 units and 2 KB an answer, 300 reads a day per person (a fixed refusal after that), no bulk mode (`all` is refused), one audit
+// record per answer holding the unit ids and no text, and one admin notice a day when a person's tools were served more than 150 DISTINCT units.
 // The API token only reads. Authentication happens before this (the identity adapter vouches for the principal). Nothing here reads who is acting from a body.
-import { INDEX_EXPIRY_ATTRIBUTE, LocalLessonsBodySchema, agentXError, change, companyScoped, indexExpiresAt, type DocumentStore } from "@agentx/contracts";
+import { createHash } from "node:crypto";
+import { INDEX_EXPIRY_ATTRIBUTE, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, LOCAL_KNOWLEDGE_DISTINCT_ALERT, LOCAL_KNOWLEDGE_NO_BULK_MESSAGE, LocalKnowledgeAreasBodySchema, LocalLessonsBodySchema, agentXError, change, companyScoped, indexExpiresAt, type DocumentStore } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { repoFileStatus } from "../../lessons/repo-file-routes.js";
 import { buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
 import { takeRate } from "../../core/script-tokens/rate.js";
-import { LocalLessonsUnavailable, lessonsForLocalTool, type LocalLessonsDeps, type LocalToolsCounter } from "../../lessons/local-tools.js";
+import { LocalLessonsUnavailable, knowledgeAreasForLocalTool, lessonsForLocalTool, type LocalLessonsDeps, type LocalToolsCounter } from "../../lessons/local-tools.js";
+import { knowledgeLimits } from "../../lessons/knowledge-limits.js";
+import { emitAudit, requireAudit } from "../../lessons/policy.js";
+import type { NoticeService } from "../../services/notices.js";
 import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
 import { peopleOf, type Lesson } from "../../lessons/types.js";
 import type { ScopeKey } from "../../lessons/store.js";
@@ -29,6 +36,7 @@ import type { LocalLessons } from "./lessons.js";
 const PROJECT_LESSONS = /^\/v1\/app\/projects\/([^/]+)\/lessons(?:\/([A-Za-z0-9_-]{1,64})(?:\/(approve|reject|merge|retire|history))?)?$/u;
 const TASK_LESSONS = /^\/v1\/app\/tasks\/([0-9a-f-]{36})\/lessons(?:\/([A-Za-z0-9_-]{4,64})\/feedback)?$/u;
 const LOCAL_LESSONS = /^\/v1\/dev\/projects\/([^/]+)\/lessons$/u;
+const KNOWLEDGE_AREAS = /^\/v1\/dev\/projects\/([^/]+)\/knowledge\/areas$/u;
 const COMPANY_LOCAL_TOOLS = "/v1/app/org/lessons/local-tools";
 export const LOCAL_LESSONS_PER_MINUTE = 60;
 const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
@@ -57,12 +65,14 @@ export const CHANGE_ON_THE_PAGE = "This is changed on the lessons page, by you. 
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 
-export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskFlowDeps }): (request: BrokerRequest, caller: TaskCaller) => Promise<BrokerResponse | undefined> {
+export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskFlowDeps; /** Where the once-a-day admin notice is queued; absent: the audit record alone says it. */ notices?: Pick<NoticeService, "queueAdmin"> | undefined }): (request: BrokerRequest, caller: TaskCaller) => Promise<BrokerResponse | undefined> {
   const { lessons, flow } = options;
   const companyId = flow.companyId;
   const runtime = lessons.runtime;
   const nowMs = (): number => (flow.now?.() ?? new Date()).getTime();
   const counter = localLessonsDayCounter(flow.store, nowMs);
+  // The per-person day limits of knowledge read outside Rovara. The store's expiry attribute is named here, where it is allowed (the TTL guard test lists this file), and handed to the limits.
+  const limits = knowledgeLimits({ store: flow.store, now: nowMs, expiry: { attribute: INDEX_EXPIRY_ATTRIBUTE, expiresAt: (atMs) => indexExpiresAt(new Date(atMs).toISOString()) } });
 
   /** The display names a lesson that leaves Rovara must not hold: the owner's, the person asking, and the people of the lessons asked about; a name that cannot be read, or too many people, throws. */
   async function peopleNames(developerId: string, key: ScopeKey, found: readonly Lesson[]): Promise<string[]> {
@@ -78,7 +88,7 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
   }
 
   /** A local coding tool's read (decision 46b). The token's permission and project were checked when it was authenticated; they are checked again here. */
-  async function localRead(project: string, request: BrokerRequest, caller: TaskCaller): Promise<object> {
+  async function localRead(project: string, request: BrokerRequest, caller: TaskCaller, tool: "lessons" | "areas"): Promise<object> {
     const developerId = caller.principal.personId;
     let allowed: boolean;
     try { allowed = await takeRate(flow.store, { pk: companyScoped(companyId, "LESSON_LOCAL_READS"), sk: developerId }, LOCAL_LESSONS_PER_MINUTE, 60_000, nowMs); }
@@ -86,15 +96,29 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
     if (!allowed) throw agentXError("TOO_MANY_REQUESTS", "Too many lesson requests. Try again in a minute.");
     if (caller.scriptToken !== undefined && (!caller.scriptToken.permissions.includes("lessons") || !caller.scriptToken.projects.includes(project))) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
     if (await flow.projects.latest(project) === undefined) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
-    let raw: unknown;
-    try { raw = request.body === undefined || request.body === "" ? {} : JSON.parse(request.body); } catch { throw agentXError("CONFIG_INVALID", "body: is not JSON"); }
-    const parsed = LocalLessonsBodySchema.safeParse(raw);
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      // Field names only: the values are the caller's.
-      throw agentXError("CONFIG_INVALID", `${issue === undefined || issue.path.length === 0 ? "body" : issue.path.join(".")}: ${issue === undefined || issue.code === "unrecognized_keys" ? "has a field this route does not take" : issue.message}`);
-    }
+    const via = caller.scriptToken === undefined ? "person" : "token";
     const count = async (found: number, refusal?: string): Promise<void> => { try { await counter.count({ orgId: companyId, project, developerId, lessons: found, refusal }); } catch { /* bookkeeping only */ } };
+    // The day's limit, counted before anything is read and fail closed: a counter that cannot be read refuses the call. Fixed words; nothing the caller sent is echoed.
+    let within: boolean;
+    try { within = await limits.takeCall(companyId, developerId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    if (!within) { await count(0, "day_limit"); throw agentXError("TOO_MANY_REQUESTS", LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE); }
+    /** One audit record per answer, written BEFORE the text is returned (no record, no answer): the tool, how it asked, how many units and their ids. Never text. */
+    const audited = async (ids: readonly string[]): Promise<void> => {
+      const units = ids.slice(0, 10);
+      const ok = await requireAudit(runtime.audit, { action: "lesson.knowledge_read", workspaceId: companyId, project, actor: developerId, facts: { tool, via, units: units.length, ...Object.fromEntries(units.map((id, index) => [`u${String(index + 1)}`, id])) } });
+      if (!ok) { await count(0, "audit"); throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    };
+    /** After the answer is allowed: the distinct units this person was served today; the call that takes it above the line tells the admins once. Never changes the answer. */
+    const noteServed = async (ids: readonly string[]): Promise<void> => {
+      if (ids.length === 0) return;
+      try {
+        const noted = await limits.noteServed({ companyId, project, developerId, unitIds: ids });
+        if (!noted.crossed) return;
+        await emitAudit(runtime.audit, { action: "lesson.knowledge_read_alert", workspaceId: companyId, project, actor: developerId, facts: { distinct: noted.distinct, line: LOCAL_KNOWLEDGE_DISTINCT_ALERT } });
+        const noticeId = `knowledge-${new Date(nowMs()).toISOString().slice(0, 10)}-${createHash("sha256").update(developerId).digest("hex").slice(0, 16)}`;
+        await options.notices?.queueAdmin({ orgId: companyId, developerIds: [lessons.owner.id], noticeId, kind: "knowledge_read" });
+      } catch { /* bookkeeping only: the answer stands */ }
+    };
     const deps: LocalLessonsDeps = {
       store: runtime.store, settings: runtime.settings, access: runtime.access, localTools: runtime.localTools, now: nowMs,
       names: (key, found) => peopleNames(developerId, key, found),
@@ -102,9 +126,32 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
       // What is merged into the repository's own lessons file now (decision 50a): the file pass's state, ids only.
       ...(runtime.repoFile === undefined ? {} : { repoFileIds: async (key: ScopeKey, place: string) => { const state = await runtime.repoFile!.deps.state.get(key, place); return state === undefined ? undefined : new Set(Object.keys(state.rendered)); } }),
     };
+    let raw: unknown;
+    try { raw = request.body === undefined || request.body === "" ? {} : JSON.parse(request.body); } catch { throw agentXError("CONFIG_INVALID", "body: is not JSON"); }
+    const shape = tool === "areas" ? LocalKnowledgeAreasBodySchema : LocalLessonsBodySchema;
+    const checked = shape.safeParse(raw);
+    if (!checked.success) {
+      const issue = checked.error.issues[0];
+      // Field names only: the values are the caller's.
+      throw agentXError("CONFIG_INVALID", `${issue === undefined || issue.path.length === 0 ? "body" : issue.path.join(".")}: ${issue === undefined || issue.code === "unrecognized_keys" ? "has a field this route does not take" : issue.message}`);
+    }
+    if (tool === "areas") {
+      let outcome: Awaited<ReturnType<typeof knowledgeAreasForLocalTool>>;
+      try { outcome = await knowledgeAreasForLocalTool(deps, { orgId: companyId, project, remote: checked.data.repo }); } catch (error) {
+        await count(0, error instanceof LocalLessonsUnavailable ? "unavailable" : "error");
+        throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
+      }
+      if (outcome.kind === "unknown_repo") { await count(0, "unknown_repo"); throw agentXError("NOT_FOUND", NO_SUCH_PROJECT); }
+      await audited([]);
+      await count(0, outcome.answer.reason);
+      return outcome.answer;
+    }
+    const parsed = { data: checked.data as ReturnType<typeof LocalLessonsBodySchema.parse> };
+    // There is no bulk mode: a tool that asks for the whole set is told so, in fixed words.
+    if (parsed.data.all === true) throw agentXError("CONFIG_INVALID", `all: ${LOCAL_KNOWLEDGE_NO_BULK_MESSAGE}`);
     let outcome: Awaited<ReturnType<typeof lessonsForLocalTool>>;
     try {
-      outcome = await lessonsForLocalTool(deps, { orgId: companyId, project, remote: parsed.data.repo, task: parsed.data.task, files: parsed.data.files, stage: parsed.data.stage, all: parsed.data.all, skipRepoFile: parsed.data.skipRepoFile });
+      outcome = await lessonsForLocalTool(deps, { orgId: companyId, project, remote: parsed.data.repo, task: parsed.data.task, files: parsed.data.files, stage: parsed.data.stage, skipRepoFile: parsed.data.skipRepoFile });
     } catch (error) {
       await count(0, error instanceof LocalLessonsUnavailable ? "unavailable" : "error");
       throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
@@ -113,7 +160,10 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
       await count(0, "unknown_repo");
       throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
     }
-    await count(outcome.answer.lessons.length, outcome.answer.reason);
+    const ids = outcome.answer.lessons.map((lesson) => lesson.id);
+    await audited(ids);
+    await count(ids.length, outcome.answer.reason);
+    await noteServed(ids);
     return outcome.answer;
   }
 
@@ -122,11 +172,13 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
     const project = PROJECT_LESSONS.exec(path);
     const task = TASK_LESSONS.exec(path);
     const local = request.method === "POST" ? LOCAL_LESSONS.exec(path) : null;
-    if (project === null && task === null && local === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
+    const areas = request.method === "POST" ? KNOWLEDGE_AREAS.exec(path) : null;
+    if (project === null && task === null && local === null && areas === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
     try {
       if (caller.principal.companyId !== companyId) throw agentXError("FORBIDDEN", "this is not your install");
       const who = { orgId: companyId, developerId: caller.principal.personId };
-      if (local !== null) return json(200, await localRead(decodeURIComponent(local[1]!), request, caller));
+      if (local !== null) return json(200, await localRead(decodeURIComponent(local[1]!), request, caller, "lessons"));
+      if (areas !== null) return json(200, await localRead(decodeURIComponent(areas[1]!), request, caller, "areas"));
       if (path === COMPANY_LOCAL_TOOLS) {
         if (request.method === "POST") throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);
         if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");

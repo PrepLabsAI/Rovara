@@ -570,6 +570,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     store, registry, now: clock, footer: ATTENTION_FOOTER, log,
     doneToldInThread: () => registry.names("channel").length > 0 && channelMilestonesOn(),
     planCarded: planCardPosted({ store, now: () => clock().getTime() }),
+    // The install's one owner is its admin: they are told the admin notices (an unusual amount of team knowledge read by a tool).
+    adminNotice: async (_org, developerId) => developerId === owner.personId,
   });
   const sessionService = createSessionService({
     store,
@@ -720,7 +722,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => sessionService.refresh(orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
-  const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
+  const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps, notices });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await sessionService.start().catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });

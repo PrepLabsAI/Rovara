@@ -1,6 +1,7 @@
 // Spec 025 FR-026: `agentx mcp`, a stdio MCP server for the developer signed in on this computer.
 // stdout carries only MCP messages; logs go to stderr and never hold a token.
 import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -30,8 +31,23 @@ export interface McpServeDeps extends DeveloperSessionDeps {
    * `currentCliInvocation()`, for tests only.
    */
   cliInvocation?: CliInvocation;
+  /**
+   * The git remote of the checkout this process runs in (its `origin`), for the team knowledge tools to find the repository and project. Defaults to asking git in the working directory; tests give their own. A failure is
+   * "no remote".
+   */
+  checkoutRemote?(): Promise<string | undefined>;
   stderr: { write(text: string): unknown };
   clock?: { now(): number; sleep(ms: number, signal: AbortSignal): Promise<void> };
+}
+
+/** `git remote get-url origin` in the working directory: one short answer, two seconds at most, never an error (no git, no checkout or no remote is just "none"). */
+function gitOriginOfCwd(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile("git", ["remote", "get-url", "origin"], { cwd: process.cwd(), timeout: 2_000, maxBuffer: 4_096, env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
+      const remote = error === null ? stdout.trim() : "";
+      resolve(remote === "" || remote.length > 400 || /[\u0000-\u001f]/u.test(remote) ? undefined : remote);
+    });
+  });
 }
 
 /** Resolves after `ms`, or at once when the tool call is cancelled. */
@@ -159,6 +175,7 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
       ...(clientVersion === undefined ? {} : { clientVersion }),
       confirmation,
       serverVersion: CLI_VERSION,
+      checkoutRemote: async () => { try { return await (deps.checkoutRemote?.() ?? gitOriginOfCwd()); } catch { return undefined; } },
       adminSignedIn: () => deps.adminSignedIn(deps.env),
       adminSignInNotice: async () => adminSignInNotice(await storedAdmin(), now(), commandFor),
       compatibility,
