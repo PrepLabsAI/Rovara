@@ -35,7 +35,6 @@ const KNOWLEDGE_AREAS = /^\/v1\/dev\/projects\/([^/]+)\/knowledge\/areas$/u;
 const COMPANY_LOCAL_TOOLS = "/v1/app/org/lessons/local-tools";
 export { LOCAL_LESSONS_PER_MINUTE };
 const UNAVAILABLE = KNOWLEDGE_UNAVAILABLE;
-const NO_SUCH_PROJECT = "No such project.";
 /** At most this many people's names are looked up in one call: over it, nothing is returned. */
 const MAX_NAME_LOOKUPS = 300;
 

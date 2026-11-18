@@ -108,9 +108,9 @@ describe("the candidate takes the confirmed locations", () => {
   it("is bound into what the approver approves: the digest moves with the locations and is the commands' alone without them", () => {
     const setup = [{ cwd: "repo/app", executable: "npm", args: ["ci"], timeoutSeconds: 60 }];
     expect(setupApplyDigest(setup, setup)).toBe(setupApplyDigest(setup, setup, undefined));
-    expect(setupApplyDigest(setup, setup, [])).toBe(setupApplyDigest(setup, setup));
-    expect(setupApplyDigest(setup, setup, [locationOf(ids[0]!)])).not.toBe(setupApplyDigest(setup, setup));
-    expect(setupApplyDigest(setup, setup, [locationOf(ids[0]!)])).not.toBe(setupApplyDigest(setup, setup, [locationOf(ids[1]!)]));
+    expect(setupApplyDigest(setup, setup, {})).toBe(setupApplyDigest(setup, setup));
+    expect(setupApplyDigest(setup, setup, { promptLocations: [locationOf(ids[0]!)] })).not.toBe(setupApplyDigest(setup, setup));
+    expect(setupApplyDigest(setup, setup, { promptLocations: [locationOf(ids[0]!)] })).not.toBe(setupApplyDigest(setup, setup, { promptLocations: [locationOf(ids[1]!)] }));
   });
 });
 

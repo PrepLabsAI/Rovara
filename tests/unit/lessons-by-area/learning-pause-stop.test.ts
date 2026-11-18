@@ -8,7 +8,6 @@ import { createHumanEditExtractor, learnFromHumanEdit, type HumanEditExtractorDe
 import type { HumanEditInput } from "../../../packages/broker/src/lessons/capture-types.js";
 import { setLearningSourcePause, SOURCE_KINDS } from "../../../packages/broker/src/lessons/learning-sources.js";
 import { ALL_PAUSABLE_KINDS, pausedKindsFor, pausedKindsOfFlags } from "../../../packages/broker/src/lessons/paused-kinds.js";
-import { newTaskFailureTally } from "../../../packages/broker/src/lessons/pause.js";
 import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
 import type { CorrectionJudge, CorrectionRating } from "../../../packages/broker/src/lessons/ports.js";
 import { reflectSubject } from "../../../packages/broker/src/lessons/reflect.js";

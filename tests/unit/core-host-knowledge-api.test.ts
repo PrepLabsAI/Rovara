@@ -701,7 +701,7 @@ describe("the MCP tools against a hosted install (the CLI client targets the sam
       if (method === "GET" && url.pathname === "/v1/dev/projects") return json(200, { developer: { id: "a".repeat(64), name: "Ada", provider: "oidc" }, projects: [{ name: "billing", latestRevision: 1, access: "granted", channels: [] }, { name: "payments", latestRevision: 1, access: "granted", channels: [] }], notices: [] });
       try { return json(200, await b.api.answer({ method, path: url.pathname, body: typeof init?.body === "string" ? init.body : "{}" }, person(personId))); }
       catch (error) { if (!(error instanceof AgentXError)) throw error; return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } }); }
-    }) as typeof fetch;
+    });
   }
   const contextOf = (b: Built, personId: string, seen: string[]): ToolContext => ({
     client: httpControlPlaneClient({ session: async () => ({ baseUrl: "https://api.hosted.test", accessToken: "cli-token-for-the-test", signInCommand: "x" }), fetch: hostedFetch(b, personId, seen), sleep: async () => undefined }),

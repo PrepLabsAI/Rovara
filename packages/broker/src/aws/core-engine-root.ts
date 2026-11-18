@@ -982,7 +982,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         return ids;
       };
       // Delivery's own check, read now: a queued admin notice is told only to a person who is one of the company's admins at that moment (fail closed on any fault).
-      adminNotice = async (orgId, developerId) => (await adminsOf(orgId as OrgId)).includes(developerId);
+      adminNotice = async (orgId, developerId) => (await adminsOf(orgId)).includes(developerId);
       knowledge = createKnowledgeApi({
         lessonsSwitch: switchValue,
         companyOf: async (caller) => await membershipOf(caller.personId),

@@ -22,7 +22,6 @@ import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-f
 import {
   CASES_DIR, EVAL_COMMAND, EVAL_REPORT, SCORING_PATH, createStandInWorld, evalRun, git, pythonAvailable, teamGate, unitTests, type StandInWorld,
 } from "../support/ai-builder-standin.js";
-import { blockedModelHosts, redirectEscapesFor } from "../support/model-host-block-facts.js";
 
 const GREEN = "01-friendlier-tone.patch";
 const REGRESSION = "02-simplify-prompt-regression.patch";

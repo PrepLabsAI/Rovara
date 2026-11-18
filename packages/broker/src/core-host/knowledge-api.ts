@@ -153,11 +153,11 @@ export function createKnowledgeApi(options: KnowledgeApiOptions): KnowledgeApi {
       names: async (developerId: string, key: ScopeKey, found: readonly Lesson[]) => {
         const ids = new Set<string>([developerId]);
         for (const lesson of found) for (const id of peopleOf(lesson)) ids.add(id);
-        const approvers = await options.people.approvers(companyId as OrgId, key.project);
+        const approvers = await options.people.approvers(companyId, key.project);
         if (!approvers.complete) throw new Error("the project's approvers are not complete");
         for (const id of [...approvers.ownerIds, ...approvers.eligibleIds]) ids.add(id);
         if (options.people.projectMembers !== undefined) {
-          const roster = await options.people.projectMembers(companyId as OrgId, key.project);
+          const roster = await options.people.projectMembers(companyId, key.project);
           if (!roster.complete) throw new Error("the project's roster is not complete");
           for (const id of roster.ids) ids.add(id);
         }
@@ -172,7 +172,7 @@ export function createKnowledgeApi(options: KnowledgeApiOptions): KnowledgeApi {
       projectExists: lessons.projectExists,
       tellAdmins: async (notice) => {
         // The audit alert is already written (by the shared server); this only queues the notice for the company's admins now, in the company's own store. Fail closed: nobody known, nobody told.
-        const admins = options.adminsOf === undefined ? [] : await options.adminsOf(companyId as OrgId);
+        const admins = options.adminsOf === undefined ? [] : await options.adminsOf(companyId);
         if (admins.length === 0) return;
         await queueAdminNotice({ store: runtime.documents, now: () => new Date(options.now()), log: (entry) => log("notice_log", { event: entry["event"] }) }, { orgId: companyId, developerIds: admins, noticeId: notice.noticeId, kind: "knowledge_read" });
       },

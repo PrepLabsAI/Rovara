@@ -21,7 +21,7 @@ import { pausedKindsFor, withoutPausedSpans } from "./paused-kinds.js";
 import { reflectSubject, type ReflectDeps } from "./reflect.js";
 import type { EvidenceSpan, ReflectSubject } from "./reflect-input.js";
 import type { LessonStore } from "./store.js";
-import { withoutPausedEvidence, type LearnResult, type TaskSubjectSource } from "./task-end.js";
+import type { LearnResult, TaskSubjectSource } from "./task-end.js";
 import { buildTaskReflectSubject } from "./task-subject.js";
 
 export interface HumanEditExtractorDeps {
