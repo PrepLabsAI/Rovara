@@ -276,7 +276,7 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
   // Lead 4 L4-LP3Wc: a draft that rests on a kind of evidence a person paused ("Where Rovara learns from") is not stored, not counted against any source and not judged: the pause is a stop (a reflection that was in flight when it was pressed ends here).
   // Read live, and an unreadable store counts as paused (fail closed).
   const pausedKinds = await pausedKindsFor(deps.store, key);
-  if (draft.provenance.sourceKinds.some((kind) => pausedKinds.has(kind))) return drop("source_paused");
+  if (draft.provenance.sourceKinds.some((kind) => (pausedKinds as ReadonlySet<string>).has(kind))) return drop("source_paused");
 
   // Every candidate is collected (no flat caps). It is counted against its sources; a spiking source is paused alone and its lessons are held, not dropped.
   await noteCandidateSources(deps, deps.store, key, attributableSources(draft.provenance), deps.alerts, deps.alreadyNoted);

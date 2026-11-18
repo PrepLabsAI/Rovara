@@ -50,7 +50,7 @@ export async function buildLearningSources(deps: LearningSourcesDeps, caller: { 
   const read = await readVisibleRanked({ access: deps.access, key, viewer, where: "view", log: deps.log, live, ranked, pageSize: 50, enough: () => false, deadlineAt });
   const pausedNow = pausedKindsOfFlags(await deps.store.flags(key));
   const sources = LEARNING_SOURCE_KEYS.map((sourceKey) => {
-    const kinds = new Set<SpanKind>(SOURCE_KINDS[sourceKey]);
+    const kinds: ReadonlySet<string> = new Set<SpanKind>(SOURCE_KINDS[sourceKey]);
     const mine = read.kept.filter((lesson) => lesson.provenance.sourceKinds.some((kind) => kinds.has(kind)));
     const suggested = mine.filter((lesson) => SUGGESTED.has(lesson.status));
     const kept = suggested.filter((lesson) => KEPT.has(lesson.status));

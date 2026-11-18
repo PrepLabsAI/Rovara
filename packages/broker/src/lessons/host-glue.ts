@@ -311,7 +311,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     // A message names its company: one of another company is never this company's to learn from (it is answered as having nothing to learn from, and not retried).
     learn: async (message) => (message.workspaceId !== companyId ? { status: "no_facts", retry: false } : await learnFromEndedTaskTyped(learning, message)),
     ...(humanEditWork === undefined ? {} : {
-      humanEdit: async (job) => (job.repo.workspaceId !== companyId ? { status: "no_facts", retry: false } : await learnFromHumanEdit({ run: humanEditWork, settings: runtime.settings }, job)),
+      humanEdit: async (job) => (job.repo.workspaceId !== companyId ? { status: "no_facts", retry: false } : await learnFromHumanEdit({ run: humanEditWork, settings: runtime.settings, store: runtime.store }, job)),
     }),
   });
 
