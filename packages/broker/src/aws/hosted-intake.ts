@@ -17,7 +17,7 @@ import {
 import { dismissIntakeItem, intakePortsOf, listWaitingIntakeItems, readIntakeItem, startWaitingIntake, type IntakePorts } from "../core/intake/index.js";
 import type { MomentTable } from "../core/ticket-updates/moments.js";
 import { ticketUpdatesHandler, type TicketUpdatesDependencies } from "../core/ticket-updates/handler.js";
-import { refreshTicketThread, seedTicketUpdatesIfUnset } from "../core/ticket-updates/index.js";
+import { refreshTicketThread, seedTicketUpdatesIfUnset, ticketStartedShared } from "../core/ticket-updates/index.js";
 import { taskLogMilestoneHandler } from "../core/task-log/milestones.js";
 import type { TaskLogHooks } from "../core/task-log/hooks.js";
 import { taskSharedOf } from "../core/task-log/task-shared.js";
@@ -183,7 +183,8 @@ export interface HostedTicketUpdatesInput {
  * The ticket write-back for ONE company on a hosted install: a Linear ticket is written with the company's own OAuth connection only (`linearCompanyTracker`, which refuses any other company's scope before a token
  * is read); any other tracker has no write-back here. The handlers go on the company's milestones, the task log's first (its entries are then there when the thread is drawn) and the ticket's second, as on a laptop.
  *
- * What may leave is the project's own level (default `status_only`: unchanged for every project that exists). Above it, a task only its owner can see (`taskSharedOf`, from the company's own session and People records)
+ * What may leave is the project's own level (default `status_only`: unchanged for every project that exists). Above it, a task counts as shared when it was started from a ticket (`ticketStartedShared`, owner decision 254zzq:
+ * the ticket is a shared place and the project chose the level) or when the company's own session and People records say so (`taskSharedOf`); a task only its owner can see that did not start from a ticket
  * stays at `status_only`: a Linear comment is seen by everyone who can see the ticket. A refresh told of a task that is not this company's is refused before anything is read or written.
  */
 export function hostedTicketUpdates(input: HostedTicketUpdatesInput): CodeMilestoneHandler[] {
@@ -192,7 +193,7 @@ export function hostedTicketUpdates(input: HostedTicketUpdatesInput): CodeMilest
   const emit = (event: string, fields: Record<string, unknown>): void => { log({ component: "intake", event, ...fields }); };
   const deps: TicketUpdatesDependencies = {
     store: input.store, now: input.now, scope: { orgId: companyId }, trackerFor: hostedTrackerFor(companyId, input.connections, input.fetch), log: emit,
-    taskShared: taskSharedOf({ store: input.store }),
+    taskShared: ticketStartedShared({ store: input.store, now: input.now, scope: { orgId: companyId } }, taskSharedOf({ store: input.store })),
     ...(input.planSummaryOf === undefined ? {} : { planSummaryOf: input.planSummaryOf }),
   };
   input.taskLog?.subscribe(async (taskId) => {
