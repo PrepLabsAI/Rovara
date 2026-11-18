@@ -10,6 +10,7 @@ export const TASK_TOKEN_AUDIENCE = "rovara-model-gateway";
 export const TASK_TOKEN_TYP = "rovara-task+jwt";
 export const TASK_TOKEN_ALGORITHM = "RS256";
 export const TASK_TOKEN_SECONDS = 900;
+export const REVIEWER_GRANT_SECONDS = 120;
 export const TASK_TOKEN_SKEW_SECONDS = 30;
 export const TASK_TOKEN_SIGNING_INPUT_MAX_BYTES = 3500;
 export const TASK_TOKEN_CLAIMS = [
@@ -29,6 +30,7 @@ export const TASK_TOKEN_CLAIMS = [
   { name: "stp", type: "string", required: true },
   { name: "src", type: "WorkOrigin", required: false },
   { name: "mdl", type: "string[]", required: true },
+  { name: "reviewer", type: "ReviewerGrant", required: false },
 ] as const;
 
 const seconds = z.number().int().nonnegative();
@@ -50,7 +52,13 @@ export const TaskTokenClaimsSchema = z.object({
   // Reporting only. No authorization or money decision reads this claim.
   src: WorkOriginSchema.optional(),
   mdl: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/u)).min(1).max(16),
-}).strict();
+  /** One reviewer model; cid/pid/tid/ws/op bind the task. Gateway must atomically consume jti before spending. */
+  reviewer: z.object({ kind: z.enum(["second_review", "design_review"]), slot: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/u), ceilingUsd: z.number().finite().positive().max(1_000_000) }).strict().optional(),
+}).strict().superRefine((claims, context) => {
+  if (claims.reviewer !== undefined && (claims.mdl.length !== 1 || claims.stp !== claims.reviewer.kind || (claims.reviewer.kind === "second_review" && claims.reviewer.slot !== "second_review") || claims.exp - claims.iat !== REVIEWER_GRANT_SECONDS)) {
+    context.addIssue({ code: "custom", path: ["reviewer"], message: "a reviewer requires one kind, one model and the reviewer TTL" });
+  }
+});
 export type TaskTokenClaims = z.infer<typeof TaskTokenClaimsSchema>;
 
 /** Malformed claims have no partial interpretation and carry no diagnostic text. */
@@ -62,5 +70,12 @@ export function parseTaskTokenClaims(value: unknown): TaskTokenClaims | undefine
 
 /** The issuer supplies integer seconds; lifetime and skew are never caller options. */
 export function taskTokenClaimsFor(input: Omit<TaskTokenClaims, "aud" | "nbf" | "exp">): TaskTokenClaims | undefined {
-  return parseTaskTokenClaims({ ...input, aud: TASK_TOKEN_AUDIENCE, nbf: input.iat - TASK_TOKEN_SKEW_SECONDS, exp: input.iat + TASK_TOKEN_SECONDS });
+  return parseTaskTokenClaims({ ...input, aud: TASK_TOKEN_AUDIENCE, nbf: input.iat - TASK_TOKEN_SKEW_SECONDS, exp: input.iat + (input.reviewer === undefined ? TASK_TOKEN_SECONDS : REVIEWER_GRANT_SECONDS) });
+}
+
+/** After signature/issuer verification only. The gateway's consume callback MUST atomically claim jti once until exp (including concurrent requests). */
+export async function consumeReviewerGrant(claims: TaskTokenClaims, expected: Pick<TaskTokenClaims, "cid" | "pid" | "tid" | "ws" | "op"> & { kind: "second_review" | "design_review"; slot: string; model: string }, nowSeconds: number, consume: (jti: string, expiresAt: number) => Promise<boolean>): Promise<boolean> {
+  const parsed = parseTaskTokenClaims(claims);
+  if (parsed?.reviewer === undefined || !Number.isSafeInteger(nowSeconds) || nowSeconds < parsed.iat || nowSeconds >= parsed.exp || parsed.cid !== expected.cid || parsed.pid !== expected.pid || parsed.tid !== expected.tid || parsed.ws !== expected.ws || parsed.op !== expected.op || parsed.reviewer.kind !== expected.kind || parsed.reviewer.slot !== expected.slot || parsed.mdl[0] !== expected.model) return false;
+  try { return (await consume(parsed.jti, parsed.exp)) === true; } catch { return false; }
 }

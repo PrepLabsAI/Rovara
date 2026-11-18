@@ -408,7 +408,7 @@ export async function startReview(deps: TaskFlowDeps, row: RowRef, options: { re
   });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-auto-review", task.taskId, workflow.revision, candidate.digest), prompt: reviewPrompt({ candidateDigest: candidate.digest, roles }), workflowMode: "REVIEW",
-    workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload, ...(second.record === undefined ? {} : { secondReviewPlan: second.record }),
+    workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload, ...(second.record === undefined ? {} : { secondReviewPlan: second.record }), ...(second.firstEvent === undefined ? {} : { firstEvent: second.firstEvent }),
     requires: ["task.workflowMode", "task.workflowReview", ...(checks === undefined ? [] : ["task.workflowReviewChecks"]), ...(plan === undefined ? [] : ["task.workflowReviewPlan"]), ...(payload["workflowReviewRisk"] === undefined ? [] : ["task.workflowReviewRisk"]), ...(roles.length === 2 ? [] : ["task.workflowReviewers"])],
   }).catch(async (error: unknown) => {
     // A start that threw carries no operation: the allowance held for its second review goes back before the error goes on.
