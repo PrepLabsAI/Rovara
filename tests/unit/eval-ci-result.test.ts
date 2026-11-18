@@ -202,7 +202,7 @@ describe("the named check landed", () => {
     setChecks(w, [unit, evals()]);
     await trackTask(deps, TASK_ID);
     expect(evalLines(body(w))).toHaveLength(1);
-    setChecks(w, [unit, evals({ state: "in_progress", conclusion: undefined })]);
+    setChecks(w, [unit, evals({ state: "pending", conclusion: undefined })]);
     w.now.value += 5 * MIN;
     await trackTask(deps, TASK_ID);
     expect(evalLines(body(w))).toEqual([]);
