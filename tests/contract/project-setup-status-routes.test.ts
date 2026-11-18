@@ -332,6 +332,68 @@ describe("the checklist's rows, each from its own records", () => {
     expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
   });
 
+  // L4-T5 (owner D9): the eval row is required only when evals were found. A finished run that found none leaves nothing to confirm, so the row is done by itself.
+  it("eval confirm (D9): a finished run that found no evals makes the row done by itself, and the first task can start", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    // L4-T2 (D1) + L4-T5 (D9) together: the eval row is done by itself on the proposal, but the first task still waits for the setup to be approved and checked.
+    const unapproved = await h.ok();
+    expect(unapproved.evalConfirm).toEqual({ state: "done", report: "none" });
+    expect(unapproved.setupRun.state).toBe("needs_you");
+    expect(unapproved.firstTask.canStart).toBe(false);
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    const body = await h.ok();
+    expect(body.evalConfirm).toEqual({ state: "done", report: "none" });
+    expect(body.firstTask.canStart).toBe(true);
+    expect(body.progress).toEqual({ done: 4, total: 8, percent: 50, nextRequired: "firstTask" });
+  });
+
+  it("eval confirm (D9): not before the setup run is done (blocked while it runs, failed, partial or never started), and never when evals WERE found", async () => {
+    for (const result of [undefined, { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used, summary: SUMMARY({ stop: "attempts_used", partial: true }) },
+      READY({ stop: "attempts_used", summary: SUMMARY({ stop: "attempts_used", partial: true }) })] as const) {
+      const h = companyA();
+      setupRun(h, A, "alpha", result);
+      expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
+    }
+    const never = companyA();
+    expect((await never.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
+    const found = companyA();
+    const task = setupRun(found, A, "alpha", READY());
+    evalReport(found, A, "alpha", task, "reported");
+    expect((await found.ok()).evalConfirm).toMatchObject({ state: "needs_you", report: "reported" });
+    expect((await found.ok()).firstTask.canStart).toBe(false);
+  });
+
+  it("eval confirm (D9): an eval report that is there but does not read back is NOT 'none found' (the row keeps waiting), and a report that is absent is", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "reported");
+    h.db.set({ ...(h.db.get(evalDiscoveryKey(A, "alpha", task).pk, evalDiscoveryKey(A, "alpha", task).sk) as object), reportDigest: "0".repeat(64) });
+    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    h.db.set({ ...(h.db.get(evalDiscoveryKey(A, "alpha", task).pk, evalDiscoveryKey(A, "alpha", task).sk) as object), report: { nonsense: true } });
+    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+  });
+
+  it("eval confirm (D9): another company's report for a project of the same name never counts, and does not hide this company's none-found", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    const theirs = setupRun(h, B, "alpha", READY(), "99999999-9999-4999-8999-999999999999");
+    evalReport(h, B, "alpha", theirs, "reported");
+    // A's run has no report of its own: done by itself. B's report (and B's task id) is a row in B's partition and is never read for A.
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
+    expect(task).not.toBe(theirs);
+    // A report row stored under A's partition for a task that is not A's current run does not count either.
+    evalReport(h, A, "alpha", "66666666-6666-4666-8666-666666666666", "reported");
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
+  });
+
+  it("eval confirm (D9): a person's 'no evals' for the run still reads as no_evals, not as none", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: true })).status).toBe(200);
+    expect((await h.ok()).evalConfirm).toMatchObject({ state: "done", report: "no_evals" });
+  });
+
   it("AI and spend: the project's own budget, then the company's saved model, else the install's defaults", async () => {
     const h = companyA();
     expect((await h.ok()).aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
@@ -418,6 +480,7 @@ describe("the checklist's rows, each from its own records", () => {
   it("can start needs the setup run, the eval confirm and AI and spend all done; 100% needs every row done or skipped", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "reported");
     expect((await h.ok()).firstTask.canStart).toBe(false);
     evalReport(h, A, "alpha", task, "confirmed");
     // L4-T2: a proposal nobody approved is not a finished setup, so the first task cannot start yet.
@@ -912,6 +975,67 @@ describe("setting a skipped optional row", () => {
   });
 });
 
+// L4-T5: a run whose worker is dead no longer reads "running" for 26 hours. A live worker talks to the broker every few seconds (and the broker notes it on the task once a minute); a run silent for
+// 10 minutes reads as stopped, and a run that has not spoken yet gets an hour from its start (its machine is still being made).
+describe("a setup run whose worker stopped talking (L4-T5)", () => {
+  const MIN = 60_000;
+  /** A run with no result, started `startedAgoMin` ago, whose worker was last heard `seenAgoMin` ago (undefined: never). */
+  function runningRun(h: Harness, startedAgoMin: number, seenAgoMin: number | undefined, company = A) {
+    const taskId = setupRun(h, company, "alpha", undefined);
+    h.db.set({ ...(h.db.get(setupAgentKey(company, "alpha").pk, setupAgentKey(company, "alpha").sk) as object), startedAt: new Date(NOW - startedAgoMin * MIN).toISOString() });
+    if (seenAgoMin !== undefined) h.db.set({ ...(h.db.get(`DEVTASK#${taskId}`, "META") as object), setupAgentSeenAt: new Date(NOW - seenAgoMin * MIN).toISOString() });
+    return taskId;
+  }
+  const row = async (h: Harness) => (await h.ok()).setupRun;
+  const STOPPED = { state: "failed", status: "failed", testOutcome: "unknown", failure: "The setup run stopped before it finished. Start it again." };
+
+  it("a worker heard from within 10 minutes is running, however long the run has been going (a run waiting on an admin's answer for hours still polls)", async () => {
+    const h = companyA();
+    runningRun(h, 20 * 60, 0.25);
+    expect(await row(h)).toMatchObject({ state: "running", status: "running" });
+    const waiting = companyA();
+    runningRun(waiting, 3, 9.9);
+    expect(await row(waiting)).toMatchObject({ state: "running", status: "running" });
+  });
+
+  it("a worker silent for more than 10 minutes reads as stopped, with the fixed 'start it again' sentence, and a later word makes it run again", async () => {
+    const h = companyA();
+    const task = runningRun(h, 30, 10.1);
+    expect(await row(h)).toMatchObject(STOPPED);
+    expect(SETUP_AGENT_FAILURES.stale).toBe(STOPPED.failure);
+    h.db.set({ ...(h.db.get(`DEVTASK#${task}`, "META") as object), setupAgentSeenAt: new Date(NOW - 5_000).toISOString() });
+    expect(await row(h)).toMatchObject({ state: "running", status: "running" });
+  });
+
+  it("a run that never spoke gets an hour from its start, then reads as stopped", async () => {
+    const early = companyA();
+    runningRun(early, 59, undefined);
+    expect(await row(early)).toMatchObject({ state: "running", status: "running" });
+    const late = companyA();
+    runningRun(late, 61, undefined);
+    expect(await row(late)).toMatchObject(STOPPED);
+  });
+
+  it("the old bound still holds: a run that has gone on past its wall clock and the longest wait on an admin (with 1 hour to end) reads as stopped even if something keeps talking", async () => {
+    const h = companyA();
+    runningRun(h, 45 + 24 * 60 + 61, 0.1);
+    expect(await row(h)).toMatchObject(STOPPED);
+  });
+
+  it("only this company's run counts: a worker's word on a task that names another company changes nothing for this company's run", async () => {
+    const h = companyA();
+    const mine = runningRun(h, 30, 20);
+    // Another company's task carries a fresh word; this company's pointer names its own task, which stays silent.
+    const theirs = "99999999-9999-4999-8999-999999999999";
+    h.db.set({ pk: `DEVTASK#${theirs}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: B, orgId: B, taskId: theirs, project: "alpha", purpose: "setup_agent", setupAgentSeenAt: new Date(NOW - 1_000).toISOString() });
+    expect(mine).not.toBe(theirs);
+    expect(await row(h)).toMatchObject(STOPPED);
+    // And a pointer of this company that names the other company's task never reads as running.
+    h.db.set({ ...(h.db.get(setupAgentKey(A, "alpha").pk, setupAgentKey(A, "alpha").sk) as object), taskId: theirs });
+    expect(await row(h)).toMatchObject({ state: "failed", status: "failed" });
+  });
+});
+
 describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
   const audits = (h: Harness) => h.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === "project_setup_eval_none_changed");
   const record = (h: Harness, company = A, project = "alpha") => h.db.get(setupEvalNoneKey(company, project).pk, setupEvalNoneKey(company, project).sk);
@@ -920,7 +1044,8 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
     setupApply(h, A, "alpha", { state: "approved", check: "ready" });
-    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    // L4-T5: with no eval found the row is already done; the answer is still taken (and bound to the run), and wins over nothing it contradicts.
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
     const answer = await h.call("PUT", EVAL_NONE(), { noEvals: true });
     expect(answer).toEqual({ status: 200, body: { project: "alpha", noEvals: true, taskId: task } });
     expect(ProjectSetupEvalNoneResponseSchema.safeParse(answer.body).success).toBe(true);
@@ -997,7 +1122,8 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
     const first = setupRun(h, A, "alpha", READY());
     await h.call("PUT", EVAL_NONE(), { noEvals: true });
     const second = setupRun(h, A, "alpha", READY(), "77777777-7777-4777-8777-777777777777");
-    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    // The first run's answer does not carry over; the new run found no eval, so the row is done by itself (L4-T5), as "none" and not as the first run's "no_evals".
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
     expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 200, body: { project: "alpha", noEvals: true, taskId: second } });
     expect(record(h)).toMatchObject({ taskId: second, revision: 2 });
     expect(audits(h).map((row) => String(row.taskId)).sort()).toEqual([first, second].sort());
@@ -1015,7 +1141,7 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
     expect(record(h)).toBeUndefined();
     expect(audits(h).map((row) => row.noEvals)).toEqual(expect.arrayContaining([true, false]));
     expect(audits(h).find((row) => row.noEvals === false)).toMatchObject({ taskId: task });
-    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
     const before = JSON.stringify(h.db.find(() => true));
     expect((await h.call("PUT", EVAL_NONE(), { noEvals: false })).status).toBe(200);
     expect(JSON.stringify(h.db.find(() => true))).toBe(before);

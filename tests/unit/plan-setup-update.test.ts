@@ -289,6 +289,8 @@ describe("Update setup on the hosted routes", () => {
     expect((await call(get(UPDATES), maintainer)).body["offers"]).toEqual([]);
     const again = await call(post(`${UPDATES}/prepare`, body()), maintainer);
     expect(again.status).toBe(409);
+    // L4-T5: it says what can be done with the waiting setup (its check is still running), and never offers a "Decide it" that does not exist.
+    expect(again.body["error"]).toMatchObject({ message: "Another setup is still being checked on a fresh machine. Wait for the check to finish, or discard it, first." });
   });
 
   it("refuses a reader and a person who does not manage the project, writing nothing", async () => {
