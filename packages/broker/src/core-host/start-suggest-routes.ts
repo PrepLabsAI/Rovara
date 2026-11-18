@@ -5,7 +5,7 @@
 // Rules:
 //  - The company is the caller's LIVE membership (the dev routes check it and mount that company's runtime). Who asks: any role on the project, read live (a viewer too: a suggestion changes nothing). Anyone else, a
 //    project the company does not have, a malformed name and another company's project all get the same 404 "project not found". The role is read BEFORE the body is.
-//  - Nothing is stored, nothing is started, nothing the caller sent is echoed. A script token never reaches this route (APP_ROUTES `requires: "full"`).
+//  - Nothing is started and nothing the caller said is stored (only the hourly counter row: ids and a count), nothing the caller sent is echoed. A script token never reaches this route (APP_ROUTES `requires: "full"`).
 //  - The classifier is a seam (`route`): on hosted, one small call through the answers gateway path (L4-HC). With none (no gateway) or on any refusal the suggestion says `unavailable` (the page falls back to its
 //    one-press Quick); small talk is answered without it.
 //  - The hourly limit is a stored counter in the company's own store, per project and person (L4-HC), so it holds across instances and restarts.

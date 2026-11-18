@@ -13,7 +13,7 @@ import type { StartRouter } from "./start-suggest.js";
 
 /** The most the router may write (a route object is about 40 tokens). */
 export const START_ROUTER_MAX_OUTPUT_TOKENS = 120;
-/** What one classification may cost at most, in cents (a few hundred tokens of input and the 120 of output are far below it). */
+/** The NOMINAL ceiling of one classification, in cents (the adapter only refuses a call whose remaining ceiling is spent; the real bounds are the 4,000-character text cap, 120 output tokens, 60 calls an hour, the company's own key and the gateway's monthly limit). */
 export const START_ROUTER_CEILING_CENTS = 2;
 const PERSON_MAX = 100;
 
