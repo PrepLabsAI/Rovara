@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TEST_SERVICES_FILE_SEED_FEATURE, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
-import { SEED_FILE_MAX_BYTES, SeedFileError, loadSeedFile, readSeedFile, seedFileContentProblem, seedFileDigest, seedFileLoadArgs, seedRoleStatements } from "../../packages/worker/src/service-seed-file.js";
+import { DATABASE_READ_MAX_BYTES, SEED_FILE_MAX_BYTES, SeedFileError, loadSeedFile, readDatabaseText, readSeedFile, seedFileContentProblem, seedFileDigest, seedFileLoadArgs, seedRoleStatements } from "../../packages/worker/src/service-seed-file.js";
 import { seedFileApplier } from "../../packages/worker/src/test-services-run.js";
 import { SeedError, runSeeds } from "../../packages/worker/src/service-reset.js";
 
@@ -202,5 +202,39 @@ describe("the run's seed port", () => {
   it("is a worker feature the broker checks before it sends a plan with a file seed", () => {
     expect(TEST_SERVICES_FILE_SEED_FEATURE).toBe("task.testServices.fileSeed.v1");
     expect(WORKER_INVOCATION_FEATURES).toContain(TEST_SERVICES_FILE_SEED_FEATURE);
+  });
+});
+
+// L4-E34 (E3): Rovara's own fixed read-only statements (the schema, a few parent keys) are read as the database's owner over the local socket, as exact bytes, bounded, with fixed failure words.
+describe("reading one fixed answer from the database", () => {
+  const target = { container: "rovara-svc-run1-postgres", family: "postgres", user: "rovara", database: "app" };
+  const fake = (result: Record<string, unknown> = {}) => {
+    const calls: string[][] = []; const options: Array<{ maxStdoutBytes: number; timeoutMs?: number; stdin?: Buffer }> = [];
+    return { calls, options, execBytes: vi.fn(async (args: readonly string[], opts: { maxStdoutBytes: number; timeoutMs?: number; stdin?: Buffer }) => { calls.push([...args]); options.push(opts); return { exitCode: 0, stdout: Buffer.from(' {"tables":[]}\n'), stderr: "", ...result }; }) };
+  };
+  it("runs psql as the owner over the container's socket (no host, port or password), one -c, and returns the exact text trimmed", async () => {
+    const docker = fake();
+    expect(await readDatabaseText(docker, target, "SELECT 1", new AbortController().signal)).toBe('{"tables":[]}');
+    expect(docker.calls).toEqual([["exec", "rovara-svc-run1-postgres", "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", "rovara", "-d", "app", "-c", "SELECT 1"]]);
+    expect(docker.calls[0]!.some(arg => /^-h$|^--host|^-p$|^--port|PGPASSWORD|password/iu.test(arg))).toBe(false);
+    expect(docker.options[0]!.maxStdoutBytes).toBe(DATABASE_READ_MAX_BYTES); expect(docker.options[0]!.stdin).toBeUndefined();
+  });
+  it("refuses anything but a SELECT, a NUL, a long statement, other names and another family, before any call", async () => {
+    const docker = fake();
+    for (const statement of ["DROP TABLE users", "  insert into t values (1)", "SELECT 1\0", `SELECT ${"x".repeat(70_000)}`]) expect(await reasonOf(readDatabaseText(docker, target, statement, new AbortController().signal))).toBe("unsupported");
+    for (const bad of [{ ...target, user: "x; drop" }, { ...target, database: "a b" }, { ...target, container: "../x" }, { ...target, family: "redis" }, { ...target, user: undefined }]) expect(await reasonOf(readDatabaseText(docker, bad, "SELECT 1", new AbortController().signal))).toBe("unsupported");
+    expect(docker.execBytes).not.toHaveBeenCalled();
+  });
+  it("turns every failure into a fixed reason that carries no output: a non-zero exit, a too large answer, a timeout, a cancel, a docker error", async () => {
+    const signal = () => new AbortController().signal;
+    expect(await reasonOf(readDatabaseText(fake({ exitCode: 2, stderr: "secret-in-stderr" }), target, "SELECT 1", signal()))).toBe("load_failed");
+    expect(await reasonOf(readDatabaseText(fake({ tooLarge: true }), target, "SELECT 1", signal()))).toBe("load_failed");
+    expect(await reasonOf(readDatabaseText(fake({ timedOut: true, exitCode: null }), target, "SELECT 1", signal()))).toBe("timeout");
+    expect(await reasonOf(readDatabaseText(fake({ aborted: true, exitCode: null }), target, "SELECT 1", signal()))).toBe("load_failed");
+    const aborted = new AbortController(); aborted.abort();
+    expect(await reasonOf(readDatabaseText(fake(), target, "SELECT 1", aborted.signal))).toBe("load_failed");
+    expect(await reasonOf(readDatabaseText({ execBytes: async () => { throw new Error("private-docker-error"); } }, target, "SELECT 1", signal()))).toBe("load_failed");
+    expect(await reasonOf(readDatabaseText({}, target, "SELECT 1", signal()))).toBe("unsupported");
+    try { await readDatabaseText(fake({ exitCode: 2, stderr: "secret-in-stderr" }), target, "SELECT 1", signal()); } catch (error) { expect(String(error)).not.toContain("secret-in-stderr"); expect(String(error)).not.toContain("SELECT"); }
   });
 });

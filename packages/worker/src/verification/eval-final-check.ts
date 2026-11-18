@@ -5,6 +5,7 @@ import {
   type EvalRequest, type EvalSpendInputs, type EvalSpendGrant, type EvalSpendApproval, type MonthlyMeter, type EvalMeterReservation,
   type EvalRoundArtifact, type EvalRoundKind, type EvalNotRunReason, type BaseScoreCache, type EvalRoundFacts, type EvalRunDiagnostic,
 } from "@agentx/contracts";
+import { isStandInSetVersion } from "@agentx/contracts";
 import { runFailureOf } from "./eval-run-diagnostic.js";
 import { z } from "zod";
 import { openMeteredStage } from "./eval-spend-guard.js";
@@ -28,6 +29,14 @@ export interface EvalFinalCheckPorts {
   plan(): Promise<EvalFinalCheckPlan | typeof EVAL_PLAN_QUESTIONS_CHANGED | undefined>;
   approval: EvalSpendApproval; meter: MonthlyMeter; cache: BaseScoreCache;
   baselines: Pick<EvalBaselines, "forTask">;
+  /**
+   * L4-E34 (E4): the version of the stand-in set this check's databases were loaded from (`sharedStandInVersion`, eval-database-prep.ts), or undefined when the eval has no stand-ins. It is part of the base score's cache identity
+   * (a new version measures the old code again) and NOT part of the approved spend (a new version needs no new approval: the re-run stays inside the approval's own caps and the monthly meter). A value that is not a version is
+   * "not connected", zero calls.
+   */
+  standInSetVersion?(): Promise<string | undefined> | string | undefined;
+  /** L4-E34 (E3): the round's one fill-and-re-ask pass for stand-in databases (`createFillPass`); see `EvalQuestionPlan.fillMissingRows`. */
+  fillMissingRows?: EvalQuestionPlan["fillMissingRows"];
   /** Resolves only after the sandbox and every call have joined, including on abort. Bounded
    * provider deadlines are mandatory. Never returns repository-provided accounting as authority. */
   runner(this: void, request: { side: "old" | "new"; ids: readonly string[]; runs: 1 | 2 | 3; call: EvalMeterReservation["call"]; signal: AbortSignal }): ReturnType<EvalQuestionPlan["run"]>;
@@ -101,6 +110,13 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
   } catch { return refuse("not_connected"); }
   if (plan === undefined) return refuse("not_connected");
   const p = plan;
+  // L4-E34 (E4): the stand-in set's version, asked after the plan is known and before anything is reserved. It moves the cache identity only; the approval below still binds the plan's own settings fingerprint.
+  let standIn: string | undefined;
+  if (ports.standInSetVersion !== undefined) {
+    try { standIn = await ports.standInSetVersion(); } catch { return refuse("not_connected"); }
+    if (standIn !== undefined && !isStandInSetVersion(standIn)) return refuse("not_connected");
+  }
+  const roundKey: EvalRoundInput["key"] = standIn === undefined ? p.key : { ...p.key, standInSetVersion: standIn };
   const finish = (output: EvalRoundOutput): EvalRoundArtifact => {
     if (output.status !== "done" || output.evidence === undefined) return refuse("invalid_question_data");
     if (facts.signal.aborted && output.result.label !== "Worse on eval") return refuse("stopped");
@@ -114,7 +130,7 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     const displayed = new Set(checked.data.questions?.filter(q => q.answers !== undefined).map(q => q.id));
     return withFailure({ ...checked.data, fixRequested: derived.fixRequested, feedback: derived.outcome === "not_run" ? { notRun: true } : { questions: derived.questions.filter(q => displayed.has(q.id)).slice(0, 20).map(q => ({ ...q, oldAnswers: [...q.oldAnswers], newAnswers: [...q.newAnswers] })) } });
   };
-  const input: EvalRoundInput = { tier: { reasons: [{ code: "eval_hint" }] }, trigger: { needed: true, reason: "changes" }, roundKind, key: p.key, settings: p.settings, evalSetHash: p.evalSetHash, evalConfigured: p.evalConfigured, cache: ports.cache };
+  const input: EvalRoundInput = { tier: { reasons: [{ code: "eval_hint" }] }, trigger: { needed: true, reason: "changes" }, roundKind, key: roundKey, settings: p.settings, evalSetHash: p.evalSetHash, evalConfigured: p.evalConfigured, cache: ports.cache };
   if (!p.evalConfigured) return finish(await runEvalRound(input));
   if (typeof ports.approval?.read !== "function" || typeof ports.meter?.reserve !== "function" || typeof ports.cache?.read !== "function" || typeof ports.cache?.write !== "function" || typeof ports.baselines?.forTask !== "function" || typeof ports.runner !== "function") return refuse("not_connected");
   let grant: EvalSpendGrant;
@@ -151,7 +167,7 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     if (output === undefined || stage.callFailure() !== undefined) return noRun(stage.failure() ?? "provider_error", counted.calls, counted.costMicros ?? NaN);
     return { ...output, calls: counted.calls, costMicros: counted.costMicros ?? NaN };
   };
-  const healthInput: EvalHealthInput = { key: { ...p.key, evalSetHash: p.baseEvalSetHash ?? p.evalSetHash, hiddenSetHash: "none", judgePin: p.judgePin }, settings: p.settings, selection: p.selection,
+  const healthInput: EvalHealthInput = { key: { ...roundKey, evalSetHash: p.baseEvalSetHash ?? p.evalSetHash, hiddenSetHash: "none", judgePin: p.judgePin }, settings: p.settings, selection: p.selection,
     questionIds: p.questions.map(q => q.id), maxCallsPerQuestion: p.maxCallsPerQuestion, maxCostMicrosPerQuestion: p.maxCostMicrosPerQuestion, limits: { maxCalls: grant.maxCalls, maxCostMicros: grant.maxCostMicros }, approval: { read: async () => grant },
     meter: { reserve: async estimate => {
       if (!fits(estimate.calls, estimate.costMicros)) { baselineCapped = true; return undefined; }
@@ -176,7 +192,7 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
   };
   try {
     const output = await runEvalRound({ ...input, questionPlan: { company: p.company, provider: "customer", connected: true, previousPasses: req.evalPass - 1,
-      judgePin: p.judgePin, baselineJudgePin: p.baselineJudgePin, ...(p.baseEvalSetHash === undefined ? {} : { baseEvalSetHash: p.baseEvalSetHash }), ...(p.sameJudgeFamily === undefined ? {} : { sameJudgeFamily: p.sameJudgeFamily }), subsetSupported: p.subsetSupported,
+      judgePin: p.judgePin, baselineJudgePin: p.baselineJudgePin, ...(p.baseEvalSetHash === undefined ? {} : { baseEvalSetHash: p.baseEvalSetHash }), ...(p.sameJudgeFamily === undefined ? {} : { sameJudgeFamily: p.sameJudgeFamily }), subsetSupported: p.subsetSupported, ...(ports.fillMissingRows === undefined ? {} : { fillMissingRows: ports.fillMissingRows }),
       questions: p.questions, maxCallsPerQuestion: p.maxCallsPerQuestion, maxCostMicrosPerQuestion: p.maxCostMicrosPerQuestion, limits: { maxCalls: grant.maxCalls, maxCostMicros: grant.maxCostMicros },
       get callsAlreadyUsed() { return req.callsAlreadyUsed + baselineCalls; }, get costAlreadyUsedMicros() { return req.costAlreadyUsedMicros + baselineCost; }, run },
       prepareBaseline: async () => {
