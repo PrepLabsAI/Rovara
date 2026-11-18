@@ -74,7 +74,7 @@ export async function requestEvalHealthCheck(deps: EvalHealthRequestDeps, projec
   const row: EvalHealthRequestRecord = RecordSchema.parse({ entityType: EVAL_HEALTH_REQUEST_ENTITY, schemaVersion: 1, company: deps.companyId, project, requestId: body.requestId, spendDigest: found.spend.digest, estimateMicros: estimate,
     requestedBy: { personId: principal.personId, provider: principal.provider, role, at: new Date(deps.now()).toISOString() }, state: "requested" });
   const condition = raw === undefined ? when.absent() : when.and(...Object.entries(raw).map(([name, value]) => when.eq([name], value)));
-  const written = await deps.store.put({ item: { ...key, ...row } as unknown as StoredDocument, condition });
+  const written = await deps.store.put({ item: { ...key, ...row }, condition });
   if (!written.applied) return refuse("CHANGE_STALE", "The eval check changed. Read it again.");
   return { requested: true, duplicate: false, cost: dollarsOf(estimate) };
 }

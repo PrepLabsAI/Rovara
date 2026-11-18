@@ -204,7 +204,7 @@ describe("POST eval-decide: a waiting item", () => {
     const card = (await h.call(get(`${RUN}/eval`), h.admin)).body as { report: { taskId: string; reportDigest: string } };
     const approval = h.wirings.get(FAKE_COMPANY)!.approval!;
     await confirmEvalDiscovery({ store: h.world.store, companyId: FAKE_COMPANY, now: () => h.world.clock.now, members: approval.evalMembers, monthlyCap: async () => CAP, readFile: (...a) => h.reader.read!(...a),
-      latest: async () => ({ revision: 1, definition: definition(PROJECT) as never }) }, PROJECT, { taskId: card.report.taskId, reportDigest: card.report.reportDigest, selection: "evals/demo", paths: ["evals/demo/q1.txt", "evals/demo/q2.txt"] }, h.admin.principal);
+      latest: async () => ({ revision: 1, definition: definition(PROJECT) }) }, PROJECT, { taskId: card.report.taskId, reportDigest: card.report.reportDigest, selection: "evals/demo", paths: ["evals/demo/q1.txt", "evals/demo/q2.txt"] }, h.admin.principal);
     const after = (await h.call(get(`${RUN}/eval`), h.admin)).body as { state: string; spend: { approval: { requestId: string; revision: number; artifactDigest: string } } };
     expect(after.state).toBe("waiting");
     const offer = after.spend.approval;
