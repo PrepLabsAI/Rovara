@@ -12,12 +12,16 @@ import { nextWikiPage, readWikiBuildPointer, submitWikiPage, type WikiBuildDeps,
 import {
   agentsSwitchControl, continueWikiControl, deleteProjectWiki, deleteWikiControl, refreshWikiControl, startWikiControl, stopWikiControl, wikiControlsView, type WikiControlAction, type WikiControlsDeps,
 } from "../../packages/broker/src/core/wiki-build/controls.js";
+import { change, when } from "@agentx/contracts";
+import { wikiBuildRunKey } from "../../packages/broker/src/core/wiki-build/keys.js";
+import { deleteWikiBuildRows } from "../../packages/broker/src/core/wiki-build/controls.js";
 import { API_SHA, COMPANY_A, COMPANY_B, FakeSink, FakeStarter, WEB_SHA, area, fileMap, reader, repoEntry } from "../support/wiki-build-fixtures.js";
 
 const ADMIN = "person-admin";
 const VIEWER = "person-viewer";
 const OUTSIDER = "person-outsider";
 const T0 = Date.parse("2026-11-17T12:00:00.000Z");
+const clock = { now: T0 };
 const API_FILE = "export function startServer(port: number) {\n  return listen(port, routes);\n}\n";
 
 const PAGE_CLAIM = { claimId: "c0001", text: "A claim", citations: [{ repo: "api", path: "src/server.ts", commit: API_SHA, line: 1, quote: "export function startServer(port: number) {" }], source: "found" as const, checkedAt: "2026-11-17T09:00:00.000Z" };
@@ -40,12 +44,12 @@ function world(options: { company?: OrgId; manages?: string[]; views?: string[];
   const standing = async (person: string, project: string): Promise<WikiBuildStanding> => (person === ADMIN && manages.includes(project) ? { access: "manage" } : person === VIEWER && views.includes(project) ? { access: "view" } : { access: "none" });
   const map = fileMap([repoEntry("api", [area("src", { rank: 1 })]), repoEntry("web", [area("app", { rank: 1 })])]);
   const build: WikiBuildDeps = {
-    store, companyId: company, now: () => T0, starter, standing, modelAccessConfigured: true, aiKey: async () => "connected", fileMap: async () => map,
+    store, companyId: company, now: () => clock.now, starter, standing, modelAccessConfigured: true, aiKey: async () => "connected", fileMap: async () => map,
     defaultBranchHeads: async () => [{ repo: "api", commit: API_SHA }, { repo: "web", commit: WEB_SHA }], limitSetting: async () => ({ budgetCents: 1_000, pageReserveCents: 100 }),
     recordBuild: async (record) => { records.push(record); }, ...options.deps,
   };
   const wiki = createWikiStore({ store, companyId: company, now: () => T0 });
-  const audited: Array<{ action: WikiControlAction; project: string; requestId: string; on?: boolean }> = [];
+  const audited: Array<{ action: WikiControlAction; project: string; requestId: string; on?: boolean; token: string }> = [];
   const record = options.record ?? (async (action, project, details) => { audited.push({ action, project, ...details }); });
   const controls: WikiControlsDeps = { build, wiki, agents: { store, companyId: company, now: () => T0 }, record };
   const loop: WikiPageLoopDeps = { store, companyId: company, now: () => T0, standing, read: reader({ [`api:src/server.ts@${API_SHA}`]: API_FILE }).read, sink };
@@ -266,7 +270,7 @@ describe("Delete wiki: W2's deleteWiki AND A1's deleteWikiUse AND the build's ow
     await seedWiki(w, project, ["overview", "repo-api"]);
     await w.wiki.addNote(project, { pageId: "overview", text: "a note", authorId: "p1" });
     await w.wiki.addFlag(project, { pageId: "overview", by: { kind: "person", personId: "p1" } });
-    await w.wiki.writeBuild(project, { buildId: "build-0001", kind: "first", state: "done", startedBy: "p1", startedAt: "2026-11-17T10:00:00.000Z", repos: [{ repo: "api", commit: API_SHA }], counts: { pagesWritten: 1, claimsKept: 1, claimsDropped: 0, skipped: 0 }, dropped: [], skipped: [] } as WikiBuildRecord);
+    await w.wiki.writeBuild(project, { buildId: "build-0001", kind: "first", state: "done", startedBy: "p1", startedAt: "2026-11-17T10:00:00.000Z", repos: [{ repo: "api", commit: API_SHA }], counts: { pagesWritten: 1, claimsKept: 1, claimsDropped: 0, skipped: 0 }, dropped: [], skipped: [] } satisfies WikiBuildRecord);
     await setWikiAgentSwitch(w.controls.agents, project, true);
     await w.store.put({ item: { pk: wikiBuildPartition({ orgId: w.company, project }), sk: "NOTES#t1", entityType: "WIKI_BUILD_NOTES", orgId: w.company, project, taskId: "t1", by: "p1", notes: "steer" } });
     await w.store.put({ item: { pk: wikiBuildPartition({ orgId: w.company, project }), sk: "DONE#t1#overview", entityType: "WIKI_BUILD_PAGE_DONE", orgId: w.company, project } });
@@ -362,5 +366,53 @@ describe("the answers match the contract the setup page reads", () => {
     expect(WikiControlsViewSchema.parse(stopped.view)).toMatchObject({ status: "stopped", stop: "stopped_by_person" });
     const missing = world({ deps: { aiKey: async () => "missing" } });
     expect(WikiControlsViewSchema.parse(await wikiControlsView(missing.controls, ADMIN, "beacon"))).toMatchObject({ aiKey: "missing", connectKey: WIKI_BUILD_WORDS.connectKey });
+  });
+});
+
+describe("audit tokens and a pointer that moved (review M1, L3)", () => {
+  it("a reused request id that finds another state carries another token, so it gets its own audit record; a true repeat carries the same one", async () => {
+    const w = world();
+    const requestId = id();
+    await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: true });
+    await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: false });
+    expect(w.audited.map((entry) => [entry.on, entry.token.split("@")[0]])).toEqual([[true, "false>true"], [false, "true>false"]]);
+    // The same flip a third time (A, B, A) is a new act and carries a new token once the clock has moved.
+    clock.now += 1000;
+    await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: true });
+    expect(w.audited.at(-1)!.token.split("@")[0]).toBe("false>true");
+    expect(w.audited.at(-1)!.token).not.toBe(w.audited[0]!.token);
+
+    await seedWiki(w, "beacon", ["overview"]);
+    const del = id();
+    await deleteWikiControl(w.controls, ADMIN, "beacon", { requestId: del }, { store: w.store, now: () => T0 });
+    await seedWiki(w, "beacon", ["overview", "repo-api"]);
+    await deleteWikiControl(w.controls, ADMIN, "beacon", { requestId: del }, { store: w.store, now: () => T0 });
+    const deletes = w.audited.filter((entry) => entry.action === "delete_requested");
+    expect(deletes).toHaveLength(2);
+    expect(deletes[0]!.token).not.toBe(deletes[1]!.token);
+
+    const started = id();
+    await startWikiControl(w.controls, ADMIN, "beacon", { requestId: started });
+    const first = w.audited.filter((entry) => entry.action === "start_requested").at(-1)!;
+    expect(first.token.startsWith("none@")).toBe(true);
+  });
+
+  it("deleting the build's rows leaves the pointer of a run that started after the pointer was read", async () => {
+    const w = world();
+    await startWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
+    const seen = (await readWikiBuildPointer(w.store, w.company, "beacon"))!;
+    // A newer run replaces the pointer between the query and the delete.
+    const racing = {
+      query: async (request: Parameters<MemoryDocumentStore["query"]>[0]) => {
+        const answer = await w.store.query(request);
+        await w.store.update({ key: wikiBuildRunKey({ orgId: w.company, project: "beacon" }), ops: [change.set("taskId", "newer-run")], condition: when.present() });
+        return answer;
+      },
+      delete: (request: Parameters<MemoryDocumentStore["delete"]>[0]) => w.store.delete(request),
+    };
+    await deleteWikiBuildRows(racing, { orgId: w.company, project: "beacon" });
+    const after = await readWikiBuildPointer(w.store, w.company, "beacon");
+    expect(after?.taskId).toBe("newer-run");
+    expect(after?.taskId).not.toBe(seen.taskId);
   });
 });

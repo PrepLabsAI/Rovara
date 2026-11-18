@@ -10,13 +10,20 @@
 //     still running cannot write a page into a wiki that was just deleted (its next callback is refused). A running build must be stopped first.
 //   - `deleteProjectWiki` is the one call a project's removal makes (Cloud's project erase walk): the same three deletes without a person's standing, for a caller that already is the erase.
 import {
-  OrgIdSchema, WIKI_BUILD_WORDS, WIKI_CONTROLS_WORDS, WikiAgentSwitchBodySchema, WikiDeleteBodySchema, WikiProjectSchema, WikiRefreshBodySchema, agentXError, queryAll,
+  OrgIdSchema, WIKI_BUILD_WORDS, WIKI_CONTROLS_WORDS, WikiAgentSwitchBodySchema, WikiDeleteBodySchema, WikiProjectSchema, WikiRefreshBodySchema, agentXError, queryAll, when,
   type DocumentStore, type OrgId, type WikiAiKeyState, type WikiControlsExtra, type WikiIndexEntry, type WikiStore,
 } from "@agentx/contracts";
 import { deleteWikiUse, setWikiAgentSwitch, wikiAgentSwitchIsOn, type WikiAgentOptions } from "../wiki/agent-context.js";
 import { createWikiStore } from "../wiki/store.js";
 import { wikiBuildPartition, wikiBuildRowKey } from "./keys.js";
-import { continueWikiBuild, startWikiBuild, stopWikiBuild, wikiBuildState, type WikiBuildDeps, type WikiBuildView } from "./run.js";
+import { continueWikiBuild, readWikiBuildPointer, startWikiBuild, stopWikiBuild, wikiBuildState, type WikiBuildDeps, type WikiBuildView } from "./run.js";
+
+/**
+ * What an audit record names. `token` is the state the act found (the run's task id, the switch's old value, the wiki's last build) AND the time of the act: it goes into the record's event id,
+ * so a REUSED request id that acts again (a second flip of the switch, the same flip after two others, a delete after a rebuild) always gets its own record. Only a repeat in the very same
+ * millisecond records once; a client's retry may record twice, which loses nothing (the audit sink dedupes by event id, and an act must never hide behind an earlier record).
+ */
+export interface WikiControlDetails { requestId: string; on?: boolean; token: string }
 
 export type WikiControlAction = "start_requested" | "continue_requested" | "stop_requested" | "refresh_requested" | "agents_switched" | "delete_requested";
 
@@ -31,7 +38,7 @@ export interface WikiControlsDeps {
    * The audit record of an act or a request for one, written BEFORE it (an act whose record cannot be written is not done). Absent on a laptop. A repeat of a request id records once (the event id names it).
    * Throws when it could not write.
    */
-  record?: ((action: WikiControlAction, project: string, details: { requestId: string; on?: boolean }) => Promise<void>) | undefined;
+  record?: ((action: WikiControlAction, project: string, details: WikiControlDetails) => Promise<void>) | undefined;
 }
 
 export type WikiControlsView = WikiBuildView & WikiControlsExtra;
@@ -55,7 +62,7 @@ async function requireManage(deps: WikiControlsDeps, personId: string, project: 
   if (access !== "manage") throw agentXError("FORBIDDEN", WIKI_CONTROLS_WORDS.notAllowed);
 }
 
-async function recorded(deps: WikiControlsDeps, action: WikiControlAction, project: string, details: { requestId: string; on?: boolean }): Promise<void> {
+async function recorded(deps: WikiControlsDeps, action: WikiControlAction, project: string, details: WikiControlDetails): Promise<void> {
   if (deps.record === undefined) return;
   try { await deps.record(action, project, details); } catch { throw agentXError("AUDIT_UNAVAILABLE", WIKI_CONTROLS_WORDS.auditUnavailable); }
 }
@@ -68,6 +75,11 @@ function bodyOf<T>(schema: { safeParse(value: unknown): { success: true; data: T
 }
 
 const isStale = (entry: WikiIndexEntry): boolean => entry.flagged || entry.claims.changed > 0;
+
+/** The task id of the project's current or last build run, or "none": the state a start, continue, stop or refresh found. */
+async function runToken(deps: WikiControlsDeps, project: string): Promise<string> {
+  try { return `${(await readWikiBuildPointer(deps.build.store, deps.build.companyId, project))?.taskId ?? "none"}@${String(deps.build.now())}`; } catch { return `unread@${String(deps.build.now())}`; }
+}
 
 async function indexOf(deps: WikiControlsDeps, project: string): Promise<WikiIndexEntry[]> {
   try { return await deps.wiki.readIndex(project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", WIKI_CONTROLS_WORDS.unreadable); }
@@ -98,7 +110,7 @@ export async function startWikiControl(deps: WikiControlsDeps, personId: string,
   const requestId = requestIdOf(rawBody);
   // The run checks the body, the standing, the key and the map; the record comes after the standing is known and before anything starts.
   await requireManage(deps, personId, project);
-  if (requestId !== undefined) await recorded(deps, "start_requested", project, { requestId });
+  if (requestId !== undefined) await recorded(deps, "start_requested", project, { requestId, token: await runToken(deps, project) });
   const done = await startWikiBuild(deps.build, personId, project, rawBody);
   return withView(deps, personId, project, done.status);
 }
@@ -106,7 +118,7 @@ export async function startWikiControl(deps: WikiControlsDeps, personId: string,
 export async function continueWikiControl(deps: WikiControlsDeps, personId: string, project: string, rawBody: unknown): Promise<Answer> {
   const requestId = requestIdOf(rawBody);
   await requireManage(deps, personId, project);
-  if (requestId !== undefined) await recorded(deps, "continue_requested", project, { requestId });
+  if (requestId !== undefined) await recorded(deps, "continue_requested", project, { requestId, token: await runToken(deps, project) });
   const done = await continueWikiBuild(deps.build, personId, project, rawBody);
   return withView(deps, personId, project, done.status);
 }
@@ -114,7 +126,7 @@ export async function continueWikiControl(deps: WikiControlsDeps, personId: stri
 export async function stopWikiControl(deps: WikiControlsDeps, personId: string, project: string, rawBody: unknown): Promise<Answer> {
   const requestId = requestIdOf(rawBody);
   await requireManage(deps, personId, project);
-  if (requestId !== undefined) await recorded(deps, "stop_requested", project, { requestId });
+  if (requestId !== undefined) await recorded(deps, "stop_requested", project, { requestId, token: await runToken(deps, project) });
   const done = await stopWikiBuild(deps.build, personId, project, rawBody);
   return withView(deps, personId, project, done.status);
 }
@@ -130,7 +142,7 @@ export async function refreshWikiControl(deps: WikiControlsDeps, personId: strin
   if (index.length === 0) throw agentXError("CONFIG_INVALID", WIKI_CONTROLS_WORDS.buildFirst);
   const have = new Set(index.map((entry) => entry.pageId));
   const stale = new Set(index.filter(isStale).map((entry) => entry.pageId));
-  await recorded(deps, "refresh_requested", project, { requestId: body.requestId });
+  await recorded(deps, "refresh_requested", project, { requestId: body.requestId, token: await runToken(deps, project) });
   const done = await startWikiBuild(deps.build, personId, project, { requestId: body.requestId }, { refresh: { include: (page) => !have.has(page.id) || stale.has(page.id) } });
   return withView(deps, personId, project, done.status);
 }
@@ -139,7 +151,7 @@ export async function refreshWikiControl(deps: WikiControlsDeps, personId: strin
 export async function agentsSwitchControl(deps: WikiControlsDeps, personId: string, project: string, rawBody: unknown): Promise<Answer> {
   const body = bodyOf(WikiAgentSwitchBodySchema, rawBody);
   await requireManage(deps, personId, project);
-  await recorded(deps, "agents_switched", project, { requestId: body.requestId, on: body.on });
+  await recorded(deps, "agents_switched", project, { requestId: body.requestId, on: body.on, token: `${String(await wikiAgentSwitchIsOn(deps.agents, project))}>${String(body.on)}@${String(deps.build.now())}` });
   try { await setWikiAgentSwitch(deps.agents, project, body.on); } catch { throw agentXError("RUNTIME_UNAVAILABLE", WIKI_CONTROLS_WORDS.unreadable); }
   return withView(deps, personId, project, 200);
 }
@@ -154,7 +166,8 @@ export async function deleteWikiBuildRows(store: Pick<DocumentStore, "query" | "
   const ordered = [...items.filter((item) => item.sk === "RUN"), ...items.filter((item) => item.sk !== "RUN")];
   for (const item of ordered) {
     if (item.pk !== pk) continue;
-    await store.delete({ key: wikiBuildRowKey({ orgId, project }, item.sk) });
+    // The pointer goes only while it is the run that was read: a build started a moment ago keeps its pointer (a start after the delete is a start, not part of it).
+    await store.delete({ key: wikiBuildRowKey({ orgId, project }, item.sk), ...(item.sk === "RUN" && typeof item["taskId"] === "string" ? { condition: when.eq("taskId", item["taskId"]) } : {}) });
   }
   return items.length;
 }
@@ -177,7 +190,8 @@ export async function deleteWikiControl(deps: WikiControlsDeps, personId: string
   const body = bodyOf(WikiDeleteBodySchema, rawBody);
   await requireManage(deps, personId, project);
   if ((await wikiBuildState(deps.build, project)).status === "running") throw agentXError("WORKSPACE_BUSY", WIKI_CONTROLS_WORDS.deleteWhileRunning);
-  await recorded(deps, "delete_requested", project, { requestId: body.requestId });
+  const last = await deps.wiki.lastBuild(project).catch(() => undefined);
+  await recorded(deps, "delete_requested", project, { requestId: body.requestId, token: `${last?.buildId ?? "none"}:${String((await indexOf(deps, project)).length)}@${String(deps.build.now())}` });
   let deleted: ProjectWikiDeletion;
   try { deleted = await deleteProjectWiki({ store: options.store, companyId: deps.build.companyId, now: options.now }, project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", WIKI_CONTROLS_WORDS.unreadable); }
   return { status: 200, deleted, message: WIKI_CONTROLS_WORDS.deleted, view: await wikiControlsView(deps, personId, project) };

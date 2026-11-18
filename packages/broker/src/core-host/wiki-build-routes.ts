@@ -17,6 +17,7 @@
 //   - Every act (and every request for one) leaves an audit record naming the person and why they were allowed, written BEFORE the act: nothing is done when the record cannot be written.
 //   - A repository removed from the project leaves nothing behind: its pages are pruned before the state is read (`pruneRepositories`), as on the wiki read routes.
 //   - Refusals are fixed words; nothing a caller sent is echoed, and a store or host fault is a fixed 503.
+import { createHash } from "node:crypto";
 import {
   AgentXError, WIKI_CONTROLS_WORDS, WikiProjectSchema, agentXError, type AuditEvent, type AuditSink, type OrgId, type PluginKind, type WikiAiKeyState, type WikiFileMap,
 } from "@agentx/contracts";
@@ -24,7 +25,7 @@ import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { cancelTask } from "../core/task-flow/cancel.js";
 import { createWikiStore } from "../core/wiki/store.js";
-import { unregisteredHost, type FileMapRepository } from "../core/wiki/file-map.js";
+import type { FileMapRepository } from "../core/wiki/file-map.js";
 import { repositoryKeyOf } from "../core/wiki/map-service.js";
 import {
   agentsSwitchControl, continueWikiControl, deleteWikiControl, refreshWikiControl, startWikiControl, stopWikiControl, wikiControlsView, type WikiControlAction, type WikiControlsDeps,
@@ -179,7 +180,7 @@ export async function routeHostedWikiBuild(input: HostedWikiBuildInput): Promise
       record: async (action: WikiControlAction, name, details) => {
         const basis: SetupRunBasis | undefined = isManage(standing) ? standing.basis : undefined;
         const event: AuditEvent = {
-          eventId: `wiki_build.${action}:${companyId}:${name}:${personId}:${details.requestId}`, companyId, at: new Date(input.now()).toISOString(), actor: { type: "person", id: personId },
+          eventId: `wiki_build.${action}:${companyId}:${name}:${personId}:${details.requestId}:${createHash("sha256").update(details.token).digest("hex").slice(0, 16)}`, companyId, at: new Date(input.now()).toISOString(), actor: { type: "person", id: personId },
           action: `wiki_build.${action}`, subject: { type: "project", id: name },
           details: { project: name, ...(basis === undefined ? {} : { basis }), requestId: details.requestId, ...(details.on === undefined ? {} : { on: details.on }) },
         };

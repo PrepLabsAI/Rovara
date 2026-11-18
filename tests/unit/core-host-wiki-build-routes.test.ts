@@ -8,6 +8,7 @@ import {
   type WikiPageWrite,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
+import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { wikiBuildPartition } from "../../packages/broker/src/core/wiki-build/keys.js";
 import { readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
@@ -52,7 +53,7 @@ const WB = (name: string, tail = "") => `/v1/app/projects/${name}/wiki-build${ta
 const id = () => randomUUID();
 
 interface Person { caller: DeployedCaller; membership: CompanyMembership; grants: Map<string, "developer" | "administrator"> }
-type Body = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- a JSON answer read field by field
+interface Body { status: string; error: { code: string; message: string }; wiki: { pages: number; refreshPages: number }; agents: { on: boolean }; [key: string]: unknown }
 
 async function buildWorld(options: { wired?: boolean; gateway?: boolean; withStarter?: boolean; aiKey?: HostedWikiBuildWiring["aiKey"]; audit?: (sink: AuditSink) => AuditSink } = {}) {
   const world = createFakeWorld();
@@ -93,7 +94,7 @@ async function buildWorld(options: { wired?: boolean; gateway?: boolean; withSta
     }),
   };
   const starters: FakeStarter[] = [];
-  const starter = new FakeStarter(world.store);
+  const starter = new FakeStarter(world.store as unknown as MemoryDocumentStore);
   const inputs: WikiBuildStarterInput[] = [];
   const wikiBuild: HostedWikiBuildWiring = {
     standing, modelAccessConfigured: () => options.gateway ?? true, map, ...(options.aiKey === undefined ? {} : { aiKey: options.aiKey }),
@@ -110,7 +111,6 @@ async function buildWorld(options: { wired?: boolean; gateway?: boolean; withSta
   };
   return { world, app, person, standing, call, routes, starter, inputs, listings };
 }
-type World = Awaited<ReturnType<typeof buildWorld>>;
 
 const wikiEvents = (world: FakeWorld): AuditEvent[] => world.audit.filter((event) => event.action.startsWith("wiki_build."));
 const rows = async (world: FakeWorld, pk: string) => (await queryAll(world.store, { pk })).length;
@@ -135,7 +135,7 @@ describe("hosted wiki build controls: who may do what", () => {
       expect(started.body).toMatchObject({ status: "running", canManage: true, payer: "project", aiKey: "unknown", agents: { on: false } });
       const pointer = await readWikiBuildPointer(world.store, FAKE_COMPANY, "payments");
       expect(pointer).toMatchObject({ orgId: FAKE_COMPANY, project: "payments", requestId, requestedBy: `p-${role}`, payer: { kind: "project", project: "payments" } });
-      expect(pointer!.pins).toEqual([{ repo: "payments", commit: expect.stringMatching(/^[a-f0-9]{40}$/u) }]);
+      expect(pointer!.pins).toEqual([{ repo: "payments", commit: expect.stringMatching(/^[a-f0-9]{40}$/u) as string }]);
       expect(starter.started).toHaveLength(1);
       // The starter is made for THIS caller and a flow whose start rule is the wiki build's own.
       expect(inputs[0]!.caller.principal.personId).toBe(`p-${role}`);
@@ -189,7 +189,7 @@ describe("hosted wiki build controls: who may do what", () => {
     for (const request of [get(WB("payments")), post(WB("payments"), { requestId: id() }), post(WB("payments", "/delete"), { requestId: id() })]) {
       const answer = await routes.route(request, caller);
       expect(answer?.statusCode).toBe(403);
-      expect(JSON.parse(answer!.body).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
+      expect((JSON.parse(answer!.body) as Body).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
     }
   });
 
@@ -373,3 +373,37 @@ describe("hosted wiki build controls: the rest of each control", () => {
     expect((await wiki.readIndex("payments")).map((entry) => entry.pageId)).not.toContain("repo-gone");
   });
 });
+
+describe("hosted wiki build controls: the audit event ids and the start rule", () => {
+  it("a reused request id that acts again always gets its own audit event id, even the third flip (A, B, A)", async () => {
+    const { world, person, call } = await buildWorld();
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    const requestId = id();
+    for (const on of [true, false, true]) {
+      world.clock.now += 1000;
+      await call(post(WB("payments", "/agents"), { requestId, on }), owner);
+    }
+    const ids = wikiEvents(world).map((event) => event.eventId);
+    expect(ids).toHaveLength(3);
+    // Every act is its own record, even the third flip (A, B, A) under the same request id.
+    expect(new Set(ids).size).toBe(3);
+    expect(wikiEvents(world).map((event) => event.details?.["on"])).toEqual([true, false, true]);
+  });
+
+  it("the flow the starter is made with starts only for the company's live managers of that project", async () => {
+    const { person, call, inputs } = await buildWorld();
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
+    person("p-theirs", OTHER, "owner");
+    await call(post(WB("payments"), { requestId: id() }), owner);
+    const rule = inputs[0]!.flow.access;
+    const principal = (personId: string, companyId: string) => ({ companyId, personId, displayName: "n", roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER }) as never;
+    expect(await rule.checkStart(principal("p-owner", FAKE_COMPANY), "payments")).toEqual({ allowed: true });
+    expect(await rule.checkStart(principal("p-dev", FAKE_COMPANY), "payments")).toMatchObject({ allowed: false, code: "FORBIDDEN" });
+    expect(await rule.checkStart(principal("p-owner", FAKE_COMPANY), "ledger")).toEqual({ allowed: true });
+    expect(await rule.checkStart(principal("p-theirs", OTHER), "payments")).toMatchObject({ allowed: false });
+    expect(await rule.checkStart(principal("p-owner", OTHER), "payments")).toMatchObject({ allowed: false, code: "FORBIDDEN" });
+    expect(await rule.checkStart(principal("p-nobody", FAKE_COMPANY), "payments")).toMatchObject({ allowed: false });
+  });
+});
+

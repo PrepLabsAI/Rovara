@@ -56,7 +56,7 @@ export function createLocalWikiBuild(options: LocalWikiBuildOptions): LocalWikiB
         if (caller.scriptToken !== undefined || !caller.principal.roles.includes("owner")) throw agentXError("FORBIDDEN", "only the owner of this install can build a project's wiki");
         const project = match[1]!;
         const latest = await flow.projects.latest(project);
-        if (latest === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
+        if (latest === undefined) throw agentXError("PROJECT_NOT_FOUND", WIKI_CONTROLS_WORDS.projectNotFound);
         const repositories = latest.definition.repositories;
         const wiki = createWikiStore({ store: flow.store, companyId, now: options.now });
         // A repository removed from the project leaves nothing behind: its pages go before anything is read.
