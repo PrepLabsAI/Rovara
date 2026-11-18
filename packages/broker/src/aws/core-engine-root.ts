@@ -89,6 +89,8 @@ import { createCompanyArtifactReader } from "../core-host/company-artifact-reade
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
+import type { HostedAnswersWiring } from "../core-host/answer-routes.js";
+import type { LessonsHost } from "../lessons/host-glue.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type SetupRepairMark, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
@@ -99,6 +101,8 @@ import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wi
 import { hostedServiceCatalog } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { baseFlakyTests } from "../core/test-env/base-flaky.js";
+import { flakyFactsPort } from "../lessons/knowledge-facts.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
@@ -328,6 +332,14 @@ export function personStandingFromDynamo(client: DynamoSender, tableName: string
 export function projectGrantFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string) => Promise<boolean> {
   const role = projectGrantRoleFromDynamo(client, tableName);
   return async (personId, project) => (await role(personId, project)) !== undefined;
+}
+
+/**
+ * Lead 4 L4-AK2g: the hosted answers' team knowledge briefing. A company's answer is briefed by THAT company's own lessons host, and only on the runtime that is that company's (the engine builds one runtime per
+ * company); another company's id, or a company the lessons switch does not cover, has none and the answer is made as before. The seam is asked only after the answer service checked the person's role.
+ */
+export function answersBriefingOf(runtimeCompanyId: OrgId, hostOf: (companyId: OrgId) => Pick<LessonsHost, "answerBriefing"> | undefined): NonNullable<HostedAnswersWiring["briefing"]> {
+  return (companyId) => { const host = companyId === runtimeCompanyId ? hostOf(companyId) : undefined; return host === undefined ? undefined : (input) => host.answerBriefing(input); };
 }
 
 /** The project role the lessons API reads, from the broker's grant: a project administrator is a `maintainer`, a developer a `contributor`; anything else none. */
@@ -732,6 +744,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         } else {
           lessons = createCoreLessons({
             flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
+            // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
+            knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
             ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;
@@ -951,6 +965,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // every answer is the fixed "answers are not set up here yet" outcome.
           answers: {
             model: answersModel(),
+            // Lead 4 L4-AK2g: this company's own lessons host answers its briefing (never another company's); absent where the lessons switch does not cover it.
+            briefing: answersBriefingOf(runtime.companyId, (id) => lessonsByCompany.get(id)?.host),
             standing: setupRunStanding,
             repositories: async (companyId, project) => {
               if (companyId !== runtime.companyId) return undefined;

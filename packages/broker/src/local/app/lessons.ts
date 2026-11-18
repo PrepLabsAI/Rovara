@@ -100,6 +100,8 @@ export interface LocalLessons {
   localToolsSwitches(): Promise<LessonLocalToolsView | undefined>;
   /** One local coding tools switch from the lessons page: the project's own, or the company's "lessons stay in Rovara". Audited before it is made. */
   localToolsSwitch(input: { scope: "project"; project: string; enabled: boolean } | { scope: "company"; stays: boolean }): Promise<LocalActionResult>;
+  /** The team knowledge briefing for an answer about one project (lead 4 L4-AK2b); see `LessonsHost.answerBriefing`. */
+  answerBriefing(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined>;
   /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
   learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
   /** What the callbacks tell after a batch of a worker's events: the load report of a step, applied to the manifest its dispatch recorded. Never throws. */
@@ -329,6 +331,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   }
 
   const learnedFor: LocalLessons["learnedFor"] = (input) => host.learnedFor(input);
+  const answerBriefing: LocalLessons["answerBriefing"] = (input) => host.answerBriefing(input);
   const onEvents: LocalLessons["onEvents"] = (operation, events) => host.onEvents(operation, events);
   const usedInPullRequest: LocalLessons["usedInPullRequest"] = (task, repositoryId) => host.usedInPullRequest(task, repositoryId);
   const listKey = (taskId: string, repositoryId: string) => host.listKey(taskId, repositoryId);
@@ -399,5 +402,5 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
 
   const noteHumanEdit: LocalLessons["noteHumanEdit"] = (push) => host.noteHumanEdit(push);
-  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, localToolsSwitches, localToolsSwitch, learnedFor, answerBriefing, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
 }

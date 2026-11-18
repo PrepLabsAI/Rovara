@@ -62,6 +62,7 @@ import { secondReviewReplayKey, secondReviewVerdictKey } from "../../packages/br
 import { plain, replayRun, verdictFor } from "../support/second-review-world.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { startFakeProvider } from "../support/model-proxy-world.js";
+import { lessonRecord, draft } from "./lessons/lesson-helpers.js";
 import { catalogModelIds, listPricesPerMillion } from "../../packages/model-runtime/src/catalog.js";
 import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
 import { catalogPriceOf, costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
@@ -6292,5 +6293,26 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
     // Without the limit the same install runs the step, and the cost shows as unknown.
     const free = await launch({ environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real", ROVARA_RUN_LIMIT: "0" }, files: { "gateway.mjs": gateway("") }, config });
     expect((await toPlanReview(free)).plan.payload).toMatchObject({ modelRoute: { alias: "company-gateway/house-model" } });
+  });
+});
+
+describe("rovara up: the answer route's team knowledge briefing (lead 4 L4-AK2g)", () => {
+  it("the owner's answer is briefed by THIS install's lessons host (the join in app.ts): the model is shown the framed team-knowledge block, and with lessons off it is not", async () => {
+    for (const lessons of ["on", "off"] as const) {
+      const provider = await startFakeProvider();
+      cleanup.push(() => provider.close());
+      const h = await launch({ host: true, environment: { ANTHROPIC_API_KEY: ["sk", "ant", "api03", "A".repeat(32)].join("-"), ...(lessons === "off" ? { ROVARA_LESSONS: "0" } : {}) }, modelProviderEndpoints: { anthropic: provider.url } });
+      expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
+      const store = h.runtime.app.lessons.runtime.store;
+      const key = { workspaceId: IMPLICIT_COMPANY_ID, project: "payments" };
+      const lesson = lessonRecord({ workspaceId: IMPLICIT_COMPANY_ID, project: "payments", tier: 1, tierReasons: [], approvals: [{ approvalId: "a1", by: "local-owner", at: 1, mode: "one" }], scope: {}, citations: [], citationChecks: [], stages: ["UNDERSTAND", "PLAN", "IMPLEMENT", "REVIEW"], provenance: { ...draft().provenance, supportTasks: [] }, title: "Use the retry helper", description: "Retries go through withRetry.", body: "Wrap network calls in withRetry instead of looping by hand." });
+      await store.commit(key, await store.setVersion(key), [lesson], 1);
+      const response = await h.api("/v1/app/projects/payments/answers", { method: "POST", body: { requestId: "88888888-8888-4888-8888-888888888888", question: "How do we retry network calls with the retry helper?" } });
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+      const shown = provider.calls.filter((call) => call.path === "/v1/messages").map((call) => JSON.stringify(call.body)).join("\n");
+      expect(shown.length).toBeGreaterThan(0);
+      if (lessons === "on") { expect(shown).toContain("team-knowledge"); expect(shown).toContain("Use the retry helper"); }
+      else expect(shown).not.toContain("team-knowledge");
+    }
   });
 });
