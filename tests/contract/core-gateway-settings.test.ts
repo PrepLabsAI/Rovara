@@ -4,7 +4,7 @@
 // so the core then refused work. The synthesized templates are checked in core-engine-infrastructure.test.ts ("the model gateway settings").
 import { describe, expect, it } from "vitest";
 import {
-  BROKER_SETTINGS, BROKER_SETTING_VALUE, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, isCoreAgentModelId,
+  BROKER_SETTINGS, BROKER_SETTING_VALUE, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_LEARNING_MODEL_VARIABLE, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, isCoreAgentModelId,
 } from "@agentx/contracts";
 import { hydrateBrokerEnvironment, hydrateBrokerSettings } from "../../packages/broker/src/aws/broker-environment.js";
 import { gatewayModelKeysModules, readGatewayModelAccess } from "../../packages/broker/src/core-host/gateway-model-access.js";
@@ -476,5 +476,96 @@ describe("coreEngine.answersModel (the hosted answers model)", () => {
     delete empty[CORE_ANSWERS_MODEL_VARIABLE];
     hydrateBrokerEnvironment(empty);
     expect(empty[CORE_ANSWERS_MODEL_VARIABLE]).toBe("");
+  });
+});
+
+// DEC 254zzz58: the hosted lessons learning model, `agentx config set coreEngine.learningModel`. Empty = the first Claude model the gateway offers the company.
+describe("coreEngine.learningModel (the hosted lessons learning model)", () => {
+  const LEARNING_KEY = "coreEngine.learningModel";
+  const LEARNING_MODEL = "claude-haiku-5-5";
+  const LEARNING_ALLOWED = `${LEARNING_KEY} must be empty (none: the first Claude model the model gateway offers the company) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: lessons learn on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_LEARNING_MODEL_MAX_LENGTH} characters)`;
+  const controlPlane = (parameters: Record<string, string>) => stacks({ "agentx-staging-control-plane": { CoreEngine: "off", CoreModelGatewayHost: HOST, CoreAgentModel: GLM, CoreLearningModel: "", ...parameters } });
+
+  it("is the stack parameter CoreLearningModel of the control plane, empty by default, with no model role and no live gateway check", () => {
+    const entry = configKey(LEARNING_KEY);
+    expect(entry).toMatchObject({ target: { kind: "stack-parameter", part: "control-plane", parameter: "CoreLearningModel" }, defaultValue: "" });
+    expect(entry.model).toBeUndefined();
+    expect(entry.gatewayOffered).toBeUndefined();
+    expect(entry.corePairedWith).toBeUndefined();
+    expect(whereText(entry.target, ENV)).toBe("stack parameter CoreLearningModel on agentx-staging-control-plane");
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("CoreLearningModel");
+  });
+
+  it.each(["", "none", " none "])("reads %j as empty (the first Claude model the gateway offers)", (value) => {
+    expect(configKey(LEARNING_KEY).parse(value)).toBe("");
+  });
+
+  it("accepts an Anthropic model id the catalog knows, trimmed, and stores only what the stack parameter admits", () => {
+    for (const value of [LEARNING_MODEL, MODEL, "claude-sonnet-4-5-20250929"]) {
+      const stored = configKey(LEARNING_KEY).parse(` ${value} `);
+      expect(stored).toBe(value);
+      expect(new RegExp(CORE_LEARNING_MODEL_PATTERN, "u").test(stored)).toBe(true);
+    }
+  });
+
+  it.each([
+    "claude-made-up-9", "us.anthropic.claude-haiku-5-5", "anthropic.claude-haiku-5-5-v1:0", "Claude-Haiku-4-5", "claude sonnet", `claude-${"a".repeat(80)}`, "claude-",
+    GLM, "zai.glm-9", "deepseek.v3.2", "https://evil.example/claude-haiku-5-5", "claude-haiku-5-5,lm=x", "claude-haiku-5-5\nlm=x", "u:p@claude-haiku-5-5",
+  ])("refuses %j, without echoing it", (value) => {
+    let message = "";
+    try { configKey(LEARNING_KEY).parse(value); } catch (error) { message = (error as Error).message; }
+    expect(message).toContain(LEARNING_ALLOWED);
+    expect(message).not.toContain("evil.example");
+  });
+
+  it("sets only CoreLearningModel (agent model zai.glm-5 kept), with the previous template and every other parameter kept, and asks the gateway nothing", async () => {
+    const cloudFormation = fakeCloudFormation({ parameters: { CoreEngine: "off", CoreModelGatewayHost: HOST, CoreAgentModel: GLM, CoreLearningModel: "" } });
+    const asked: string[] = [];
+    const recorder = fakeChangeRecorder();
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => { asked.push(String(input instanceof Request ? input.url : input)); return await recorder(input, init); }) as typeof fetch;
+    const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({}), fetch: fetchImpl });
+    expect((await runConfigSet(run, ENV, { key: LEARNING_KEY, value: LEARNING_MODEL, yes: true })).changed).toBe(true);
+    expect(run.lines).toContain(`${LEARNING_KEY}: CoreLearningModel  -> ${LEARNING_MODEL} on agentx-staging-control-plane`);
+    const create = cloudFormation.calls.find((call) => call.name === "CreateChangeSetCommand")!.input as { Parameters: Array<Record<string, unknown>>; UsePreviousTemplate?: boolean };
+    expect(create.UsePreviousTemplate).toBe(true);
+    expect(create.Parameters.filter((parameter) => parameter["ParameterValue"] !== undefined)).toEqual([{ ParameterKey: "CoreLearningModel", ParameterValue: LEARNING_MODEL }]);
+    expect(create.Parameters).toEqual(expect.arrayContaining([{ ParameterKey: "CoreAgentModel", UsePreviousValue: true }, { ParameterKey: "CoreModelGatewayHost", UsePreviousValue: true }]));
+    expect(asked.filter((url) => url.includes(CORE_OFFERED_MODELS_ADMIN_PATH))).toEqual([]);
+  });
+
+  it("clears with none (back to the gateway's first Claude model), changing only CoreLearningModel", async () => {
+    const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: GLM, CoreLearningModel: LEARNING_MODEL } });
+    const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreLearningModel: LEARNING_MODEL }) });
+    expect((await runConfigSet(run, ENV, { key: LEARNING_KEY, value: "none", yes: true })).changed).toBe(true);
+    const create = cloudFormation.calls.find((call) => call.name === "CreateChangeSetCommand")!.input as { Parameters: Array<Record<string, unknown>> };
+    expect(create.Parameters.filter((parameter) => parameter["ParameterValue"] !== undefined)).toEqual([{ ParameterKey: "CoreLearningModel", ParameterValue: "" }]);
+  });
+
+  it("refuses a Bedrock id, a non-Claude model, an unknown model and a malformed id before any AWS call", async () => {
+    for (const value of ["us.anthropic.claude-haiku-5-5", GLM, "claude-made-up-9", "claude-haiku-5-5,lm=x"]) {
+      const cloudFormation = fakeCloudFormation();
+      await expect(runConfigSet(services({ store: await seeded(), cloudFormation, stacks: controlPlane({}) }), ENV, { key: LEARNING_KEY, value, yes: true }), value).rejects.toThrow("nothing changed");
+      expect(cloudFormation.calls, value).toEqual([]);
+    }
+  });
+
+  it("shows empty when unset or when the stack predates the parameter, and the value when set", async () => {
+    const store = await seeded();
+    expect((await runConfigGet(services({ store, stacks: controlPlane({}) }), ENV, LEARNING_KEY)).value).toBe("");
+    expect((await runConfigGet(services({ store, stacks: stacks({ "agentx-staging-control-plane": { CoreEngine: "off" } }) }), ENV, LEARNING_KEY)).value).toBe("");
+    expect((await runConfigGet(services({ store, stacks: controlPlane({ CoreLearningModel: LEARNING_MODEL }) }), ENV, LEARNING_KEY)).value).toBe(LEARNING_MODEL);
+  });
+
+  it("is read by the broker (packed lm) and nothing else changes: the agent model, the answers model and the gateway read back as before", () => {
+    expect(BROKER_SETTINGS.coreLearningModel).toEqual({ code: "lm", variable: CORE_LEARNING_MODEL_VARIABLE });
+    const env = { AGENTX_SETTINGS: `lm=${LEARNING_MODEL},aa=,am=${GLM},gw=${HOST}`, AGENTX_NAMES: "", AGENTX_ENV: ENV, AGENTX_ACCOUNT_ID: "123456789012", AWS_REGION: "us-west-2" } as Record<string, string | undefined>;
+    hydrateBrokerEnvironment(env);
+    expect(env[CORE_LEARNING_MODEL_VARIABLE]).toBe(LEARNING_MODEL);
+    expect(env[CORE_ANSWERS_MODEL_VARIABLE]).toBe("");
+    expect(readGatewayModelAccess(env)).toMatchObject({ gatewayUrl: GATEWAY, route: { alias: GLM, catalog: GLM } });
+    const empty = { ...env, AGENTX_SETTINGS: `lm=,am=${GLM},gw=${HOST}` } as Record<string, string | undefined>;
+    delete empty[CORE_LEARNING_MODEL_VARIABLE];
+    hydrateBrokerEnvironment(empty);
+    expect(empty[CORE_LEARNING_MODEL_VARIABLE]).toBe("");
   });
 });

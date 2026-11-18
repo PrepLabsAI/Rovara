@@ -742,7 +742,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     if (inputs.lessonsLearning === undefined || !switchCovers(lessonsSwitch.value, companyId)) return undefined;
     try {
       const port = inputs.lessonsLearning(companyId);
-      // Said once per company build: a covered company with no port (no gateway settings, no task-token key, a non-Claude agent model) learns nothing, and that is never silent.
+      // Said once per company build: a covered company with no port (no gateway settings, no task-token key, a SET learning model that is not Claude; DEC 254zzz58: never the agent model) learns nothing, and that is never silent.
       if (port === undefined) log({ event: "core_engine.lessons_learning_not_set_up", companyId });
       return port;
     } catch { log({ event: "core_engine.lessons_learning_unavailable", companyId }); return undefined; }

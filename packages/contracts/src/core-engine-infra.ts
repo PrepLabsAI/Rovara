@@ -99,6 +99,20 @@ export function isCoreAnswersModelId(value: string): boolean {
   return typeof value === "string" && value.length <= CORE_ANSWERS_MODEL_MAX_LENGTH && new RegExp(CORE_ANSWERS_MODEL_PATTERN, "u").test(value) && value !== "" && isCoreAgentModelId(value);
 }
 /**
+ * DEC 254zzz58: the hosted lessons' LEARNING model, a stack parameter of its own (`CoreLearningModel`, the broker's ROVARA_CORE_LEARNING_MODEL, packed `lm`), separate from the task agent model.
+ * Empty (the default) means the first Claude model the model gateway offers the company (read live per company, core-host/hosted-learning.ts); set, it is ONE Claude engine name and the
+ * learning calls (the reflector, the curator's judge, the outcome judge) run on it and ONLY they do (every task step keeps ROVARA_CORE_AGENT_MODEL). The gateway's learning route used here is
+ * Anthropic Messages on the company's own Anthropic account, so the value is a Claude engine name, never a Bedrock id and never a non-Claude model: the same rule and length as the answers model.
+ */
+export const CORE_LEARNING_MODEL_VARIABLE = "ROVARA_CORE_LEARNING_MODEL";
+export const CORE_LEARNING_MODEL_PARAMETER = "CoreLearningModel";
+export const CORE_LEARNING_MODEL_PATTERN = CORE_ANSWERS_MODEL_PATTERN;
+export const CORE_LEARNING_MODEL_MAX_LENGTH = CORE_ANSWERS_MODEL_MAX_LENGTH;
+/** Whether `value` is a well-formed learning model id: a Claude engine name (the answers model's rule). Empty is not an id (it means "the first Claude model the gateway offers the company"). */
+export function isCoreLearningModelId(value: string): boolean {
+  return isCoreAnswersModelId(value);
+}
+/**
  * DEC 254g: the broker's admin read of the models the model gateway offers the caller's company (`OfferedAgentModels`), for `agentx config set coreEngine.agentModel`. Only the broker
  * may sign the gateway's service token (the task key's policy permits only its role), so the CLI asks the broker with its admin sign-in.
  */

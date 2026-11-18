@@ -15,6 +15,7 @@
 //   - (web task channel C8, option b) the attention email: CoreAttentionEmail (default off), CoreAttentionEmailHost and CoreAttentionEmailSender, and the small sender function the broker invokes,
 //     which with its role and invoke permission exists only while CoreAttentionEmail is on (attention-email.ts);
 //   - the `CoreAnswersModel` parameter (L4-AM, default empty = the agent model; broker only, packed `aa`, ROVARA_CORE_ANSWERS_MODEL, hosted answers and classifier only)
+//   - the `CoreLearningModel` parameter (DEC 254zzz58, default empty = the first Claude model the gateway offers the company; broker only, packed `lm`, ROVARA_CORE_LEARNING_MODEL, lessons learning only)
 //   - the `CoreModelGatewayHost` and `CoreAgentModel` parameters (default empty), packed for the broker and the dispatcher, which read them as ROVARA_CORE_MODEL_GATEWAY_URL
 //     (`https://<host>`) and ROVARA_CORE_AGENT_MODEL.
 //
@@ -26,7 +27,7 @@
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
-  CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
+  CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
@@ -78,6 +79,7 @@ export class CoreEngine extends Construct {
   /** DEC 254zm: `none` (the default) or `mirrored`, packed for the broker and the dispatcher (`ti`) and given whole to the session steps. */
   readonly testServiceImages: CfnParameter;
   private readonly answersModel: CfnParameter;
+  private readonly learningModel: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
@@ -146,6 +148,11 @@ export class CoreEngine extends Construct {
     // classifier use the agent model, exactly as before. A Claude engine name only (the answers purpose runs on the company's own Anthropic account). No IAM, no secret.
     this.answersModel = new CfnParameter(stack, "CoreAnswersModel", { type: "String", default: "", maxLength: CORE_ANSWERS_MODEL_MAX_LENGTH, allowedPattern: CORE_ANSWERS_MODEL_PATTERN, description: "Core engine hosted answers model, a Claude model id such as claude-haiku-4-5 used for the Just answer and the start-box classifier only; empty (the default) uses the agent model" });
     addBrokerSetting(broker, props.naming, "coreAnswersModel", this.answersModel.valueAsString);
+    // DEC 254zzz58: the hosted lessons' learning model, for the BROKER only (the lessons' learning calls run there), separate from the agent model. A stack parameter (OPERATOR_PARAMETERS keeps it
+    // across upgrades), packed (`lm`). Empty (the default): the first Claude model the model gateway offers the company. A Claude engine name only (the learning route used is the company's own
+    // Anthropic account). No IAM, no secret: the broker already reads the offered models and mints learning tokens with its task key.
+    this.learningModel = new CfnParameter(stack, "CoreLearningModel", { type: "String", default: "", maxLength: CORE_LEARNING_MODEL_MAX_LENGTH, allowedPattern: CORE_LEARNING_MODEL_PATTERN, description: "Core engine hosted lessons learning model, a Claude model id such as claude-haiku-4-5 used for lessons learning only; empty (the default) uses the first Claude model the model gateway offers the company" });
+    addBrokerSetting(broker, props.naming, "coreLearningModel", this.learningModel.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).

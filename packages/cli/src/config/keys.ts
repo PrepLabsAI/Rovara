@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, isCoreLearningModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
@@ -116,6 +116,20 @@ export const coreAnswersModel = (key: string) => (value: string): string => {
   return trimmed;
 };
 
+/**
+ * coreEngine.learningModel (DEC 254zzz58): empty (the first Claude model the model gateway offers the company), or ONE Anthropic model id this Rovara's catalog knows (such as claude-haiku-5-5) that
+ * the hosted lessons' learning calls run on, separate from the agent model. A Claude engine name only: the learning route used runs on the company's own Anthropic account, so a Bedrock
+ * `us.anthropic....` id or a model such as zai.glm-5 is refused here, before any deploy. The catalog must know it (the per-call cap is priced from it). The refusal never echoes the value.
+ */
+export const coreLearningModel = (key: string) => (value: string): string => {
+  const trimmed = value.trim();
+  if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
+  if (!isCoreLearningModelId(trimmed) || catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined) {
+    return refuse(key, `empty (none: the first Claude model the model gateway offers the company) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: lessons learn on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_LEARNING_MODEL_MAX_LENGTH} characters)`);
+  }
+  return trimmed;
+};
+
 const oneOf = (key: string, values: readonly string[]) => (value: string): string =>
   (values.includes(value.trim()) ? value.trim() : refuse(key, `one of ${values.join(", ")}`));
 
@@ -196,6 +210,8 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     target: parameter("control-plane", "TestServiceImages"), defaultValue: "none", parse: oneOf("testServices.images", ["none", "mirrored"]) },
   { key: "coreEngine.answersModel", description: "the model the hosted Just answer and the start-box classifier run on through the model gateway (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses coreEngine.agentModel, as before",
     target: parameter("control-plane", CORE_ANSWERS_MODEL_PARAMETER), defaultValue: "", parse: coreAnswersModel("coreEngine.answersModel") },
+  { key: "coreEngine.learningModel", description: "the model the hosted lessons learn with (the reflector and the judges) through the model gateway, on the company's own Anthropic account (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses the first Claude model the gateway offers the company",
+    target: parameter("control-plane", CORE_LEARNING_MODEL_PARAMETER), defaultValue: "", parse: coreLearningModel("coreEngine.learningModel") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
   // DEC 254zg (a): Code's company layer, one switch for every function that reads COMPANY_SIGNIN and every company-only grant; the Slack service's stack takes the same value.
   { key: "company.signIn", description: "enabled: Code's company layer is on (company membership sign-in, invites, Add to Slack, Slack company mode); disabled (the default): it is off, and the template holds no company-only grant. Close self-serve (company.selfServe disabled) and migrate the members before enabling it (named environments only)",
