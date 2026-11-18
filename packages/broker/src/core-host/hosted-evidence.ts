@@ -3,6 +3,7 @@
 // redaction as the laptop, and keeps it where the Proof route (`GET /v1/dev/tasks/{id}/evidence`) reads it back. Informational: a fault or a slow store only means there is no pack for this code.
 import type { DocumentStore, ObjectStorage, OrgId } from "@agentx/contracts";
 import { createLocalEvidence, type LocalEvidence } from "../local/app/evidence.js";
+import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { createCompanyEvidenceBlobs, type CompanyEvidenceBlobsOptions } from "./company-evidence-blobs.js";
 
 /**
@@ -41,4 +42,10 @@ export function createHostedEvidence(options: HostedEvidenceOptions): LocalEvide
     // TE-C1: the baseline the plan offered, looked up in this company's own records, only while the baseline switch is on.
     testEnv: { store, now: options.now, env: options.env },
   });
+}
+
+/** The flow's `keepEvidence` seam for one company (the laptop's `keepEvidence: (input) => evidence.keepAfterChecks(input)`). */
+export function hostedKeepEvidence(options: HostedEvidenceOptions): NonNullable<TaskFlowDeps["keepEvidence"]> {
+  const evidence = createHostedEvidence(options);
+  return (input) => evidence.keepAfterChecks(input);
 }

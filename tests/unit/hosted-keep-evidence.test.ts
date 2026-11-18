@@ -5,7 +5,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { FAILURE_CAUSES_ARTIFACT, EVIDENCE_RAW_ARTIFACT, orgProjectCatalogKey, projectRevisionKey, type CheckEntry, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { OperationRecord, TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
@@ -50,12 +49,12 @@ async function world(options: { env?: NodeJS.ProcessEnv } = {}) {
     env: { ROVARA_CORE_ENGINE: "on" }, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
     runtime: (registry, companyId) => {
       // The wiring under test: exactly what aws/core-engine-root.ts hands each company's flow.
-      const evidence = createHostedEvidence({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId: companyId as never, env: options.env ?? {}, now: () => fake.clock.now, log: (entry) => logs.push(entry), refused: (reason) => refused.push(reason) });
+      const evidence = createHostedEvidence({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId: companyId, env: options.env ?? {}, now: () => fake.clock.now, log: (entry) => logs.push(entry), refused: (reason) => refused.push(reason) });
       hosted.set(companyId, evidence);
       return {
-        callbackSigningKey: Buffer.alloc(32, 7), access: { ...createOwnerTaskAccess(), async checkStart() { return { allowed: true }; }, async canAct(principal, task) { return principal.personId === task.developerId; } } as TaskFlowDeps["access"],
+        callbackSigningKey: Buffer.alloc(32, 7), access: { ...createOwnerTaskAccess(), async checkStart() { return { allowed: true }; }, async canAct(principal, task) { return principal.personId === task.developerId; } },
         repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined, services: SERVICES,
-        ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const }, flowOptions: { understandFirst: true, keepEvidence: evidence.keepAfterChecks },
+        ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const }, flowOptions: { understandFirst: true, keepEvidence: (input) => evidence.keepAfterChecks(input) },
       };
     },
   });
@@ -70,7 +69,7 @@ async function world(options: { env?: NodeJS.ProcessEnv } = {}) {
   const blobs = (await app.registry()).require("object-storage");
 
   /** A task of `companyId` started by `owner` whose current candidate failed `readiness:0`, with the worker's raw file (and causes) saved as the callback saves them. */
-  const taskOf = async (owner: DeployedCaller, companyId: string, files: { raw?: string; causes?: string } = { raw: rawFile(), causes: causesFile() }, plan?: unknown) => {
+  const taskOf = async (owner: DeployedCaller, companyId: string, files: { raw?: string | undefined; causes?: string | undefined } = { raw: rawFile(), causes: causesFile() }, plan?: unknown) => {
     const runtime = await app.runtimeFor(companyId);
     const { task } = await runtime.flow.start({ principal: owner.principal, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true });
     const record = (await readTask(runtime.flow.deps, task.taskId))!;
@@ -82,7 +81,7 @@ async function world(options: { env?: NodeJS.ProcessEnv } = {}) {
     await fake.store.put({ item: { ...(await fake.store.get(taskKey(task.taskId)))!, workflow } as never });
     const current = (await readTask(runtime.flow.deps, task.taskId))!;
     const operationId = "op-checks-1";
-    await fake.store.put({ item: { ...operationKey(companyId, current.workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId: current.workspaceId, kind: "task", workflowMode: "CHECKS", status: "SUCCEEDED", fence: 1, createdAt: "2026-11-18T00:00:00.000Z", companyId, dispatch: { kind: "task", payload: { workflowMode: "CHECKS", ...(plan === undefined ? {} : { testEnvironment: plan }) } } } });
+    await fake.store.put({ item: { ...operationKey(companyId, current.workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId: current.workspaceId, kind: "task", workflowMode: "CHECKS", status: "SUCCEEDED", fence: 1, createdAt: "2026-11-18T00:00:00.000Z", companyId, dispatch: { kind: "task", payload: { workflowMode: "CHECKS", ...(plan === undefined ? {} : { testEnvironment: plan as JsonValue }) } } } });
     for (const [name, text] of [[EVIDENCE_RAW_ARTIFACT, files.raw], [FAILURE_CAUSES_ARTIFACT, files.causes]] as const) {
       if (text === undefined) continue;
       const objectKey = artifactObjectKey(current.workspaceId, operationId, name);
@@ -180,7 +179,7 @@ describe("one company's evidence is never another's", () => {
     expect(w.refused).toContain("workspace_not_company");
     // READ: B's own task whose row points at A's owner and workspace shows no pack (the shared bucket holds A's, but B's store cannot read it).
     const b = await w.taskOf(ownerB, OTHER, { raw: undefined, causes: undefined });
-    await w.fake.store.put({ item: { ...(await w.fake.store.get(taskKey(b.taskId)))!, ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId } as never });
+    await w.fake.store.put({ item: { ...(await w.fake.store.get(taskKey(b.taskId)))!, ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId } });
     // A's pack bytes sit at the key B's forged row names (B's task id under A's workspace), in the one shared bucket: only the company-bound read keeps them out of B's Proof tab.
     await w.blobs.put(evidencePackKey({ ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId, taskId: b.taskId }, DIGEST), before!, { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
     expect(await loadEvidencePack(w.blobs, { ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId, taskId: b.taskId }, DIGEST)).toBeDefined();
@@ -189,7 +188,7 @@ describe("one company's evidence is never another's", () => {
     expect(JSON.stringify(answer)).not.toContain("applies discount");
     // The route's own read goes through the company-bound store: the raw store would have shown it.
     expect(await loadEvidencePack(w.blobs, { ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId, taskId: a.taskId }, DIGEST)).toBeDefined();
-    expect(await loadEvidencePack(hostedEvidenceBlobs({ blobs: w.blobs, store: w.fake.store, companyId: OTHER as never }), { ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId, taskId: a.taskId }, DIGEST)).toBeUndefined();
+    expect(await loadEvidencePack(hostedEvidenceBlobs({ blobs: w.blobs, store: w.fake.store, companyId: OTHER }), { ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId, taskId: a.taskId }, DIGEST)).toBeUndefined();
   });
 
   it("the raw file is read only through this company's own ARTIFACT row: another workspace's raw file is never kept for this task", async () => {
@@ -215,9 +214,9 @@ describe("the baseline words (TE-C1)", () => {
   const planOf = (shas: string[]) => ({ revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "unit", kind: "test" }], baselineCandidates: shas.map((value) => ({ sha: value })) });
   const baselineSha = "1".padStart(40, "0");
   const claimed = (value: string) => rawFile().replace('"selection"', `"baseline":{"sha":"${value}","commitsBack":2},"selection"`);
-  async function baselineWorld(env: NodeJS.ProcessEnv, companyWithRow = FAKE_COMPANY) {
+  async function baselineWorld(env: NodeJS.ProcessEnv, companyWithRow: string = FAKE_COMPANY) {
     const w = await world({ env });
-    await recordBaselineRow({ store: w.fake.store, now: () => NOW }, mintTrustedBaselineRun({ orgId: companyWithRow as never, project: "payments", row: BaselineRowSchema.parse({
+    await recordBaselineRow({ store: w.fake.store, now: () => NOW }, mintTrustedBaselineRun({ orgId: companyWithRow, project: "payments", row: BaselineRowSchema.parse({
       recordedAt: new Date(NOW - 3_600_000).toISOString(), envRevision: 1, branch: "main", headSha: baselineSha, finishedAt: new Date(NOW - 3 * 3_600_000).toISOString(), writer: "nightly", tests: { total: 5, passed: 4, failed: 1, skipped: 0 }, failed: ["a::x"], flaky: [] }) }));
     return w;
   }
