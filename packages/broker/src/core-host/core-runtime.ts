@@ -123,7 +123,7 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     const own = given?.(input);
     // The cost report's row for this task (lead 4, A2), in the start's own transaction: the task and its row exist together or not at all. It never throws.
     const reported = reportStartItems({ companyId, taskId: input.taskId, project: input.project, title: input.title, origin: input.origin, purpose: input.purpose, receivedAt: input.receivedAt });
-    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped), ...reported] };
+    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(input), stampItem(companyId, input.taskId, stamped), ...reported] };
   };
   const base = createTaskFlowFromRegistry(withStepFenceRetry(withCompanyMachines(registry, companyId)), {
     ...options.flowOptions,

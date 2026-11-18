@@ -125,7 +125,7 @@ describe("the hosted Slack adapter: one company's workspaces, with that company'
 // ---- the start on the core
 
 const CALLER: CoreEntryCaller = { developerId: "d".repeat(64), sessionId: "s1", name: "Rovara member" };
-const START = { caller: CALLER, thread: { teamId: TEAM_A, channelId: CHANNEL, threadTs: TS }, userId: USER, requestId: newRequestId(), project: "payments", instructions: "Add a retry", workflowPath: "QUICK" as const };
+const START = { caller: CALLER, companyId: COMPANY, thread: { teamId: TEAM_A, channelId: CHANNEL, threadTs: TS }, userId: USER, requestId: newRequestId(), project: "payments", instructions: "Add a retry", workflowPath: "QUICK" as const };
 const TASK_ID = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 
 function entryWith(options: { route?: CoreTaskEntry["route"]; record?: CoreTaskEntry["recordThread"] } = {}): { entry: CoreTaskEntry; requests: Array<{ path: string; body: Record<string, unknown> }> } {
@@ -365,7 +365,7 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
 
   it("a Slack start asks the core first, with the Slack person's own caller, and the old start still follows", () => {
     const source = read("packages/broker/src/aws/broker.ts");
-    expect(source).toMatch(/dependencies\.workspaces === undefined \? undefined : await startSlackWorkflowOnCore\(dependencies\.developer\.coreTasks, \{ caller, thread, userId, requestId, project: binding\.projectName, instructions, workflowPath: event\.workflowPath \}/u);
+    expect(source).toMatch(/dependencies\.workspaces === undefined \|\| company === undefined \? undefined : await startSlackWorkflowOnCore\(dependencies\.developer\.coreTasks, \{ caller, companyId: company, thread, userId, requestId, project: binding\.projectName, instructions, workflowPath: event\.workflowPath \}/u);
     expect(source).toMatch(/if \(onCore !== undefined\) return \{ task: \{ taskId: onCore\.taskId \} \};\n\s+const developer = /u);
     expect(source).toContain("shareToChannel: true, channel: thread.channelId");
   });

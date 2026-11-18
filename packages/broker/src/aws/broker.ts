@@ -288,7 +288,7 @@ import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
@@ -6305,15 +6305,15 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (binding === undefined) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  const existingWorkflowThread = await getItem(dependencies, sharedTaskKey(thread));
+  const existingWorkflowThread = await getItem<Record<string, unknown>>(dependencies, sharedTaskKey(thread));
   const threadOwnerKey = ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, slackThreadSubject(thread));
   const existingThreadTask = await getItem<{ workspaceId?: string; closedAt?: string }>(dependencies, slackThreadKey(threadOwnerKey));
-  if (existingWorkflowThread !== undefined || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) {
-    throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
-  }
+  // L4-U5c: in company mode, this company's own guard row for THIS request id is Slack's retry of the same event (it goes on to the core, whose idempotency answers the first task); any other row is a thread that already has a task.
+  const company = dependencies.workspaces === undefined ? undefined : await dependencies.workspaces.requireCompany(thread.teamId);
+  if ((existingWorkflowThread !== undefined && !isOwnSlackStart(existingWorkflowThread, { companyId: company, requestId })) || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
   // L4-U5b: a company the core serves starts the task on the core (no channel share: the core has none) and remembers this Slack thread, so the task's pause at Build, its pull request and its end are told here too.
   // Only where Slack runs in company mode (the thread can then be remembered and told); the single-workspace install keeps the start it always had.
-  const onCore = dependencies.workspaces === undefined ? undefined : await startSlackWorkflowOnCore(dependencies.developer.coreTasks, { caller, thread, userId, requestId, project: binding.projectName, instructions, workflowPath: event.workflowPath },
+  const onCore = dependencies.workspaces === undefined || company === undefined ? undefined : await startSlackWorkflowOnCore(dependencies.developer.coreTasks, { caller, companyId: company, thread, userId, requestId, project: binding.projectName, instructions, workflowPath: event.workflowPath },
     brokerLogLine);
   if (onCore !== undefined) return { task: { taskId: onCore.taskId } };
   const developer = dependencies.workspaces === undefined ? dependencies.developer : { ...dependencies.developer, slackTeamId: thread.teamId };
