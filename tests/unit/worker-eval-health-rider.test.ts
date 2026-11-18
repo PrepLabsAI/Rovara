@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EVAL_HEALTH_RESULT_PATH, EvalHealthResultBodySchema, PREPARE_EVAL_HEALTH_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import { runEvalHealthRider, type EvalHealthRiderDeps } from "../../packages/worker/src/eval-health-run.js";
 import { pinnedEvalPlan } from "../../packages/worker/src/verification/eval-plan-source.js";
+import { EVAL_GATEWAY_URL_VARIABLE } from "../../packages/worker/src/verification/eval-wiring.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { createEvalFinalCheckWorld } from "../support/eval-final-check.js";
 
@@ -91,10 +92,14 @@ describe("the rider measures main and posts the one result", () => {
     expect(answer).toMatchObject({ ...ids, result: { status: "not_run", reason: "not_connected" } });
     expect(net.sent).toHaveLength(1);
   });
-  it("the production binding without the worker's image or a fresh sandbox is not connected (never a hold)", async () => {
+  it("the production binding without a fresh check sandbox (no worker image) is not connected: it asks for no plan, holds nothing and only posts the answer", async () => {
     const net = network();
-    const answer = await runEvalHealthRider(deps({ fetch: net.fetchImpl, environment: {} }));
+    const answer = await runEvalHealthRider(deps({ fetch: net.fetchImpl, environment: { [EVAL_GATEWAY_URL_VARIABLE]: "https://gateway.example.test" } }));
     expect(answer?.result).toEqual({ status: "not_run", reason: "not_connected" });
+    expect(net.sent.map(s => s.url.split("/").pop())).toEqual([EVAL_HEALTH_RESULT_PATH]);
+    // And with nothing set at all (no gateway), the same.
+    const bare = network();
+    expect((await runEvalHealthRider(deps({ fetch: bare.fetchImpl, environment: {} })))?.result).toEqual({ status: "not_run", reason: "not_connected" });
   });
   it("main must be exactly what the broker pinned: a repository the preparation resolved elsewhere, or not in the pins, is refused before any sandbox", async () => {
     for (const m of [manifest("a".repeat(40)), { repositories: [] }, { repositories: [{ ...manifest().repositories[0]!, name: "other" }] }, { repositories: [...manifest().repositories, ...manifest().repositories] }]) {
