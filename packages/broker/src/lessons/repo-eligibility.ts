@@ -7,7 +7,7 @@
 //   - `isRepoFileEligible` / `repoFileBlockers`: whether a stored lesson may go into repository R's file now.
 // The table of inputs (one kind of span each):
 //   pr_comment, human_edit, outcome, fact, and a CI result or an intent that carries a repository place  -> yes, if the place is ONE repository and the span's audience is that repository's readers (or the project, a public repository)
-//   send_back, remembered, close_reason (typed in Rovara)                                                -> never
+//   send_back, remembered, close_reason, plan_comment, design_comment (typed in Rovara)                                              -> never
 //   plan, review_finding, ci_failure written by Rovara (no person)                                       -> only if everything else passes (they are derived from the task's inputs)
 //   a person's words in a plan / finding, a span from Slack, a tracker, MCP or Rovara itself, a loaded lesson, another repository, an unknown kind -> never
 //   a task's own start and steering that are not spans (typed task text, answers, notes, connections)     -> never, unless the subject source PROVED them repository-visible (`ReflectSubject.repoInputs`)
@@ -47,7 +47,7 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set(SPAN_KINDS);
 /** Kinds that are the repository's own words, work or facts: they pass when their place and readers are one repository's. */
 const REPOSITORY_KINDS: ReadonlySet<string> = new Set(["pr_comment", "human_edit", "outcome", "fact"]);
 /** Kinds a person types in Rovara (or its CLI, chat or Slack-linked session): never repository-visible, whatever place they carry. */
-const TYPED_IN_ROVARA: ReadonlySet<string> = new Set(["send_back", "remembered", "close_reason"]);
+const TYPED_IN_ROVARA: ReadonlySet<string> = new Set(["send_back", "remembered", "close_reason", "plan_comment", "design_comment"]);
 /** Kinds Rovara derives from the task's inputs: they add nothing of their own, and are only as visible as the inputs they were made from. */
 const DERIVED_KINDS: ReadonlySet<string> = new Set(["plan", "review_finding", "ci_failure"]);
 
