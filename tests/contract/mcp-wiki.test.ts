@@ -112,7 +112,7 @@ describe("free wiki MCP tools", () => {
   });
 
   it("returns an empty wiki with no key and refuses a response naming another project", async () => {
-    const empty = await connected({ project: "alpha", state: "empty", pages: [] });
+    const empty = await connected({ project: "alpha", state: "empty", agentsEnabled: false, pages: [] });
     const result = await empty.mcp.callTool({ name: "wiki_list", arguments: { project: "alpha" } });
     framed(textOf(result), 4096);
     expect(textOf(result)).toContain("No wiki pages here.");

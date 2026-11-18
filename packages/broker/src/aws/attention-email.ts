@@ -15,7 +15,8 @@
 //   - per-person links (`attentionEmailLinks`): settings, the inbox, and a SIGNED link that stops these emails. Acting on it still takes the person's own sign-in (`inbox-routes.ts`).
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { InvokeCommand, type LambdaClient } from "@aws-sdk/client-lambda";
-import { ATTENTION_EMAIL_FUNCTION_VARIABLE, EmailError, SLACK_OIDC_ISSUER, SlackUserIdSchema, emailRefusal, isPlainEmailAddress, type DocumentStore, type EmailSender, type OrgId } from "@agentx/contracts";
+import { ATTENTION_EMAIL_FUNCTION_VARIABLE, EmailError, emailRefusal, isPlainEmailAddress, type DocumentStore, type EmailSender, type OrgId } from "@agentx/contracts";
+import { isOwnSlackWorkspaceSignIn } from "./slack-own-workspace.js";
 import { plainHttpsLink, type AttentionEmailLinks } from "../core/notify/email-text.js";
 import { attentionPersonOf, rememberAttentionOwner } from "../core/notify/person-index.js";
 import { mintUnsubscribeToken, unsubscribeKeyOf } from "../core/notify/unsubscribe-token.js";
@@ -95,7 +96,7 @@ export function verifiedSignInAddress(record: Record<string, unknown> | undefine
   // GitHub: the account's one verified primary email (developer/providers.ts).
   if (provider === "github" && issuer === GITHUB_ISSUER) return email;
   // Slack: the install's own workspace only (another workspace's sign-in stores no email, and names its subject `<team>:<user>`).
-  if (provider === "slack" && issuer === SLACK_OIDC_ISSUER && SlackUserIdSchema.safeParse(subject).success) return email;
+  if (provider === "slack" && isOwnSlackWorkspaceSignIn(issuer, subject)) return email;
   // OIDC: the install's own issuer only. A company's own issuer (company-issuer.ts) can assert any address for its members.
   if (provider === "oidc" && ownOidcIssuer !== undefined && trim(ownOidcIssuer) !== "" && trim(issuer) === trim(ownOidcIssuer)) return email;
   return undefined;
