@@ -51,7 +51,16 @@ export function withoutCoreEngine(template: unknown): unknown {
   const dispatcherPolicy = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DispatcherServiceRoleDefaultPolicy") && resource.Type === "AWS::IAM::Policy")!;
   const statements = (dispatcherPolicy[1].Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> }).Statement;
   expect(statements.filter((statement) => statement.Sid === "ConsumeCoreDispatchQueue")).toHaveLength(1);
-  (dispatcherPolicy[1].Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> }).Statement = statements.filter((statement) => statement.Sid !== "ConsumeCoreDispatchQueue");
+  // L4-IAMR: the dispatcher's one read of a company's stored artifacts (tests/contract/dispatcher-artifacts-read.test.ts pins it and its widening mutants): Allow, s3:GetObject, the artifacts bucket's private/* and workspaces/*.
+  const artifactReads = statements.filter((statement) => statement.Sid === "ReadCompanyArtifacts") as Array<{ Sid: string; Effect: string; Action: unknown; Resource: Array<{ "Fn::Join": [string, unknown[]] }> }>;
+  expect(artifactReads).toHaveLength(1);
+  const bucketArn = (artifactReads[0]!.Resource[0]!["Fn::Join"][1] as [{ "Fn::GetAtt": [string, string] }, string])[0];
+  expect(artifactReads[0]).toEqual({
+    Sid: "ReadCompanyArtifacts", Effect: "Allow", Action: "s3:GetObject",
+    Resource: [{ "Fn::Join": ["", [bucketArn, "/private/*"]] }, { "Fn::Join": ["", [bucketArn, "/workspaces/*"]] }],
+  });
+  expect(bucketArn["Fn::GetAtt"][1]).toBe("Arn");
+  (dispatcherPolicy[1].Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> }).Statement = statements.filter((statement) => statement.Sid !== "ConsumeCoreDispatchQueue" && statement.Sid !== "ReadCompanyArtifacts");
   const tables = Object.entries(synthesized.Resources).filter(([, resource]) => resource.Type === "AWS::DynamoDB::Table" && Array.isArray(resource.Properties.GlobalSecondaryIndexes)
     && (resource.Properties.GlobalSecondaryIndexes as Array<{ IndexName: string }>).some((index) => index.IndexName === "outbox-pending"));
   expect(tables).toHaveLength(1);

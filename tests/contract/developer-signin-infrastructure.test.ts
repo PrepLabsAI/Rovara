@@ -1749,6 +1749,9 @@ const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
+  // L4-IAMR (DEC 254zzz26): the dispatcher's company-bound artifact reader reads the artifacts bucket's private/* and workspaces/* (GetObject only; pinned with its widening mutants in dispatcher-artifacts-read.test.ts).
+  ["role:DispatcherServiceRole", "Allow", "s3:GetObject", "bucket:Artifacts/private/*", "{}"] as AccessTuple,
+  ["role:DispatcherServiceRole", "Allow", "s3:GetObject", "bucket:Artifacts/workspaces/*", "{}"] as AccessTuple,
 ].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple)) && !dispatcherHookSignerReplaced.has(JSON.stringify(tuple))).concat(envRoom2Added, dispatcherHookSignerTuples).sort(byText);
 
 describe("broker IAM headroom", () => {
