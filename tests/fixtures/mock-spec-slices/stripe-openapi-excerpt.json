@@ -1,0 +1,283 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Stripe API",
+    "version": "2026-10-28.endive"
+  },
+  "paths": {
+    "/v1/charges": {
+      "post": {
+        "operationId": "PostCharges",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/charge"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/charges/{charge}": {
+      "get": {
+        "operationId": "GetChargesCharge",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/charge"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/refunds": {
+      "post": {
+        "operationId": "PostRefunds",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/refund"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/payment_intents": {
+      "post": {
+        "operationId": "PostPaymentIntents",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/payment_intent"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/payment_intents/{intent}": {
+      "get": {
+        "operationId": "GetPaymentIntentsIntent",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/payment_intent"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/customers": {
+      "post": {
+        "operationId": "PostCustomers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/customer"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "charge": {
+        "type": "object",
+        "required": [
+          "amount",
+          "amount_captured",
+          "amount_refunded",
+          "billing_details",
+          "captured",
+          "created",
+          "currency",
+          "disputed",
+          "id",
+          "livemode",
+          "metadata",
+          "object",
+          "paid",
+          "refunded",
+          "status"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer"
+          },
+          "amount_captured": {
+            "type": "integer"
+          },
+          "amount_refunded": {
+            "type": "integer"
+          },
+          "billing_details": {},
+          "captured": {
+            "type": "boolean"
+          },
+          "created": {
+            "type": "integer",
+            "format": "unix-time"
+          },
+          "currency": {
+            "type": "string",
+            "format": "currency"
+          },
+          "disputed": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "livemode": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "object": {
+            "type": "string",
+            "enum": [
+              "charge"
+            ]
+          },
+          "paid": {
+            "type": "boolean"
+          },
+          "refunded": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "pending",
+              "succeeded"
+            ]
+          }
+        }
+      },
+      "customer": {
+        "type": "object",
+        "required": [
+          "created",
+          "id",
+          "livemode",
+          "object"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "unix-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "livemode": {
+            "type": "boolean"
+          },
+          "object": {
+            "type": "string",
+            "enum": [
+              "customer"
+            ]
+          }
+        }
+      },
+      "payment_intent": {
+        "type": "object",
+        "required": [
+          "created",
+          "id",
+          "livemode",
+          "object",
+          "status"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "unix-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "livemode": {
+            "type": "boolean"
+          },
+          "object": {
+            "type": "string",
+            "enum": [
+              "payment_intent"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "canceled",
+              "processing",
+              "requires_action",
+              "requires_capture",
+              "requires_confirmation",
+              "requires_payment_method",
+              "succeeded"
+            ]
+          }
+        }
+      },
+      "refund": {
+        "type": "object",
+        "required": [
+          "amount",
+          "created",
+          "currency",
+          "id",
+          "object"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "integer",
+            "format": "unix-time"
+          },
+          "currency": {
+            "type": "string",
+            "format": "currency"
+          },
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string",
+            "enum": [
+              "refund"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -2,7 +2,7 @@
 // and the unmatched count; and the Prove usage step. With tx off, or with no fake, everything reads as it did.
 import { describe, expect, it } from "vitest";
 import {
-  FixtureSetSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, fixtureEntry, fixtureSetDigest, TEST_SERVICES_FAKE_USAGE_WORDS, testEnvDigest,
+  EvidenceDependencySchema, FixtureSetSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, fixtureEntry, fixtureSetDigest, TEST_SERVICES_FAKE_USAGE_WORDS, testEnvDigest,
   type FixtureSet, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type TestServicesUsageRecord, type VerifiedCatalog,
 } from "@agentx/contracts";
 import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
@@ -303,6 +303,61 @@ describe("what the evidence says about a fake", () => {
     // Another company's task sees nothing of it.
     const elsewhere = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: OTHER_ORG, project: PROJECT, taskId: "t1" }, ON);
     expect(elsewhere.dependencies).toBeUndefined();
+  });
+});
+
+describe("the vendor spec check on a fake's evidence row (L4-VS)", () => {
+  const stripeDependency = { id: "payments", family: "http:api.stripe.com", protocol: "http_json", target: "api.stripe.com" } as const;
+  const stripeSet = (chargeBody: string): FixtureSet => makeSet({
+    dependency: stripeDependency, origin: "recorded", writtenBy: undefined, recordedAt: "2026-10-20T08:00:00.000Z", revision: 2,
+    entries: [fixtureEntry({ dependency: stripeDependency, match }, { method: "POST", path: "/v1/refunds", contentType: "", body: "" }, { status: 200, headers: [], contentType: "application/json", body: chargeBody, latencyMs: 0 })],
+  });
+  const GOOD = JSON.stringify({ id: "re_1", object: "refund", amount: 5, created: 1700000000, currency: "usd" });
+  const BAD = JSON.stringify({ id: "re_1", object: "refund", amount: "5" });
+  const chosenFor = async (set: FixtureSet, store: FixtureStore = storeOf()) => {
+    const digest = await approvedSet(store, set);
+    const h = await approvedWith(body([payments(digest, { family: set.dependency.family })]), store);
+    return { store, h, chosen: await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON) };
+  };
+  const backing = () => ({ kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail" }) as never;
+  const ran = (pinned: PinnedDependency[]) => dependencyEvidenceOf(pinned, usageOf([fakeRow()]));
+
+  it("carries a match for a Stripe fake that fits the pinned spec, from the slice pinned at approval", async () => {
+    const { chosen } = await chosenFor(stripeSet(GOOD));
+    expect(chosen.dependencies![0]!.fake).toMatchObject({ origin: "recorded", mockSpec: { result: "matches", vendor: "stripe" } });
+    const row = ran([{ id: "postgres", name: "Postgres", backing: "local" }, ...chosen.dependencies!]).dependencies[1]!;
+    expect(row).toMatchObject({ mockSpecResult: "matches", mockSpecVendor: "stripe", recordedAt: "2026-10-20T08:00:00.000Z" });
+    expect(EvidenceDependencySchema.parse(row)).toEqual(row);
+  });
+  it("carries a mismatch for a Stripe fake that does not fit it (advisory: the fake still runs and is still labelled a recorded fake)", async () => {
+    const { chosen } = await chosenFor(stripeSet(BAD));
+    expect(chosen.dependencies![0]!.fake!.mockSpec).toEqual({ result: "mismatch", vendor: "stripe" });
+    const row = ran([{ id: "postgres", name: "Postgres", backing: "local" }, ...chosen.dependencies!]).dependencies[1]!;
+    expect(row).toMatchObject({ backing: "fake", label: "recorded_fake", mockSpecResult: "mismatch", mockSpecVendor: "stripe" });
+    expect(EvidenceDependencySchema.parse(row)).toEqual(row);
+  });
+  it("states nothing for a fake of a service the catalog does not cover", async () => {
+    const { chosen } = await chosenFor(recordedSet());
+    expect(chosen.dependencies![0]!.fake).not.toHaveProperty("mockSpec");
+    expect(ran([{ id: "postgres", name: "Postgres", backing: "local" }, ...chosen.dependencies!]).dependencies[1]).not.toHaveProperty("mockSpecResult");
+  });
+  it("states nothing when the slice cannot be read, and the rest of the row is unchanged; another company reads nothing", async () => {
+    const { store, h } = await chosenFor(stripeSet(GOOD));
+    const broken = { ...store, specSlice: () => Promise.reject(new Error("store down")) } as FixtureStore;
+    const chosen = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => broken }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
+    expect(chosen.dependencies![0]!.fake).toEqual({ origin: "recorded", revision: 2, recordedAt: "2026-10-20T08:00:00.000Z" });
+    const noMethod = { ...store, specSlice: undefined } as unknown as FixtureStore;
+    expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => noMethod }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies![0]!.fake).not.toHaveProperty("mockSpec");
+    expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: OTHER_ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies).toBeUndefined();
+  });
+  it("a fake that did not start carries no spec result", () => {
+    const record = { ...usageOf([]), dependencies: [{ id: "payments", started: false, healthy: false, startMs: 0, resetCount: 0, failure: "start_failed" }] } as RawUsage;
+    const row = dependencyEvidenceOf([{ id: "payments", name: "Stripe", backing: "fake", fake: { origin: "recorded", mockSpec: { result: "mismatch", vendor: "stripe" } } }], record).dependencies[0]!;
+    expect(row).not.toHaveProperty("mockSpecResult");
+  });
+  it("pinnedFakeOf keeps a vendor result and drops one for a service with no pinned vendor", () => {
+    expect(pinnedFakeOf(backing(), undefined, { result: "no_spec", vendor: "github" })).toEqual({ origin: "hand_written", mockSpec: { result: "no_spec", vendor: "github" } });
+    expect(pinnedFakeOf(backing(), undefined, { result: "no_spec", vendor: "unknown" })).toEqual({ origin: "hand_written" });
   });
 });
 

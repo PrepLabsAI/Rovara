@@ -6,8 +6,9 @@
 import { UNUSED_WORDS, readTestEnvPin, usableTestEnvironment } from "./usable.js";
 import { testEnvironmentEnabled } from "./switch.js";
 import type { TestEnvDeps } from "./deps.js";
-import type { EvidenceEnvironment, EvidenceNotTested, OrgId, TestEnvDependency, TestEnvProdDeny } from "@agentx/contracts";
+import type { EvidenceEnvironment, EvidenceNotTested, MockSpecSlice, OrgId, TestEnvDependency, TestEnvProdDeny } from "@agentx/contracts";
 import type { PinnedDependency } from "../proof/dependency-evidence.js";
+import type { FixtureReadPort } from "./fixture-lookup.js";
 
 export interface EvidenceEnvironmentChoice {
   environment?: EvidenceEnvironment | undefined;
@@ -22,7 +23,7 @@ export interface EvidenceEnvironmentChoice {
  * What the pack says about a fake: the store's facts about the set (recorded or hand-written, which revision, when it was recorded) and, from the approved backing's own provenance, whether Rovara made it (TE-A3). A fake Rovara made
  * is never shown as a recording, whatever the store says: the approved backing is the broker's, so this is the one place that says it.
  */
-export function pinnedFakeOf(backing: Extract<TestEnvDependency["backing"], { kind: "fake" }>, set: { origin: string; revision: number; recordedAt?: string | undefined } | undefined): NonNullable<PinnedDependency["fake"]> {
+export function pinnedFakeOf(backing: Extract<TestEnvDependency["backing"], { kind: "fake" }>, set: { origin: string; revision: number; recordedAt?: string | undefined } | undefined, mockSpec?: Pick<MockSpecSlice, "result" | "vendor">): NonNullable<PinnedDependency["fake"]> {
   const madeByRovara = backing.provenance?.origin === "rovara_setup" || backing.provenance?.origin === "rovara_task";
   return {
     origin: set?.origin === "recorded" && !madeByRovara ? "recorded" : "hand_written",
@@ -31,7 +32,20 @@ export function pinnedFakeOf(backing: Extract<TestEnvDependency["backing"], { ki
     ...(madeByRovara ? { madeByRovara: true } : {}),
     // A fake that may make up answers: its row is Made by Rovara unless its ledger counted none (`evidenceDependencyTrustClass`, review 2 M2).
     ...(backing.unmatched === "schema_synth" ? { makesUpAnswers: true } : {}),
+    // The vendor spec check pinned when the set was approved (L4-VS). Said only for a mock of a vendor the catalog covers: a fake of any other service has no published spec to check, so it states
+    // nothing (a "thing to check" line on every such fake would be noise), and a missing or unverifiable slice states nothing either.
+    ...(mockSpec === undefined || mockSpec.vendor === "unknown" ? {} : { mockSpec: { result: mockSpec.result, vendor: mockSpec.vendor } }),
   };
+}
+
+/** The approval-time vendor spec slice of a set, or nothing: a store that cannot give it (down, or one that predates slices) never fails the evidence, and the row then states nothing about a spec. */
+async function specSliceOf(store: FixtureReadPort | undefined, orgId: OrgId, project: string, digest: string): Promise<MockSpecSlice | undefined> {
+  try {
+    const found = await store?.specSlice(orgId, project, digest);
+    return found?.ok === true ? found.slice : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Never throws; with the switch off, or no pin, it says nothing (the pack then reads as it did before). */
@@ -51,9 +65,13 @@ export async function evidenceEnvironmentOf(deps: TestEnvDeps, task: { orgId?: O
       else if (dependency.backing.kind === "fake") {
         // what the evidence says about a fake (recorded or hand-written, which revision, when it was recorded) is the STORE's, read for THIS organisation by the pinned digest; the worker's words never set it. A set the store
         // cannot give (no store, withdrawn since) is shown as the less trusted word, hand-written, without a revision.
-        const read = await Promise.resolve(deps.fixtureStore?.(() => Promise.resolve(body.prodDeny)).readApproved(task.orgId, task.project, dependency.backing.fixtureSetRef)).catch(() => undefined);
+        const store = deps.fixtureStore?.(() => Promise.resolve(body.prodDeny));
+        const fixtureSetRef = dependency.backing.fixtureSetRef;
+        const read = await Promise.resolve(store?.readApproved(task.orgId, task.project, fixtureSetRef)).catch(() => undefined);
         const set = read?.ok === true ? read.set : undefined;
-        dependencies.push({ id: dependency.id, name: dependency.name, backing: "fake", fake: pinnedFakeOf(dependency.backing, set) });
+        // The vendor spec check was pinned at approval, in a row only this company's project mock row points to. It is read only for a set the store gave, and a missing or unverifiable slice states nothing.
+        const slice = set === undefined ? undefined : await specSliceOf(store, task.orgId, task.project, fixtureSetRef);
+        dependencies.push({ id: dependency.id, name: dependency.name, backing: "fake", fake: pinnedFakeOf(dependency.backing, set, slice) });
       }
     }
     return { environment: { tier: body.tier, envRevision: found.environment.revision, services: [], data: "synthetic", accounts: [] }, deny: body.prodDeny, ...(dependencies.length === 0 ? {} : { dependencies }) };
