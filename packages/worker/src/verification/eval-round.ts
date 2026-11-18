@@ -313,16 +313,20 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   if (first === undefined) return refuse(stop ?? "provider_error");
   let questions: EvalQuestionComparison[] = untouched.map(q => ({ id: q.id, category: q.category, old: byId.get(q.id)!.samples, first: first.get(q.id)!.samples[0]!, edited: q.baseHash !== q.headHash }));
   const judge = (): EvalCheckResult => { comparisonQuestions = questions; return evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true }); };
-  // L4-E34 (E3): the fill-and-re-ask pass, once, only for a runner that can ask a subset. The old side is asked afresh (three runs, the shape of a saved baseline) because its saved answers were given on data without these rows.
+  // L4-E34 (E3): the fill-and-re-ask pass, once, only for a runner that can ask a subset. It is OPTIONAL work: it never stops the round. It runs only when the budget has room for it AND for the suspect re-asks it could cause, and a
+  // pass that fails (a refused hold, a provider error) is dropped and the round goes on with what it had. The old side is asked afresh (three runs, the shape of a saved baseline) because its saved answers were given on data
+  // without these rows. The questions it re-asks are measured on the filled data (the fill pass only fills keys the old code also asked for: see `createFillPass`).
   if (config.subsetSupported && config.fillMissingRows !== undefined && stop === undefined) {
     const known = new Set(ids);
-    const gaps = await Promise.resolve().then(() => config.fillMissingRows!({ ids })).then(found => [...new Set(found)].filter(id => known.has(id)).slice(0, ids.length), () => [] as string[]);
-    if (gaps.length > 0 && reserve("re-asks", 4 * gaps.length)) {
+    const found = await Promise.resolve().then(() => config.fillMissingRows!({ ids })).catch(() => undefined);
+    const gaps = Array.isArray(found) ? [...new Set(found.filter((id): id is string => typeof id === "string" && known.has(id)))].slice(0, ids.length) : [];
+    if (gaps.length > 0 && fits(4 * gaps.length + 6 * Math.min(gaps.length, 20)) && reserve("re-asks", 4 * gaps.length)) {
+      const before = stop;
       const oldAgain = await run("old", gaps, 3); const newAgain = oldAgain === undefined ? undefined : await run("new", gaps, 1);
       if (oldAgain !== undefined && newAgain !== undefined) {
         const refilled = new Set(gaps);
         questions = questions.map(q => (refilled.has(q.id) ? { ...q, old: oldAgain.get(q.id)!.samples, first: newAgain.get(q.id)!.samples[0]! } : q));
-      }
+      } else stop = before;
     }
   }
   if (config.subsetSupported) {

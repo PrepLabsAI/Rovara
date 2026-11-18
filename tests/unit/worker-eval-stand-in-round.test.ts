@@ -48,7 +48,7 @@ describe("the stand-in version in an eval's identity", () => {
     expect(reasonOf(await runFinalCheckEval(request, w.ports, facts()))).toBeUndefined();
     expect(w.approvals()).toBe(1);
     const other = await world(); other.ports.standInSetVersion = () => V2;
-    other.grant.inputsDigest = evalSpendInputsDigest({ ...other.plan.inputs, settingsFingerprint: evalSettingsFingerprintOf(other.plan.settings, other.plan.judgePin, V2) });
+    Object.assign(other.grant, { inputsDigest: evalSpendInputsDigest({ ...other.plan.inputs, settingsFingerprint: evalSettingsFingerprintOf(other.plan.settings, other.plan.judgePin, V2) }) });
     expect(reasonOf(await runFinalCheckEval(request, other.ports, facts()))).toBe("spend_not_approved"); expect(other.holds).toEqual([]); expect(other.calls).toEqual([]);
   });
   it("a version that is not one, or a port that fails, is not_connected with zero calls and no leak", async () => {
@@ -88,7 +88,7 @@ describe("the stand-in version in an eval's identity", () => {
     const store = new MemoryDocumentStore();
     const a = await world(true, 1); a.ports.cache = createDocumentBaseScoreCache(store, { companyId: "company-a" }); a.ports.baselines = createEvalBaselines(); a.ports.standInSetVersion = () => V1;
     await runFinalCheckEval(request, a.ports, facts()); expect(a.calls).toHaveLength(4);
-    const b = await world(true, 1); b.plan.company = "company-b"; b.plan.key = { ...b.plan.key, company: "company-b" }; b.grant.company = "company-b"; b.ports.standInSetVersion = () => V1;
+    const b = await world(true, 1); b.plan.company = "company-b"; b.plan.key = { ...b.plan.key, company: "company-b" }; Object.assign(b.grant, { company: "company-b" }); b.ports.standInSetVersion = () => V1;
     b.ports.cache = createDocumentBaseScoreCache(store, { companyId: "company-b" }); b.ports.baselines = createEvalBaselines();
     await runFinalCheckEval(request, b.ports, facts()); expect(b.calls).toHaveLength(4); // its own baseline, not company-a's
   });
@@ -125,14 +125,36 @@ describe("the fill-and-re-ask pass", () => {
     const whole = await world(); whole.plan.subsetSupported = false; let called = 0; whole.ports.fillMissingRows = async () => { called += 1; return ["q1"]; };
     await runFinalCheckEval(request, whole.ports, facts()); expect(called).toBe(0);
   });
-  it("is bounded by the same cap: when the re-ask does not fit the call budget the round says cap and spends nothing more", async () => {
-    const w = await world(); w.grant.maxCalls = 10; w.ports.fillMissingRows = async () => ["q1", "q2"];
-    expect(reasonOf(await runFinalCheckEval(request, w.ports, facts()))).toBe("cap");
+  it("is optional work: when the re-ask does not fit the call budget (with the suspect re-asks it could cause) the pass is skipped and the round is exactly what it would have been", async () => {
+    const without = await world(); Object.assign(without.grant, { maxCalls: 10 }); const plain = await runFinalCheckEval(request, without.ports, facts());
+    const w = await world(); Object.assign(w.grant, { maxCalls: 10 }); w.ports.fillMissingRows = async () => ["q1", "q2"];
+    const artifact = await runFinalCheckEval(request, w.ports, facts());
+    expect(evalResultFromArtifact(artifact).outcome).toBe("ran"); expect(evalResultFromArtifact(artifact).label).toBe(evalResultFromArtifact(plain).label);
     expect(w.stages).toHaveLength(1); expect(w.calls).toHaveLength(4);
   });
-  it("a refused meter hold for the re-ask reports cap without inventing an old-code attestation", async () => {
+  it("a regression only the suspect re-asks can confirm is still confirmed when the fill pass would have used the budget", async () => {
+    const without = await world(false); Object.assign(without.grant, { maxCalls: 4 + 6 * 4 }); const plain = await runFinalCheckEval(request, without.ports, facts());
+    expect(evalResultFromArtifact(plain).label).toBe("Worse on eval");
+    const w = await world(false); Object.assign(w.grant, { maxCalls: 4 + 6 * 4 }); w.ports.fillMissingRows = async () => ["q1"];
+    expect(evalResultFromArtifact(await runFinalCheckEval(request, w.ports, facts())).label).toBe("Worse on eval");
+  });
+  it("a refused meter hold or a failed re-ask drops the pass; it never turns a finished round into Not run", async () => {
     const w = await world(); const reserve = w.ports.meter.reserve.bind(w.ports.meter); let holds = 0; w.ports.fillMissingRows = async () => ["q1"];
     w.ports.meter.reserve = r => ++holds === 1 ? reserve(r) : Promise.resolve(undefined);
-    expect(reasonOf(await runFinalCheckEval(request, w.ports, facts()))).toBe("cap"); expect(w.stages).toHaveLength(1);
+    const artifact = await runFinalCheckEval(request, w.ports, facts());
+    expect(evalResultFromArtifact(artifact).outcome).toBe("ran"); expect(w.stages).toHaveLength(1);
+    const failing = await world(); failing.ports.fillMissingRows = async () => ["q1"]; const run = failing.ports.runner;
+    failing.ports.runner = async r => { if (r.side === "old") throw new Error("private-provider-error"); return run(r); };
+    const out = await runFinalCheckEval(request, failing.ports, facts());
+    expect(evalResultFromArtifact(out).outcome).toBe("ran"); expect(JSON.stringify(out)).not.toContain("private-provider-error");
+  });
+  it("hostile pass results (not a list, non-string ids, huge or repeated lists) are contained: no throw, no extra spend beyond the asked questions", async () => {
+    for (const hostile of [7, { length: 2 }, "q1", null, [1, {}, null], Array.from({ length: 5000 }, () => "q1")]) {
+      const w = await world(); w.ports.fillMissingRows = (async () => hostile) as never;
+      const artifact = await runFinalCheckEval(request, w.ports, facts());
+      expect(evalResultFromArtifact(artifact).outcome).toBe("ran");
+      if (Array.isArray(hostile) && hostile.length === 5000) expect(w.stages.map(s => [s.side, [...s.ids], s.runs])).toEqual([["new", ["q0", "q1", "q2", "q3"], 1], ["old", ["q1"], 3], ["new", ["q1"], 1]]);
+      else expect(w.stages).toHaveLength(1);
+    }
   });
 });

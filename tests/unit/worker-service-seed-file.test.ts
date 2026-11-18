@@ -215,7 +215,7 @@ describe("reading one fixed answer from the database", () => {
   it("runs psql as the owner over the container's socket (no host, port or password), one -c, and returns the exact text trimmed", async () => {
     const docker = fake();
     expect(await readDatabaseText(docker, target, "SELECT 1", new AbortController().signal)).toBe('{"tables":[]}');
-    expect(docker.calls).toEqual([["exec", "rovara-svc-run1-postgres", "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", "rovara", "-d", "app", "-c", "SELECT 1"]]);
+    expect(docker.calls).toEqual([["exec", "rovara-svc-run1-postgres", "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", "rovara", "-d", "app", "-c", "SET default_transaction_read_only = on", "-c", "SELECT 1"]]);
     expect(docker.calls[0]!.some(arg => /^-h$|^--host|^-p$|^--port|PGPASSWORD|password/iu.test(arg))).toBe(false);
     expect(docker.options[0]!.maxStdoutBytes).toBe(DATABASE_READ_MAX_BYTES); expect(docker.options[0]!.stdin).toBeUndefined();
   });

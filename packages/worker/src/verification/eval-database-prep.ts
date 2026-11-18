@@ -45,7 +45,7 @@ export function postgresStandInDatabase(input: { docker: Pick<DockerCli, "execBy
 /** One thing a side loads: a project command (a migration or a seed command) or a repository SQL file's bytes. */
 export type StandInStep = { readonly kind: "command"; readonly command: ProjectCommand } | { readonly kind: "file"; readonly bytes: Buffer };
 
-export type StandInPrepareFailure = "migration_failed" | "migration_timeout" | "migration_rollback" | "seed_failed" | "seed_timeout" | "too_many_steps" | "schema_unreadable" | "stopped";
+export type StandInPrepareFailure = "migration_failed" | "migration_timeout" | "migration_rollback" | "seed_failed" | "seed_timeout" | "too_many_steps" | "stopped";
 const SENTENCES: Record<StandInPrepareFailure, string> = {
   migration_failed: "A migration did not complete on the test database",
   migration_timeout: "A migration ran out of time on the test database",
@@ -53,7 +53,6 @@ const SENTENCES: Record<StandInPrepareFailure, string> = {
   seed_failed: "A seed did not load into the test database",
   seed_timeout: "A seed ran out of time on the test database",
   too_many_steps: "The test database has more migrations and seeds than a side loads",
-  schema_unreadable: "The test database's tables could not be read",
   stopped: "The test database preparation was stopped",
 };
 /** The one error of the preparation: a fixed sentence, never a command's output, a path or a name. */
@@ -84,7 +83,7 @@ async function readSchema(database: StandInDatabasePort, signal: AbortSignal): P
   let schema: StandInSchema | undefined;
   try { schema = parseStandInSchema(JSON.parse(await database.readText(STAND_IN_SCHEMA_STATEMENT, signal))); } catch { schema = undefined; }
   if (signal.aborted) throw new StandInPrepareError("stopped");
-  if (schema === undefined) throw new StandInPrepareError("schema_unreadable");
+  if (schema === undefined) throw new Error("schema_unreadable");
   return schema;
 }
 
@@ -99,6 +98,9 @@ async function loadPlan(database: StandInDatabasePort, plan: StandInPlan, signal
   if (plan.sql === "") return true;
   try { await database.loadSql(Buffer.from(plan.sql, "utf8"), signal); return true; } catch { if (signal.aborted) throw new StandInPrepareError("stopped"); return false; }
 }
+
+/** A filler for a side whose schema could not be read: it writes nothing. */
+const unreadableFiller = (side: "old" | "new"): StandInFiller => ({ side, fill: async () => ({ filled: [], skipped: [{ table: "", reason: "not_filled" }] }) });
 
 /**
  * Prepares ONE side's fresh database. Migrations first (the project's `up` commands, in the order given), then the seeds in the order given, then generated rows for the tables still empty. A failing migration or seed ends the
@@ -128,7 +130,12 @@ export async function prepareStandInDatabase(input: { side: "old" | "new"; datab
       }
     }
   }
-  const schema = await readSchema(database, signal);
+  // The migrations and seeds stand. A schema that cannot be read (too large an answer, a shape the parser refuses) only means no generated rows: the side still runs, with a fixed reason in its report.
+  let schema: StandInSchema;
+  try { schema = await readSchema(database, signal); } catch (error) {
+    if (error instanceof StandInPrepareError && error.reason === "stopped") throw error;
+    return { report: { side: input.side, migrations: migrations.length, seeds: seeds.length, seedDigests, generatorVersion: STAND_IN_ROW_GENERATOR_VERSION, filled: [], skipped: [{ table: "", reason: "not_filled" }] }, filler: unreadableFiller(input.side) };
+  }
   const keys = await readKeys(database, parentKeyColumns(schema), signal);
   const plan = planStandInRows(schema, keys);
   const loaded = await loadPlan(database, plan, signal);
@@ -165,12 +172,18 @@ export function sharedStandInVersion(reports: readonly StandInDatabaseReport[], 
   return { status: "same", version: standInSetVersion({ images: parts.images, seeds: first.seedDigests, generatorVersion: first.generatorVersion, answerSets: parts.answerSets ?? [] }) };
 }
 
-/** A zero-row lookup and the question that made it. */
-export interface ObservedLookup { readonly questionId: string; readonly lookup: ZeroRowLookup }
+/** A zero-row lookup, the question that made it and the side whose code made it. */
+export interface ObservedLookup { readonly questionId: string; readonly lookup: ZeroRowLookup; readonly side: "old" | "new" }
+
+const lookupKey = (lookup: ZeroRowLookup): string => `${lookup.table}\u0000${lookup.column}\u0000${String(lookup.value)}`;
 
 /**
  * The round's one fill-and-re-ask pass (`EvalQuestionPlan.fillMissingRows`). Asked once with the ids just run: it takes what the observer saw, writes the same missing rows to BOTH sides (so the sides stay identical), logs each
- * lookup by table and column (never a value), and returns the ids whose lookup was written, for the round to ask again on both sides. A second call, an observer that fails, a lookup not in the ids or one that could not be
+ * lookup by table and column (never a value), and returns the ids whose lookup was written, for the round to ask again on both sides.
+ *
+ * ONLY KEYS THE OLD CODE ASKED FOR. A key that only the CHANGE's code looks up could be the change's own mistake (a wrong id, a wrong column); writing a row for it would hide that regression. So a lookup is filled only when the
+ * observer also saw the same table, column and value asked by the OLD side (`side: "old"`, from the baseline's or an old re-ask's ledger). A change that asks for a key the old code never needed stays unfilled and is judged as it ran.
+ * Re-asked questions are measured on filled data (the round says so). A second call, an observer that fails, a lookup not in the ids or one that could not be
  * written gives nothing: this pass never stops an eval and never repeats.
  */
 export function createFillPass(input: {
@@ -186,7 +199,9 @@ export function createFillPass(input: {
     used = true;
     try {
       const ids = new Set(request.ids);
-      const seen = (await input.observed(request.ids)).filter(item => ids.has(item.questionId) && PLAIN_NAME.test(item.lookup.table) && PLAIN_NAME.test(item.lookup.column)).slice(0, STAND_IN_LIMITS.lookups);
+      let seen = (await input.observed(request.ids)).filter(item => ids.has(item.questionId) && PLAIN_NAME.test(item.lookup.table) && PLAIN_NAME.test(item.lookup.column)).slice(0, STAND_IN_LIMITS.lookups);
+      const oldKeys = new Set(seen.filter(item => item.side === "old").map(item => lookupKey(item.lookup)));
+      seen = seen.filter(item => oldKeys.has(lookupKey(item.lookup)));
       if (seen.length === 0) return [];
       for (const item of seen) log({ event: "stand-in.zero-row-lookup", table: item.lookup.table, column: item.lookup.column });
       const lookups = seen.map(item => item.lookup);

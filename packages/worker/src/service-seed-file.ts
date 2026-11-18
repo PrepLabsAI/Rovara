@@ -191,7 +191,7 @@ export async function loadSeedFile(docker: Pick<DockerCli, "execBytes" | "run">,
 export const DATABASE_READ_MAX_BYTES = 1_048_576;
 
 /**
- * L4-E34 (E3): reads ONE text answer from the helper's database, as the database's own owner over the container's local socket (no host, port or password): `psql -t -A -c <statement>`. The statement is one of Rovara's fixed,
+ * L4-E34 (E3): reads ONE text answer from the helper's database, as the database's own owner over the container's local socket (no host, port or password): `psql -t -A -c <statement>`, in a session set read-only first (`default_transaction_read_only`). The statement is one of Rovara's fixed,
  * read-only statements (the schema read, the key sample), never text from a repository: it must start with SELECT, hold no NUL and be at most 64 KiB. The answer is the exact stdout (`execBytes`), at most
  * `DATABASE_READ_MAX_BYTES`. Any failure (a non-zero exit, a timeout, a cancel, too large an answer) is a `SeedFileError` with a fixed reason; the statement and the output never go in it.
  */
@@ -203,7 +203,7 @@ export async function readDatabaseText(docker: Pick<DockerCli, "execBytes">, tar
   const execBytes = docker.execBytes;
   if (execBytes === undefined) throw new SeedFileError("unsupported");
   const timeoutMs = options.timeoutMs ?? CONTROL_TIMEOUT_MS;
-  const result = await execBytes.call(docker, ["exec", target.container, "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", user, "-d", database, "-c", statement], { signal, timeoutMs, maxStdoutBytes: DATABASE_READ_MAX_BYTES }).catch(() => undefined);
+  const result = await execBytes.call(docker, ["exec", target.container, "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", user, "-d", database, "-c", "SET default_transaction_read_only = on", "-c", statement], { signal, timeoutMs, maxStdoutBytes: DATABASE_READ_MAX_BYTES }).catch(() => undefined);
   if (result === undefined || result.aborted === true || signal.aborted) throw new SeedFileError("load_failed");
   if (result.timedOut === true) throw new SeedFileError("timeout");
   if (result.exitCode !== 0 || result.tooLarge === true) throw new SeedFileError("load_failed");

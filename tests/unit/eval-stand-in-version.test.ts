@@ -77,7 +77,7 @@ describe("the base-cache key", () => {
   it("is byte for byte what it was with no stand-in version (v1 and v2 keys, golden), and an explicit undefined is the same as none", () => {
     expect(evalBaseCacheKey(parts())).toBe("040c3654d5adf083f3e7fa55a1e8c7d67aba5be161c6334ac0f93da227729e2e");
     expect(evalBaseCacheKey(parts({ codeHash: hex("c"), judgePin: hex("d") }))).toBe("e4ee3b563d375329ab326d8e3ae43ce557052913e9e6095a701b3e7640f2f2bb");
-    expect(evalBaseCacheKey(parts({ standInSetVersion: undefined }))).toBe(evalBaseCacheKey(parts()));
+    expect(evalBaseCacheKey(parts({ standInSetVersion: undefined } as never))).toBe(evalBaseCacheKey(parts()));
   });
   it("moves with the version, in both key forms, and an unchanged version gives an unchanged key", () => {
     const one = standInSetVersion(set()); const two = standInSetVersion(set({ seeds: [hex("c")] }));

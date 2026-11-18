@@ -91,7 +91,7 @@ describe("one side's fresh database", () => {
     expect(report.generatorVersion).toBe(STAND_IN_ROW_GENERATOR_VERSION);
     expect(seedCommandDigest(command("npm", "run", "seed"))).toBe(seedCommandDigest(seedCommand)); expect(seedCommandDigest(command("npm", "run", "seed2"))).not.toBe(seedCommandDigest(seedCommand));
   });
-  it("ends the side with a fixed reason, and runs nothing after it, for a failed or timed-out migration or seed, a rollback command, too many steps, an unreadable schema and a stop", async () => {
+  it("ends the side with a fixed reason, and runs nothing after it, for a failed or timed-out migration or seed, a rollback command, too many steps, an stop", async () => {
     const down = command("alembic", "downgrade", "base"); const seedCommand = command("npm", "run", "seed");
     const failing = simulated({ migrations: MIGRATIONS, failCommand: "alembic upgrade head" });
     expect(await reasonOf(prepareStandInDatabase({ side: "new", database: failing.port, steps: [{ kind: "command", command: MIGRATE }, seedFile("users")], signal: signal() }))).toBe("migration_failed");
@@ -106,9 +106,15 @@ describe("one side's fresh database", () => {
     expect(rollback.log).toEqual([]);
     const many = simulated();
     expect(await reasonOf(prepareStandInDatabase({ side: "new", database: many.port, steps: Array.from({ length: STAND_IN_STEPS_MAX + 1 }, () => seedFile("users")), signal: signal() }))).toBe("too_many_steps"); expect(many.log).toEqual([]);
-    expect(await reasonOf(prepareStandInDatabase({ side: "new", database: simulated({ migrations: MIGRATIONS, garbageSchema: true }).port, steps: [{ kind: "command", command: MIGRATE }], signal: signal() }))).toBe("schema_unreadable");
     const stop = new AbortController(); stop.abort(); const stopped = simulated({ migrations: MIGRATIONS });
     expect(await reasonOf(prepareStandInDatabase({ side: "new", database: stopped.port, steps: [{ kind: "command", command: MIGRATE }], signal: stop.signal }))).toBe("stopped"); expect(stopped.log).toEqual([]);
+  });
+  it("a schema that cannot be read is not a failure: the migrations and seeds stand, nothing is generated, and the report says so in fixed words", async () => {
+    const db = simulated({ migrations: MIGRATIONS, garbageSchema: true });
+    const { report, filler } = await prepareStandInDatabase({ side: "new", database: db.port, steps: [{ kind: "command", command: MIGRATE }, seedFile("users")], signal: signal() });
+    expect(report.filled).toEqual([]); expect(report.skipped).toEqual([{ table: "", reason: "not_filled" }]); expect(report.seedDigests).toHaveLength(1);
+    expect(db.sql.every(text => !text.includes("$stand_in$"))).toBe(true);
+    expect(await filler.fill([{ table: "users", column: "email", value: "a@example.test" }], signal())).toEqual({ filled: [], skipped: [{ table: "", reason: "not_filled" }] });
   });
   it("a failure carries a fixed sentence: no command text, no path, no database output", async () => {
     const secret = command("npm", "run", "migrate:up", "--token=private-token-value");
@@ -164,7 +170,7 @@ describe("the fill and re-ask pass", () => {
     const old = await prepared("old"); const changed = await prepared("new"); const before = [old.db.sql.length, changed.db.sql.length];
     const log: unknown[] = [];
     const pass = createFillPass({ fillers: [old.filler, changed.filler], signal: signal(), log: entry => log.push(entry),
-      observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "private-email-value@example.test" } }, { questionId: "q2", lookup: { table: "users", column: "email", value: "private-email-value@example.test" } }, { questionId: "qx", lookup: { table: "users", column: "id", value: 3 } }] });
+      observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "private-email-value@example.test" }, side: "old" as const }, { questionId: "q2", lookup: { table: "users", column: "email", value: "private-email-value@example.test" }, side: "new" as const }, { questionId: "qx", lookup: { table: "users", column: "id", value: 3 }, side: "old" as const }] });
     expect(await pass({ ids: ["q1", "q2", "q3"] })).toEqual(["q1", "q2"]);
     expect(old.db.sql).toHaveLength(before[0]! + 1); expect(changed.db.sql).toHaveLength(before[1]! + 1);
     expect(old.db.sql.at(-1)).toBe(changed.db.sql.at(-1)); expect(old.db.sql.at(-1)).toContain("'private-email-value@example.test'");
@@ -177,16 +183,26 @@ describe("the fill and re-ask pass", () => {
     const ask = (over: Partial<Parameters<typeof createFillPass>[0]>) => createFillPass({ fillers: [old.filler, changed.filler], signal: signal(), observed: async () => [], ...over })({ ids: ["q1"] });
     expect(await ask({ observed: async () => { throw new Error("private-observer-failure"); } })).toEqual([]);
     expect(await ask({})).toEqual([]);
-    expect(await ask({ observed: async () => [{ questionId: "q1", lookup: { table: 'users"; drop', column: "email", value: 1 } }] })).toEqual([]);
-    expect(await ask({ observed: async () => [{ questionId: "q1", lookup: { table: "ghosts", column: "id", value: 1 } }] })).toEqual([]);
+    expect(await ask({ observed: async () => [{ questionId: "q1", lookup: { table: 'users"; drop', column: "email", value: 1 }, side: "old" as const }] })).toEqual([]);
+    expect(await ask({ observed: async () => [{ questionId: "q1", lookup: { table: "ghosts", column: "id", value: 1 }, side: "old" as const }] })).toEqual([]);
     const refused = await prepared("new", { migrations: MIGRATIONS, failSql: t => t.includes("who@example.test") });
-    expect(await createFillPass({ fillers: [old.filler, refused.filler], signal: signal(), observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "who@example.test" } }] })({ ids: ["q1"] })).toEqual([]);
+    expect(await createFillPass({ fillers: [old.filler, refused.filler], signal: signal(), observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "who@example.test" }, side: "old" as const }] })({ ids: ["q1"] })).toEqual([]);
     const stop = new AbortController(); stop.abort();
-    expect(await ask({ signal: stop.signal, observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "z@example.test" } }] })).toEqual([]);
+    expect(await ask({ signal: stop.signal, observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "z@example.test" }, side: "old" as const }] })).toEqual([]);
+  });
+  it("fills ONLY keys the old code also asked for: a key only the change looked up (its own possible mistake) is never written, so it cannot hide a regression", async () => {
+    const old = await prepared("old"); const changed = await prepared("new"); const before = old.db.sql.length;
+    const pass = createFillPass({ fillers: [old.filler, changed.filler], signal: signal(), observed: async () => [
+      { questionId: "q1", lookup: { table: "users", column: "id", value: 777 }, side: "new" as const }, { questionId: "q2", lookup: { table: "users", column: "email", value: "shared@example.test" }, side: "old" as const },
+      { questionId: "q2", lookup: { table: "users", column: "email", value: "shared@example.test" }, side: "new" as const }] });
+    expect(await pass({ ids: ["q1", "q2"] })).toEqual(["q2"]);
+    expect(old.db.sql).toHaveLength(before + 1); expect(old.db.sql.at(-1)).not.toContain("777"); expect(old.db.sql.at(-1)).toContain("shared@example.test");
+    const onlyNew = createFillPass({ fillers: [old.filler], signal: signal(), observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "id", value: 778 }, side: "new" as const }] });
+    expect(await onlyNew({ ids: ["q1"] })).toEqual([]); expect(old.db.sql).toHaveLength(before + 1);
   });
   it("a logging failure changes nothing", async () => {
     const old = await prepared("old");
-    const pass = createFillPass({ fillers: [old.filler], signal: signal(), log: () => { throw new Error("log down"); }, observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "a@example.test" } }] });
+    const pass = createFillPass({ fillers: [old.filler], signal: signal(), log: () => { throw new Error("log down"); }, observed: async () => [{ questionId: "q1", lookup: { table: "users", column: "email", value: "a@example.test" }, side: "old" as const }] });
     expect(await pass({ ids: ["q1"] })).toEqual(["q1"]);
   });
 });
@@ -205,6 +221,6 @@ describe("the port over a started Postgres helper", () => {
     expect(calls.some(call => call.join(" ").includes("--single-transaction") && call.join(" ").includes("rovara_seed_"))).toBe(true);
     calls.length = 0;
     expect(await port.readText("SELECT 1", signal())).toBe("[]");
-    expect(calls).toEqual([["exec", "exec", "rovara-svc-run1-postgres", "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", "rovara", "-d", "app", "-c", "SELECT 1"]]);
+    expect(calls).toEqual([["exec", "exec", "rovara-svc-run1-postgres", "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", "rovara", "-d", "app", "-c", "SET default_transaction_read_only = on", "-c", "SELECT 1"]]);
   });
 });

@@ -26,12 +26,25 @@ describe("the schema read", () => {
     expect(STAND_IN_SCHEMA_STATEMENT).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT)\b/u);
     expect(STAND_IN_SCHEMA_STATEMENT).toContain("n.nspname = 'public'");
   });
-  it("is parsed with runtime checks: a wrong shape, an unknown key column, a duplicate table or an extra field is no schema", () => {
+  it("is parsed with runtime checks: a wrong overall shape or a duplicate table is no schema", () => {
     expect(parseStandInSchema(raw([users]))).toBeDefined();
-    for (const bad of [null, {}, { tables: "x" }, raw([{ ...users, extra: 1 }]), raw([{ ...users, primaryKey: ["nope"] }]), raw([users, users]), raw([{ ...memberships, foreignKeys: [{ columns: ["user_id", "org_id"], refTable: "users", refColumns: ["id"] }] }]),
-      raw([{ ...users, columns: [] }]), raw([{ ...users, columns: [col("id", "integer"), col("id", "integer")] }]), raw([{ ...users, columns: [{ ...col("id", "integer"), identity: "x" }] }])]) {
-      expect(parseStandInSchema(bad)).toBeUndefined();
-    }
+    for (const bad of [null, {}, { tables: "x" }, raw([users, users]), { tables: [], extra: 1 }]) expect(parseStandInSchema(bad)).toBeUndefined();
+  });
+  it("drops ONE bad table (an extra field, an unknown key column, no column, a repeated column, a bad identity, over 200 columns or 32 keys), reports it, and keeps the rest (never the whole schema)", () => {
+    const bad = [{ ...users, name: "a1", extra: 1 }, { ...users, name: "a2", primaryKey: ["nope"] }, { ...users, name: "a3", columns: [] }, { ...users, name: "a4", columns: [col("id", "integer"), col("id", "integer")] },
+      { ...users, name: "a5", columns: [{ ...col("id", "integer"), identity: "x" }] }, { ...users, name: "a6", columns: Array.from({ length: 201 }, (_, i) => col(`c${i}`, "integer")) }, { ...users, name: "a7", uniques: Array.from({ length: 33 }, () => ["id"]) },
+      { ...memberships, name: "a8", foreignKeys: [{ columns: ["user_id", "org_id"], refTable: "users", refColumns: ["id"] }] }];
+    const schema = parseStandInSchema(raw([...bad, orgs]))!;
+    expect(schema.tables.map(table => table.name)).toEqual(["orgs"]); expect(schema.invalid).toBe(8);
+    expect(planStandInRows(schema).skipped).toContainEqual({ table: "", reason: "unsupported_type" }); expect(planStandInRows(schema).tables).toEqual([{ table: "orgs", rows: 5 }]);
+  });
+  it("keeps the first 64 labels of an enum with more (it is no reason to refuse the schema)", () => {
+    const big = { ...users, uniques: [], columns: [col("id", "integer"), col("country", "country", { enumValues: Array.from({ length: 300 }, (_, i) => `c${i}`) })] };
+    const schema = parseStandInSchema(raw([big]))!;
+    expect(schema.tables[0]!.columns[1]!.enumValues).toHaveLength(STAND_IN_LIMITS.enumValues);
+  });
+  it("reads at most 73 tables in SQL (ordered by name) so a large schema stays under the answer cap", () => {
+    expect(STAND_IN_SCHEMA_STATEMENT).toMatch(/ORDER BY c\.relname LIMIT 73\) s$/u);
   });
   it("drops migration bookkeeping tables, orders by name, and says when it kept only the first 64", () => {
     const schema = parseStandInSchema(raw([{ ...users, name: "zeta" }, { ...users, name: "alembic_version" }, { ...users, name: "_prisma_migrations" }, { ...users, name: "alpha" }]))!;
@@ -104,6 +117,10 @@ describe("keys hold", () => {
     for (const row of rowsOf(withParents, "posts")) expect(["41", "42"]).toContain(row["author_id"]);
     for (const row of rowsOf(withParents, "memberships")) expect(["41", "42"]).toContain(row["user_id"]);
   });
+  it("a self-reference to a stored generated column or an unsupported type never throws (the column is NULL and the block catches the insert)", () => {
+    const odd = { name: "tree", hasRows: false, primaryKey: ["id"], uniques: [], columns: [col("id", "integer", { generated: true }), col("parent", "integer", { nullable: true }), col("label", "text")], foreignKeys: [{ columns: ["parent"], refTable: "tree", refColumns: ["id"] }] };
+    expect(() => planStandInRows(schemaOf([odd]))).not.toThrow();
+  });
   it("skips a table whose required parent has no rows (no_parent), leaves a nullable foreign key NULL, and never points at rows that were not written", () => {
     const orphan = { ...posts, name: "orphans", foreignKeys: [{ columns: ["author_id"], refTable: "ghosts", refColumns: ["id"] }] };
     const p = planStandInRows(schemaOf([orphan]));
@@ -158,7 +175,7 @@ describe("plain SQL only, and every failure in fixed words", () => {
     expect(seedFileContentProblem(Buffer.from(plan.sql, "utf8"))).toBeUndefined();
   });
   it("never quotes a table or column name that is not plain (it is skipped as unsafe_name)", () => {
-    for (const bad of ["a b", 'a"b', "a;drop", "é", "1x", "", "x".repeat(64)]) expect(PLAIN_NAME.test(bad)).toBe(false);
+    for (const bad of ["a b", 'a"b', "a;drop", "é", "1x", "", "x".repeat(64), "x$stand_in$y", "a$b"]) expect(PLAIN_NAME.test(bad)).toBe(false);
     const evil = { ...orgs, name: 'x"; DROP TABLE users; --' };
     const plan = planStandInRows(schemaOf([evil, { ...orgs, name: "ok", columns: [col("id", "uuid"), col('na"me', "text")] }]));
     expect(plan.sql).toBe(""); expect(plan.skipped.map(entry => entry.reason)).toEqual(["unsafe_name", "unsafe_name"]);
@@ -180,6 +197,11 @@ describe("plain SQL only, and every failure in fixed words", () => {
 });
 
 describe("parent keys already in the database", () => {
+  it("are read for at most 50 parent tables (json_build_object takes 100 arguments)", () => {
+    const wanted = new Map(Array.from({ length: 70 }, (_, i) => [`p${String(i).padStart(2, "0")}`, ["id"]] as [string, string[]]));
+    const statement = sampleKeysStatement(wanted)!;
+    expect(statement).toContain("'p49'"); expect(statement).not.toContain("'p50'");
+  });
   it("are asked for by a fixed statement built only from schema names that are plain, for parents of empty tables", () => {
     const schema = schemaOf([{ ...users, hasRows: true }, { ...orgs, hasRows: true }, memberships, { ...orgs, name: "bad name", hasRows: true }]);
     const wanted = parentKeyColumns(schema);

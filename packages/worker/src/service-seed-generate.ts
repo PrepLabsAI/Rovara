@@ -23,10 +23,13 @@ export const STAND_IN_ROWS_PER_TABLE = 5;
 /** The most tables, columns per table and sampled parent keys one pass reads or writes; more is cut at a stated limit, never silently (`too_many_tables`). */
 export const STAND_IN_LIMITS = Object.freeze({ tables: 64, columns: 200, enumValues: 64, parentKeys: STAND_IN_ROWS_PER_TABLE, lookups: 50 });
 /** The plain shape of a table or column name that may be quoted into a statement. */
-export const PLAIN_NAME = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/u;
+export const PLAIN_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/u;
 /** Migration tools' own bookkeeping tables: never filled. */
 const BOOKKEEPING = /^(?:_prisma_migrations|schema_migrations|alembic_version|knex_migrations(?:_lock)?|django_migrations|__drizzle_migrations|flyway_schema_history|typeorm_migrations|migrations|sequelizemeta|goose_db_version|schema_version)$/iu;
 const BLOCK_TAG = "stand_in";
+/** The statement reads at most this many tables beyond the limit, so migration bookkeeping tables do not hide a real one. */
+const BOOKKEEPING_ALLOWANCE = 8;
+const SCHEMA_READ_LIMIT = 64 + 1 + BOOKKEEPING_ALLOWANCE;
 
 export type StandInSkipReason = "unsafe_name" | "unsupported_type" | "no_parent" | "too_many_tables" | "not_filled" | "has_rows";
 
@@ -54,34 +57,40 @@ export interface StandInTable {
   /** Whether the table already holds a row (a migration or a seed put it there). */
   readonly hasRows: boolean;
 }
-export interface StandInSchema { readonly tables: readonly StandInTable[]; readonly truncated: boolean }
+export interface StandInSchema { readonly tables: readonly StandInTable[]; readonly truncated: boolean; /** Tables left out because they were over a limit or malformed. */ readonly invalid?: number }
 
 const name = z.string().min(1).max(200);
 const names = z.array(name).max(32);
-const ColumnSchema = z.object({ name, type: z.string().min(1).max(200), nullable: z.boolean(), identity: z.enum(["", "a", "d"]), generated: z.boolean(), enumValues: z.array(z.string().max(100)).max(STAND_IN_LIMITS.enumValues) }).strict();
+// An enum with more labels than the limit keeps the first labels (any label is a valid value); a table over a limit is dropped from the schema (reported), never the whole schema.
+const ColumnSchema = z.object({ name, type: z.string().min(1).max(200), nullable: z.boolean(), identity: z.enum(["", "a", "d"]), generated: z.boolean(),
+  enumValues: z.array(z.string().max(100)).max(10_000).transform(labels => labels.slice(0, STAND_IN_LIMITS.enumValues)) }).strict();
 const TableSchema = z.object({
   name, hasRows: z.boolean(), columns: z.array(ColumnSchema).min(1).max(STAND_IN_LIMITS.columns), primaryKey: names, uniques: z.array(names).max(32),
   foreignKeys: z.array(z.object({ columns: names.min(1), refTable: name, refColumns: names.min(1) }).strict()).max(32),
 }).strict();
-const SchemaSchema = z.object({ tables: z.array(TableSchema).max(10_000) }).strict();
+const SchemaSchema = z.object({ tables: z.array(z.unknown()).max(10_000) }).strict();
 
 /**
- * The schema of the run's database as `STAND_IN_SCHEMA_STATEMENT` printed it, or undefined for anything else (a wrong shape, a foreign key that names a column its table does not have, a duplicate table). Bookkeeping tables are
- * dropped. At most `STAND_IN_LIMITS.tables` tables are kept (in name order); `truncated` says when more existed.
+ * The schema of the run's database as `STAND_IN_SCHEMA_STATEMENT` printed it, or undefined for a wrong overall shape or a duplicate table. A table that is over a limit (200 columns, 32 keys), has no column, or names a key
+ * column it does not have is DROPPED and counted in `invalid` (never the whole schema). Bookkeeping tables are dropped. At most `STAND_IN_LIMITS.tables` tables are kept (in name order); `truncated` says when more existed.
  */
 export function parseStandInSchema(raw: unknown): StandInSchema | undefined {
   const parsed = SchemaSchema.safeParse(raw);
   if (!parsed.success) return undefined;
-  const all = parsed.data.tables.filter(table => !BOOKKEEPING.test(table.name)).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  let invalid = 0;
+  const valid: Array<z.infer<typeof TableSchema>> = [];
+  for (const item of parsed.data.tables) {
+    const table = TableSchema.safeParse(item);
+    if (!table.success) { invalid += 1; continue; }
+    const columns = new Set(table.data.columns.map(column => column.name));
+    const known = (list: readonly string[]): boolean => list.every(column => columns.has(column));
+    if (columns.size !== table.data.columns.length || !known(table.data.primaryKey) || !table.data.uniques.every(known) || !table.data.foreignKeys.every(key => known(key.columns) && key.columns.length === key.refColumns.length)) { invalid += 1; continue; }
+    valid.push(table.data);
+  }
+  const all = valid.filter(table => !BOOKKEEPING.test(table.name)).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   if (new Set(all.map(table => table.name)).size !== all.length) return undefined;
   const kept = all.slice(0, STAND_IN_LIMITS.tables);
-  for (const table of kept) {
-    const columns = new Set(table.columns.map(column => column.name));
-    if (columns.size !== table.columns.length) return undefined;
-    const known = (list: readonly string[]): boolean => list.every(column => columns.has(column));
-    if (!known(table.primaryKey) || !table.uniques.every(known) || !table.foreignKeys.every(key => known(key.columns) && key.columns.length === key.refColumns.length)) return undefined;
-  }
-  return { tables: kept, truncated: all.length > kept.length };
+  return { tables: kept, truncated: all.length > kept.length || parsed.data.tables.length >= SCHEMA_READ_LIMIT, invalid };
 }
 
 /**
@@ -102,7 +111,7 @@ SELECT json_build_object(
    'refTable', rc.relname::text,
    'refColumns', (SELECT json_agg(a.attname::text ORDER BY k.ord) FROM unnest(x.confkey) WITH ORDINALITY AS k(attnum, ord) JOIN pg_attribute a ON a.attrelid = x.confrelid AND a.attnum = k.attnum)))
    FROM pg_constraint x JOIN pg_class rc ON rc.oid = x.confrelid JOIN pg_namespace rn ON rn.oid = rc.relnamespace WHERE x.conrelid = c.oid AND x.contype = 'f' AND rn.nspname = 'public'), '[]'::json)
-) AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r') s`;
+) AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY c.relname LIMIT ${SCHEMA_READ_LIMIT}) s`;
 
 // ---- values
 
@@ -226,6 +235,12 @@ interface BuildOptions {
   readonly forced?: ReadonlyMap<string, string> | undefined;
 }
 
+/** The value of a self-referencing key column in the first row (a stored generated column, or a type the generator cannot write, gives NULL: the insert then fails in its block, never a throw here). */
+function selfKey(table: StandInTable, columnName: string, row: number): string {
+  const column = table.columns.find(candidate => candidate.name === columnName);
+  return column === undefined || column.generated ? "NULL" : standInValue(table.name, column, row, true) ?? "NULL";
+}
+
 /** The rows of one table, or the reason it cannot be written. `parents` holds the rows already known for each table (generated this pass, or sampled keys). */
 function rowsOf(schema: StandInSchema, table: StandInTable, parents: ReadonlyMap<string, readonly ParentKey[]>, count: number, rowOffset: number, options: BuildOptions): StandInRows | StandInSkipReason {
   const keys = keyColumnsOf(schema, table);
@@ -258,7 +273,7 @@ function rowsOf(schema: StandInSchema, table: StandInTable, parents: ReadonlyMap
         const index = fk.columns.indexOf(column.name);
         const pool = fk.refTable === table.name ? undefined : parents.get(fk.refTable);
         // A self-reference points at the first row of this table (which points at itself).
-        values[column.name] = pool === undefined ? standInValue(table.name, writable.find(c => c.name === fk.refColumns[index])!, rowOffset, true) ?? "NULL" : pool[row % pool.length]![fk.refColumns[index]!] ?? "NULL";
+        values[column.name] = pool === undefined ? selfKey(table, fk.refColumns[index]!, rowOffset) : pool[row % pool.length]![fk.refColumns[index]!] ?? "NULL";
       } else values[column.name] = standInValue(table.name, column, row, keys.has(column.name))!;
     }
     // Drop a row that repeats an earlier row's primary or unique key.
@@ -286,6 +301,7 @@ function screenedBlock(table: StandInTable, made: StandInRows): string | undefin
 
 function planOf(schema: StandInSchema, accepted: ReadonlyArray<{ table: StandInTable; made: StandInRows; block: string }>, skipped: Array<{ table: string; reason: StandInSkipReason }>): StandInPlan {
   if (schema.truncated) skipped.push({ table: "", reason: "too_many_tables" });
+  if ((schema.invalid ?? 0) > 0) skipped.push({ table: "", reason: "unsupported_type" });
   // A name that is not plain is never echoed (it came from a catalog; the report is shown and logged): the entry keeps its reason and an empty name.
   const named = skipped.map(entry => (entry.table === "" || PLAIN_NAME.test(entry.table) ? entry : { table: "", reason: entry.reason }));
   return {
@@ -340,7 +356,8 @@ export function parentKeyColumns(schema: StandInSchema): Map<string, string[]> {
  */
 export function sampleKeysStatement(wanted: ReadonlyMap<string, readonly string[]>): string | undefined {
   if (wanted.size === 0) return undefined;
-  const parts = [...wanted].map(([table, columns]) => `${quote(table)}, (SELECT COALESCE(json_agg(x), '[]'::json) FROM (SELECT ${columns.map(ident).join(", ")} FROM ${ident("public")}.${ident(table)} ORDER BY ${columns.map(ident).join(", ")} LIMIT ${STAND_IN_LIMITS.parentKeys}) x)`);
+  // json_build_object takes at most 100 arguments (two per table): at most 50 parents are read, the rest read as having no rows to point at.
+  const parts = [...wanted].slice(0, 50).map(([table, columns]) => `${quote(table)}, (SELECT COALESCE(json_agg(x), '[]'::json) FROM (SELECT ${columns.map(ident).join(", ")} FROM ${ident("public")}.${ident(table)} ORDER BY ${columns.map(ident).join(", ")} LIMIT ${STAND_IN_LIMITS.parentKeys}) x)`);
   return `SELECT json_build_object(${parts.join(", ")})::text`;
 }
 
