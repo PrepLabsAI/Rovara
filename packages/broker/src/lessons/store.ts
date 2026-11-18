@@ -84,6 +84,11 @@ export interface LessonStore {
   duePending(key: ScopeKey, now: number, limit: number): Promise<PendingOutcome[]>;
   removePending(key: ScopeKey, pendingKey: string): Promise<void>;
   flags(key: ScopeKey): Promise<ProjectFlags>;
+  /** Lead 4 L4-LP3Wd: the flags with the revision they were read at (0 for a row never written, or written before revisions). Every writer of the flags row reads here and writes with `setFlagsIf` (`flags-fence.ts`). */
+  flagsRev(key: ScopeKey): Promise<{ flags: ProjectFlags; rev: number }>;
+  /** Writes the flags only if the row is still at `expectedRev` (the revision `flagsRev` returned); false when another writer got there first (nothing is written). A write raises the revision by one. */
+  setFlagsIf(key: ScopeKey, flags: ProjectFlags, expectedRev: number): Promise<boolean>;
+  /** Replaces the flags whatever they hold, and raises the revision (so a writer that read before it cannot write over it). For seeding and tests only: a production writer uses `updateFlags` (`flags-fence.ts`), which never writes over a change it did not read. */
   setFlags(key: ScopeKey, flags: ProjectFlags): Promise<void>;
   /**
    * Rewrites the head AND every stored version of a lesson in place (no new version), for deletion and erasure: old versions must not keep what was deleted.
@@ -150,7 +155,7 @@ const clone = <T>(value: T): T => structuredClone(value);
 
 interface ProjectState {
   heads: Map<string, Lesson>; versions: Map<string, Lesson[]>; members: Map<string, number>; sets: SetSnapshot[];
-  manifests: Map<string, LoadManifest>; once: Set<string>; pending: Map<string, PendingOutcome>; flags: ProjectFlags;
+  manifests: Map<string, LoadManifest>; once: Set<string>; pending: Map<string, PendingOutcome>; flags: ProjectFlags; flagsRev: number;
   sourceEvents: Array<{ at: number; source: string }>;
   gone: Map<string, "withdrawn" | "purged">; goneTexts: Set<string>; textSecret?: Buffer;
   erased: Set<string>; markRefs: Map<string, string>; harms: Map<string, Set<string>>; erasedSources: Set<string>; deletedIds: Set<string>; intents: Map<string, DeletionIntent>;
@@ -165,7 +170,7 @@ export class InMemoryLessonStore implements LessonStore {
     const id = scopeId(key);
     let value = this.state.get(id);
     if (value === undefined) {
-      value = { heads: new Map(), versions: new Map(), members: new Map(), sets: [{ setVersion: 0, at: 0, members: [] }], manifests: new Map(), once: new Set(), pending: new Map(), flags: {}, sourceEvents: [], gone: new Map(), goneTexts: new Set(), markRefs: new Map(), harms: new Map(), erased: new Set(), erasedSources: new Set(), deletedIds: new Set(), intents: new Map() };
+      value = { heads: new Map(), versions: new Map(), members: new Map(), sets: [{ setVersion: 0, at: 0, members: [] }], manifests: new Map(), once: new Set(), pending: new Map(), flags: {}, flagsRev: 0, sourceEvents: [], gone: new Map(), goneTexts: new Set(), markRefs: new Map(), harms: new Map(), erased: new Set(), erasedSources: new Set(), deletedIds: new Set(), intents: new Map() };
       this.state.set(id, value);
     }
     return value;
@@ -313,6 +318,7 @@ export class InMemoryLessonStore implements LessonStore {
     const paused = s.flags.pausedSources;
     if (paused !== undefined && Object.keys(paused).some((name) => normSource(name) === wanted)) {
       s.flags = { ...s.flags, pausedSources: Object.fromEntries(Object.entries(paused).filter(([name]) => normSource(name) !== wanted)) };
+      s.flagsRev += 1;
     }
   }
   async fence(key: ScopeKey, fence: { people?: readonly string[]; ids?: readonly string[]; sourceIds?: readonly string[] }): Promise<void> {
@@ -377,7 +383,15 @@ export class InMemoryLessonStore implements LessonStore {
   }
   async removePending(key: ScopeKey, pendingKey: string): Promise<void> { this.of(key).pending.delete(pendingKey); }
   async flags(key: ScopeKey): Promise<ProjectFlags> { return clone(this.of(key).flags); }
-  async setFlags(key: ScopeKey, flags: ProjectFlags): Promise<void> { this.of(key).flags = clone(flags); }
+  async flagsRev(key: ScopeKey): Promise<{ flags: ProjectFlags; rev: number }> { const s = this.of(key); return { flags: clone(s.flags), rev: s.flagsRev }; }
+  async setFlagsIf(key: ScopeKey, flags: ProjectFlags, expectedRev: number): Promise<boolean> {
+    const s = this.of(key);
+    if (s.flagsRev !== expectedRev) return false;
+    s.flags = clone(flags);
+    s.flagsRev += 1;
+    return true;
+  }
+  async setFlags(key: ScopeKey, flags: ProjectFlags): Promise<void> { const s = this.of(key); s.flags = clone(flags); s.flagsRev += 1; }
   async recordSourceEvent(key: ScopeKey, event: { at: number; source: string }): Promise<void> { this.of(key).sourceEvents.push({ at: event.at, source: normSource(event.source) }); }
   async sourceDays(key: ScopeKey, source: string, days: number, now: number): Promise<number[]> {
     const counts = new Array<number>(days).fill(0);
