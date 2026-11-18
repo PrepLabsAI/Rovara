@@ -303,6 +303,17 @@ describe("the plan card on a hosted Slack thread (HW5b)", () => {
     expect(approvedAudit(w).map((event) => event.action)).toEqual(["decision.changes_requested"]);
   });
 
+  it("the box's metadata stays within Slack's limit and still reads back, even for a quote-heavy card text", async () => {
+    const w = await world({ kind: "medium" });
+    const long = '"\\'.repeat(750);
+    await corePlanPressHandler(w.pressDeps).handle(w.action(OWNER, CORE_CHANGES_ACTION, { messageText: long }));
+    const metadata = (w.slack.views[0]!.view as { private_metadata: string }).private_metadata;
+    expect(metadata.length).toBeLessThanOrEqual(2_800);
+    const submission = { type: "view_submission", user: { id: OWNER, team_id: TEAM_A }, team: { id: TEAM_A }, view: { id: "V0BOX00009", callback_id: CHANGES_CALLBACK, private_metadata: metadata, state: { values: { [CHANGES_INPUT]: { text: { value: "Use a queue" } } } } } };
+    expect(await corePlanSubmission(w.pressDeps)(submission)).toEqual({ response_action: "clear" });
+    expect(await decisionsOf(w)).toEqual(["REQUEST_CHANGES"]);
+  });
+
   it("a forged press for a HIGH risk plan (a button the card never had) is refused at every layer, and nothing is written", async () => {
     const w = await world({ kind: "high" });
     const before = await w.stepWorkflow();
