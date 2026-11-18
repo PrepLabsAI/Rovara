@@ -319,13 +319,19 @@ it.each([roleSet(), revoke(), roleSet(p, "admin")])("FIX-2 admin cannot change o
   expect(await h.invoke({ ...event, createdBy: actor })).toEqual(onlyOwner);
   expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
 });
-it.each(["admin", "owner"] as const)("FIX-2 current %s demotion and removal need step-up", async (role) => {
-  for (const event of [roleSet(), revoke()]) {
+// DEC 254zzz73: a removal needs no step-up (an admin's or owner's removal is guarded by the role rules and, for an owner, the last-owner witness).
+it.each(["admin", "owner"] as const)("FIX-2 current %s demotion needs step-up", async (role) => {
+  for (const event of [roleSet()]) {
     const h = world(); h.seed(p, role); h.seed(actor, "owner");
     const before = [...h.db.items.values()];
     expect(await h.invoke({ ...event, createdBy: actor })).toEqual(stepUp);
     expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
   }
+});
+it.each(["admin", "owner"] as const)("DEC 254zzz73: an owner removes a current %s with no step-up (another owner stays)", async (role) => {
+  const h = world(); h.seed(p, role); h.seed(actor, "owner");
+  expect(await h.invoke({ ...revoke(), createdBy: actor })).toEqual({ ok: true });
+  assertMirror(h, p);
 });
 it("FIX-2 admin can keep a plain member role and revoke a plain member without step-up", async () => {
   const h = world(); h.seed(p, "member"); h.seed(actor, "admin");

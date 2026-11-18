@@ -72,6 +72,8 @@ export function memberBoundary(sources: readonly InventorySource[], caps: Partia
 const contractImports = new Set([
   "CompanyMember", "CompanyMemberRefusal", "MemberListInput", "MemberPersonId", "MemberReply", "CompanyMemberReply",
   "MEMBER_LAST_OWNER", "MEMBER_REVOKED", "MEMBER_ONLY_OWNER", "MEMBER_STEP_UP", "memberCursor", "memberCursorPerson",
+  // DEC 254zzz84 (5): two more fixed refusal sentences of a removal with a hand-over (words, not kinds).
+  "MEMBER_SUCCESSOR_INVALID", "MEMBER_CHANGED",
 ]);
 
 function checkContractImport(node: ts.StringLiteralLike): void {

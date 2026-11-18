@@ -6,7 +6,7 @@ import { IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, companyScoped } from "
 import { membershipKey } from "../aws/company-check.js";
 import { ownerKeyForSubject } from "../aws/lambda.js";
 import { emailIndexKey } from "./store.js";
-import { CompanyMember, CompanyMemberRefusal, MemberListInput, MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, MEMBER_ONLY_OWNER, memberCursor, memberCursorPerson } from "./company-member-contract.js";
+import { CompanyMember, CompanyMemberRefusal, MemberListInput, MEMBER_CHANGED, MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, MEMBER_ONLY_OWNER, MEMBER_SUCCESSOR_INVALID, memberCursor, memberCursorPerson } from "./company-member-contract.js";
 import { CompanyIssuerRecord, CompanyIssuerSettings, companyIssuerKey } from "./company-issuer.js";
 
 export const CompanyPersonId = z.string().regex(/^[a-f0-9]{64}$/);
@@ -46,6 +46,11 @@ type Member = z.infer<typeof CompanyMember>;
 export const companyMemberKey = (companyId: string, personId: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "MEMBERS"), sk: `MEMBER#${CompanyPersonId.parse(personId)}` });
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 /** `viaPreapproval`: DEC 254b (f), this very call wrote the membership by consuming a live pre-approval (never an existing member, a legacy join or a lost race). */
+/**
+ * DEC 254zzz84 (5): what a removal with a hand-over fences inside the removal's own transaction: the role the remover saw (the target's snapshot CAS
+ * then holds it), and the successor, who must be a live member of the same company (any role) at the moment the removal commits.
+ */
+export interface RemovalFence { expectedRole?: Member["role"]; successorId?: string }
 export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
 const unavailable = () => new Error("company sign-in unavailable");
@@ -169,8 +174,9 @@ export class CompanySignInStore {
     } catch { return refused(); }
   }
   /** Every mutation and its durable log commit together. Logs contain only fixed events and opaque ids. */
-  async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string, memberAudit?: { createdBy: string; createdAt: string; fromRole: Member["role"]; toRole: Member["role"]; ownerOverride?: true }): Promise<void> {
-    if (!OrgIdSchema.safeParse(companyId).success || !/^company-[a-z-]+$/.test(event) || writes.length > 4) throw unavailable();
+  async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string, memberAudit?: { createdBy: string; createdAt: string; fromRole: Member["role"]; toRole: Member["role"]; ownerOverride?: true; successorId?: string }): Promise<void> {
+    // At most 5: a member write, its mirror, the actor's check, the last-owner witness and (DEC 254zzz84 (5)) a removal's successor.
+    if (!OrgIdSchema.safeParse(companyId).success || !/^company-[a-z-]+$/.test(event) || writes.length > 5) throw unavailable();
     await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: [...writes, { Put: {
       TableName: this.input.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${this.iso()}#${randomUUID()}`, entityType: "COMPANY_LOG", event, companyId, ...(personId === undefined ? {} : { personId }), ...memberAudit }, ConditionExpression: "attribute_not_exists(pk)",
     } }] }));
@@ -251,11 +257,12 @@ export class CompanySignInStore {
     });
     return { ConditionExpression: conditions.join(" AND "), ExpressionAttributeNames: names, ExpressionAttributeValues: values };
   }
-  private liveMemberCheck(companyId: string, personId: string, owner: boolean): Write {
+  private liveMemberCheck(companyId: string, personId: string, owner: boolean | "any"): Write {
+    const roles = owner === "any" ? "(#role = :owner OR #role = :admin OR #role = :member)" : owner ? "#role = :owner" : "(#role = :owner OR #role = :admin)";
     return { ConditionCheck: { TableName: this.input.tableName, Key: membershipKey(personId),
-      ConditionExpression: "#entity = :entity AND companyId = :company AND personId = :person AND attribute_not_exists(revokedAt) AND " + (owner ? "#role = :owner" : "(#role = :owner OR #role = :admin)"),
+      ConditionExpression: "#entity = :entity AND companyId = :company AND personId = :person AND attribute_not_exists(revokedAt) AND " + roles,
       ExpressionAttributeNames: { "#entity": "entityType", "#role": "role" },
-      ExpressionAttributeValues: { ":entity": "COMPANY_MEMBERSHIP", ":company": companyId, ":person": personId, ":owner": "owner", ...(owner ? {} : { ":admin": "admin" }) },
+      ExpressionAttributeValues: { ":entity": "COMPANY_MEMBERSHIP", ":company": companyId, ":person": personId, ":owner": "owner", ...(owner === true ? {} : { ":admin": "admin" }), ...(owner === "any" ? { ":member": "member" } : {}) },
     } };
   }
   private async checkActor(companyId: string, createdBy: string | undefined, owner = false): Promise<void> {
@@ -269,7 +276,7 @@ export class CompanySignInStore {
   private requireMemberStepUp(role: Member["role"]): void {
     if (role === "admin" || role === "owner") throw new CompanyMemberRefusal({ ok: false, error: "step_up_required", message: MEMBER_STEP_UP });
   }
-  private async writeMember(previous: Member, next: Member, event: string, createdBy?: string): Promise<void> {
+  private async writeMember(previous: Member, next: Member, event: string, createdBy?: string, fence: RemovalFence = {}): Promise<void> {
     // A self-actor's target snapshot must itself still be authorized. The earlier
     // actor read alone can race with this read; the snapshot CAS then fences it.
     if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
@@ -277,9 +284,16 @@ export class CompanySignInStore {
     if (ownerChange) await this.checkActor(previous.companyId, createdBy, true);
     // The target snapshot CAS includes its current role in this same transaction.
     // A concurrent promotion cannot turn a plain-member write into an elevated write.
-    if (createdBy !== undefined) {
-      if (next.role !== previous.role || next.revokedAt !== undefined) this.requireMemberStepUp(previous.role);
-      if (next.role !== previous.role) this.requireMemberStepUp(next.role);
+    // DEC 254zzz73: a removal needs no step-up (only a role change still passes this seam until its own lane removes it).
+    if (createdBy !== undefined && next.role !== previous.role) {
+      this.requireMemberStepUp(previous.role);
+      this.requireMemberStepUp(next.role);
+    }
+    // DEC 254zzz84 (5): the role the remover saw; the target snapshot CAS below holds it to the commit.
+    if (fence.expectedRole !== undefined && fence.expectedRole !== previous.role) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_CHANGED });
+    if (fence.successorId !== undefined) {
+      const successor = fence.successorId === previous.personId ? undefined : await this.membership(fence.successorId).catch(() => undefined);
+      if (successor === undefined || successor.companyId !== previous.companyId || successor.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_SUCCESSOR_INVALID });
     }
     let witness: string | undefined;
     if (previous.role === "owner" && previous.revokedAt === undefined && (next.role !== "owner" || next.revokedAt !== undefined)) {
@@ -299,23 +313,33 @@ export class CompanySignInStore {
     if (createdBy !== undefined && createdBy !== previous.personId && createdBy !== witness) writes.push(this.liveMemberCheck(previous.companyId, createdBy, ownerChange));
     const witnessIndex = writes.length;
     if (witness !== undefined) writes.push(this.liveMemberCheck(previous.companyId, witness, true));
+    // The successor is live (any role) at the commit. The actor and an owner witness are already checked live with a stronger role, and DynamoDB forbids two steps on one item.
+    const successorIndex = writes.length;
+    const successorChecked = fence.successorId !== undefined && fence.successorId !== createdBy && fence.successorId !== witness;
+    if (successorChecked) writes.push(this.liveMemberCheck(previous.companyId, fence.successorId!, "any"));
     try {
-      await this.operatorWrite(previous.companyId, event, writes, previous.personId, { createdBy: createdBy ?? "operator", createdAt: this.iso(), fromRole: previous.role, toRole: next.role, ...(ownerChange && createdBy === undefined ? { ownerOverride: true } : {}) });
+      await this.operatorWrite(previous.companyId, event, writes, previous.personId, { createdBy: createdBy ?? "operator", createdAt: this.iso(), fromRole: previous.role, toRole: next.role,
+        ...(ownerChange && createdBy === undefined ? { ownerOverride: true } : {}), ...(fence.successorId === undefined ? {} : { successorId: fence.successorId }) });
     } catch (error) {
       const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | null)?.CancellationReasons;
       if (witness !== undefined && conditional(error) && reasons?.[witnessIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
+      if (successorChecked && conditional(error) && reasons?.[successorIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_SUCCESSOR_INVALID });
+      // The target's snapshot (index 0) moved: with an expected role, that is "the person changed", in fixed words.
+      if (fence.expectedRole !== undefined && conditional(error) && reasons?.[0]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_CHANGED });
       throw unavailable();
     }
   }
-  async setRevoked(companyId: string, personId: string, revoked: boolean, createdBy?: string): Promise<boolean> {
+  async setRevoked(companyId: string, personId: string, revoked: boolean, createdBy?: string, fence: RemovalFence = {}): Promise<boolean> {
     if (!OrgIdSchema.safeParse(companyId).success || typeof revoked !== "boolean") throw unavailable();
+    // A fence belongs to a removal only (a restore names no successor).
+    if (!revoked && (fence.expectedRole !== undefined || fence.successorId !== undefined)) throw unavailable();
     await this.checkActor(companyId, createdBy);
     const member = await this.membership(personId);
     if (member === undefined || member.companyId !== companyId) return false;
     const next = { ...member };
     if (revoked) { next.revokedAt = this.iso(); next.revokedBy = createdBy ?? "operator"; }
     else { delete next.revokedAt; delete next.revokedBy; }
-    await this.writeMember(member, next, revoked ? "company-member-revoke" : "company-member-restore", createdBy);
+    await this.writeMember(member, next, revoked ? "company-member-revoke" : "company-member-restore", createdBy, fence);
     return true;
   }
   async setRole(companyId: string, personId: string, role: Member["role"], createdBy?: string): Promise<"changed" | "unchanged" | "not_found"> {
