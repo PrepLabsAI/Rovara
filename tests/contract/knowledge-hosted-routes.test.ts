@@ -37,7 +37,7 @@ describe("the knowledge routes at the developer router", () => {
     }
     expect(answer).toHaveBeenCalledTimes(2);
     expect(answer.mock.calls[0]).toEqual([{ method: "POST", path: `${P}/lessons`, authorization: `Bearer ${cli.access!}`, body: JSON.stringify({ repo: "git@github.com:acme/api.git" }) }, { kind: "person", personId: person("owner") }]);
-    expect(answer.mock.calls[1]![1]).toEqual({ kind: "person", personId: person("owner") });
+    expect((answer.mock.calls[1] as unknown[] | undefined)?.[1]).toEqual({ kind: "person", personId: person("owner") });
     // No sign-in, a bad sign-in: refused before the API is asked.
     expect((await callOn(deps, "POST", `${P}/lessons`, undefined)).status).toBe(401);
     expect((await callOn(deps, "POST", `${P}/lessons`, "Bearer not.a.jwt")).status).toBe(401);
@@ -62,7 +62,7 @@ describe("the knowledge routes at the developer router", () => {
     const w = world();
     await w.setup();
     const cli = await w.signIn("owner", { cli: true });
-    const deps = { ...w.routes } as DeveloperRouteDependencies;
+    const deps: DeveloperRouteDependencies = { ...w.routes };
     for (const [tool, shape] of [["lessons", { lessons: [] }], ["knowledge/areas", { repos: [], more: 0 }]] as const) {
       expect(await callOn(deps, "POST", `${P}/${tool}`, `Bearer ${cli.access!}`)).toMatchObject({ status: 200, body: { status: "off", reason: "install_switch", project: "payments", ...shape } });
       expect(await callOn(deps, "POST", `${P}/${tool}`, `Bearer ${TOKEN}`)).toMatchObject({ status: 401, body: { error: { code: "AUTH_REQUIRED", message: "Script tokens are turned off here." } } });

@@ -94,7 +94,7 @@ async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" })
       registry, companyId, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
-    const built = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch, people, hostFor: async (id) => lessons.get(id as OrgId)?.host, now: () => world.clock.now });
+    const built = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch, people, hostFor: async (id) => lessons.get(id)?.host, now: () => world.clock.now });
     built?.attach();
     if (built !== undefined) lessons.set(companyId, built);
     audits.set(companyId, runtime.flow.deps.audit);
@@ -118,10 +118,10 @@ function build(w: World, over: Partial<KnowledgeApiOptions> = {}): Built {
     lessonsOf: async (companyId) => w.lessons.get(companyId),
     people: w.people,
     authenticateToken: scriptTokenAuthenticator({ lessonsSwitch, now: () => w.world.clock.now, companyOf: async (companyId) => ({ store: w.world.store, audit: w.audits.get(companyId)!, identity }) }),
-    adminsOf: async (companyId) => { const principals = [await identity.getPrincipal(companyId, companyId === A ? PEOPLE[A].admin : PEOPLE[B].admin)]; return principals.flatMap((p) => (p === undefined ? [] : [developerIdOf(p)])); },
+    adminsOf: async (companyId) => { const admin = companyId === A ? "a-admin" : "b-admin"; const principal = await identity.getPrincipal(companyId, admin); return principal === undefined ? [] : [developerIdOf(principal)]; },
     now: () => w.world.clock.now, ...over,
   };
-  return { api: createKnowledgeApi(options), options, notices: async () => (await w.world.store.query({ pk: PENDING_PK })).items as Array<Record<string, unknown>> };
+  return { api: createKnowledgeApi(options), options, notices: async () => (await w.world.store.query({ pk: PENDING_PK })).items };
 }
 
 const P = "/v1/dev/projects/payments";
@@ -132,7 +132,7 @@ interface Reply { ok: boolean; status?: number; code?: string; message?: string;
 async function call(api: KnowledgeApi, caller: KnowledgeCaller, path: string, body: unknown = {}, authorization?: string): Promise<Reply> {
   try {
     const answer = await api.answer({ method: "POST", path, ...(authorization === undefined ? {} : { authorization }), body: typeof body === "string" ? body : JSON.stringify(body) }, caller);
-    return { ok: true, body: answer as Reply["body"] };
+    return { ok: true, ...(answer === undefined ? {} : { body: answer as NonNullable<Reply["body"]> }) };
   } catch (error) {
     if (!(error instanceof AgentXError)) throw error;
     return { ok: false, code: error.code, status: error.statusCode, message: error.message.slice(error.code.length + 2) };
@@ -237,7 +237,7 @@ describe("a signed-in person", () => {
     w.removed.delete("a-contrib");
     expect((await asPerson(b, "a-contrib", lessonsPath())).ok).toBe(true);
     // A roster that cannot be read refuses (fail closed), with fixed words.
-    const down = build(w, { people: { onProjectRoster: async () => { throw new Error("roster down"); } } });
+    const down = build(w, { people: { onProjectRoster: async () => { throw new Error("roster down"); }, approvers: (...args) => w.people.approvers(...args) } });
     expect(await asPerson(down, "a-contrib", lessonsPath())).toMatchObject({ ok: false, code: "RUNTIME_UNAVAILABLE", message: "Rovara can't read lessons right now. Try again." });
   });
 });
@@ -434,7 +434,7 @@ describe("limits", () => {
     const b = build(w);
     await put(w, A, lesson(A, "les_pay00001"));
     const realUpdate = w.world.store.update.bind(w.world.store);
-    w.world.store.update = (async (request: Parameters<typeof realUpdate>[0]) => { if (String(request.key.pk).includes("KNOWLEDGE_READ_DAY") || String(request.key.pk).includes("RATE")) throw new Error("store down"); return realUpdate(request); }) as typeof w.world.store.update;
+    w.world.store.update = (async (request: Parameters<typeof realUpdate>[0]) => { if (String(request.key.pk).includes("KNOWLEDGE_READ_DAY") || String(request.key.pk).includes("RATE")) throw new Error("store down"); return realUpdate(request); });
     const refused = await asPerson(b, "a-contrib", lessonsPath());
     expect(refused).toMatchObject({ ok: false, code: "RUNTIME_UNAVAILABLE", message: "Rovara can't read lessons right now. Try again." });
     expect(JSON.stringify(refused)).not.toContain("withRetry");
@@ -689,7 +689,7 @@ describe("the principal a hosted token is made for", () => {
 describe("the MCP tools against a hosted install (the CLI client targets the same routes)", () => {
   /** A fetch that is the hosted broker's door for one signed-in person: the two routes go to the knowledge API, the project list is the person's. */
   function hostedFetch(b: Built, personId: string, seen: string[]): typeof fetch {
-    return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL((typeof input === "string" ? input : input instanceof URL ? input.href : input.url));
       const method = init?.method ?? "GET";
       seen.push(`${method} ${url.pathname}`);
@@ -704,7 +704,8 @@ describe("the MCP tools against a hosted install (the CLI client targets the sam
     clientName: "claude-code", serverVersion: "0.4.0", adminSignedIn: async () => false, compatibility: async () => ({ env: "staging", apiVersion: "1.2" }), now: () => 0, sleep: async () => undefined,
     newRequestId: () => "33333333-3333-4333-8333-333333333333", checkoutRemote: async () => REPO,
   });
-  const tool = (name: string) => KNOWLEDGE_TOOLS.find((entry) => entry.name === name)!;
+  const callOf = { signal: new AbortController().signal };
+  const tool = (name: string) => { const found = KNOWLEDGE_TOOLS.find((entry) => entry.name === name)!; return { handler: (context: ToolContext, input: Record<string, unknown>) => found.handler(context, input, callOf) }; };
 
   it("team_knowledge and team_knowledge_areas find the project from the checkout's remote on the hosted routes and show the same units", async () => {
     const w = await setUp();
