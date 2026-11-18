@@ -117,6 +117,9 @@ describe("a wiki page as the target", () => {
     const module = await teamLessonsForArea(deps, { key: KEY, target: { page: { pageId: modulePageId("api", "src/billing"), kind: "module", repos: ["api"], citedPaths: ["src/billing/a.ts"] } } });
     expect(module?.area).toEqual({ repo: "api", folder: "src/billing" });
     expect(idsOf(module)).toEqual(["les_ok000001"]);
+    // A folder only a lesson with no person behind it names is not found by that lesson: the page has no area and says nothing about it.
+    await add(conv("les_hidden001", { approvals: [{ approvalId: "a", by: "system:auto", at: 1, mode: "auto" }], scope: { repos: ["api"], paths: ["src/hidden/**"] } }));
+    expect(await teamLessonsForArea(deps, { key: KEY, target: { page: { pageId: modulePageId("api", "src/hidden"), kind: "module", repos: ["api"], citedPaths: [] } } })).toEqual({ lessons: [], more: 0 });
     const repoPage = await teamLessonsForArea(deps, { key: KEY, target: { page: { pageId: "repo-api", kind: "repo", repos: ["api"], citedPaths: [] } } });
     expect(idsOf(repoPage)).toEqual(["les_ok000001", "les_other001"]);
     expect(await teamLessonsForArea(deps, { key: KEY, target: { page: { pageId: "overview", kind: "overview", repos: ["api"], citedPaths: [] } } })).toEqual({ lessons: [], more: 0 });
