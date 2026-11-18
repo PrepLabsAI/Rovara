@@ -465,6 +465,7 @@ export * from "./eval-run-diagnostic.js";
 export * from "./eval-dependency-list.js";
 // DEC 253j(1): the trusted EVAL_PLAN record (stored next to EVAL_SPEND, bound by its digest).
 export * from "./eval-plan-record.js";
+export * from "./eval-stand-in-version.js";
 export * from "./eval-discovery-report.js";
 export * from "./eval-wrapper.js";
 export * from "./eval-wrapper-templates.js";
