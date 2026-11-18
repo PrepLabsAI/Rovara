@@ -336,7 +336,7 @@ import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
 import { installEngineModel } from "../core-host/company-engine-model.js";
-import { createHostedLessonsPeople } from "./hosted-lessons-people.js";
+import { createHostedLessonsPeople } from "./hosted-lessons-people.js"; import { hostedLessonsSlack } from "./hosted-slack-thread.js";
 import { hostedLessonsLearning } from "../core-host/hosted-learning.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
@@ -15649,6 +15649,8 @@ function buildBrokerHandler(callbackSigningKey: string) {
     // L4-HW2: the lessons' learning calls (the reflector, the curator's judge, the outcome judge) go through the model gateway's learning route on the COMPANY's own provider account and learning cap
     // (core-host/hosted-learning.ts); asked only for a company the lessons switch names. No gateway settings or no task-token key: no port, so learning calls refuse and nothing is spent.
     lessonsLearning: hostedLessonsLearning(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration))),
+    // L4-HW8: the lessons' Slack source reads a task's own thread through the signed `thread_messages` command of the deployment's Slack adapter (aws/hosted-slack-thread.ts); no adapter env, no source.
+    ...((slack) => (slack === undefined ? {} : { lessonsSlack: slack }))(hostedLessonsSlack({ env: process.env, secretsManager, workspaces: slackCompany?.workspaces, legacyTeamId: process.env.SLACK_TEAM_ID ?? process.env.SLACK_ADAPTER_TEAM_ID })),
     policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
     origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
     log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
