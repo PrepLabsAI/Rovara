@@ -34,7 +34,7 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, orgProjectCatalogKey, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
+import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, loadReadableTask, taskViewOf } from "../core/task-flow/reads.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
@@ -68,7 +68,7 @@ import type { HostedTestEnvironmentDecider } from "./hosted-test-environment-dec
 import { z } from "zod";
 import { isReportPath, routeHostedReport, type HostedReportWiring } from "./report-routes.js";
 import { isWikiBuildPath, routeHostedWikiBuild, type HostedWikiBuildWiring } from "./wiki-build-routes.js";
-import { isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "./answer-routes.js";
+import { hostedAnswerService, isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "./answer-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -198,6 +198,25 @@ export interface CoreDevRoutesOptions {
   log?: (entry: Record<string, unknown>) => void;
 }
 
+/**
+ * Lead 4 J2: what the Slack door asks of the core, in process. Everything here was verified by the caller (the Slack workspace's company, the company-linked person, the project the thread's channel is bound to,
+ * the thread's own id): the body of a Slack message names none of them.
+ */
+export interface SlackThreadAnswerInput {
+  companyId: string;
+  personId: string;
+  project: string;
+  /** The verified Slack thread (`slackAnswerThreadId`). */
+  threadId: string;
+  requestId: string;
+  question: string;
+}
+export interface SlackThreadAnswer {
+  answer: AnswerResponse;
+  /** The answer as untrusted data for the task a person starts from it; present only when the answer carries its one button and the asker may still attach it. */
+  attach?: string | undefined;
+}
+
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
 const ORG_ID = /^org_[0-9a-z]{20}$/u;
@@ -314,7 +333,16 @@ interface Mounted {
   actions?: TaskActions;
 }
 
-export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> } {
+export interface CoreDevRoutes {
+  route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>;
+  /**
+   * Lead 4 J2: the smart Just answer for a Slack thread, in process (the thread is one every participant reads, so its memory is shared; the HTTP route never says so). `undefined`: the core does not serve
+   * answers for this company (switch off, or no answers wiring). Throws the answer service's own refusals (`NOT_FOUND` for no role or no project, `TOO_MANY_REQUESTS`, `RUNTIME_UNAVAILABLE`).
+   */
+  answerForSlackThread(input: SlackThreadAnswerInput): Promise<SlackThreadAnswer | undefined>;
+}
+
+export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoutes {
   const mounted = new Map<string, Promise<Mounted>>();
   const mount = (companyId: string): Promise<Mounted> => {
     let found = mounted.get(companyId);
@@ -337,6 +365,27 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
   };
 
   return {
+    async answerForSlackThread(input) {
+      if (!options.app.serving || !ORG_ID.test(input.companyId)) return undefined;
+      let target: Mounted;
+      try {
+        target = await mount(input.companyId);
+      } catch (error) {
+        if (error instanceof Error && error.name === "CoreEngineOffError") return undefined;
+        throw error;
+      }
+      // Mounted by the company asked for; a runtime of another company would never be asked.
+      if (target.runtime.companyId !== input.companyId || target.wiring.answers === undefined) return undefined;
+      const service = hostedAnswerService({ companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
+      const answer = await service.ask({
+        personId: input.personId, project: input.project, sharedThread: true,
+        body: { requestId: input.requestId, question: input.question, threadId: input.threadId, channel: "slack" },
+      });
+      if (answer.answerId === undefined || answer.action === undefined) return { answer };
+      // Attached only for the person who asked, with a role on the project now (the answer service checks both); anything else leaves the answer without its button.
+      const context = await service.taskContext({ personId: input.personId, project: input.project, answerId: answer.answerId }).catch(() => undefined);
+      return { answer, ...(context === undefined ? {} : { attach: context.text }) };
+    },
     async route(request, caller) {
       // Off: nothing is read and nothing answers here.
       if (!options.app.serving) return undefined;

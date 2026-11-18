@@ -11,7 +11,7 @@
 //  - Refusals are fixed words; nothing a caller sent is echoed, and a fault is a fixed 503.
 import { ANSWER_WORDS, AgentXError, agentXError, type DocumentStore, type OrgId } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
-import { createAnswerService } from "../core/answers/service.js";
+import { createAnswerService, type AnswerService } from "../core/answers/service.js";
 import { createAnswerCodeSource, type AnswerRepositoryHandle } from "../core/answers/code-source.js";
 import type { AnswerModel } from "../core/answers/ports.js";
 import { createWikiStore } from "../core/wiki/store.js";
@@ -52,6 +52,27 @@ export function isAnswersPath(path: string, method: string): boolean {
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
 const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
 
+/**
+ * The answer service of one member company on the deployed core: that company's own store, wiki and code, the person's live role on the project (any role asks), and the company's answers model through the
+ * gateway when one is wired. The HTTP route and the Slack door (`answerForSlackThread`, dev-routes.ts) both make it here, so there is ONE rule for who may ask.
+ */
+export function hostedAnswerService(input: { companyId: OrgId; store: DocumentStore; wiring: HostedAnswersWiring; now: () => number; log?: ((entry: Record<string, unknown>) => void) | undefined }): AnswerService {
+  return createAnswerService({
+    companyId: input.companyId, store: input.store, wiki: createWikiStore({ store: input.store, companyId: input.companyId, now: input.now }), now: input.now, log: input.log,
+    access: {
+      async mayAsk(personId, name) {
+        const standing = await input.wiring.standing(personId, input.companyId, name);
+        return standing?.access === "manage" || standing?.access === "view";
+      },
+    },
+    async code(name) {
+      const found = await input.wiring.repositories(input.companyId, name);
+      return found === undefined ? undefined : createAnswerCodeSource(found.handles, found.names);
+    },
+    model: input.wiring.model?.(input.companyId),
+  });
+}
+
 /** One request on the answer path (`isAnswersPath`), after the dev routes checked the company from membership. Always answers. */
 export async function routeHostedAnswers(input: HostedAnswersInput): Promise<BrokerResponse> {
   try {
@@ -61,20 +82,7 @@ export async function routeHostedAnswers(input: HostedAnswersInput): Promise<Bro
     try { project = decodeURIComponent(match[1]!); } catch { throw agentXError("NOT_FOUND", ANSWER_WORDS.projectNotFound); }
     let body: unknown;
     try { body = input.request.body === undefined || input.request.body === "" ? {} : JSON.parse(input.request.body) as unknown; } catch { body = undefined; }
-    const service = createAnswerService({
-      companyId: input.companyId, store: input.store, wiki: createWikiStore({ store: input.store, companyId: input.companyId, now: input.now }), now: input.now, log: input.log,
-      access: {
-        async mayAsk(personId, name) {
-          const standing = await input.wiring.standing(personId, input.companyId, name);
-          return standing?.access === "manage" || standing?.access === "view";
-        },
-      },
-      async code(name) {
-        const found = await input.wiring.repositories(input.companyId, name);
-        return found === undefined ? undefined : createAnswerCodeSource(found.handles, found.names);
-      },
-      model: input.wiring.model?.(input.companyId),
-    });
+    const service = hostedAnswerService(input);
     return json(200, await service.ask({ personId: input.personId, project, body }));
   } catch (error) {
     if (error instanceof AgentXError) return errorAnswer(error);

@@ -9,6 +9,7 @@ import {
   SlackThreadSchema,
   SlackUserIdSchema,
   routeChoiceLabel,
+  slackAnswerCard,
   suggestionCardMessage,
   suggestionCardText,
   workflowChoiceKey,
@@ -86,22 +87,26 @@ export function workflowChoiceMessage(input: { choiceId: string; requesterId: st
 }
 
 /** The question's card as it was first posted, for the request's `suggestion` (a routed card) or the plain Quick or Full question. */
-export function workflowChoiceCard(input: { choiceId: string; requesterId: string; suggestion?: RequestSuggestion | undefined }): { text: string; blocks: Array<Record<string, unknown>> } {
+export function workflowChoiceCard(input: { choiceId: string; requesterId: string; suggestion?: RequestSuggestion | undefined; cardText?: string | undefined }): { text: string; blocks: Array<Record<string, unknown>> } {
+  // Lead 4 J2: an answer's own message (its text and its one button), kept by the choice so no press or failed start ever replaces the answer with a card question.
+  if (input.cardText !== undefined) return slackAnswerCard({ text: input.cardText, button: { requesterId: input.requesterId, choiceId: input.choiceId } });
   return input.suggestion === undefined
     ? workflowChoiceMessage({ choiceId: input.choiceId, requesterId: input.requesterId })
     : suggestionCardMessage({ choiceId: input.choiceId, requesterId: input.requesterId, suggestion: input.suggestion });
 }
 
 /** What the question's card says the moment its requester pressed Quick or Full: no buttons, until the start is known. */
-export function workflowChoiceStartingMessage(path: WorkflowPath): { text: string; blocks: Array<Record<string, unknown>> } {
+export function workflowChoiceStartingMessage(path: WorkflowPath, cardText?: string): { text: string; blocks: Array<Record<string, unknown>> } {
   const text = `Starting this on ${path === "FULL" ? "Full" : "Quick"}…`;
+  // An answer's message keeps its words while its task starts.
+  if (cardText !== undefined) return { text, blocks: answeredWorkflowCard(cardText, text) };
   return { text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] };
 }
 
 /** The question's card once its start was refused for good: its question kept, no buttons, and what to do instead. */
-function workflowChoiceEndedMessage(suggestion: RequestSuggestion | undefined): { text: string; blocks: Array<Record<string, unknown>> } {
+function workflowChoiceEndedMessage(suggestion: RequestSuggestion | undefined, cardText?: string): { text: string; blocks: Array<Record<string, unknown>> } {
   const text = "I couldn't start this. Start a new request in the channel.";
-  return { text, blocks: answeredWorkflowCard(suggestion === undefined ? QUESTION_TEXT : suggestionCardText(suggestion), text) };
+  return { text, blocks: answeredWorkflowCard(cardText ?? (suggestion === undefined ? QUESTION_TEXT : suggestionCardText(suggestion)), text) };
 }
 
 /** What happens first on `path`, in one sentence. */
@@ -115,9 +120,9 @@ function firstStep(path: WorkflowPath): string {
  * Task 15/19: the Quick or Full question once `userId` answered it (by button or by reply): the question kept, its
  * buttons gone, and who chose which path beneath it, with the first step.
  */
-export function workflowChoiceAnsweredMessage(userId: string, path: WorkflowChoice, suggestion?: RequestSuggestion): { text: string; blocks: Array<Record<string, unknown>> } {
+export function workflowChoiceAnsweredMessage(userId: string, path: WorkflowChoice, suggestion?: RequestSuggestion, cardText?: string): { text: string; blocks: Array<Record<string, unknown>> } {
   const chosen = path === "ANSWER" ? `<@${userId}> asked for an answer. I'll reply here.` : workflowChosenNotice(userId, path);
-  return { text: chosen, blocks: answeredWorkflowCard(suggestion === undefined ? QUESTION_TEXT : suggestionCardText(suggestion), chosen) };
+  return { text: chosen, blocks: answeredWorkflowCard(cardText ?? (suggestion === undefined ? QUESTION_TEXT : suggestionCardText(suggestion)), chosen) };
 }
 
 /** The one-line confirmation that a task started on `path`. */
@@ -206,7 +211,14 @@ export type WorkflowChoiceOutcome = "started" | "none" | "not_requester" | "othe
  * A waiting request its requester chose a path for: what starts, the question's message when it is known, and (Task 21)
  * what the routed card suggested.
  */
-export interface ChosenRequest { choiceId: string; instructions: string; requestId: string; messageTs?: string; suggestion?: RequestSuggestion }
+export interface ChosenRequest {
+  choiceId: string; instructions: string; requestId: string; messageTs?: string; suggestion?: RequestSuggestion;
+  /** Lead 4 J2: set when the choice's message is a Slack answer (its words, made safe for Slack); every card edit then keeps these words instead of a card question. */
+  cardText?: string;
+}
+
+/** The most an answer's kept words may be (six Slack sections). */
+const CARD_TEXT_MAX = 17_400;
 
 /** A request waiting in its thread for its requester's Quick or Full choice. */
 export interface WorkflowChoiceStore {
@@ -238,7 +250,8 @@ const SUGGESTIONS: ReadonlySet<string> = new Set(REQUEST_ROUTE_KINDS.filter((kin
 function chosenRequest(item: Record<string, unknown>): ChosenRequest {
   return { choiceId: item.choiceId as string, instructions: item.instructions as string, requestId: item.requestId as string,
     ...(typeof item.messageTs === "string" ? { messageTs: item.messageTs } : {}),
-    ...(typeof item.suggestion === "string" && SUGGESTIONS.has(item.suggestion) ? { suggestion: item.suggestion as RequestSuggestion } : {}) };
+    ...(typeof item.suggestion === "string" && SUGGESTIONS.has(item.suggestion) ? { suggestion: item.suggestion as RequestSuggestion } : {}),
+    ...(typeof item.cardText === "string" && item.cardText.length > 0 && item.cardText.length <= CARD_TEXT_MAX ? { cardText: item.cardText } : {}) };
 }
 
 const choiceKey = workflowChoiceKey;
@@ -281,6 +294,8 @@ export function createDynamoWorkflowChoiceStore(input: { documentClient: Documen
       const refusal = (item: Record<string, unknown> | undefined): Exclude<WorkflowChoiceOutcome, "started"> | undefined => {
         if (item === undefined || (choiceId !== undefined && item.choiceId !== choiceId)) return "none";
         if (item.userId !== userId) return "not_requester";
+        // Lead 4 J2: an answer offers one button, Quick; a typed `full` or `answer` on it is not a choice it has.
+        if (item.fromAnswer === true && workflowPath !== "QUICK") return "none";
         if (item.selectedPath !== undefined && item.selectedPath !== workflowPath) return "other_path";
         if (typeof item.startingUntil === "number" && item.startingUntil > nowSeconds()) return "starting";
         return undefined;
@@ -415,7 +430,7 @@ export async function finishChosenWorkflow(
   logRouteChoice(chosen, input.workflowPath);
   if (chosen.messageTs !== undefined && deps.updateQuestion !== undefined) {
     try {
-      await deps.updateQuestion({ channel: input.thread.channelId, ts: chosen.messageTs, ...workflowChoiceAnsweredMessage(input.userId, input.workflowPath, chosen.suggestion) });
+      await deps.updateQuestion({ channel: input.thread.channelId, ts: chosen.messageTs, ...workflowChoiceAnsweredMessage(input.userId, input.workflowPath, chosen.suggestion, chosen.cardText) });
     } catch (error) {
       // The task started; a question left with its buttons only answers "no longer waiting" if pressed again.
       logChoice("workflow.choice_question_update_failed", error);
@@ -504,6 +519,8 @@ export interface HandedOffWorkflowStart {
   messageTs?: string;
   /** What the routed card suggested, so a failed start can put the same card back; absent on the plain Quick or Full question. */
   suggestion?: RequestSuggestion;
+  /** Lead 4 J2: an answer's own words, so a failed start puts the answer back (with its button) and never a card question over it. */
+  cardText?: string;
 }
 
 export function isHandedOffWorkflowStart(event: unknown): event is HandedOffWorkflowStart {
@@ -515,7 +532,8 @@ export function isHandedOffWorkflowStart(event: unknown): event is HandedOffWork
     && (value.workflowPath === "QUICK" || value.workflowPath === "FULL") && typeof value.choiceId === "string" && UUID_PATTERN.test(value.choiceId)
     && typeof value.responseUrl === "string" && value.responseUrl.startsWith("https://hooks.slack.com/")
     && (value.messageTs === undefined || SlackMessageTimestampSchema.safeParse(value.messageTs).success)
-    && (value.suggestion === undefined || (typeof value.suggestion === "string" && SUGGESTIONS.has(value.suggestion)));
+    && (value.suggestion === undefined || (typeof value.suggestion === "string" && SUGGESTIONS.has(value.suggestion)))
+    && (value.cardText === undefined || (typeof value.cardText === "string" && value.cardText.length > 0 && value.cardText.length <= CARD_TEXT_MAX));
 }
 
 /**
@@ -537,15 +555,15 @@ export async function handOffChosenWorkflow(
       logChoice(failure, error);
     }
   };
-  await replace(workflowChoiceStartingMessage(input.workflowPath), "workflow.choice_starting_card_failed");
+  await replace(workflowChoiceStartingMessage(input.workflowPath, chosen.cardText), "workflow.choice_starting_card_failed");
   try {
     await deps.handOff({ source: "agentx.slack-interactivity", action: "start-chosen-workflow", thread: input.thread, userId: input.userId,
       workflowPath: input.workflowPath, choiceId: chosen.choiceId, responseUrl: input.responseUrl, ...(input.messageTs === undefined ? {} : { messageTs: input.messageTs }),
-      ...(chosen.suggestion === undefined ? {} : { suggestion: chosen.suggestion }) });
+      ...(chosen.suggestion === undefined ? {} : { suggestion: chosen.suggestion }), ...(chosen.cardText === undefined ? {} : { cardText: chosen.cardText }) });
   } catch (error) {
     // Nothing will start it: free the hold so the same answer can be given again at once, with its buttons back.
     await deps.store.release(input.thread, chosen.choiceId).catch((releaseError: unknown) => logChoice("workflow.choice_release_failed", releaseError));
-    await replace(workflowChoiceCard({ choiceId: chosen.choiceId, requesterId: input.userId, suggestion: chosen.suggestion }), "workflow.choice_card_restore_failed");
+    await replace(workflowChoiceCard({ choiceId: chosen.choiceId, requesterId: input.userId, suggestion: chosen.suggestion, cardText: chosen.cardText }), "workflow.choice_card_restore_failed");
     throw error;
   }
   return "started";
@@ -572,8 +590,8 @@ export async function runHandedOffWorkflowStart(
   // The press changed the card to "Starting this on ..."; a start that did not go through puts the question back (its
   // buttons too, unless the choice was dropped for good) before the member is told why.
   const restoreCard = async (terminal: boolean) => {
-    const message = terminal ? workflowChoiceEndedMessage(event.suggestion)
-      : workflowChoiceCard({ choiceId: event.choiceId, requesterId: event.userId, suggestion: event.suggestion });
+    const message = terminal ? workflowChoiceEndedMessage(event.suggestion, event.cardText)
+      : workflowChoiceCard({ choiceId: event.choiceId, requesterId: event.userId, suggestion: event.suggestion, cardText: event.cardText });
     try {
       await deps.replaceCard?.(event.responseUrl, message);
     } catch (error) {

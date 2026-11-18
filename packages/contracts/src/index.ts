@@ -389,6 +389,7 @@ export * from "./wiki-corrections.js";
 // Lead 4 J1: the smart Just answer service (limits, request, answer object, fixed words).
 export * from "./answers.js";
 export * from "./answer-keys.js";
+export * from "./slack-answers.js";
 export * from "./spec-target.js";
 
 // Wiki W0: the free file map and forecast.
