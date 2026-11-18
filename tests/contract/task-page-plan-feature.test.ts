@@ -106,11 +106,11 @@ describe("the task page's feature, from the broker (an owner, a channel reader a
     const { t } = waiting();
     const COMPANY = `org_${"p".repeat(19)}a`, OTHER = `org_${"p".repeat(19)}b`;
     const store = new DynamoDocumentStore({ client: t.deps.documentClient, tableName: t.deps.tableName });
-    const inCompany = (companyId: string) => createFeatureStore({ store, companyId: companyId as never, audit: new DocumentAuditSink({ store: () => store }), now: () => t.deps.now() });
+    const inCompany = (companyId: string) => createFeatureStore({ store, companyId, audit: new DocumentAuditSink({ store: () => store }), now: () => t.deps.now() });
     const mine = await inCompany(COMPANY).create({ name: "Mine" }, SYSTEM);
     const theirs = await inCompany(OTHER).create({ name: "Other company canary" }, SYSTEM);
     await inCompany(OTHER).setTaskFeature({ taskId: t.taskId, project: "payments", featureId: theirs.id, source: "chosen" }, SYSTEM);
-    const deps = { ...t.deps, companyId: COMPANY } as typeof t.deps;
+    const deps = { ...t.deps, companyId: COMPANY };
     const view = await getTaskDocumentView(deps, PRIYA, t.taskId);
     expect(view.planFeature).toMatchObject({ line: "Feature: No feature", feature: null });
     expect(JSON.stringify(view.planFeature)).not.toContain("canary");

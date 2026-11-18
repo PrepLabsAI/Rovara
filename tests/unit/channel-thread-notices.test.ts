@@ -638,7 +638,7 @@ describe("the plan card's feature line in the chat", () => {
     const made = await features(w).create({ name: "*Checkout* _v2_ @here <https://evil.example|x> `code`" }, SYSTEM);
     await features(w).setTaskFeature({ taskId: TASK, project: "web", featureId: made.id, source: "chosen" }, SYSTEM);
     const line = (await card(w))!.data.text.split("\n").find((entry) => entry.startsWith("Feature:"))!;
-    expect(line).not.toMatch(/[*_`<>@|\[\]~#!]/u);
+    expect(line).not.toMatch(/[*_`<>@|[\]~#!]/u);
     expect(line).toContain("Checkout");
     expect(line.endsWith("(chosen)")).toBe(true);
   });
