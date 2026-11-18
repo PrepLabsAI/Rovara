@@ -231,6 +231,26 @@ describe("one sighting never reaches the people who decide, whatever else would 
   });
 });
 
+describe("no model of any kind", () => {
+  it("a suggestion that meets neighbours asks neither a judge nor an embedder (the ordered word test decides alone)", async () => {
+    const w = await world();
+    const calls = { judge: 0, embed: 0 };
+    const process = {
+      ...w.lessons.runtime.process,
+      judgeModel: { complete: async () => { calls.judge += 1; throw new Error("no model"); }, quote: async () => { calls.judge += 1; throw new Error("no model"); } },
+      spend: { admit: async () => true },
+      embedder: { spec: "counting", dimension: 4, embed: async () => { calls.embed += 1; return [1, 0, 0, 0]; }, embedMany: async (texts: readonly string[]) => { calls.embed += 1; return texts.map(() => [1, 0, 0, 0]); } },
+    };
+    const deps = { process: process as never, limits: proposeLimits(w.h.store, () => w.h.clock.now) };
+    const base = { companyId: COMPANY, project: "payments" };
+    await proposeKnowledge(deps, { ...base, proposer: { kind: "tool", personId: "p1" }, proposal: { advice: "Wrap network calls in withRetry", when: "calling the network" } });
+    await proposeKnowledge(deps, { ...base, proposer: { kind: "tool", personId: "p2" }, proposal: { advice: "Wrap every network call in withRetry helper", when: "calling the network" } });
+    await proposeKnowledge(deps, { ...base, proposer: { kind: "agent", taskId: "t-1" }, proposal: { advice: "Network calls go through the withRetry wrapper", when: "calling the network" } });
+    expect((await all(w)).length).toBeGreaterThan(0);
+    expect(calls).toEqual({ judge: 0, embed: 0 });
+  });
+});
+
 describe("limits: 10 a person a UTC day for tools, 3 a task for agents", () => {
   it("refuses the 11th suggestion of a person's day with fixed words, counts per person, and opens again the next UTC day", async () => {
     const w = await world();
