@@ -1,0 +1,7 @@
+openapi: 3.1.0
+info: { title: Stripe API, version: rovara-test-excerpt-1 }
+paths:
+  /v1/charges:
+    post: { operationId: createCharge }
+  /v1/refunds:
+    post: { operationId: createRefund }

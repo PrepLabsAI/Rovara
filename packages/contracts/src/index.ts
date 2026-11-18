@@ -284,6 +284,7 @@ export * from "./decision-focus.js";
 export * from "./decision-card-tabs.js";
 export * from "./test-environment.js";
 export * from "./service-mocks.js";
+export * from "./mock-spec-slices.js";
 export * from "./test-services-aws-resources.js";
 export * from "./test-services-shared.js";
 export * from "./test-env-dependency.js";

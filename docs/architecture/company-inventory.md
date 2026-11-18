@@ -1,4 +1,4 @@
-435 record kinds: 70 company-scoped, 19 install-wide, 346 needs-company. 216 routes: 47 company-scoped, 5 install-wide, 164 needs-company.
+436 record kinds: 71 company-scoped, 19 install-wide, 346 needs-company. 216 routes: 47 company-scoped, 5 install-wide, 164 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -197,6 +197,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:APPROVAL_PROOF_USED | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_SIGN_IN_SETTING | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_STEP_UP_CLAIM | company-scoped | State table | no | - | Switch-on lane L2a: written, read and settled only under companyScoped(company, APPROVAL_STEP_UP_CLAIM); a claim id names its company and a random part that must match the row (core-host-hosted-approvers two-company test). |
+| record | entity:MOCK_SPEC_SLICE | company-scoped | State table | no | - | C-SPEC: key is ORG#<company>#MOCK_SPEC#<project>#<digest>; separate versioned test catalog excerpt row, while the approved mock row carries only its slice digest. tests/unit/test-env-fixture-store.test.ts covers two companies and two projects. |
 | record | entity:ARTIFACT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ASK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ASK_LOCK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -1038,7 +1039,7 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/task-flow/records.ts:215:82:sk | document.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | caller records consumed by packages/broker/src/core/task-flow/records.ts (keyOf) |
 | forwarding | packages/broker/src/core/task-flow/run-watch-rows.ts:38:66:computed | [deps.store.ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | runWatchKey, runWatchPartition |
 | forwarding | packages/broker/src/core/test-env/environment.ts:66:109:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | editedKey, projectMetaKey, projectPk, testEnvLatestKey, testEnvProposalKey, testEnvProveKey, testEnvRevisionKey |
-| forwarding | packages/broker/src/core/test-env/fixture-store.ts:107:3:computed | [verifiedBrand] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | fixtureObjectKey, rowKey |
+| forwarding | packages/broker/src/core/test-env/fixture-store.ts:113:3:computed | [verifiedBrand] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | fixtureObjectKey, rowKey |
 | forwarding | packages/broker/src/core/triggers/dispatch.ts:93:169:computed | [key] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | orgAutonomousKey, triggerRateKey, triggerSubjectKey |
 | forwarding | packages/broker/src/core/triggers/store.ts:74:109:sk | triggerId | Runtime sort component forwarded within the feeding partition; not an independent record family. | directoryKey, pendingTriggerScheduleKey, recipientKey, targetTriggerCountKey, targetTriggersKey, triggerActivityKey, triggerKey, triggerMatchKey, triggerNoticeKey, triggerTargetKey, triggersByCreatorKey |
 | forwarding | packages/broker/src/core/triggers/store.ts:75:128:sk | developerId | Runtime sort component forwarded within the feeding partition; not an independent record family. | directoryKey, pendingTriggerScheduleKey, recipientKey, targetTriggerCountKey, targetTriggersKey, triggerActivityKey, triggerKey, triggerMatchKey, triggerNoticeKey, triggerTargetKey, triggersByCreatorKey |

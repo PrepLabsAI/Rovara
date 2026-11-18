@@ -101,7 +101,7 @@ export interface PrVerdictInput {
 export const PR_EXCEPTION_KINDS = [
   "review_only", "check_failed", "check_blocked", "check_not_run", "check_already_failing", "check_made_by_rovara", "testing_reason",
   "requirements_pending", "other_not_tested", "requirement_failed", "requirement_partly_tested", "requirement_not_tested", "requirement_not_proven", "code_without_tests",
-  "service_not_available", "service_made_by_rovara", "service_hand_written", "service_made_up_answers", "service_fell_back", "service_emulated", "service_old_fake",
+  "service_not_available", "service_made_by_rovara", "service_hand_written", "service_made_up_answers", "service_fell_back", "service_emulated", "service_old_fake", "service_spec_check",
   "tests_weaker", "weakening_not_compared", "flagged_files",
   "finding_accepted", "second_review_blocking", "second_review_not_run", "reviews_partial", "review_same_model",
   "flaky_rerun", "browser_problem", "eval_worse", "eval_prompt_without_run", "files_incomplete", "files_not_read", "merge_order",
@@ -342,6 +342,9 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
   if (emulated.length > 0) add("service_emulated", "AWS was emulated, not real.", "The emulator does not check permissions, so nothing here shows the change is allowed to do it on real AWS.", emulated.map(named));
   const oldFakes = byClass("old_fake");
   if (oldFakes.length > 0) add("service_old_fake", oldFakes.length === 1 ? "A recorded fake is old." : `${oldFakes.length} recorded fakes are old.`, `Recorded more than ${OLD_FAKE_DAYS} days ago (or the date is unknown). Real behaviour may have changed.`, oldFakes.map((dependency) => { const age = ageDays(dependency.recordedAt, input.asOf); return `${named(dependency)}: ${age === undefined ? "recorded on an unknown date" : `recorded ${number(age)} days before this pull request`}`; }));
+  const specMismatches = dependencies.filter((dependency) => dependency.mockSpecResult === "mismatch");
+  const specMissing = dependencies.filter((dependency) => dependency.mockSpecResult === "no_spec");
+  if (specMismatches.length + specMissing.length > 0) add("service_spec_check", "A mock needs a spec check.", "A mock mismatch raises merge risk one level. No published spec is stated when a catalog entry has no matching operation.", [...specMismatches.map((dependency) => `${named(dependency)}: does not match ${dependency.mockSpecVendor === "stripe" ? "Stripe" : dependency.mockSpecVendor === "github" ? "GitHub" : "the pinned vendor"}'s published API; check this mock.`), ...specMissing.map((dependency) => `${named(dependency)}: no published spec to check against.`)]);
 
   // Weakened tests and flags
   const weakening = input.weakening;
@@ -385,7 +388,8 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
 
   // ---- risk (rules V5, V6)
   const judged = input.risk.judged && changed !== undefined && changed.source === "host";
-  const riskLevel: "low" | "medium" | "high" = judged ? input.risk.level : "high";
+  const hasSpecMismatch = dependencies.some((dependency) => dependency.mockSpecResult === "mismatch");
+  const riskLevel: "low" | "medium" | "high" = !judged ? "high" : hasSpecMismatch ? input.risk.level === "low" ? "medium" : "high" : input.risk.level;
   const riskJudged = judged;
   const riskPhrase = riskJudged ? `${RISK_WORDS[riskLevel]} risk` : "Risk not judged yet (treated as high)";
 
@@ -443,7 +447,7 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
   })();
 
   const riskLines = ((): string[] => {
-    const reasons = input.risk.reasons.map((reason) => safeLine(reason, 200));
+    const reasons = [...input.risk.reasons.map((reason) => safeLine(reason, 200)), ...(hasSpecMismatch ? ["A mock does not match the pinned vendor API spec; check it before merging."] : [])];
     const first = riskJudged ? `${RISK_WORDS[riskLevel]}.${reasons[0] === undefined ? "" : ` ${reasons[0]}`}`
       : changed === undefined ? "Not judged yet, so it counts as high. Rovara is still reading the changed files."
         : "Not judged from the code host's list of changed files, so it counts as high.";
