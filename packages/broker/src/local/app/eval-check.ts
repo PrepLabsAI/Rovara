@@ -12,7 +12,7 @@ import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { EVAL_CHECK_WORDS, ciDefinitionReaderOf, evalCheckView, setEvalCheck, type EvalCheckCardDeps, type EvalCheckRepository } from "../../core/ci-evidence/eval-check-card.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
 
-const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/ci-eval-check$/u;
+const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/ci-eval-check$/u;
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
 const bodyOf = (request: BrokerRequest): unknown => {
   if (request.body === undefined || request.body === "") return {};
@@ -59,7 +59,7 @@ export function createLocalEvalCheck(options: LocalEvalCheckOptions): LocalEvalC
           project, canManage: true, repositories,
           async record(details) {
             await options.audit.record({
-              eventId: `ci_eval_check.set:${companyId}:${project}:${personId}:${details.requestId}:${createHash("sha256").update(auditChoice(details.check), "utf8").digest("hex").slice(0, 16)}`,
+              eventId: `ci_eval_check.set:${companyId}:${project}:${personId}:${details.requestId}:${createHash("sha256").update(`${auditChoice(details.check)}\u0001${auditChoice(details.previous)}`, "utf8").digest("hex").slice(0, 16)}`,
               companyId, at: new Date(options.now()).toISOString(), actor: { type: "person", id: personId }, action: "ci_eval_check.set", subject: { type: "project", id: project },
               details: { project, basis: "install-owner", requestId: details.requestId, check: details.check?.name ?? "none", ...(details.check?.source === undefined ? {} : { source: details.check.source }), previous: details.previous?.name ?? "none" },
             });

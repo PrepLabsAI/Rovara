@@ -6,12 +6,12 @@
 //           when the workflow files cannot be read right now (a name is never taken on the person's word or the browser's). `null` always works: a person can always turn it off.
 //   Who      the setup rule, decided by the route (a company owner or admin, or the project's administrator); this file never sees a role it was not handed as `canManage`.
 //   Audit    the record naming the person and why they were allowed is written BEFORE the row: nothing changes when it cannot be written. The same request id with the same choice is one act.
-//   Words    fixed; nothing a repository, a workflow file or a caller wrote is echoed except the proposed check's own name (inert: no control character, 200 characters at most).
+//   Words    fixed; nothing a caller wrote is echoed. Of a repository only a proposed check's name, its workflow file's path and the repository's name are returned (to a manager, as the list to pick from), each bounded; Cloud refuses a control character in any of them.
 import { EvalCheckSchema, agentXError, type CodeHost, type EvalCheck, type HostScope, type PluginKind } from "@agentx/contracts";
 import { z } from "zod";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import { CI_READ_REPOSITORIES_MAX, CI_READ_TIMEOUT_MS } from "../plan/ci.js";
-import { EVAL_PROPOSALS_MAX, proposeEvalChecks, type EvalCheckProposal } from "./eval-check-proposal.js";
+import { EVAL_PROPOSALS_MAX, proposeEvalChecks } from "./eval-check-proposal.js";
 import { readEvalCheckSetting, writeEvalCheckSetting, type EvalCheckStoreDeps } from "./eval-check-setting.js";
 
 export const EVAL_CHECK_WORDS = {
@@ -70,8 +70,8 @@ export async function ciDefinitionReaderOf(host: Pick<CodeHost, "baseBranchHead"
 const sameCheck = (left: { name: string; source?: string | undefined }, right: { name: string; source?: string | undefined }): boolean => left.name === right.name && (left.source ?? "") === (right.source ?? "");
 
 /**
- * The proposals of a project's repositories (at most the first few, inside one deadline). A name proposed in two repositories is offered once. "unknown" unless every repository was read and at least one was proposed
- * from, or every one was read and none held an eval-looking job ("none_found"): a repository that could not be read is never taken as "no eval".
+ * The proposals of a project's repositories (at most the first few, inside one deadline). A name proposed in two repositories is offered once. What was proposed is offered even when another repository could not be read (the person
+ * picks from what Rovara saw); with nothing proposed the answer is "none_found" only when EVERY repository was read: a repository that could not be read is never taken as "no eval".
  */
 export async function gatherEvalProposals(deps: Pick<EvalCheckCardDeps, "readerFor">, repositories: readonly EvalCheckRepository[]): Promise<EvalCheckProposalsView> {
   const targets = repositories.slice(0, CI_READ_REPOSITORIES_MAX);
@@ -156,4 +156,3 @@ function sameChoice(left: EvalCheck | undefined, right: EvalCheck | undefined): 
   return sameCheck(left, right);
 }
 
-export type { EvalCheckProposal };

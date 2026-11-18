@@ -649,9 +649,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const wikiMap = createLocalWikiMap({ flow: flow.deps, registry, companyId, now: () => clock().getTime(), log });
   // Wiki W4: the wiki build controls (Build, Stop, Continue, Refresh now, the agents switch, Delete wiki). The task flow's wiki build starter is the one seam left to fill (`starter`).
   const wikiBuildControls = createLocalWikiBuild({ flow: flow.deps, wikiMap, owner, companyId, now: () => clock().getTime(), modelAccessConfigured: async () => (await chosen()) !== undefined, starter: createWikiBuildStarter });
-  // Lead 4 N1: the nightly upkeep switch (owner only; recorded here, and nothing AI-spending starts on a laptop by itself).
   // L4-EVCI2: the setup card's eval check from the customer's CI (owner only; the proposals come from the project's workflow files through the code host the registry holds).
   const evalCheck = createLocalEvalCheck({ flow: flow.deps, registry, companyId, audit: registry.require("audit-sink"), now: () => clock().getTime(), log });
+  // Lead 4 N1: the nightly upkeep switch (owner only; recorded here, and nothing AI-spending starts on a laptop by itself).
   const upkeepSwitch = createLocalUpkeep({ flow: flow.deps, owner, companyId, audit: registry.require("audit-sink"), now: () => clock().getTime() });
   // The worker's wiki build callback (the owner's standing, the project's own code host read for the citation re-read, this install's wiki store as the page sink) and the end hook for the build record.
   // An embedding product may supply its own (`options.wikiBuild`).

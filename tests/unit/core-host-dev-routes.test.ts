@@ -932,7 +932,7 @@ describe("the eval check card on the deployed API (L4-EVCI2)", () => {
     const { app, companyOf, remember } = await world2();
     const readFor: string[] = [];
     const read = async (companyId: string) => { readFor.push(companyId); return reader; };
-    const standing = async (personId: string, companyId: string) => (companyId === FAKE_COMPANY && personId === remember(FAKE_COMPANY).principal.personId ? { access: "manage" as const, basis: "company-owner" as const } : { access: "manage" as const, basis: "company-owner" as const });
+    const standing = async () => ({ access: "manage" as const, basis: "company-owner" as const });
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, evalCheck: { standing, readerFor: read } }) });
     const owner = remember(FAKE_COMPANY);
     const proposed = await routes.route(get(CARD), owner);

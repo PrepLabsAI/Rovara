@@ -807,7 +807,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // L4-EVCI2: the setup card's eval check from the customer's CI. The same live standing; the workflow files are read through the company's own code host (company-bound, listings and one file at a time).
           evalCheck: {
             standing: setupRunStanding,
-            readerFor: async (companyId, repository) => ciDefinitionReaderOf(codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }), repository, { orgId: companyId }),
+            readerFor: async (companyId, repository) => companyId !== runtime.companyId ? undefined : ciDefinitionReaderOf(codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }), repository, { orgId: companyId }),
           },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {

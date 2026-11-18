@@ -94,8 +94,8 @@ export async function routeHostedEvalCheck(input: HostedEvalCheckInput): Promise
       project, canManage: true, repositories,
       async record(details) {
         const event: AuditEvent = {
-          // The choice is in the id: the same request id with another choice is another act and must not be deduped as a replay.
-          eventId: `ci_eval_check.set:${companyId}:${project}:${personId}:${details.requestId}:${createHash("sha256").update(auditChoice(details.check), "utf8").digest("hex").slice(0, 16)}`,
+          // The choice AND what it replaced are in the id: the same request id with another choice, or a replay of an old id after a later change, is another act and must not be deduped as a replay.
+          eventId: `ci_eval_check.set:${companyId}:${project}:${personId}:${details.requestId}:${createHash("sha256").update(`${auditChoice(details.check)}\u0001${auditChoice(details.previous)}`, "utf8").digest("hex").slice(0, 16)}`,
           companyId, at: new Date(input.now()).toISOString(), actor: { type: "person", id: personId },
           action: "ci_eval_check.set", subject: { type: "project", id: project },
           details: { project, basis, requestId: details.requestId, check: details.check?.name ?? "none", ...(details.check?.source === undefined ? {} : { source: details.check.source }), previous: details.previous?.name ?? "none" },

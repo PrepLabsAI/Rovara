@@ -11,7 +11,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } from "../../packages/broker/src/core-host/eval-check-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createLocalEvalCheck } from "../../packages/broker/src/local/app/eval-check.js";
-import { EVAL_CHECK_WORDS, setEvalCheck } from "../../packages/broker/src/core/ci-evidence/eval-check-card.js";
+import { EVAL_CHECK_WORDS, ciDefinitionReaderOf, setEvalCheck } from "../../packages/broker/src/core/ci-evidence/eval-check-card.js";
 import { evalCheckEvidencePort, evalCheckKey, readEvalCheckSetting } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
 import { parseCiEvidenceSettings } from "@agentx/contracts";
 import type { CiDefinitionReader } from "../../packages/broker/src/rovara-code/ci-checks.js";
@@ -239,6 +239,19 @@ describe("the act", () => {
     expect((await w.call(OWNER, "GET", "beacon")).body["confirmed"]).toMatchObject({ name: "Quality gate" });
   });
 
+  it("replaying an OLD request id after a later change is a new act: it is recorded again (the record names what it replaced) and the row follows", async () => {
+    const w = hosted();
+    const first = choose("evals");
+    await put(w, OWNER, "beacon", first);
+    await put(w, OWNER, "beacon", choose("Quality gate"));
+    expect(w.audited).toHaveLength(2);
+    const replay = await put(w, OWNER, "beacon", first);
+    expect(replay.body["confirmed"]).toMatchObject({ name: "evals" });
+    expect(w.audited).toHaveLength(3);
+    expect(w.audited[2]).toMatchObject({ details: { check: "evals", previous: "Quality gate" } });
+    expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(3);
+  });
+
   it("bodies are strict: an unknown field, a bad request id, an empty or over-long name and a missing check are refused in fixed words", async () => {
     const w = hosted();
     const bad: unknown[] = [
@@ -409,5 +422,35 @@ describe("on a laptop", () => {
     expect((await l.call("GET", path))!.body["proposals"]).toEqual({ verdict: "unknown", items: [], cut: false });
     expect((await l.call("PUT", path, choose("evals")))!.status).toBe(503);
     expect((await l.call("PUT", path, { requestId: randomUUID(), check: null }))!.status).toBe(200);
+  });
+});
+
+describe("the workflow reader of a code host", () => {
+  const host = (files: Record<string, string>, over: Record<string, unknown> = {}) => {
+    const calls: string[] = [];
+    return {
+      calls,
+      host: {
+        baseBranchHead: async (_repository: unknown, branch: string) => { calls.push(`head ${branch}`); return "a".repeat(40); },
+        directoryEntries: async (_repository: unknown, path: string, revision: string) => { calls.push(`list ${path}@${revision.slice(0, 3)}`); return { entries: Object.keys(files).map((name) => ({ name, kind: "file" as const })), complete: true }; },
+        fileAtRevision: async (_repository: unknown, path: string, revision: string, _scope: unknown, options?: { maxBytes?: number }) => { calls.push(`read ${path}@${revision.slice(0, 3)} max ${String(options?.maxBytes)}`); return files[path.split("/").pop()!]; },
+        ...over,
+      } as never,
+    };
+  };
+  it("lists and reads at ONE commit, the head of the default branch, and the proposals come out of it", async () => {
+    const { host: h, calls } = host({ "ci.yml": WORKFLOW });
+    const reader = await ciDefinitionReaderOf(h, { url: "https://github.com/acme/app", defaultBranch: "trunk" }, { orgId: COMPANY_A });
+    const proposals = await (await import("../../packages/broker/src/core/ci-evidence/eval-check-proposal.js")).proposeEvalChecks(reader!);
+    expect(proposals).toMatchObject({ verdict: "proposals", proposals: [{ check: { name: "evals" } }, { check: { name: "Quality gate" } }] });
+    expect(calls[0]).toBe("head trunk");
+    expect(calls.slice(1).every((call) => call.includes("@aaa"))).toBe(true);
+    expect(calls).toContain("list .github/workflows@aaa");
+    expect(calls.some((call) => call.startsWith("read .github/workflows/ci.yml@aaa max "))).toBe(true);
+  });
+  it("a host that cannot list gives no reader; one that cannot answer throws (the card then says it could not read)", async () => {
+    expect(await ciDefinitionReaderOf({ baseBranchHead: async () => "a".repeat(40), fileAtRevision: async () => undefined }, { url: "u", defaultBranch: "main" }, { orgId: COMPANY_A })).toBeUndefined();
+    const { host: down } = host({}, { baseBranchHead: async () => { throw new Error("down"); } });
+    await expect(ciDefinitionReaderOf(down, { url: "u", defaultBranch: "main" }, { orgId: COMPANY_A })).rejects.toThrow();
   });
 });
