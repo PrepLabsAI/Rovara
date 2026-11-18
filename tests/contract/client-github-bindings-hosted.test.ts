@@ -11,19 +11,19 @@ import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/compa
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { createBroker, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
 
-const JCKF = "org_jckf8av6ri11rszcdjsa";
+const STAGING_COMPANY = "org_stagingshape00000000";
 const OTHER = "org_bbbbbbbbbbbbbbbbbbbb";
-const STAGING_INSTALLATION = 173228775;
+const STAGING_INSTALLATION = 700001;
 const OTHER_INSTALLATION = 88;
 const repo = (fullName: string, id: number) => ({ fullName, githubRepositoryId: id, private: true, defaultBranch: "main" });
 const installation = (id: number, login: string, repositories: ReturnType<typeof repo>[]) =>
   ({ installationId: id, accountLogin: login, accountType: "Organization" as const, repositorySelection: "selected" as const, status: "active" as const, repositories });
 const LISTED = [
-  installation(STAGING_INSTALLATION, "PrepLabsAI", [repo("PrepLabsAI/web", 1), repo("PrepLabsAI/docs", 2)]),
+  installation(STAGING_INSTALLATION, "acme-staging", [repo("acme-staging/web", 1), repo("acme-staging/docs", 2)]),
   installation(OTHER_INSTALLATION, "other-co", [repo("other-co/payroll", 3)]),
   installation(99, "unbound", [repo("unbound/x", 4)]),
 ];
-const INSTALLATION_OF: Record<string, number> = { PrepLabsAI: STAGING_INSTALLATION, "other-co": OTHER_INSTALLATION, unbound: 99 };
+const INSTALLATION_OF: Record<string, number> = { "acme-staging": STAGING_INSTALLATION, "other-co": OTHER_INSTALLATION, unbound: 99 };
 const ownerOf = (url: string) => /^https:\/\/github\.com\/([^/]+)\//.exec(url)![1]!;
 
 beforeAll(loadSlackBroker);
@@ -34,12 +34,12 @@ async function hosted(options: { company?: string; role?: Role; administrator?: 
   const bindings = new GithubInstallationBindings(h.db, "State");
   // Staging: the backfill marker is written, so an installation with no binding row belongs to nobody.
   await bindings.backfill(async () => []);
-  await bindings.claim(JCKF, STAGING_INSTALLATION, "PrepLabsAI", "operator-lambda");
+  await bindings.claim(STAGING_COMPANY, STAGING_INSTALLATION, "acme-staging", "operator-lambda");
   await bindings.claim(OTHER, OTHER_INSTALLATION, "other-co", "operator-lambda");
   // As the PR 19 tests sign in: the Rovara administrator by OIDC, a company owner/admin/member by Slack.
   // The install administrator signs in through the install's own OIDC: a session the sign-in server marked as the shared method, in their company.
   const amr = options.administrator === true ? "oidc" : "slack";
-  const company = options.company ?? JCKF;
+  const company = options.company ?? STAGING_COMPANY;
   const sharedMethod = amr === "oidc" && company !== IMPLICIT_COMPANY_ID ? { sessionId: "22222222-2222-4222-8222-222222222222", companyId: company, installMethod: true } : {};
   h.claims.azp = "web-app"; h.claims.amr = amr; h.claims.scope = "projects:create";
   h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app", amr, administrator: options.administrator ?? false, endsAt: 4_000_000_000, ...sharedMethod });
@@ -77,7 +77,7 @@ const ids = (response: { body: string }) => (json(response)["installations"] as 
 const choiceNames = (response: { body: string }) => (json(response)["repositories"] as Array<{ fullName: string }>).map((row) => row.fullName);
 const FORBIDDEN = { code: "FORBIDDEN", message: "only a Rovara administrator can create a project" };
 const ROUTES = [["/v1/dev/client/repositories", undefined], ["/v1/dev/client/repositories/available", undefined],
-  ["/v1/dev/client/projects", { repository: "PrepLabsAI/web" }], ["/v1/dev/client/projects/bulk", { repositories: ["PrepLabsAI/docs"] }]] as const;
+  ["/v1/dev/client/projects", { repository: "acme-staging/web" }], ["/v1/dev/client/projects/bulk", { repositories: ["acme-staging/docs"] }]] as const;
 
 describe("hosted client project routes with the company GitHub bindings", () => {
   it.each([["owner", "developer"], ["admin", "developer"], ["owner", "linking"]] as const)("the staging shape: a company %s (%s) lists, picks and creates from its own installation only", async (role, mode) => {
@@ -87,12 +87,12 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     expect(ids(listed)).toEqual([STAGING_INSTALLATION]);
     const picker = await h.call("/v1/dev/client/repositories/available");
     expect(picker.statusCode).toBe(200);
-    expect(choiceNames(picker)).toEqual(["PrepLabsAI/docs", "PrepLabsAI/web"]);
-    const created = await h.call("/v1/dev/client/projects", { repository: "PrepLabsAI/web" });
+    expect(choiceNames(picker)).toEqual(["acme-staging/docs", "acme-staging/web"]);
+    const created = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
     expect(created.statusCode).toBe(200);
     const name = (json(created) as { name: string }).name;
-    expect(h.db.get(`PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(JCKF);
-    const bulk = await h.call("/v1/dev/client/projects/bulk", { repositories: ["PrepLabsAI/docs"] });
+    expect(h.db.get(`PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(STAGING_COMPANY);
+    const bulk = await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-staging/docs"] });
     expect(bulk.statusCode).toBe(200);
     expect((json(bulk)["results"] as Array<{ outcome: string }>).map((row) => row.outcome)).toEqual(["created"]);
   });
@@ -101,9 +101,9 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     const h = await hosted({ company: OTHER, role: "owner" });
     expect(ids(await h.call("/v1/dev/client/repositories"))).toEqual([OTHER_INSTALLATION]);
     expect(choiceNames(await h.call("/v1/dev/client/repositories/available"))).toEqual(["other-co/payroll"]);
-    const refused = await h.call("/v1/dev/client/projects", { repository: "PrepLabsAI/web" });
+    const refused = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
     expect(refused.statusCode).toBe(400);
-    expect(refused.body).not.toContain(JCKF);
+    expect(refused.body).not.toContain(STAGING_COMPANY);
     expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
     expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
     // And the other way round: the staging company sees nothing of the second company's.
@@ -115,11 +115,11 @@ describe("hosted client project routes with the company GitHub bindings", () => 
 
   it("the multi-repository and bulk creates refuse another company's repository and write nothing", async () => {
     const h = await hosted({ company: OTHER, role: "admin" });
-    const many = await h.call("/v1/dev/client/projects", { repositories: ["other-co/payroll", "PrepLabsAI/web"], name: "mixed" });
+    const many = await h.call("/v1/dev/client/projects", { repositories: ["other-co/payroll", "acme-staging/web"], name: "mixed" });
     expect(json(many)["error"]).toEqual({ code: "CONFIG_INVALID", message: REPOSITORIES_NOT_AVAILABLE });
-    const bulk = await h.call("/v1/dev/client/projects/bulk", { repositories: ["PrepLabsAI/docs"] });
+    const bulk = await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-staging/docs"] });
     expect(JSON.stringify(json(bulk))).not.toContain("\"created\"");
-    expect(bulk.body).not.toContain(JCKF);
+    expect(bulk.body).not.toContain(STAGING_COMPANY);
     expect(h.db.find((item) => typeof item.pk === "string" && item.pk.startsWith("PROJECT#"))).toEqual([]);
   });
 
@@ -127,10 +127,10 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     const revoked = await hosted({ role: "owner" });
     revoked.db.set({ ...revoked.db.get(`COMPANY_MEMBER#${PERSON}`, "COMPANY")!, revokedAt: TIME, revokedBy: "test" });
     // A removed membership ends the sign-in's company at once (the token check); a revoked sign-in record fails companyMayCreateProjects.
-    expect(json(await revoked.call("/v1/dev/client/projects", { repository: "PrepLabsAI/web" }))["error"]).toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(json(await revoked.call("/v1/dev/client/projects", { repository: "acme-staging/web" }))["error"]).toMatchObject({ code: "AUTH_REQUIRED" });
     const signedOut = await hosted({ role: "owner" });
     signedOut.db.set({ ...signedOut.db.get(`DEVELOPER#${PERSON}`, "META")!, revoked: true });
-    expect(json(await signedOut.call("/v1/dev/client/projects", { repository: "PrepLabsAI/web" }))["error"]).toEqual(FORBIDDEN);
+    expect(json(await signedOut.call("/v1/dev/client/projects", { repository: "acme-staging/web" }))["error"]).toEqual(FORBIDDEN);
     for (const h of [revoked, signedOut]) {
       expect(h.db.find((item) => typeof item.pk === "string" && item.pk.startsWith("PROJECT#"))).toEqual([]);
       expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
@@ -151,13 +151,13 @@ describe("hosted client project routes with the company GitHub bindings", () => 
   it("the install administrator still lists and creates, filtered to their own company", async () => {
     const h = await hosted({ administrator: true, role: "member" });
     expect(ids(await h.call("/v1/dev/client/repositories"))).toEqual([STAGING_INSTALLATION]);
-    const created = await h.call("/v1/dev/client/projects", { repository: "PrepLabsAI/web" });
+    const created = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
     expect(created.statusCode).toBe(200);
-    expect(h.db.get("PROJECT#web", "REV#000000000001")?.companyId).toBe(JCKF);
+    expect(h.db.get("PROJECT#web", "REV#000000000001")?.companyId).toBe(STAGING_COMPANY);
     // The legacy member of the implicit company (staging's fourth row): the marker is written, so no installation is the implicit company's.
     const legacy = await hosted({ administrator: true, company: IMPLICIT_COMPANY_ID, role: "member" });
     expect(ids(await legacy.call("/v1/dev/client/repositories"))).toEqual([]);
-    expect((await legacy.call("/v1/dev/client/projects", { repository: "PrepLabsAI/web" })).statusCode).toBe(400);
+    expect((await legacy.call("/v1/dev/client/projects", { repository: "acme-staging/web" })).statusCode).toBe(400);
   });
 
   it("a removed membership is refused at once, before any provider read", async () => {
