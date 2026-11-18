@@ -328,6 +328,9 @@ describe("the health run is opt-in (D5)", () => {
     expect(await reader(w)).toBeUndefined();
     expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("finished");
     // Saying yes again after a finished one makes a new request.
+    // A stale retry of the finished click is the same answer and queues nothing again.
+    expect(await ask(w, person(A, "admin"), { requestId: id })).toMatchObject({ requested: true, duplicate: true });
+    expect(await reader(w)).toBeUndefined();
     expect(await ask(w)).toMatchObject({ requested: true, duplicate: false });
   });
 });

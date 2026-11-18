@@ -68,9 +68,9 @@ export async function requestEvalHealthCheck(deps: EvalHealthRequestDeps, projec
   const key = evalHealthRequestKey(deps.companyId, project);
   const raw = await deps.store.get(key);
   const before = parse(deps, project, raw);
-  if (before !== undefined && before.spendDigest === found.spend.digest && before.state === "requested") {
-    return before.requestId === body.requestId ? { requested: true, duplicate: true, cost: dollarsOf(estimate) } : refuse("CHANGE_STALE", "An eval check is already waiting to run.");
-  }
+  // Idempotent per request id: a repeat of a yes already taken (waiting, finished or void) is the same answer and queues nothing again, so a stale retry of an old click never starts another run.
+  if (before !== undefined && before.requestId === body.requestId) return { requested: true, duplicate: true, cost: dollarsOf(estimate) };
+  if (before !== undefined && before.spendDigest === found.spend.digest && before.state === "requested") return refuse("CHANGE_STALE", "An eval check is already waiting to run.");
   const row: EvalHealthRequestRecord = RecordSchema.parse({ entityType: EVAL_HEALTH_REQUEST_ENTITY, schemaVersion: 1, company: deps.companyId, project, requestId: body.requestId, spendDigest: found.spend.digest, estimateMicros: estimate,
     requestedBy: { personId: principal.personId, provider: principal.provider, role, at: new Date(deps.now()).toISOString() }, state: "requested" });
   const condition = raw === undefined ? when.absent() : when.and(...Object.entries(raw).map(([name, value]) => when.eq([name], value)));
