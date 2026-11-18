@@ -26,7 +26,7 @@ export async function keepByPerson(deps: ApproveDeps & { evidence: Pick<Evidence
   if (lesson === undefined) return { ok: false, code: "not_found" };
   if (lesson.status !== "active") return { ok: false, code: "not_pending" };
   // The person's own standing and the access records NOW (a restricted lesson is read only by someone who could see its source), as for a rejection; no answer is a no.
-  const mayRead = await readVisible({ access: deps.access, key, viewer: await deps.directory.identity(key.workspaceId, input.actorId), lessons: [lesson], where: "approve", log: deps.log }).then((shown) => shown.length === 1, () => false).catch(() => false);
+  const mayRead = await (async (): Promise<boolean> => (await readVisible({ access: deps.access, key, viewer: await deps.directory.identity(key.workspaceId, input.actorId), lessons: [lesson], where: "approve", log: deps.log })).length === 1)().catch(() => false);
   if (!mayRead) return { ok: false, code: "not_permitted" };
   const fade = await deps.evidence.readFade(key, lesson.id);
   // A fade state that cannot be read is not "no question": nothing is changed.
