@@ -128,6 +128,8 @@ export function publicEvidenceAi(input: unknown) {
   if (ai === undefined) return undefined;
   return { eval: { label: ai.eval.label, privateSet: ai.eval.privateSet, ...(ai.eval.notRunReason === undefined ? {} : { notRunReason: ai.eval.notRunReason }),
     // Public: the code and phase only (no name, no exit code, no output).
-    ...(ai.eval.runFailure === undefined ? {} : { runFailure: { code: ai.eval.runFailure.code, phase: ai.eval.runFailure.phase, tail: "" } }), ...(ai.eval.counts === undefined ? {} : { counts: ai.eval.counts }) }, realModelRun: ai.realModelRun, promptWithoutEval: ai.promptWithoutEval };
+    ...(ai.eval.runFailure === undefined ? {} : { runFailure: { code: ai.eval.runFailure.code, phase: ai.eval.runFailure.phase, tail: "",
+      // TH1: the kinds only (a database, an outside service): no port, no host.
+      ...(ai.eval.runFailure.blocked === undefined ? {} : { blocked: { items: ai.eval.runFailure.blocked.items.map(item => ({ kind: item.kind })), ...(ai.eval.runFailure.blocked.more === true ? { more: true } : {}) } }) } }), ...(ai.eval.counts === undefined ? {} : { counts: ai.eval.counts }) }, realModelRun: ai.realModelRun, promptWithoutEval: ai.promptWithoutEval };
 }
 export type PublicEvidenceAi = NonNullable<ReturnType<typeof publicEvidenceAi>>;

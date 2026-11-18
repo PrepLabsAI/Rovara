@@ -496,6 +496,31 @@ describe("the project's own dependency (PyYAML): saved environment vs the bare s
     expect(publicBody).not.toContain("Eval output");
   }, TIMEOUT);
 
+  // L4-TH1: a sealed eval that tried to reach a database and an outside host is named, not "exit code 1". The command's output is printed by the world (no real connection is made); the token is built at run time.
+  const BLOCKED_TOKEN = ["Zk3pQ9vL2m", "Xa7TnR5wYc8", "UdB4hGe6JfS"].join("");
+  const blockedOutput = [
+    "Traceback (most recent call last):",
+    '  File "evals/run.py", line 12, in <module>',
+    'psycopg2.OperationalError: connection to server at "db" (172.18.0.2), port 5432 failed: Connection refused',
+    `requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.tiktok.com', port=443): Max retries exceeded with url: /v2/video/list?access_token=${BLOCKED_TOKEN} (Caused by NameResolutionError("Failed to resolve 'api.tiktok.com'"))`,
+  ].join("\n");
+
+  it("TH1: a run that tried to reach a database and an outside host says so, in the check result and the pull request line (private: named; a public repository: the kinds only)", async () => {
+    const w = await world({ blockedOutput });
+    const artifact = await check(w);
+    expect(artifact.outcome).toBe("not_run");
+    expect(artifact.notRunReason).toBe("eval_run_failed");
+    expect(artifact.runFailure).toMatchObject({ code: "blocked_connection", phase: "run", exitCode: 1, blocked: { items: [{ kind: "database", port: 5432 }, { kind: "service", host: "api.tiktok.com" }] } });
+    expect(w.frames).toHaveLength(0);
+    expect(evalResultFromArtifact(artifact).notRun?.sentence).toBe("not run: your eval tried to reach a database (port 5432) and an outside service (api.tiktok.com). Rovara's sealed check can't reach those yet");
+    const { body } = await pullRequest(w, artifact);
+    expect(body).toContain("Eval: Not run: your eval tried to reach a database (port 5432) and an outside service (api.tiktok.com). Rovara's sealed check can't reach those yet.");
+    expect(body).not.toContain(BLOCKED_TOKEN);
+    const publicBody = (await pullRequest(w, artifact, { repositoryKnownPrivate: false })).body;
+    expect(publicBody).toContain("Eval: Not run: your eval tried to reach a database and an outside service. Rovara's sealed check can't reach those yet.");
+    for (const leak of ["api.tiktok.com", "5432", BLOCKED_TOKEN, "Eval output"]) expect(publicBody).not.toContain(leak);
+  }, TIMEOUT);
+
   it("the saved environment makes the SAME eval run: per-case results, the comparison and the label, with the dependency really imported", async () => {
     const w = await world({ patch: GREEN });
     expect(w.savedEnvironment).toBeDefined();

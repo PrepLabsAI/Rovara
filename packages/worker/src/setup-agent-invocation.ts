@@ -15,6 +15,9 @@ import type { RunNetwork } from "./setup-network.js";
 import { setupModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./verification/eval-wiring.js";
+import { runSetupEvalDryRun } from "./verification/eval-dry-run.js";
+import { testServicesConfigFromEnvironment } from "./test-services-run.js";
+import { join } from "node:path";
 
 export interface SetupInvocationDependencies {
   rootPath: string;
@@ -74,6 +77,11 @@ export async function runSetupAgentInvocation(
   const result = await runSetupAgent({
     rootPath: canonicalRoot, operationId: invocation.operationId, basedOnRevision: invocation.projectRevision, limits: setup.limits, price,
     repositories: manifest.repositories, commits: setup.commits, evalImage: environment[EVAL_WORKER_IMAGE_VARIABLE],
+    // L4-E12 (E2): the free dry run of the drafted eval, started without asking, never spending (scripted model replies, no bridge). It needs the worker's own pinned image and the fresh eval sandbox's walls; otherwise it gives nothing.
+    evalDryRun: (report) => runSetupEvalDryRun({
+      docker, environment, taskId: invocation.operationId, workspaceKey: () => setupWorkspaceKey(canonicalRoot), commits: setup.commits, servicesOff: testServicesConfigFromEnvironment(environment, docker) === undefined,
+      repositories: manifest.repositories.map((repository) => ({ name: repository.name, directory: join(canonicalRoot, repository.path) })),
+    }, report),
     ...(manifest.meta === undefined ? {} : { metaRepo: manifest.meta.name }),
     ports: {
       startNetwork: async () => (sharedNetwork !== undefined ? sharedRunNetwork(sharedNetwork) : startRunNetwork(docker, { taskId: invocation.operationId, image, workspace: await setupWorkspaceKey(canonicalRoot) })),

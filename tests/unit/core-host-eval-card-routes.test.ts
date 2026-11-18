@@ -15,6 +15,7 @@ import { evalSpendKey, readEvalSpendRecord } from "../../packages/broker/src/cor
 import { deployedSessionMembers } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { evalHealthState, readEvalHealthRequest } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
 import { readEvalDiscovery } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
+import { recordEvalDependencyList } from "../../packages/broker/src/core/setup-agent/eval-dependency-list.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { CAP, company, filesOf, gitReader, project as PROJECT, reportOf } from "../support/eval-card-world.js";
 
@@ -41,7 +42,7 @@ const post = (path: string, body: unknown = {}) => ({ method: "POST", path, head
 const RUN = `/v1/app/projects/${PROJECT}/setup-agent`;
 interface Person { companyId: OrgId; role: OrgRole; grants: Record<string, "developer" | "administrator"> }
 
-async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; healthRun?: (project: string) => Promise<unknown>; providerConnected?: (scope: { company: string; project: string }) => Promise<boolean | undefined> } = {}) {
+async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; healthRun?: (project: string) => Promise<unknown>; providerConnected?: (scope: { company: string; project: string }) => Promise<boolean | undefined>; testServicesOff?: () => boolean } = {}) {
   const world = createFakeWorld();
   await register(world, FAKE_COMPANY, PROJECT); await register(world, OTHER, PROJECT);
   const app = appOver(world);
@@ -69,7 +70,7 @@ async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; hea
   const wiringFor = (companyId: OrgId): HostedSetupRunWiring => ({
     standing, modelAccessConfigured: () => true,
     approval: createHostedSetupApproval({ flow: { store: world.store, companyId, now: () => new Date(world.clock.now) }, store: world.store, approvers, audit: sink, identity, people: { membershipOf, projectGrantRole }, proofKey: KEY, now: () => new Date(world.clock.now) }),
-    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, ...(options.healthRun === undefined ? {} : { healthRun: options.healthRun }), ...(options.providerConnected === undefined ? {} : { providerConnected: options.providerConnected }), monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
+    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, ...(options.healthRun === undefined ? {} : { healthRun: options.healthRun }), ...(options.providerConnected === undefined ? {} : { providerConnected: options.providerConnected }), ...(options.testServicesOff === undefined ? {} : { testServicesOff: options.testServicesOff }), monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
   });
   const wirings = new Map<string, HostedSetupRunWiring>([[FAKE_COMPANY, wiringFor(FAKE_COMPANY)], [OTHER, wiringFor(OTHER)]]);
   const routes = createCoreDevRoutes({
@@ -325,5 +326,39 @@ describe("POST eval-health starts the run (L4-EVH)", () => {
     const off = await approvedWorld({ healthRuns: false, healthRun: async (name) => { started.push(name); } });
     expect((await off.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: off.seen }), off.admin)).status).toBe(404);
     expect(started).toEqual([]);
+  });
+});
+
+describe("GET eval: what the free dry run found (L4-E12)", () => {
+  const LIST = { version: 1 as const, modelCalls: 0 as const, ended: "failed" as const, databases: [{ port: 5432, engine: "postgres" as const }], hosts: [{ name: "api.vendor.example.test", port: 443 }], envVars: ["STRIPE_API_KEY"] };
+  const record = (world: FakeWorld, companyId: OrgId) => recordEvalDependencyList({ store: world.store, now: () => world.clock.now }, { orgId: companyId, project: PROJECT, taskId: randomUUID() }, LIST);
+
+  it("carries the list in the TH1 words on the card, with the off reason only where the deployment says test services are off", async () => {
+    const off = await hosted({ testServicesOff: () => true });
+    await off.reported(FAKE_COMPANY);
+    await record(off.world, FAKE_COMPANY);
+    const admin = off.person("p-admin", FAKE_COMPANY, "admin");
+    const card = (await off.call(get(`${RUN}/eval`), admin)).body as { reaches?: { words: string; blocked?: { items: unknown[] } } };
+    expect(card.reaches?.words).toBe("A free dry run of your eval on main found it reaches a database (port 5432) and an outside service (api.vendor.example.test) and needs the variable STRIPE_API_KEY. Test services are off on this install, so your evals get no database or stand-in here yet.");
+    expect(card.reaches?.blocked?.items).toEqual([{ kind: "database", port: 5432 }, { kind: "service", host: "api.vendor.example.test" }]);
+    const on = await hosted({ testServicesOff: () => false });
+    await on.reported(FAKE_COMPANY);
+    await record(on.world, FAKE_COMPANY);
+    const answer = (await on.call(get(`${RUN}/eval`), on.person("p-admin", FAKE_COMPANY, "admin"))).body as { reaches?: { words: string } };
+    expect(answer.reaches?.words).not.toContain("Test services");
+    // a deployment that wires no switch reads as on
+    const none = await hosted();
+    await none.reported(FAKE_COMPANY);
+    await record(none.world, FAKE_COMPANY);
+    expect(((await none.call(get(`${RUN}/eval`), none.person("p-admin", FAKE_COMPANY, "admin"))).body as { reaches?: { words: string } }).reaches?.words).not.toContain("Test services");
+  });
+
+  it("shows nothing to another company, and nothing where no dry run ran (two companies)", async () => {
+    const { world, person, call, reported } = await hosted({ testServicesOff: () => true });
+    await reported(FAKE_COMPANY);
+    expect((await call(get(`${RUN}/eval`), person("p-admin", FAKE_COMPANY, "admin"))).body["reaches"]).toBeUndefined();
+    await record(world, FAKE_COMPANY);
+    expect((await call(get(`${RUN}/eval`), person("o-admin", OTHER, "admin"))).body["reaches"]).toBeUndefined();
+    expect((await call(get(`${RUN}/eval`), person("p-admin", FAKE_COMPANY, "admin"))).body["reaches"]).toBeDefined();
   });
 });

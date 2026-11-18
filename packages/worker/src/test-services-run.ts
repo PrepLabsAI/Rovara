@@ -319,7 +319,7 @@ export async function testServicesAtWorkerBoot(input: { rootPath: string; config
 // ---- the plan to helper requests and the run's environment
 
 /** One dependency of the plan checked against the worker's own signed catalog; credentials and requests are made per phase (`materialize`). */
-interface Base {
+export interface Base {
   plan: TaskDependencyPlan;
   entry: CatalogEntry;
   aliases: string[];
@@ -347,7 +347,7 @@ interface EmulatorBase {
 }
 
 /** A dependency with one phase's own helper request and credentials (the working phase's, or one sealed round's). The emulator's has no `env`: its variables come from the `aws` block of the environment. */
-interface Resolved extends Base {
+export interface Resolved extends Base {
   request: HelperRequest;
   env?: ServiceEnvDependency;
 }
@@ -399,7 +399,7 @@ async function initFilesOf(plan: TaskDependencyPlan, root: string, repositoryPat
 }
 
 /** Every base's image, by digest, must already be on this host (the launcher runs with `--pull=never`, and the worker has no registry login). Otherwise: the fixed `pull_failed`, naming the dependencies, with nothing made yet. */
-async function requireLocalImages(docker: DockerCli, config: Pick<TestServicesConfig, "registry" | "catalogEnv" | "imageReferences">, bases: readonly Base[], signal: AbortSignal | undefined): Promise<void> {
+export async function requireLocalImages(docker: DockerCli, config: Pick<TestServicesConfig, "registry" | "catalogEnv" | "imageReferences">, bases: readonly Base[], signal: AbortSignal | undefined): Promise<void> {
   const missing = new Map<string, TestServicesStartFailure>();
   for (const base of bases) {
     if (signal?.aborted === true) throw new TestServicesError("start_failed");
@@ -415,13 +415,13 @@ async function requireLocalImages(docker: DockerCli, config: Pick<TestServicesCo
   if (missing.size > 0) throw new TestServicesError("pull_failed", missing);
 }
 
-const randomAlphanumeric = (length: number): string => randomBytes(length).toString("hex").slice(0, length);
+export const randomAlphanumeric = (length: number): string => randomBytes(length).toString("hex").slice(0, length);
 
 /**
  * The plan's dependencies against the worker's own signed catalog: the plan names an entry, a repository and a digest, and the catalog must say the same (family, backing, pinned digest, edition, not retired). Anything else
  * is `mismatch`: the broker's plan is never trusted to name an image. The user and the database come from the plan's config or fixed defaults, and must have the launcher's plain form.
  */
-function resolveDependencies(catalog: ServiceCatalog, dependencies: readonly TaskDependencyPlan[], config: Pick<TestServicesConfig, "edition">): Base[] {
+export function resolveDependencies(catalog: ServiceCatalog, dependencies: readonly TaskDependencyPlan[], config: Pick<TestServicesConfig, "edition">): Base[] {
   const emulated = dependencies.filter((plan) => plan.backing === "emulated");
   const bases: Base[] = [];
   let group: Base | undefined;
@@ -549,7 +549,7 @@ function resolveLocal(catalog: ServiceCatalog, plan: TaskDependencyPlan, config:
  * One phase's helper request and variables, with a password made now: the working phase and every sealed round have their own, so no phase's helpers or password are another's. A fake's request carries its phase's set (fetched
  * for this phase) and which sandbox it answers; it has no password.
  */
-function materialize(base: Base, phase: "working" | "check", fixtures: ReadonlyMap<string, string>): Resolved {
+export function materialize(base: Base, phase: "working" | "check", fixtures: ReadonlyMap<string, string>): Resolved {
   if (base.fake !== undefined) {
     const fixtureJson = fixtures.get(base.fake.digest);
     if (fixtureJson === undefined) throw new TestServicesError("fixtures");
@@ -589,7 +589,7 @@ export function neverValuesFor(resolved: ReadonlyArray<Pick<Resolved, "request" 
  * names and of each `AWS_ENDPOINT_URL_*` name the repository's own settings set (`repoEndpointNames`), and the global endpoint, all at the emulator's first alias (a call to a service outside the plan reaches it through the global endpoint and its ledger counts it as out of the plan, so the broker flags it; the sinkhole is used only where no emulator runs), `AWS_REGION` and `AWS_DEFAULT_REGION` from the plan's region (only a label inside the emulator:
  * every endpoint is overridden, so no SDK call goes to the region's real AWS), fake credentials. The emulator's control token and secrets are `neverValues`: a variable holding one is refused.
  */
-function environmentFor(sandbox: "working" | "check", resolved: readonly Resolved[], repoEndpointNames: readonly string[] = []): ServiceEnvironment {
+export function environmentFor(sandbox: "working" | "check", resolved: readonly Resolved[], repoEndpointNames: readonly string[] = []): ServiceEnvironment {
   const emulator = resolved.find((item) => item.emulator !== undefined);
   return buildServiceEnvironment({
     sandbox, sinkholeUrl: SINKHOLE_URL, dependencies: resolved.flatMap((item) => (item.env === undefined ? [] : [item.env])), neverValues: neverValuesFor(resolved),
