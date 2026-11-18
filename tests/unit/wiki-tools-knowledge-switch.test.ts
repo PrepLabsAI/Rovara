@@ -186,9 +186,23 @@ describe("wikiToolsGate", () => {
     // A project in learning Off (standard preset) and the project's own local-tools setting are about lessons.
     expect(await wikiToolsGate({ localTools: settings({ companyStays: false }), settings: learning({ mode: "Off" }) }, key)).toBeUndefined();
     expect(await wikiToolsGate({ localTools: settings({ companyStays: false, projectOn: false }), settings: learning() }, key)).toBeUndefined();
-    // The install's lessons switch is a lessons matter too.
+    // The install's lessons switch is a lessons matter: it does not open the wiki for a company that turned the switch on, and it does not close it for one that did not.
     setLearnedLessonsGate(() => false);
-    expect(await wikiToolsGate({ localTools: settings({ companyStays: true }), settings: learning() }, key)).toBeUndefined();
+    expect(await wikiToolsGate({ localTools: settings({ companyStays: true }), settings: learning() }, key)).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
+    expect(await wikiToolsGate({ localTools: settings({ companyStays: false }), settings: learning() }, key)).toBeUndefined();
+  });
+  it("a company with no lessons runtime (no learning settings) is still held to its own switch", async () => {
+    setLearnedLessonsGate(() => false);
+    expect(await wikiToolsGate({ localTools: settings({ companyStays: true }) }, key)).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
+    expect(await wikiToolsGate({ localTools: settings({ companyStays: false }) }, key)).toBeUndefined();
+    await expect(wikiToolsGate({ localTools: settings("throw") }, key)).rejects.toBeInstanceOf(LocalLessonsUnavailable);
+  });
+  it("a caller that says nothing about being the web app is held to the switch (the route's default is closed)", async () => {
+    const h = await world();
+    await h.stays(FAKE_COMPANY, true);
+    const { routeHostedWiki } = await import("../../packages/broker/src/core-host/wiki-routes.js");
+    const answer = await routeHostedWiki({ request: { method: "GET", path: paths[0], headers: {} }, path: paths[0], personId: "p", companyId: FAKE_COMPANY as OrgId, store: h.w.store, now: () => h.w.clock.now, wiring: { standing: async () => ({ access: "view" }), projectRepositories: async () => ["web"], toolGate: async (companyId, project) => await wikiToolsGate({ localTools: h.localTools }, { workspaceId: companyId, project }) } });
+    expect(JSON.parse(answer.body as string)).toMatchObject({ status: "off" });
   });
   it("throws LocalLessonsUnavailable when the setting cannot be read", async () => {
     setLearnedLessonsGate(() => true);

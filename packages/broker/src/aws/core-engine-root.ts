@@ -76,6 +76,7 @@ import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { wikiToolsGate } from "../lessons/local-tools.js";
+import { DocumentLocalToolsSettings } from "../lessons/document-settings.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
@@ -823,8 +824,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             standing: setupRunStanding,
             projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
-            // L4-WKS: the company's "Knowledge stays in Rovara" for the MCP wiki tools (any caller but the web app), through the company's own lessons settings; absent where lessons are not on for the company.
-            ...(companyLessons === undefined ? {} : { toolGate: async (companyId: OrgId, project: string) => { if (companyId !== runtime.companyId) throw new Error("wiki gate: another company"); return await wikiToolsGate({ localTools: companyLessons.runtime.localTools, settings: companyLessons.runtime.settings }, { workspaceId: runtime.companyId, project }); } }),
+            // L4-WKS: the company's "Knowledge stays in Rovara" for the MCP wiki tools (any caller but the web app). The company's own switch is read from its own store even where lessons are not on for it (no lessons runtime);
+            // the Regulated preset needs the lessons settings, so it applies where they exist.
+            toolGate: async (companyId: OrgId, project: string) => {
+              if (companyId !== runtime.companyId) throw new Error("wiki gate: another company");
+              return await wikiToolsGate(companyLessons === undefined ? { localTools: new DocumentLocalToolsSettings(registry.require("storage")) } : { localTools: companyLessons.runtime.localTools, settings: companyLessons.runtime.settings }, { workspaceId: runtime.companyId, project });
+            },
           },
           // Lead 4 C1: the wiki's corrections. The role is read live from membership; "Suggest as a lesson" exists only where lessons are on for the company (it writes one PENDING lesson, never approves).
           wikiCorrections: {

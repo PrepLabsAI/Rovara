@@ -583,7 +583,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             }
           }
           if (target.wiring.wiki === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target), outsideTool: caller.webApp !== true });
+          return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target), webApp: caller.webApp === true });
         }
         if (isWikiCorrectionPath(path, request.method)) {
           // Lead 4 C1: the same member company's own store; the caller's role on the project is read live inside (never from the request).

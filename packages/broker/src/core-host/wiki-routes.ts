@@ -53,10 +53,10 @@ export interface HostedWikiInput {
   wiring: HostedWikiWiring;
   now: () => number;
   /**
-   * True when the caller is a tool outside Rovara (anything but the web app's own verified sign-in: a CLI token, another client, a script token): the company switch then answers before anything of the wiki is read. The
-   * Rovara web app's own Wiki tab is never held back by it.
+   * True only for the Rovara web app's own verified sign-in client (`DeployedCaller.webApp`). Anyone else (a CLI token, another client, a script token, or a caller that says nothing) is a tool outside Rovara and is held to the
+   * company's "Knowledge stays in Rovara" switch before anything of the wiki is read. The web app's own Wiki tab is never held back by it.
    */
-  outsideTool?: boolean | undefined;
+  webApp?: boolean | undefined;
 }
 
 const WIKI_PATH = /^\/v1\/app\/projects\/([^/]+)\/wiki(?:\/(?:search|pages\/([^/]+)(\/sources)?))?$/u;
@@ -92,7 +92,7 @@ export async function routeHostedWiki(input: HostedWikiInput): Promise<BrokerRes
     if (!(await mayRead(input, project))) throw projectNotFound();
     // The company's "Knowledge stays in Rovara" (owner decision 2026-11-17), for a tool outside Rovara: after the person's standing and the project (so a project one may not read is still "not found") and BEFORE any read of the
     // wiki, the repositories or the prune below, the way the knowledge tools run their one gate after the repository is proved and before anything is read.
-    if (input.outsideTool === true && input.wiring.toolGate !== undefined) {
+    if (input.webApp !== true && input.wiring.toolGate !== undefined) {
       let off: WikiToolsOff | undefined;
       try { off = await input.wiring.toolGate(input.companyId, project); } catch { throw unavailable(); }
       if (off !== undefined) return json(200, off);
