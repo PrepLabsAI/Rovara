@@ -94,7 +94,7 @@ describe("admin change plans that act on the administrator's own company, for an
 
   it.each(changes)("$kind is refused with FORBIDDEN in the clear words, not AUTH_REQUIRED, before anything is read", async (change) => {
     const world = deps(undefined);
-    const error = await caught(planChange(world.deps, identity, change as never));
+    const error = await caught(planChange(world.deps, identity, change));
     expect(error?.code).toBe("FORBIDDEN");
     expect(error?.message).toContain(ADMIN_NOT_IN_A_COMPANY);
     expect(world.asked).toEqual([]);
@@ -102,7 +102,7 @@ describe("admin change plans that act on the administrator's own company, for an
 
   it("register_sign_in_client still plans for a member administrator, in its own company", async () => {
     const world = deps(ORG_A);
-    const plan = await planChange(world.deps, identity, changes[0] as never);
+    const plan = await planChange(world.deps, identity, changes[0]);
     expect(plan.effect).toContain("Register sign-in client scheduler");
     expect(world.asked).toEqual([ORG_A]);
   });

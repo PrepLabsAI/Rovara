@@ -68,7 +68,9 @@ export async function requireGatewayOffers(input: GatewayOfferedInputs): Promise
     if (status !== 200) await response.body?.cancel().catch(() => undefined);
   } catch { throw unreadable(); }
   if (status === 401 || status === 403) {
-    throw agentXError("AUTH_REQUIRED", `${notChanged}: AgentX would not show the models the model gateway offers to this computer's admin sign-in; run agentx --env ${env} login --admin, then try again; nothing changed`);
+    // P0-14: a control plane from before --company refuses an operator in no company here; signing in again cannot fix that, so say so.
+    const older = input.company === undefined ? "" : ` (if it still refuses, the control plane on ${env} may be from before --company; upgrade it)`;
+    throw agentXError("AUTH_REQUIRED", `${notChanged}: AgentX would not show the models the model gateway offers to this computer's admin sign-in; run agentx --env ${env} login --admin, then try again${older}; nothing changed`);
   }
   if (status === 404) {
     throw agentXError("CONFIG_INVALID", `${notChanged}: the model gateway is not set up on ${env} yet, so ${value} cannot be checked; set coreEngine.modelGatewayUrl first (agentx --env ${env} config set coreEngine.modelGatewayUrl <https origin>), then try again; nothing changed`);

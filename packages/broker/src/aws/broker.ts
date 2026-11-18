@@ -296,8 +296,7 @@ import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepositor
 import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
-import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
-import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
+import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js"; import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -1730,10 +1729,8 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (request.method === "GET" && url.pathname === CORE_OFFERED_MODELS_ADMIN_PATH) {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
         if (dependencies.coreOfferedModels === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
-        // P0-14: the company the operator names (or its own membership); never AUTH_REQUIRED for an operator in no company (admin-offered-models.ts).
-        const signIn = dependencies.developer ?? dependencies.linking;
-        const company = await offeredModelsCompany({ named: url.searchParams.getAll(OFFERED_MODELS_COMPANY_PARAMETER), companies: signIn?.companies, ownerKey: identity.ownerKey,
-          signIn: signIn === undefined ? undefined : { documentClient: dependencies.documentClient, signInTableName: signIn.signInTableName } });
+        const signIn = dependencies.developer ?? dependencies.linking; // P0-14: the company the operator names (or its own membership), never AUTH_REQUIRED for one in no company (admin-offered-models.ts).
+        const company = await offeredModelsCompany({ named: url.searchParams.getAll(OFFERED_MODELS_COMPANY_PARAMETER), companies: signIn?.companies, ownerKey: identity.ownerKey, signIn: signIn === undefined ? undefined : { documentClient: dependencies.documentClient, signInTableName: signIn.signInTableName } });
         let offered: OfferedAgentModels;
         try { offered = await dependencies.coreOfferedModels(company); } catch { throw agentXError("RUNTIME_UNAVAILABLE", OFFERED_MODELS_READ_FAILED); }
         return json(offered, request.requestId);

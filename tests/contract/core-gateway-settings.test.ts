@@ -360,6 +360,12 @@ describe("agentx config set", () => {
       await expect(runConfigSet(configured, ENV, { key: MODEL_KEY, value: GLM, yes: true, company: "org_bbbbbbbbbbbbbbbbbbbb" }))
         .rejects.toThrow(`${MODEL_KEY} was not changed: org_bbbbbbbbbbbbbbbbbbbb is not one of the companies on staging, so ${GLM} cannot be checked for it; give a company id from Code's company records; nothing changed`);
       expect(cloudFormation.calls).toEqual([]);
+      // A control plane from before --company still refuses with 401: the refusal says it may need an upgrade, and only when --company was given.
+      const older = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }), fetch: withGateway(() => new Response("", { status: 401 })).fetch });
+      await expect(runConfigSet(older, ENV, { key: MODEL_KEY, value: GLM, yes: true, company: "org_bbbbbbbbbbbbbbbbbbbb" })).rejects.toThrow("may be from before --company; upgrade it");
+      const plain = await run(GLM, withGateway(() => new Response("", { status: 401 })));
+      const error = await plain.result.then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error?.message).not.toContain("before --company");
     });
 
     it("refuses a malformed --company, or --company on a key it means nothing for, before asking anything", async () => {
