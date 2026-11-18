@@ -189,7 +189,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   }
   const workspace: WorkspaceRecord = {
     ...workspaceKey(deps.companyId, workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey,
-    projectName: project.definition.name, projectRevision: revision, ...(playbookCommit === undefined ? {} : { playbookCommit }), ...(standingPin === undefined ? {} : { standingPin }), status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
+    projectName: project.definition.name, projectRevision: revision, ...(playbookCommit === undefined ? {} : { playbookCommit }), ...(standingPin === undefined ? {} : { standingPin: toDocument(standingPin) }), status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
     ...workspaceProjectIndexAttributes({ orgId: deps.companyId, projectName: project.definition.name, createdAt: receivedAt }),
     createdAt: receivedAt, updatedAt: receivedAt,
   };

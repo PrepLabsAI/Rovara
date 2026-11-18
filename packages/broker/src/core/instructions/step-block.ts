@@ -33,7 +33,7 @@ export interface StandingOperation {
    * What the task pinned at its start (hosted: read from the task's workspace record). Present: the company's rules and the project's How we work come from it ONLY, never from a live read, so one
    * task runs under one set of rules and the caller needs no code host and no company store. Absent (a laptop's task, or a hosted task that started before this was kept): read live, as before.
    */
-  pinned?: PinnedStanding | undefined;
+  pinned?: unknown;
 }
 
 /**
