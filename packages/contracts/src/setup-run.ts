@@ -9,7 +9,18 @@
 //   - a host is a plain DNS name: an address literal never parses (the design refuses those without a card);
 //   - where a value came from is one of `observed:<run>#<n>`, `recipe:<id>@<rev>` or `person`, besides the file-and-line, `model` and `detector:` sources the proposal already has.
 import { z } from "zod";
-import { UpkeepPauseReasonSchema } from "./upkeep.js";
+import type { UpkeepPauseReason } from "./upkeep.js";
+
+/**
+ * Batch 16 (rule F): this module loads only zod (the DNS helper's 128 MB entry, worker-dns-helper-footprint.test.ts), so the upkeep pause reasons are listed here
+ * and checked at compile time to be exactly upkeep.ts's `UPKEEP_PAUSE_REASONS` (a reason added or removed on either side fails `tsc`).
+ */
+const SETUP_RUN_PAUSE_REASONS = ["no_budget", "monthly_limit", "cost_too_high"] as const;
+type SamePauseReasons = [UpkeepPauseReason] extends [(typeof SETUP_RUN_PAUSE_REASONS)[number]] ? ([(typeof SETUP_RUN_PAUSE_REASONS)[number]] extends [UpkeepPauseReason] ? true : false) : false;
+type MustBeTrue<T extends true> = T;
+/** Type only (nothing runs at load time: contracts-side-effects.test.ts): `false` here fails `tsc`. */
+export type SetupRunPauseReasonsMatchUpkeep = MustBeTrue<SamePauseReasons>;
+const UpkeepPauseReasonSchema = z.enum(SETUP_RUN_PAUSE_REASONS);
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 function line(max: number, min = 1) {
