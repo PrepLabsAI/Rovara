@@ -23,11 +23,10 @@ import { isEvalRunMark } from "../../lessons/eval-run.js";
 import { isHumanSendBack } from "../../lessons/human-send-backs.js";
 import { cleanForLearning } from "../../lessons/guards.js";
 import type { EvidenceSpan } from "../../lessons/reflect-input.js";
-import type { RepoChangeRequest } from "../../lessons/repo-reflect.js";
 import type { OutcomeRowReader, RevertedTasksReader } from "../../lessons/task-outcome-rows.js";
 import type { TaskSubjectBase, TaskSubjectSource } from "../../lessons/task-end.js";
 import type { SendBackFact } from "../../lessons/task-subject.js";
-import { narrowestAudience, type Audience, type TrustClass } from "../../lessons/types.js";
+import type { Audience, TrustClass } from "../../lessons/types.js";
 import type { LessonRepositories, LessonRepository } from "./lessons-repos.js";
 import type { HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { queryAll } from "@agentx/contracts";
@@ -52,6 +51,14 @@ const FINDING_NOTES_TEXT_MAX = 4_000;
 const AGENT_TEXT_TRUST: TrustClass = "system";
 const CI_FAILURE_PREFIX = "A check failed on the change: ";
 
+/** The task's life as times (creation to close); undefined when the record's times cannot be read. */
+function lifetimeOf(task: TaskRecord): { from: number; to?: number } | undefined {
+  const from = Date.parse(task.createdAt);
+  if (!Number.isFinite(from)) return undefined;
+  const to = task.closedAt === undefined ? undefined : Date.parse(task.closedAt);
+  return to === undefined || !Number.isFinite(to) ? { from } : { from, to };
+}
+
 const present = (value: string | undefined): value is string => value !== undefined && value.trim() !== "";
 
 function outcomeOf(workflow: WorkflowSnapshot | undefined): "merged" | "closed" | undefined {
@@ -75,12 +82,6 @@ export const aclSourceOf = (provider: string): string => (provider === "github" 
 
 /** A person on the code host, named the way this install names an account that is not the owner's (`<host>_<account id or login>`). */
 const accountPerson = (provider: string, account: { login: string; hostUserId?: string | undefined }): string => `${provider}_${account.hostUserId ?? account.login}`.replace(/[^A-Za-z0-9_.-]/gu, "-").slice(0, 100);
-
-/** The start of every pull request link of a repository (`https://host/owner/name/pull/`), from one link and its number; undefined when the link does not end in that number. */
-function linkPrefixOf(url: string, number: number): string | undefined {
-  const suffix = String(number);
-  return url.endsWith(`/${suffix}`) ? url.slice(0, url.length - suffix.length) : undefined;
-}
 
 export interface LocalSubjectSourceOptions {
   flow: Pick<TaskFlowDeps, "store" | "projects">;
@@ -151,12 +152,12 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
     return spans.slice(-MAX_PLAN_COMMENTS);
   }
 
-  /** The comments of one merged pull request, as spans, and the change request they make up. */
-  async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<{ spans: EvidenceSpan[]; change?: RepoChangeRequest }> {
+  /** The comments of one pull request, as spans. */
+  async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<EvidenceSpan[]> {
     const host: CodeHost = repo.codeHost;
     const ref: ChangeRequestRef = changeRequestRef(repo.url, pullRequest.number);
     let feedback;
-    try { feedback = await host.feedback(ref, repo.scope); } catch { return { spans: [] }; }
+    try { feedback = await host.feedback(ref, repo.scope); } catch { return []; }
     const provider = providerOf(host);
     const audience: Audience = { kind: "restricted", acl: { source: aclSourceOf(provider), scope: repo.place, capturedAt: new Date(options.now()).toISOString(), liveCheck: "none" } };
     const standing = new Map<string, TrustClass>();
@@ -201,15 +202,7 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         ...(place === undefined || place === "" ? {} : { paths: [place] }),
       });
     }
-    const linkPrefix = linkPrefixOf(pullRequest.url, pullRequest.number);
-    if (pullRequest.state !== "MERGED" || linkPrefix === undefined || spans.length === 0) return { spans };
-    return {
-      spans,
-      change: {
-        place: repo.place, repository: pullRequest.repositoryId, repositoryUrl: repo.url, link: pullRequest.url, linkPrefix, revision: feedback.changeRequest.headTreeRevision,
-        merged: true, audience: narrowestAudience(spans.flatMap((span) => (span.audience === undefined ? [] : [span.audience]))), comments: spans, edits: [],
-      },
-    };
+    return spans;
   }
 
   const source: TaskSubjectSource = {
@@ -218,6 +211,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       return teaches(task, input.workspaceId) ? task.project : undefined;
     },
     async read(input): Promise<TaskSubjectBase | undefined> {
+      // Lead 4 L4-LP3Wc: a kind of evidence a person paused is a stop: none of its spans is gathered here (no finding, check text, close reason or pull request comment is read, and the code host is not asked for comments).
+      const skip: ReadonlySet<string> = input.skip ?? new Set();
       const task = await readTask(flow, input.taskId);
       if (!teaches(task, input.workspaceId)) return undefined;
       const workspaceId = input.workspaceId;
@@ -244,15 +239,15 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         }
       }
       let findings = 0;
-      for (const review of workflow?.reviews ?? []) {
+      for (const review of skip.has("review_finding") ? [] : workflow?.reviews ?? []) {
         for (const finding of review.findings) {
           if (finding.origin !== "INTRODUCED" || findings >= MAX_FINDINGS) continue;
           findings += 1;
           spans.push({ kind: "review_finding", text: finding.text, trust: AGENT_TEXT_TRUST, sourceKey: `review:${review.role.toLowerCase()}` });
         }
       }
-      if (workflow?.fixSource === "ci") for (const problem of (workflow.fixProblems ?? []).slice(0, MAX_CI_PROBLEMS)) spans.push({ kind: "ci_failure", text: `${CI_FAILURE_PREFIX}${problem}`, trust: AGENT_TEXT_TRUST, sourceKey: "ci" });
-      const closer = [...(workflow?.decisions ?? [])].reverse().find((decision) => decision.decision === "REJECT" && decision.actorRole === "TASK_OWNER");
+      if (workflow?.fixSource === "ci" && !skip.has("ci_failure")) for (const problem of (workflow.fixProblems ?? []).slice(0, MAX_CI_PROBLEMS)) spans.push({ kind: "ci_failure", text: `${CI_FAILURE_PREFIX}${problem}`, trust: AGENT_TEXT_TRUST, sourceKey: "ci" });
+      const closer = skip.has("close_reason") ? undefined : [...(workflow?.decisions ?? [])].reverse().find((decision) => decision.decision === "REJECT" && decision.actorRole === "TASK_OWNER");
       const closerId = closer === undefined ? undefined : deciderOf(closer);
       const closerTrust = closerId === undefined ? undefined : await standingOf(closerId, project);
       if (closer !== undefined && closerId !== undefined && closerTrust !== undefined) spans.push({ kind: "close_reason", text: closer.reason, trust: closerTrust, authorId: closerId });
@@ -262,23 +257,21 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       // roster is not a member (their words are not carried at all). Rovara's own decisions (the AGENTX actor, an automatic source) and a send-back or findings answer (read as send-backs) are not these.
       spans.push(...(await planComments(task, workflow)));
 
-      const repoChanges: RepoChangeRequest[] = [];
-      if (input.context !== "human_edit") {
+      if (input.context !== "human_edit" && !skip.has("pr_comment")) {
         let taken = 0;
         for (const pullRequest of (workflow?.pullRequests ?? []).slice(0, MAX_PULL_REQUESTS)) {
           if (taken >= MAX_PULL_REQUEST_COMMENTS) break;
           const repo = await options.repos.ofTask(project, task.startingRevision, pullRequest.repositoryId);
           if (repo === undefined) continue;
           const read = await reviewComments(task, pullRequest, repo);
-          taken += read.spans.length;
-          spans.push(...read.spans);
-          if (read.change !== undefined) repoChanges.push(read.change);
+          taken += read.length;
+          spans.push(...read);
         }
       }
 
       const outcome = outcomeOf(workflow);
       const links = (workflow?.pullRequests ?? []).map((pullRequest) => pullRequest.url).slice(0, 32);
-      const sendBackRequestIds = (workflow?.decisions ?? []).filter(isHumanSendBack).map((decision) => decision.requestId).slice(0, MAX_SEND_BACK_IDS);
+      const sendBackRequestIds = skip.has("send_back") ? [] : (workflow?.decisions ?? []).filter(isHumanSendBack).map((decision) => decision.requestId).slice(0, MAX_SEND_BACK_IDS);
       let mergedCommit: string | undefined;
       if (outcome === "merged" && base !== undefined) {
         const merged = (workflow?.pullRequests ?? []).find((pullRequest) => pullRequest.repositoryId === base.repository && pullRequest.state === "MERGED");
@@ -296,7 +289,9 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
             audience: { kind: "project" }, sharedTask: true, spans,
           },
         },
-        sendBackRequestIds, ...(repoChanges.length === 0 ? {} : { repoChanges }),
+        sendBackRequestIds,
+        // When the task was alive: a kind stopped at any time during it is not read after a resume (`lessons/paused-kinds.ts`).
+        ...(lifetimeOf(task) === undefined ? {} : { lifetime: lifetimeOf(task)! }),
       };
     },
   };

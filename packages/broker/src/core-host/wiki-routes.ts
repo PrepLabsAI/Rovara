@@ -4,6 +4,7 @@
 //   GET /v1/app/projects/{project}/wiki/search?q=                  bounded title, summary and page-text results
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}            one page: prose, claims (never their quotes), notes (pending ones marked), how many open "Mark wrong" flags
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}/sources    the files and lines the page cites, at their commits (never their quotes)
+//   GET /v1/app/projects/{project}/wiki/pages/{pageId}/lessons    lead 4 L4-LP3W: the team's approved lessons an agent is told in this page's area (the same units the agent's look-up answers), or none
 //
 // Rules:
 //  - The company is the caller's LIVE membership (the dev routes check it and mount that company's runtime); the store is made for that company only, so every key is the company's and
@@ -16,8 +17,10 @@
 //  - Refusals are fixed words; nothing a caller sent is echoed, and a store fault is a fixed 503.
 import {
   WIKI_LIMITS, WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, WikiIndexResponseSchema, WikiPageIdSchema, WikiPageResponseSchema, WikiProjectSchema, WikiSearchResponseSchema, WikiSourcesResponseSchema,
-  AgentXError, agentXError, redactText, stripHiddenCharacters, type DocumentStore, type OrgId, type WikiIndexResponse, type WikiPageResponse, type WikiSourcesResponse, type WikiStore,
+  AgentXError, TEAM_LESSONS_NOTE, TeamLessonsAnswerSchema, agentXError, redactText, stripHiddenCharacters, type DocumentStore, type OrgId, type TeamLessonsAnswer, type WikiIndexResponse, type WikiPageResponse, type WikiSourcesResponse, type WikiStore,
 } from "@agentx/contracts";
+import type { LoadDeps } from "../lessons/load.js";
+import { teamLessonRowOf, teamLessonsForArea } from "../lessons/team-lessons.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { WIKI_FORMER_MEMBER, createWikiStore } from "../core/wiki/store.js";
 import type { SetupRunStanding } from "./setup-run-routes.js";
@@ -35,6 +38,11 @@ export interface HostedWikiWiring {
   projectRepositories(companyId: OrgId, project: string): Promise<readonly string[] | undefined>;
   /** A person's display name now, for a note's author. Absent or unknown: "a former member". */
   displayName?: ((personId: string) => Promise<string | undefined>) | undefined;
+  /**
+   * Lead 4 L4-LP3W: the lessons library of THIS company (its own runtime's load dependencies), for the page's "Team lessons for this area". Absent, or undefined for the company (lessons off): that path says "route not found".
+   * It is asked for the member company only, so another company's lessons are never in reach.
+   */
+  lessonsOf?: ((companyId: OrgId) => LoadDeps | undefined) | undefined;
 }
 
 export interface HostedWikiInput {
@@ -49,7 +57,7 @@ export interface HostedWikiInput {
   now: () => number;
 }
 
-const WIKI_PATH = /^\/v1\/app\/projects\/([^/]+)\/wiki(?:\/(?:search|pages\/([^/]+)(\/sources)?))?$/u;
+const WIKI_PATH = /^\/v1\/app\/projects\/([^/]+)\/wiki(?:\/(?:search|pages\/([^/]+)(\/sources|\/lessons)?))?$/u;
 const WIKI_SEARCH_SCAN_MAX = WIKI_LIMITS.pagesPerProject;
 const WIKI_SEARCH_BATCH_SIZE = 10;
 
@@ -91,7 +99,8 @@ export async function routeHostedWiki(input: HostedWikiInput): Promise<BrokerRes
     let pageId: string;
     try { pageId = decodeURIComponent(match[2]); } catch { throw pageNotFound(); }
     if (!WikiPageIdSchema.safeParse(pageId).success) throw pageNotFound();
-    const answer = match[3] === undefined ? await pageAnswer(input, store, project, pageId) : await sourcesAnswer(store, project, pageId);
+    const answer = match[3] === undefined ? await pageAnswer(input, store, project, pageId)
+      : match[3] === "/sources" ? await sourcesAnswer(store, project, pageId) : await lessonsAnswer(input, store, project, pageId);
     if (answer === undefined) throw pageNotFound();
     return json(200, answer);
   } catch (error) {
@@ -184,6 +193,21 @@ async function sourcesAnswer(store: WikiStore, project: string, pageId: string):
     }
   }
   return WikiSourcesResponseSchema.parse({ project, pageId, files: [...files.values()].sort((a, b) => a.repo.localeCompare(b.repo) || a.path.localeCompare(b.path)) });
+}
+
+/** Lead 4 L4-LP3W: the page's area and the team's lessons an agent is told there. A page about no single area, or a company with no lessons wired, answers an empty list (or the route is not found when lessons are not wired). */
+async function lessonsAnswer(input: HostedWikiInput, store: WikiStore, project: string, pageId: string): Promise<TeamLessonsAnswer | undefined> {
+  const deps = input.wiring.lessonsOf?.(input.companyId);
+  if (deps === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const read = await guarded(async () => await store.readPage(project, pageId, "person"));
+  if (read === undefined) return undefined;
+  const citedPaths = read.page.claims.flatMap((claim) => claim.citations.map((citation) => citation.path)).slice(0, 200);
+  const found = await teamLessonsForArea(deps, { key: { workspaceId: input.companyId, project }, target: { page: { pageId, kind: read.page.kind, repos: read.page.repos.map((entry) => entry.repo), citedPaths } } });
+  if (found === undefined) throw unavailable();
+  return TeamLessonsAnswerSchema.parse({
+    project, pageId, ...(found.area === undefined ? {} : { area: found.area }),
+    lessons: found.lessons.map(teamLessonRowOf), moreLessons: found.more, note: TEAM_LESSONS_NOTE,
+  });
 }
 
 /**

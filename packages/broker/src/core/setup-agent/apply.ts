@@ -13,8 +13,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, setupItemsOf, when,
-  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type SetupVerification, type TransactItem,
+  PROMPT_LOCATIONS_MAX, ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, promptLocationKey, promptLocationsOf, setupItemsOf, when,
+  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type PromptLocation, type SetupVerification, type TransactItem,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "../decisions/approval-gate.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -26,14 +26,16 @@ import { refusedCommand } from "./refused-command.js";
 import { classifySetupChange, type SetupChangeRisk, type SetupRisk } from "./setup-risk.js";
 
 export const SETUP_APPLY_KIND = "setup-proposal";
+/** The most item ids one confirm may name: every setup and tests item a proposal may hold, and every prompt location. */
+export const SETUP_CONFIRM_ITEM_IDS_MAX = 128;
 /** The longest a command may be, as the approval page shows it: whole. */
 export const SETUP_COMMAND_SHOWN_MAX = 2_000;
 export const SetupConfirmBodySchema = z.object({
   requestId: z.string().uuid(),
   /** The project revision the person looked at. */
   expectedRevision: z.number().int().min(0),
-  /** Items to use, by id (setup and tests items only). Absent: every item that passed. */
-  itemIds: z.array(z.string().min(1).max(100)).max(64).optional(),
+  /** Items to use, by id (setup, tests and prompt-location items). Absent: every item that passed. At most the proposal's own item limits in all (32 + 32 commands, 40 locations). */
+  itemIds: z.array(z.string().min(1).max(100)).max(SETUP_CONFIRM_ITEM_IDS_MAX).optional(),
 }).strict();
 
 export const SETUP_CONFIRM_WORDS = {
@@ -116,7 +118,61 @@ export function commandsFromProposal(
   return { ...(setup.length === 0 ? {} : { setup }), ...(readiness.length === 0 ? {} : { readiness }), used, unchecked, left };
 }
 
-/** What the owner approves: the commands, as a digest. The candidate check ran exactly these, and the approval names this digest. */
+/**
+ * L4-EVP: the prompt locations the proposal's usable `prompt_location` items carry, added to the ones the project already has (a location is removed only by a person's own edit, never by an agent's proposal that
+ * leaves it out). An item that failed its re-read, names a repository the project does not have, or would take the list past its limit is left out, each with its reason. Pure.
+ */
+export interface CandidatePromptLocations { locations: PromptLocation[]; used: string[]; unchecked: string[]; left: CandidateCommands["left"] }
+export function promptLocationsFromProposal(
+  proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string }>; promptLocations?: unknown }, only?: ReadonlySet<string>,
+): CandidatePromptLocations {
+  const existing = promptLocationsOf(definition.promptLocations);
+  const out: CandidatePromptLocations = { locations: [...existing], used: [], unchecked: [], left: [] };
+  const known = new Set(existing.map(promptLocationKey));
+  for (const item of setupItemsOf(proposal)) {
+    if (item.kind !== "prompt_location" || (only !== undefined && !only.has(item.id))) continue;
+    const verdict = verification[item.id] ?? "unchecked";
+    if (verdict === "unverified") { out.left.push({ id: item.id, reason: "unverified" }); continue; }
+    // Like a command: with no choice made, only what the code host confirmed is used; a person's choice may add one that could not be checked against a file.
+    if (only === undefined && verdict !== "verified") continue;
+    if (verdict === "unchecked") out.unchecked.push(item.id);
+    const value = item.proposed.value as PromptLocation;
+    if (!definition.repositories.some((repository) => repository.name === value.repo)) { out.left.push({ id: item.id, reason: "unverified" }); continue; }
+    const key = promptLocationKey(value);
+    // A location the project already has adds nothing: it is not "used", so a confirm of only such items is refused as "nothing" instead of making a candidate equal to the base.
+    if (known.has(key)) continue;
+    if (out.locations.length >= PROMPT_LOCATIONS_MAX) { out.left.push({ id: item.id, reason: "too_many" }); continue; }
+    known.add(key);
+    out.locations.push(value);
+    out.used.push(item.id);
+  }
+  return out;
+}
+
+/**
+ * L4-EVP: what a confirm takes from the proposal. The person's choice (`itemIds`) may name prompt-location items as well as command items; an id of neither kind is unknown and refuses the whole confirm. Nothing usable at all
+ * (an empty choice, only unverified or already-held locations, only failed commands) is refused as "nothing"; commands with nothing usable are no refusal while a prompt location is usable. Pure, so it is tested without a store.
+ */
+export function chooseCandidateItems(
+  proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string; path: string }>; promptLocations?: unknown }, itemIds: readonly string[] | undefined,
+): { made: CandidateCommands; locations: CandidatePromptLocations } {
+  const items = setupItemsOf(proposal);
+  const chosen = itemIds === undefined ? undefined : new Set(itemIds);
+  const kindOf = (id: string) => items.find((item) => item.id === id)?.kind;
+  const commandChoice = chosen === undefined ? undefined : new Set([...chosen].filter((id) => kindOf(id) !== "prompt_location"));
+  const onlyLocations = chosen !== undefined && chosen.size > 0 && commandChoice!.size === 0;
+  const locations = promptLocationsFromProposal(proposal, verification, definition, chosen);
+  const commands = onlyLocations ? { used: [], unchecked: [], left: [] } as CandidateCommands : commandsFromProposal(proposal, verification, definition, commandChoice);
+  if ("error" in commands && (commands.error !== "nothing" || locations.used.length === 0)) throw agentXError("CONFIG_INVALID", commands.error === "unknown_item" ? SETUP_CONFIRM_WORDS.unknownItem : SETUP_CONFIRM_WORDS.nothing);
+  const made: CandidateCommands = "error" in commands ? { used: [], unchecked: [], left: [] } : commands;
+  if (made.used.length === 0 && locations.used.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.nothing);
+  return { made, locations };
+}
+
+/**
+ * What the owner approves: the commands, as a digest, plus whatever more of the candidate the approval must be bound to (`extra`: L4-SC's fakes, L4-EVP's prompt locations). The candidate check ran exactly these, and
+ * the approval names this digest. With no extra the digest is the commands' alone, as it always was; with prompt locations only it is exactly L4-EVP's `{ setup, readiness, promptLocations }`.
+ */
 export const setupApplyDigest = (setup: readonly ProjectCommand[], readiness: readonly ProjectCommand[], extra: Record<string, unknown> = {}): string => createHash("sha256").update(canonicalJson({ setup, readiness, ...extra })).digest("hex");
 
 export interface SetupApplyDeps extends SetupAgentDeps { flow: TaskFlowDeps }
@@ -146,18 +202,18 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
   if (view.verified !== true || view.verification === undefined) throw agentXError("CHANGE_STALE", SETUP_CONFIRM_WORDS.notChecked);
   const full = await deps.flow.projects.latest(project);
   if (full === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
-  const made = commandsFromProposal(view.proposal!, view.verification, full.definition, body.itemIds === undefined ? undefined : new Set(body.itemIds));
-  if ("error" in made) throw agentXError("CONFIG_INVALID", made.error === "unknown_item" ? SETUP_CONFIRM_WORDS.unknownItem : SETUP_CONFIRM_WORDS.nothing);
+  const { made, locations } = chooseCandidateItems(view.proposal!, view.verification, full.definition, body.itemIds);
   const setup = made.setup ?? full.definition.setup;
   const readiness = made.readiness ?? full.definition.readiness;
   if (readiness.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.noTest);
   const candidateRevision = full.definition.revision + 1;
+  const withLocations = locations.used.length > 0 ? { promptLocations: locations.locations } : {};
   const candidate = ProjectDefinitionSchema.safeParse({
-    ...full.definition, revision: candidateRevision, setup, readiness,
+    ...full.definition, revision: candidateRevision, setup, readiness, ...withLocations,
     origins: { ...(full.definition.origins ?? {}), ...(made.setup === undefined ? {} : { setup: "agent" }), ...(made.readiness === undefined ? {} : { readiness: "agent" }) },
   });
   if (!candidate.success) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.invalid);
-  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: made.used, unchecked: made.unchecked, left: made.left }, alsoTransact: [] });
+  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: [...made.used, ...locations.used], unchecked: [...made.unchecked, ...locations.unchecked], left: [...made.left, ...locations.left] }, alsoTransact: [] });
 }
 
 export interface StoreCandidateInput {
@@ -185,7 +241,9 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
   const candidateRevision = candidate.revision;
   // The approver reads every command whole: one too long to show is refused, never cut.
   if ([...candidate.setup, ...candidate.readiness].some((command) => formatCommandLine(command).length > SETUP_COMMAND_SHOWN_MAX)) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.tooLong);
-  const digest = setupApplyDigest(candidate.setup, candidate.readiness, input.digestExtra);
+  // L4-EVP (batch 17): the candidate's prompt locations are bound into the digest too, on every way a candidate is made (none: the digest is as before).
+  const promptLocations = candidate.promptLocations ?? [];
+  const digest = setupApplyDigest(candidate.setup, candidate.readiness, { ...(promptLocations.length === 0 ? {} : { promptLocations }), ...input.digestExtra });
   const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId, candidate: true });
   const reply = { digest, ...input.replyExtra, candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
@@ -207,7 +265,7 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
 }
 
 /** What the page shows of the waiting proposal: the commands, and where the check on them stands. */
-export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[]; fakes?: unknown }) | undefined> {
+export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[]; fakes?: unknown; promptLocations: string[] }) | undefined> {
   const raw = await deps.store.get(setupApplyKey(deps.companyId, project));
   if (raw === undefined || raw["entityType"] !== "SETUP_APPLY") return undefined;
   const row = raw as unknown as SetupApplyRow;
@@ -217,7 +275,9 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
   const checkState = await setupStateOfCheck(deps.flow, row.check, definition.data);
   // Each command as the person would type it (quoted where it needs it) and whole: the approver must see all of what will run.
   const text = (commands: readonly ProjectCommand[]): string[] => commands.map((command) => formatCommandLine(command));
-  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), fakes: definition.data.generalFakes };
+  // L4-EVP: the approver sees every prompt location the candidate holds, whole (repository, file, kind and name).
+  const locations = (definition.data.promptLocations ?? []).map((location) => `${location.repo}/${location.path}: ${location.kind === "file" ? "the whole file" : `${location.kind.replace("_", " ")} ${location.symbol ?? ""}`}`);
+  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), fakes: definition.data.generalFakes, promptLocations: locations };
 }
 
 /**

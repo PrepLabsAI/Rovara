@@ -10,7 +10,7 @@
 //
 // This file is pure: no store, no host, no clock (the caller passes `at`). The thresholds are named settings with these defaults; changing them is an admin action that is out of scope here.
 import { createHash } from "node:crypto";
-import { type FlowTier, type FlowTierKind, type FlowTierLevel, type WorkflowFlow, FLOW_CATCH_COUNTERS_MAX, FLOW_MAX_BYTES, FLOW_REASON_PATH_MAX, FLOW_TIER_HISTORY_MAX, FLOW_TIER_REASONS_MAX, flowRecordBytes } from "@agentx/contracts";
+import { type FlowTier, type FlowTierKind, type FlowTierLevel, type PromptLocation, type WorkflowFlow, AI_MARKER, FLOW_CATCH_COUNTERS_MAX, FLOW_MAX_BYTES, FLOW_REASON_PATH_MAX, FLOW_TIER_HISTORY_MAX, FLOW_TIER_REASONS_MAX, flowRecordBytes, promptLocationsInFile } from "@agentx/contracts";
 import { CHANGED_FILES_MAX } from "../proof/changed-files.js";
 import { isTestPath } from "../proof/verification-report.js";
 import {
@@ -52,6 +52,8 @@ export const TIER_REASON_CODES = [
   // standard
   "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "test_file_deleted", "no_files_named", "request_mentions_sensitive_area",
   "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed", "script_changed", "text_data_file", "vendored_code", "check_weakened", "docs_include", "docs_not_plain", "docs_unread", "docs_site_build", "docs_large", "scanner_ignore_file", "docs_build_config",
+  // hints (never raise the tier, never a commit flag): L4-EVP, a change that touches likely-AI code. Kept last, after the standard reasons, so no rule that reads the risky ones before `more_than_lines` sees it.
+  "ai_code_touched",
 ] as const;
 
 // ---- input
@@ -96,6 +98,8 @@ export interface TierContext {
   thresholds?: TierThresholds | undefined;
   /** What is known of the code at the head, beyond the diff. */
   head?: HeadFacts | undefined;
+  /** L4-EVP: the project's confirmed prompt locations at the task's starting revision. A changed file that holds one carries an `eval_hint` (file level: the tier sees a patch, not the file; the worker narrows to the region). Absent: none. */
+  promptLocations?: readonly PromptLocation[] | undefined;
 }
 
 // ---- reading a patch
@@ -667,10 +671,12 @@ const SECRET_IGNORE = /\.env|secret|credential|\.pem|\.key\b|id_rsa|\.npmrc|toke
 const TSCONFIG_NAME = /^tsconfig[\w.-]*\.json$/u;
 const URL_ANYWHERE = /[a-z][a-z0-9+.-]*:\/\/[^\s"')]+/giu;
 
+/** The most characters of one file's patch scanned for a model SDK name: past it the file counts as touching AI code. */
+const AI_PATCH_SCAN_MAX = 400_000;
 /** The most characters one path may have: a longer one cannot be listed honestly. */
 const PATH_CHARS_MAX = 4_096;
 
-function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
+function readFile(file: TierFile, head: HeadFacts | undefined, promptLocations?: readonly PromptLocation[]): FileReading {
   const reading: FileReading = { risky: [], standard: [], hints: [], kinds: new Set(), codeLines: 0, countsAsFile: true, isCode: true, isTest: false };
   const here = (code: string): TierReason => ({ code, path: file.path.slice(0, FLOW_REASON_PATH_MAX) });
   const names = [file.path, ...(file.previousPath === undefined ? [] : [file.previousPath])];
@@ -688,6 +694,8 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     if (isHookPath(name)) reading.risky.push(reasonFor("hook_file"));
     if (isInstructionPath(name)) reading.risky.push(reasonFor("instruction_file"));
     else if (isPromptHintPath(name)) reading.hints.push(reasonFor("eval_hint"));
+    // L4-EVP: a file the project confirmed as holding a prompt inside code asks for the eval whatever its name (an instruction file included).
+    if (promptLocations !== undefined && !reading.hints.some((hint) => hint.code === "eval_hint") && promptLocationsInFile(promptLocations, { repo: file.repository, path: name }).length > 0) reading.hints.push(reasonFor("eval_hint"));
     if (isTierSensitivePath(name)) reading.risky.push(reasonFor("sensitive_path"));
     if (isInfraPath(name)) reading.risky.push(reasonFor("infra_file"));
     if (GIT_SETTINGS_FILES.test(normal)) reading.risky.push(reasonFor("git_settings_file"));
@@ -705,6 +713,10 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
 
   const normalPath = normalizedTierPath(file.path);
   reading.isTest = isTestPath(normalPath);
+  // L4-EVP: a change to AI code that is not a confirmed prompt location: a patch (any line, context included) that names a model SDK, call or provider host. A hint only: it says "AI code was touched" so the pull request can say that no
+  // eval ran for it. It sees the patch, not the file, so an import the patch does not show is not seen (a confirmed prompt location covers that file). A patch too long to scan whole counts as touching: never a partial read taken as a clean one.
+  if (!reading.isTest && fileTypeOf(file.path) === "code" && file.patch !== undefined && !reading.hints.some((hint) => hint.code === "eval_hint")
+    && (file.patch.length > AI_PATCH_SCAN_MAX || AI_MARKER.test(file.patch))) reading.hints.push({ code: "ai_code_touched", path: file.path.slice(0, FLOW_REASON_PATH_MAX) });
   // A rename is a delete of the old path plus an add of the new one: what the old path was, it no longer is. A workflow, a scanner's configuration or a test renamed away is a deletion of it.
   if (file.previousPath !== undefined) {
     const old = file.previousPath;
@@ -892,13 +904,16 @@ export function moduleOf(path: string): string {
 
 // ---- reasons
 
+/** The hints the tier keeps whatever the limit does to the rest: the evaluation check relies on `eval_hint`, and the pull request's "no eval ran" line on `ai_code_touched`. */
+const KEPT_HINTS: readonly string[] = ["eval_hint", "ai_code_touched"];
+const keptHints = (reasons: readonly TierReason[]): TierReason[] => KEPT_HINTS.flatMap((code) => { const hint = reasons.find((reason) => reason.code === code); return hint === undefined ? [] : [hint]; });
 /**
- * The reasons cut to a limit, keeping the `eval_hint` whatever the limit does to the rest: the evaluation check relies on it, and a busy tier (many risky reasons) must still carry it. The hint goes last; the others keep their order.
+ * The reasons cut to a limit, keeping the `eval_hint` (and the `ai_code_touched` hint) whatever the limit does to the rest: the evaluation check relies on it, and a busy tier (many risky reasons) must still carry it. The hints go last; the others keep their order.
  */
 export function capReasons(reasons: readonly TierReason[], limit: number): TierReason[] {
-  const hint = reasons.find((reason) => reason.code === "eval_hint");
-  if (hint === undefined) return reasons.slice(0, Math.max(0, limit));
-  return [...reasons.filter((reason) => reason.code !== "eval_hint").slice(0, Math.max(0, limit - 1)), hint];
+  const hints = keptHints(reasons);
+  if (hints.length === 0) return reasons.slice(0, Math.max(0, limit));
+  return [...reasons.filter((reason) => !KEPT_HINTS.includes(reason.code)).slice(0, Math.max(0, limit - hints.length)), ...hints];
 }
 
 function collect(reasons: readonly TierReason[]): TierReason[] {
@@ -936,7 +951,7 @@ export function tierFromDiff(input: DiffInput, context: TierContext): ChangeTier
   const modules = new Set<string>();
   const testModules = new Set<string>();
   for (const file of input.files) {
-    const reading = readFile(file, context.head);
+    const reading = readFile(file, context.head, context.promptLocations);
     risky.push(...reading.risky);
     standard.push(...reading.standard);
     hints.push(...reading.hints);
@@ -1083,7 +1098,7 @@ const REASON_PHRASES: Readonly<Record<string, string>> = {
   registry_source_changed: "a package source", dependency_source: "a package source", install_script: "an install script", ci_privileged: "a privileged CI setting", package_source_setting: "a package source setting",
   confusable_path: "a path with a look-alike letter", infra_file: "an infrastructure file", instruction_import: "a file an instruction file reads", ci_unpinned_action: "a CI action that is not pinned to a commit",
   path_too_long: "a path too long to list", link_kind_unknown: "a path whose kind Rovara did not check", ignore_file: "an ignore file", secret_like_text: "text that looks like a credential", script_command: "a script that runs a command", check_weakened_security: "a security check weakened",
-  eval_hint: "a prompt file that needs the evaluation check", line_break_character: "a line-ending character that reads differently by reader", path_control_character: "a control character in a file name",
+  eval_hint: "a prompt file that needs the evaluation check", ai_code_touched: "AI code", line_break_character: "a line-ending character that reads differently by reader", path_control_character: "a control character in a file name",
   ci_fetch_and_run: "a CI step that fetches code and runs it", ci_net_send: "a CI step that sends data out", ci_check_removed: "a CI step that no longer runs the tests", invisible_character: "invisible text",
   docs_executes: "a document line that runs something", bidi_control: "text that reorders what is shown", confusable_text: "a word that mixes look-alike letters", reviewer_injection_text: "a line written for the reviewer", docs_build_hook: "a hook of a documentation build",
   unscanned_commits: "versions pushed between checks that Rovara could not scan",
@@ -1112,7 +1127,7 @@ export function tierGrowthSentence(tier: Pick<ChangeTier, "level" | "reasons">, 
 
 
 const compactTier = (tier: ChangeTier, reasons: number, pathMax: number): ChangeTier => ({
-  ...tier, reasons: capReasons(tier.reasons, Math.max(reasons, tier.reasons.some((reason) => reason.code === "eval_hint") ? 1 : 0)).map((reason) => (reason.path === undefined ? reason : { ...reason, path: reason.path.slice(0, pathMax) })),
+  ...tier, reasons: capReasons(tier.reasons, Math.max(reasons, keptHints(tier.reasons).length)).map((reason) => (reason.path === undefined ? reason : { ...reason, path: reason.path.slice(0, pathMax) })),
 });
 
 /**

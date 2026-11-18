@@ -26,6 +26,19 @@ export function auditProjectRef(companyId: string, project: string): string {
   return `p_${createHash("sha256").update(`lessons-audit-project\u0000${companyId}\u0000${project}`).digest("hex").slice(0, 24)}`;
 }
 
+/** The unit ids of a knowledge read as `u1`..`u10` (a fact holds one short value): only values shaped like a lesson id, at most ten. */
+const unitFacts = (e: LessonAuditEvent): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (let i = 1; i <= 10; i += 1) {
+    const value = e.facts[`u${String(i)}`];
+    if (typeof value === "string" && /^[A-Za-z0-9_-]{4,64}$/u.test(value)) out[`u${String(i)}`] = value;
+  }
+  return out;
+};
+
+/** The id of the script token that asked (`stk_` and 20 characters): an id, never a secret. */
+const tokenFact = (e: LessonAuditEvent): Record<string, string> => (typeof e.facts["tokenId"] === "string" && /^stk_[0-9a-z]{20}$/u.test(e.facts["tokenId"]) ? { tokenId: e.facts["tokenId"] } : {});
+
 const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.candidate_created": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: 1 }) },
   "lesson.pending": { action: "lesson.proposed", facts: (e) => ({ lessonType: "unknown", tier: num(e.facts["tier"]) }) },
@@ -43,6 +56,8 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.withdrawn": { action: "lesson.withdrawn", facts: (e) => ({ cause: word(e.facts["cause"], "source_deleted") }) },
   "lesson.refused": { action: "lesson.refused", facts: (e) => ({ refusal: word(e.facts["reason"], "refused") }) },
   "lesson.promoted": { action: "lesson.promoted", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
+  // Phase 4: a lesson made permanent as a rule, a draft check task or a skill. The ledger line is the promotion (its target is in the lesson's `became` link, not in the chain).
+  "lesson.graduated": { action: "lesson.promoted", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
   "lesson.rolled_back": { action: "lesson.rolled_back", facts: (e) => ({ fromSetVersion: num(e.facts["from"]), toSetVersion: num(e.facts["to"]) }) },
   // A citation that moved, and a duplicate that was merged in, each commit a new version of the lesson's text or lines: recorded as an edit by the system.
   "lesson.citation_moved": { action: "lesson.edited", facts: (e) => ({ tier: num(e.facts["tier"]), fromTier: num(e.facts["tier"]) }) },
@@ -63,21 +78,21 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.trial_offer_answered": { action: "lesson.trial_offer_answered", facts: (e) => ({ answer: word(e.facts["answer"], "unknown"), approvals: num(e.facts["approvals"]), drops: num(e.facts["drops"]) }) },
   // A project or company admin turned the weekly lessons summary in the chats on or off (developer API).
   "lesson.digest_switched": { action: "lesson.digest_switched", facts: (e) => ({ enabled: e.facts["enabled"] === true }) },
+  // A project or company admin paused or resumed one source of learning on "Where Rovara learns from" (`learning-sources.ts`): which row (a fixed key) and whether it is now paused. Written BEFORE the change.
+  "lesson.learning_source_switched": { action: "lesson.learning_source_switched", facts: (e) => ({ source: word(e.facts["source"], "unknown"), paused: e.facts["paused"] === true }) },
   "lesson.preset_proposed": { action: "lesson.preset_proposed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown") }) },
   // Erasing a commenter took back the harmful mark that retired a lesson, and the rest no longer justify it: the lesson goes back to a person as a pending card (never live by itself), recorded as a proposal.
   "lesson.harm_reversed": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]) }) },
-  // A weekly pull request about to be opened (counts), one Rovara closes (a fixed cause and the number), and a repository's switch. Written BEFORE the host is asked.
-  "lesson.repo_file_pr_opened": { action: "lesson.repo_file_pr_opened", facts: (e) => ({ removals: num(e.facts["removals"]), edits: num(e.facts["edits"]), adds: num(e.facts["adds"]) }) },
-  "lesson.repo_file_pr_closed": { action: "lesson.repo_file_pr_closed", facts: (e) => ({ cause: word(e.facts["cause"], "replaced"), pullRequest: num(e.facts["pullRequest"]) }) },
-  "lesson.repo_file_switched": { action: "lesson.repo_file_switched", facts: (e) => ({ enabled: e.facts["enabled"] === true }) },
   "lesson.local_tools_switched": { action: "lesson.local_tools_switched", facts: (e) => ({ scope: word(e.facts["scope"], "project"), enabled: e.facts["enabled"] === true }) },
-  // A person's answer on lessons that went missing from the file (retire or keep, and how many).
-  "lesson.repo_file_retire_decided": { action: "lesson.repo_file_retire_decided", facts: (e) => ({ verdict: word(e.facts["verdict"], "keep"), missing: num(e.facts["missing"]) }) },
   // An operator starts a replay copy of a past task (ids, fixed words and counts only; written BEFORE the copy is started), and a frozen snapshot is created for it.
   "lesson.replay_started": { action: "lesson.replay_started", facts: (e) => ({ operator: modelWord(e.facts["operator"]), memory: word(e.facts["memory"], "off"), snapshotLessons: num(e.facts["snapshotLessons"]), maxCents: num(e.facts["maxCents"]), sourceTask: modelWord(e.facts["sourceTask"]) }) },
   "lesson.replay_read": { action: "lesson.replay_read", facts: (e) => ({ operator: modelWord(e.facts["operator"]), what: word(e.facts["what"], "subject"), maxCents: num(e.facts["maxCents"]), target: modelWord(e.facts["target"]) }) },
   "lesson.snapshot_created": { action: "lesson.snapshot_created", facts: (e) => ({ lessonSetVersion: num(e.facts["lessonSetVersion"]), lessonCount: num(e.facts["lessonCount"]) }) },
-  // Stable makes a lesson publishable to a repository, so it is on the ledger.
+  // Team knowledge read by a tool outside Rovara (the lessons route, `agentx mcp`): one event per call with the tool's fixed name, how it asked, the number of units and the unit IDS (u1..u10). Ids and numbers only, never text.
+  "lesson.knowledge_read": { action: "lesson.knowledge_read", facts: (e) => ({ tool: word(e.facts["tool"], "unknown"), via: word(e.facts["via"], "person"), units: num(e.facts["units"]), ...tokenFact(e), ...unitFacts(e) }) },
+  // One person's tools were served more than the line of distinct units in a day: written once a day, numbers only.
+  "lesson.knowledge_read_alert": { action: "lesson.knowledge_read_alert", facts: (e) => ({ distinct: num(e.facts["distinct"]), line: num(e.facts["line"]) }) },
+  // Stable is what lets a lesson leave Rovara (to a local coding tool), so it is on the ledger.
   "lesson.trial_stable": { action: "lesson.trial_stable", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
   "lesson.sole_owner_switch_proposed": { action: "lesson.sole_owner_switch_proposed", facts: (e) => ({ fromEnabled: e.facts["from"] === true, toEnabled: e.facts["to"] === true }) },
   "lesson.sole_owner_switch_changed": { action: "lesson.sole_owner_switch_changed", facts: (e) => ({ fromEnabled: e.facts["from"] === true, toEnabled: e.facts["to"] === true, mode: word(e.facts["mode"], "second_person") }) },

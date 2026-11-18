@@ -1504,6 +1504,30 @@ describe("G: a small change that grew to risky is held as a draft with one scope
     expect(await gate(h, t.taskId)).toBeUndefined();
   });
 
+  it("G7-outage-ai (L4-EVP): the reviewer is down: Rovara says it could not check (no area claimed), only Stop is offered, Keep is refused; a change that names a model SDK carries the AI-code hint beside the outage, and Retry still works", async () => {
+    const h = await launch();
+    h.reviewer.questions = "throw";
+    h.reviewer.reviews = { code_review: "throw", security_review: "throw" };
+    const t = await toAfterPlan(h);
+    const published = await buildAndPublish(h, t, { "src/health.ts": "import OpenAI from \"openai\";\nexport const health = 200;\n" }, false);
+    h.model.setChecks(published.commit, [PASSING]);
+    await settle(h, 4);
+    const deps = h.runtime.app.flow.deps;
+    const view = (await scopeQuestionOf(deps, t.taskId))!;
+    expect(view.question).toMatchObject({ kind: "couldnt_check", files: [] });
+    expect(view.choices).toEqual(["stop"]);
+    expect(crOf(h, published.cr).body).toContain("could not check");
+    expect((await answer(h, t.taskId, "keep", "session")).status).toBe("refused");
+    h.reviewer.questions = [];
+    h.reviewer.reviews = {};
+    expect((await flowOf(h, t.taskId)).tier?.reasons.map((reason) => reason.code)).toContain("ai_code_touched");
+    expect(await retryScopeChecks(deps, t.taskId)).toBe("retrying");
+    await settle(h, 4);
+    expect((await flowOf(h, t.taskId)).tier?.level).toBe("small");
+    expect((await scopeQuestionOf(deps, t.taskId))!.held).toBe(false);
+    expect(await gate(h, t.taskId)).toBeUndefined();
+  });
+
   it("G3-proof-once: a proof is used once, and a proof for another request answers nothing", async () => {
     const { h, t } = await grown({ "src/auth/session.ts": "export const ttl = 0;\n" });
     const deps = h.runtime.app.flow.deps;

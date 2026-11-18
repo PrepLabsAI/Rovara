@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -8,6 +8,8 @@ import { DESIGN_REVIEW_WORKER_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, G
  */
 export const WORKER_IMPLEMENTED_FEATURES = [
   "task.evalRound.v1",
+  // The model gateway's address delivered with an eval request (`evalGatewayUrl`), used when the host sets no `ROVARA_EVAL_GATEWAY_URL` of its own (verification/eval-wiring.ts `evalEnvironmentWithGateway`).
+  "task.evalGateway.v1",
   "task.modelPolicy",
   "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview",
   "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode",
@@ -70,6 +72,8 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.learnedContext.v1",
   // Lead 4 A1: the project wiki as read-only files outside the repositories, with an index in the step's context and a report of the pages read (wiki-agent.ts).
   WIKI_AGENT_FEATURE,
+  // Lead 4 L4-AK2: the knowledge briefing and the pull set, with `knowledge_for` and `knowledge_report` (knowledge-run.ts, knowledge-tools.ts).
+  KNOWLEDGE_CONTEXT_FEATURE,
   // Test environment (wire-testenv): a setup draft run that is told `testEnvDetect` also reports the environment the detectors would propose (test-env-detect.ts).
   "task.testEnvDetect.v1",
   // Test environment (wire-testenv): a verification run that carries the environment's plan applies its test selection and round budget and reports the selection (verification/test-env-plan.ts).
@@ -108,5 +112,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   TEST_ENV_BASELINE_FEATURE,
   // TE-MR2b: a plan with `repositoryCoverageMap` and a repository on each check is read (verification/multi-repo-selection.ts); selection across repositories stays off (the whole check runs) until it is proven live.
   TEST_ENV_MULTI_REPO_FEATURE,
+  // L4-EVP: the eval's changed-prompt classifier reads the project's confirmed prompt locations, region by region where it can (verification/eval-changed-prompt.ts).
+  EVAL_PROMPT_LOCATIONS_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];

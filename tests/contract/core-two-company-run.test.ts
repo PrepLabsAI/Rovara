@@ -188,6 +188,8 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     expect(hits.some((hit) => hit.row.text.includes(other.companyId))).toBe(false);
     const lessons = new DocumentLessonStore(h.w.store, () => h.w.clock.now);
     const lesson = lessonRecord({ id: "les_shared1111", workspaceId: own.companyId, project: "payments", title: `Advice ${own.companyId}`, tier: 1,
+      // Batch 17 (rule F): #998's one absolute fit floor loads a lesson for a step only when it fits the task ("Add retry handling") by its own words.
+      description: "Add retry handling with the shared helper.", body: "Add retry handling with the shared helper, not a hand-written loop.",
       approvals: [{ approvalId: "approved", by: own.person, at: 1, mode: "one" }], citations: [], citationChecks: [], scope: {}, stages: ["PLAN"], expiresAt: h.w.clock.now + 86_400_000,
       provenance: { ...lessonRecord().provenance, supportTasks: [] } });
     expect((await lessons.commit({ workspaceId: own.companyId, project: "payments" }, 0, [lesson], h.w.clock.now)).ok).toBe(true);

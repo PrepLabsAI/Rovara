@@ -12,8 +12,10 @@ import { createSystemStarter, type SystemStartResult } from "../core/system-runs
 import { runUpkeepNightPass } from "../core/system-runs/night-pass.js";
 import { systemRunRequestId } from "../core/system-runs/starter.js";
 import { commitsOf, readCurrentSetupFiles } from "../core/setup-agent/snapshot.js";
+import { adoptNightlyBreak, advanceCurrentRecheck } from "../core/setup-agent/recheck.js";
 import { upkeepIsOn } from "../core/upkeep/settings.js";
 import { runUpkeepNight, type UpkeepNightDeps } from "../core/upkeep/night.js";
+import { readUpkeepCap, type UpkeepCapReader } from "../core/upkeep/cap.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { companyProjects } from "./lessons.js";
 import type { CoreService } from "./core-runtime.js";
@@ -91,6 +93,11 @@ export interface HostedSystemRunsOptions {
   enforcesDollars?: boolean | undefined;
   /** The admins' notice of a pause before a start (`upkeepPauseHooks(...).paused`). Absent: nobody is told. */
   paused?: UpkeepNightDeps["paused"] | undefined;
+  /**
+   * L4-SR1: the gateway's own answer about a project's upkeep cap (core/upkeep/cap.ts). AI starts only where it is present AND says the cap is enforced for the project now; absent: the night says `no_cost_cap` and
+   * starts none. A cap with no room (limit $0, or used up) is a pause read BEFORE any call: the admins are told once and nothing starts.
+   */
+  cap?: UpkeepCapReader | undefined;
 }
 
 export interface HostedSystemRuns {
@@ -115,7 +122,12 @@ export function createHostedSystemRuns(options: HostedSystemRunsOptions): Hosted
     const nightDeps: UpkeepNightDeps = {
       store, companyId, now,
       // AI starts only where a dollar cap is really enforced AND the refresh starter is wired; otherwise the night says `no_cost_cap` and starts none (the unattended door refuses again without a cap).
-      enforces: { dollars: options.enforcesDollars === true && options.refresh !== undefined },
+      enforces: { dollars: options.enforcesDollars === true && options.refresh !== undefined && options.cap !== undefined },
+      // L4-SR1: the project's cap as the gateway says now. No room is a pause (told once, nothing started); an unknown cap is left to the refresh, which refuses it (`no_cost_cap`).
+      limit: async (name) => {
+        const cap = await readUpkeepCap(options.cap, name, now(), companyId);
+        return cap.state === "enforced" && cap.pause !== undefined ? { state: "paused", reason: cap.pause } : { state: "ok" };
+      },
       // The default branch's head of each repository, as the code host says now. A host that cannot answer is thrown, and the night then counts it as "something changed" (an unreadable head is never "nothing new").
       heads: async (name) => {
         const latest = await deps.projects.latest(name);
@@ -137,7 +149,7 @@ export function createHostedSystemRuns(options: HostedSystemRunsOptions): Hosted
     return runUpkeepNight(nightDeps, { project });
   };
   const service: CoreService = {
-    pass: async ({ budgetMs }) => ({ ...(await runUpkeepNightPass({ store, companyId, now, enabled, projects: () => companyProjects(store, companyId), night, log }, { budgetMs })) }),
+    pass: async ({ budgetMs }) => ({ ...(await runUpkeepNightPass({ store, companyId, now, enabled, projects: () => companyProjects(store, companyId), night, settle: async (project) => { await adoptNightlyBreak(deps, project); await advanceCurrentRecheck(deps, project); }, log }, { budgetMs })) }),
   };
   return { starter, service };
 }

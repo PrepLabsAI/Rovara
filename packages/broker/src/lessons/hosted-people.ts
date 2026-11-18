@@ -24,9 +24,9 @@ export interface HostedApprovers {
   complete: boolean;
   /** Bumped by every change to who may approve (the approval's writes are fenced on it). */
   membershipVersion: number;
-  /** The company's owners. */
+  /** The company's owners (live now). NOT a recipient list: a notice to "the people who can decide" goes to `eligibleIds`, which also holds the company's non-owner admins and the project's maintainers. */
   ownerIds: string[];
-  /** Who may approve a lesson here (maintainers and company owners or admins). */
+  /** Who may approve a lesson here (maintainers and company owners or admins), live now. The one list notices to deciders are sent to. */
   eligibleIds: string[];
   /** When an eligible person last lost that right (ms), or null. */
   lastEligibleLossAtMs: number | null;
@@ -37,6 +37,11 @@ export interface HostedLessonPeople {
   approvers(companyId: OrgId, project: string | undefined): Promise<HostedApprovers>;
   /** Whether the person is on the project's roster now (a company owner or admin, or a person with a role on the project). */
   onProjectRoster(companyId: OrgId, project: string, personId: string): Promise<boolean>;
+  /**
+   * Everyone on the project's roster now (a company owner or admin, or a person with a role on the project), with whether the list is complete. Optional: a port that gives it makes the names a unit that leaves Rovara must not
+   * hold cover the whole roster; one that does not is covered by the project's approvers (`approvers`) and the people the units name.
+   */
+  projectMembers?(companyId: OrgId, project: string): Promise<{ complete: boolean; ids: string[] }>;
   /** The outside accounts the person linked (a code host's account ids). */
   linkedAccounts(companyId: OrgId, personId: string): Promise<readonly string[]>;
   /** The display name of a person who is or was in the company; undefined for someone who never was. */

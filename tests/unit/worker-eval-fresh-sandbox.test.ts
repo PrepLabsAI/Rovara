@@ -386,11 +386,12 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     const nets = daemon.calls.filter((c) => c[0] === "network" && c[1] === "create").map((c) => c.at(-1));
     expect(nets).toHaveLength(2); expect(new Set(nets).size).toBe(2);
   });
-  it("the sandbox's logs go nowhere (an agent's output cannot fill the host's disk)", async () => {
+  it("the sandbox's log is small and capped (an agent's output cannot fill the host's disk) and goes with the container (L4-EVS: it was `none`; the worker reads its tail for a failed run)", async () => {
     const w = await world();
     await w.sandbox.run(w.input());
     const sandbox = runArgsOf(w.daemon.calls, "-eval")!;
-    expect(sandbox[sandbox.indexOf("--log-driver") + 1]).toBe("none");
+    expect(sandbox[sandbox.indexOf("--log-driver") + 1]).toBe("json-file");
+    expect(sandbox.flatMap((arg, index) => (sandbox[index - 1] === "--log-opt" ? [arg] : [])).sort()).toEqual(["max-file=1", "max-size=64k"]);
   });
   it("names unsound limits, name, working folder, labels and env file (mutants of the built list)", () => {
     const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`, "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
@@ -403,7 +404,7 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     const insert = (...extra: string[]) => [...args.slice(0, at), ...extra, ...args.slice(at)];
     for (const [name, mutant] of Object.entries({
       memory: replace("--memory", "64g"), swap: replace("--memory-swap", "-1"), cpus: replace("--cpus", "64"), pids: replace("--pids-limit", "-1"), stop: replace("--stop-timeout", "3600"),
-      logs: replace("--log-driver", "json-file"), name: replace("--name", "other"), workdir: replace("--workdir", "/"), workdirUp: replace("--workdir", "/workspace/../etc"),
+      logs: replace("--log-driver", "local"), name: replace("--name", "other"), workdir: replace("--workdir", "/"), workdirUp: replace("--workdir", "/workspace/../etc"),
       label: insert("--label", "com.docker.compose.project=x"), labelLookalike: insert("--label", "rovara.run-networkX=1"), envInCheckout: replace("--env-file", "/s/r1/checkout/.env"), envInBridge: replace("--env-file", "/s/e1/models/env"),
     })) expect(freshEvalSandboxArgProblems(mutant, net, expected), name).not.toEqual([]);
   });
@@ -411,5 +412,46 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     const helper = [{ source: "/b/models", destination: "/rovara/models", rw: false, type: "bind" }, { source: "/var/lib/docker/volumes/x", destination: "/x", rw: true, type: "volume" }];
     const sandbox = [{ source: "/r/checkout", destination: FRESH_EVAL_WORKSPACE, rw: true, type: "bind" }];
     expect(bridgeFolderMountProblems({ helper, sandbox, bridgeDir: "/b/models", checkout: "/r/checkout" })).not.toEqual([]);
+  });
+});
+
+describe("the vertex row (L4-EVV)", () => {
+  const argAfter = (args: readonly string[], flag: string): string | undefined => { const at = args.indexOf(flag); return at < 0 ? undefined : args[at + 1]; };
+  const lines = (text: string): Record<string, string> => Object.fromEntries(text.split("\n").filter(Boolean).map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as [string, string]));
+  it("a gemini row's run is exactly as before: no metadata port, no project id, a gemini helper row", async () => {
+    let rows = "";
+    const daemon = fakeDaemon({ eval: async (dir) => { rows = await readFile(join(w.bridgeDir, "rows.json"), "utf8"); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
+    const w = await world(daemon);
+    await w.sandbox.run(w.input());
+    const helper = runArgsOf(daemon.calls, "-models")!;
+    expect(helper).not.toContain("--meta-port"); expect(helper).not.toContain("--project-id");
+    expect(JSON.parse(rows)).toEqual([{ id: "gemini", family: "gemini" }]);
+  });
+  it("a vertex row's run serves a vertex helper row with the metadata port and Rovara's placeholder project, and writes the Vertex client's variables (and no key) into the env file", async () => {
+    let rows = "";
+    const daemon = fakeDaemon({ eval: async (dir) => { rows = await readFile(join(w.bridgeDir, "rows.json"), "utf8"); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
+    const w = await world(daemon, { rowId: "vertex" });
+    await w.sandbox.run(w.input());
+    const helper = runArgsOf(daemon.calls, "-models")!;
+    expect(argAfter(helper, "--meta-port")).toBe("8081");
+    expect(argAfter(helper, "--project-id")).toBe("rovara-eval-project");
+    expect(JSON.parse(rows)).toEqual([{ id: "vertex", family: "vertex" }]);
+    const env = lines(daemon.envSeen[0]!);
+    const helperIp = argAfter(helper, "--ip")!;
+    expect(env).toMatchObject({
+      GOOGLE_VERTEX_BASE_URL: `http://rovara-models:8080/p/vertex/x/${TOKEN}`, GOOGLE_CLOUD_PROJECT: "rovara-eval-project", GOOGLE_CLOUD_LOCATION: "rovara-eval1",
+      GCE_METADATA_HOST: `${helperIp}:8081`, GCE_METADATA_IP: `${helperIp}:8081`, ROVARA_EVAL_IDS: "q1,q2",
+    });
+    // A key next to a project makes google-genai use the express form (no project in the path), which the gateway does not serve; and the Gemini client's variable is not set either.
+    for (const name of ["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"]) expect(env, name).not.toHaveProperty(name);
+    expect(JSON.stringify(daemon.calls)).not.toContain(TOKEN);
+    expect(daemon.containers).toEqual([]);
+  });
+  it("the env text: the vertex names in a fixed order, the helper's address required and checked, every value plain", () => {
+    const text = freshEvalEnvironment({ rowId: "vertex", token: TOKEN, side: "new", runs: 1, ids: ["q"], helperIp: "172.30.7.9" });
+    expect(text.split("\n").filter(Boolean).map((line) => line.split("=")[0])).toEqual(["GOOGLE_VERTEX_BASE_URL", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GCE_METADATA_HOST", "GCE_METADATA_IP", "HOME", "ROVARA_EVAL_SIDE", "ROVARA_EVAL_RUNS", "ROVARA_EVAL_IDS"]);
+    for (const helperIp of [undefined, "", "127.0.0.1", "172.30.7.4", "172.30.7.9\nX=1", "rovara-models"]) expect(() => freshEvalEnvironment({ rowId: "vertex", token: TOKEN, side: "new", runs: 1, ids: ["q"], ...(helperIp === undefined ? {} : { helperIp }) }), String(helperIp)).toThrow();
+    // A gemini row needs no address and ignores one.
+    expect(freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q"], helperIp: "172.30.7.9" })).toBe(freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q"] }));
   });
 });

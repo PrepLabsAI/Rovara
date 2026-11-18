@@ -1,4 +1,3 @@
-import { assertPushCarriesNoLessonsFile } from "./lessons-file-guard.js";
 import { assertPushCarriesNoRovaraWorkingFiles, unstageRovaraWorkingFiles } from "./never-commit-guard.js";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -393,9 +392,7 @@ async function validateCandidate(
  */
 async function push(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>) {
   assertCredentialFreeRemote(url);
-  // Owner decision 50.4: EVERY push of this file (a fix or update round, a base merge, a validation branch) goes through here, and none carries a change to the team's lessons file.
-  await assertPushCarriesNoLessonsFile((args) => git(directory, args), "HEAD");
-  // TE-B9: nor any of Rovara's own working files (`ROVARA_NEVER_COMMIT`), whatever the workspace layout.
+  // TE-B9: EVERY push of this file (a fix or update round, a base merge, a validation branch) goes through here, and none carries any of Rovara's own working files (`ROVARA_NEVER_COMMIT`), whatever the workspace layout.
   await assertPushCarriesNoRovaraWorkingFiles((args) => git(directory, args), "HEAD");
   await credentialedGit(directory, ["push", "--porcelain", url, `HEAD:refs/heads/${branch}`], credential, "Git push failed",
     { mode: "read", refs: true, after: ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"] });

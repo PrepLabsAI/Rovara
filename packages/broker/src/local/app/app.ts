@@ -70,6 +70,8 @@ import { createLocalFlakyChecks } from "./flaky-checks.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
 import type { HumanEditSink } from "../../core/merge/seams.js";
+import { flakyFactsPort } from "../../lessons/knowledge-facts.js";
+import { baseFlakyTests } from "../../core/test-env/base-flaky.js";
 import { createLessonRoutes } from "./lessons-routes.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
@@ -118,7 +120,7 @@ import { createChannelSink } from "../../core/channel/sink.js";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
-import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
+import { channelThreadHandler, planCardPosted, setupPausedPosted, threadFollows } from "../../core/channel/thread-notices.js";
 import { taskLogThreadMirror } from "../../core/channel/log-mirror.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 
@@ -587,6 +589,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     store, registry, now: clock, footer: ATTENTION_FOOTER, log,
     doneToldInThread: () => registry.names("channel").length > 0 && channelMilestonesOn(),
     planCarded: planCardPosted({ store, now: () => clock().getTime() }),
+    setupPausedTold: setupPausedPosted({ store }),
+    // The install's one owner is its admin: they are told the admin notices (an unusual amount of team knowledge read by a tool).
+    adminNotice: async (_org, developerId) => developerId === owner.personId,
   });
   const sessionService = createSessionService({
     store,
@@ -625,6 +630,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
   const lessonNames = registry.names("learning");
   const lessons = createLocalLessons({
+    // Lead 4 L4-AK2: the measured facts of the knowledge briefing: the base's known-flaky tests.
+    knowledge: { facts: flakyFactsPort((task) => baseFlakyTests(testEnvironment.deps, task)) },
     flow: flow.deps, registry, companyId, owner, blobs, milestones, audit: registry.require("audit-sink"), admission: registry.require("admission"), metering: registry.require("metering"), approvers: registry.require("approvers"), identity: registry.require("identity"),
     model: { choice: chosen, keys, providers, endpoints: options.modelProviderEndpoints, fetch: options.askFetch },
     learning: lessonNames.length === 0 ? undefined : registry.get("learning", lessonNames.find((name) => name !== "local") ?? lessonNames[0]!),
@@ -757,7 +764,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => sessionService.refresh(orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
-  const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
+  const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps, notices });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await wikiBuildControls.routes(request, caller)) ?? (await upkeepSwitch.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await sessionService.start().catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });

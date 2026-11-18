@@ -178,6 +178,29 @@ export class MidRunKnowledge {
     ].join("\n\n");
   }
 
+  /**
+   * Lead 4 L4-AK2: the names of the team's rule files whose patterns apply to a file or folder (loaded, waiting for a touch, or readable by name), for `knowledge_for`. Names only, cleaned: the rule's text is
+   * delivered the usual way (always-on at the start, appended on first touch, or `read_knowledge`), never through the look-up. At most 5.
+   */
+  rulesMatching(located: { repo?: string | undefined; path: string }): string[] {
+    const folder = located.path.endsWith("/");
+    const path = located.path.replace(/\/+$/u, "");
+    if (path === "") return [];
+    const names: string[] = [];
+    const seen = new Set<string>();
+    for (const item of [...this.options.initial.items, ...this.pending, ...this.manual.values(), ...this.auto.values()]) {
+      if (item.patterns === undefined || item.patterns.length === 0) continue;
+      if (located.repo !== undefined && item.layer !== "meta" && item.repo !== undefined && item.repo !== located.repo) continue;
+      const hit = item.patterns.some((pattern) => firstMatchingPattern([pattern], folder ? `${path}/probe` : path) !== undefined || firstMatchingPattern([pattern], path) !== undefined);
+      const label = item.name ?? item.path;
+      if (!hit || label === undefined || seen.has(label)) continue;
+      seen.add(label);
+      names.push(inertLabel(label));
+      if (names.length >= 5) break;
+    }
+    return names;
+  }
+
   /** `read_knowledge`: one manual or auto rule by name, once. */
   readByName(rawName: string): { text: string } | { error: string } {
     if (JUDGING_STAGES_FOR_AUTO.has(this.stage)) return { error: "Rules are not loaded by name in this stage." };

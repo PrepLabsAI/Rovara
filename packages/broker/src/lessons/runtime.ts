@@ -15,11 +15,15 @@ import { createCodeFacts, type CodeFactsReader } from "./code-facts.js";
 import type { CounterDeps } from "./counters.js";
 import type { CurateDeps } from "./curate.js";
 import { lessonDeletionPort, type LessonDeletionPort } from "./deletion.js";
+import { graduatedCleanup } from "./graduated-cleanup.js";
 import { DocumentLessonStore } from "./document-store.js";
 import { documentLearningSettings, DocumentLocalToolsSettings, DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings } from "./document-settings.js";
 import type { LocalToolsSettingsStore } from "./local-tools.js";
 import { documentLessonVectors } from "./document-vectors.js";
 import { documentMeasureSink } from "./measure.js";
+import { documentEvidenceSink, type EvidenceSink } from "./evidence.js";
+import { readTaskUseReports } from "./use-reports.js";
+import { cachedSignalsReader, weeklyExtrasOf, type SignalsReader } from "./signals.js";
 import { modelCorrectionJudge } from "./judge-model.js";
 import type { LoadDeps } from "./load.js";
 import { gatedByLessonsSwitch } from "./model-gate.js";
@@ -30,7 +34,6 @@ import type { PresetDeps } from "./preset-setting.js";
 import type { CorrectionJudge, LearningSpend, LessonAuditSink, PipelineModel } from "./ports.js";
 import type { ProcessDeps } from "./process.js";
 import { projectRepoScopesOf, withProjectRepoScopes, type ProjectRepoScopesPort } from "./project-repo-audience.js";
-import type { RepoFileRuntime } from "./repo-file-job.js";
 import type { LessonStore } from "./store.js";
 import { localLessonAudiencePort, withLessonAudiences } from "./task-audience.js";
 import { createHostedLessonParts, type HostedLessonPeople, type HostedTaskReader } from "./hosted-people.js";
@@ -96,10 +99,11 @@ export interface LessonsRuntime {
   readonly judgeModel: PipelineModel;
   readonly spend: LearningSpend;
   readonly edition: Edition;
+  /** Phase 2: the graded evidence rows' sink and the per-project signals reader the loader and the weekly list share. */
+  readonly evidence: EvidenceSink;
+  readonly signals: SignalsReader;
   /** What the loader is told about a task besides its title: a summary of the approved plan and the files it names (`plan-facts.ts`). Absent: the title and request alone. */
   planFacts?: (task: { orgId?: string | undefined; taskId: string; workflow?: unknown }) => Promise<{ summary: string; files: readonly string[] } | undefined>;
-  /** The weekly file pass and its routes. Set where the project's repositories and their code hosts can be reached. */
-  repoFile?: RepoFileRuntime;
 }
 
 const noModel = (): never => { throw new Error("no learning model is set up in this install"); };
@@ -144,9 +148,12 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   const spend = input.spend ?? DENYING_SPEND;
   const judgeModel = model === undefined ? REFUSING_MODEL : gatedByLessonsSwitch(model);
   // Phase 0 (measure only, `measure.ts`): each live load writes its fit numbers, for this company only. It changes nothing about what loads.
-  const load: LoadDeps = { ...base, store, embedder, vectors, settings, access, measure: documentMeasureSink(input.store, input.companyId, input.now) };
+  // Phases 1 and 2 (`scoring-settings.ts`): the project's clean-merge rate, its lessons' windowed evidence and its lessons under question, read once per project and reused; and the sink the graded evidence rows are written through.
+  const signals = cachedSignalsReader(input.store, input.companyId, input.now);
+  const evidence = documentEvidenceSink(input.store, input.companyId);
+  const load: LoadDeps = { ...base, store, embedder, vectors, settings, access, measure: documentMeasureSink(input.store, input.companyId, input.now), signals };
   const outcomeJudge = model === undefined || input.spend === undefined ? REFUSING_JUDGE : modelCorrectionJudge({ model, spend, pause, edition });
-  const counters: CounterDeps = { ...base, store, judge: outcomeJudge, settings, vectors };
+  const counters: CounterDeps = { ...base, store, judge: outcomeJudge, settings, vectors, evidence, useReports: (key, taskId) => readTaskUseReports(input.store, { companyId: input.companyId, project: key.project, taskId }) };
   const process: ProcessDeps = {
     ...base, store, judgeModel, spend, pause, edition, embedder, vectors, access, verifier, facts, settings,
     // The project's own repositories, read live when a lesson is tiered or put on trial; no port or an unreadable definition is "not known", which leaves a repository-restricted lesson restricted.
@@ -162,13 +169,13 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   };
   const presetStore = new DocumentPresetStore(input.store);
   const soleOwner = new DocumentSoleOwnerSwitch(input.store);
-  const view = { store, directory, settings, access, names, now: input.now, ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
+  const view = { store, directory, settings, access, names, now: input.now, weeklyExtras: (key: { workspaceId: string; project: string }) => weeklyExtrasOf(signals, key), ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
   const routes: LessonRouteDeps = {
     ...base, ...view, store, directory, settings, access, vectors, embedder, judgeModel, spend, edition, pause, verifier, facts, projectRepos: process.projectRepos,
     judge: outcomeJudge,
     presets: { settings: presetStore, changes: presetStore, audit, now: input.now, authority: hosted?.tier0Authority ?? createLocalTier0Authority(owner.id), soleOwnerLoosening: (workspaceId) => soleOwner.read(workspaceId) },
   } as LessonRouteDeps;
-  const deletion = lessonDeletionPort({ store, vectors, audit, now: input.now });
+  const deletion = lessonDeletionPort({ store, vectors, audit, now: input.now, onGone: graduatedCleanup(input.store, input.now) });
   const localTools = new DocumentLocalToolsSettings(input.store);
-  return { store, documents: input.store, settings, access, directory, audit, pause, vectors, deletion, localTools, load, counters, routes, process, judgeModel, spend, edition };
+  return { store, documents: input.store, settings, access, directory, audit, pause, vectors, deletion, localTools, load, counters, routes, process, judgeModel, spend, edition, evidence, signals };
 }

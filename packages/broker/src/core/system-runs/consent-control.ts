@@ -6,8 +6,8 @@
 //   - A withdrawal changes ONLY the company's consent row. Projects keep their own switch (they read as off while the consent is off, `effectiveSystemRunsGate`), and the nightly job is not touched: the effective gate is
 //     read on every use, so the next run is refused at once.
 //   - The row changes only if it is still the row this act read (a concurrent change loses and is told to try again). The same choice again is no change and records nothing.
-import { SYSTEM_RUNS_CONSENT_WORDS, SystemRunsBodySchema, agentXError, AgentXError, when, type DocumentStore, type OrgId, type SystemRunsView } from "@agentx/contracts";
-import { readSystemRunsConsentRow, systemRunsConsentKey } from "./consent.js";
+import { SYSTEM_RUNS_CONSENT_WORDS, SystemRunsBodySchema, agentXError, AgentXError, type DocumentStore, type OrgId, type SystemRunsView } from "@agentx/contracts";
+import { readSystemRunsConsentRow, seenRowFence, systemRunsConsentKey } from "./consent.js";
 
 export const SYSTEM_RUNS_WORDS = {
   notAllowed: "Only company owners and admins can see or change whether Rovara's automatic runs are allowed for the company.",
@@ -67,9 +67,8 @@ export async function setSystemRunsConsent(deps: SystemRunsControlDeps, readBody
   if ((await readSystemRunsConsentRow(deps)).enabled === allowed) return view(deps);
   try { await deps.record({ requestId, on: allowed, previous: typeof before?.["changedAt"] === "string" ? before["changedAt"] : "none" }); } catch { throw agentXError("AUDIT_UNAVAILABLE", SYSTEM_RUNS_WORDS.auditUnavailable); }
   const changedAt = new Date(deps.now()).toISOString();
-  const condition = before === undefined ? when.absent() : typeof before["changedAt"] === "string" ? when.eq("changedAt", before["changedAt"]) : undefined;
   const written = await deps.store.transact([
-    { kind: "put", item: { ...key, entityType: "SYSTEM_RUNS_CONSENT", orgId: deps.companyId, enabled: allowed, changedAt, requestId }, ...(condition === undefined ? {} : { condition }) },
+    { kind: "put", item: { ...key, entityType: "SYSTEM_RUNS_CONSENT", orgId: deps.companyId, enabled: allowed, changedAt, requestId }, condition: seenRowFence(before) },
   ]).catch(() => ({ applied: false as const }));
   if (!written.applied) throw agentXError("RUNTIME_UNAVAILABLE", SYSTEM_RUNS_WORDS.unreadable);
   return view(deps);

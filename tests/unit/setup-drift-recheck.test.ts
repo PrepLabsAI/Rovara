@@ -13,7 +13,7 @@ import { parseCoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, queryAll, systemOwnerIdOf,
+  IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, type CodeMilestone, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, queryAll, systemOwnerIdOf,
   type DocumentStore, type JsonValue, type OrgId, type ProjectDefinition, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { claimAutomaticRun, readAutomaticRunsUse, setAutomaticRunsCap } from "../../packages/broker/src/core/automatic-runs/cap.js";
@@ -31,6 +31,7 @@ import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
@@ -727,6 +728,62 @@ describe("what the re-check says, and what blocks", () => {
     await w.h.registerProject(projectOf("payments", { revision: 2 }));
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
     expect(await readSetupRepairCard(w.h.deps, "payments")).toBeUndefined();
+  });
+
+  it("L4-U5: pausing at Build writes the setup_paused milestone in the same commit (the thread and the ticket are told by the hook), and the admins' hook hears each break with its re-check key", async () => {
+    const w = await world();
+    const milestones = createDocumentMilestones({ store: w.h.store, now: () => w.h.clock.now });
+    w.h.deps.milestones = milestones;
+    const told = vi.fn(async () => undefined);
+    w.h.deps.setupBroken = told;
+    const heard: CodeMilestone[] = [];
+    milestones.register({ name: "probe", on: async (milestone) => { heard.push(milestone); } });
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    const task = await startTask(w);
+    const ready = await readyWorkflow(w, task.taskId);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const [row] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+      await finishCheck(w.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+      await advanceAfterFailure(w.h);
+    }
+    const [broken] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+    // Every settlement and every later read of the same break names the same key (the host's marker makes it once).
+    expect(told).toHaveBeenCalled();
+    for (const call of told.mock.calls) expect(call).toEqual([{ project: "payments", recheckKey: broken!.key }]);
+    expect(await startImplementation(w.h.deps, { taskId: task.taskId, workflowRevision: ready.revision })).toBe("STALE");
+    const paused = (await readTask(w.h.deps, task.taskId))!.workflow!;
+    expect(heard.filter((milestone) => milestone.kind === "setup_paused")).toHaveLength(1);
+    expect(heard.find((milestone) => milestone.kind === "setup_paused")).toMatchObject({ orgId: w.h.deps.companyId, taskId: task.taskId, text: "Paused before Build: the project's setup needs repair." });
+    expect(JSON.stringify(heard)).not.toContain("npm ci");
+    const rows = await queryAll(w.h.store, { pk: `DEVTASK#${task.taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#setup_paused#" } });
+    expect(rows.map((row) => row.sk)).toEqual([`CODE_MILESTONE#setup_paused#${String(paused.revision).padStart(6, "0")}`]);
+  });
+
+  it("L4-U5: a break that no longer holds (a newer setup was approved) tells the admins nothing, and a host with no admins' hook still pauses the task", async () => {
+    const w = await world();
+    const told = vi.fn(async () => undefined);
+    w.h.deps.setupBroken = told;
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    const task = await startTask(w);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const [row] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+      await finishCheck(w.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+      if (attempt === 0) await advanceAfterFailure(w.h);
+    }
+    // A person approves a new setup (revision 2) before the second failure is read: the break is not the project's any more.
+    await w.h.registerProject(projectOf("payments", { revision: 2 }));
+    await advanceAfterFailure(w.h);
+    expect(told).not.toHaveBeenCalled();
+    const bare = await world();
+    bare.model.commit("main", { "package-lock.json": "lock-2" });
+    const bareTask = await startTask(bare);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const [row] = await rechecksOf(bare.h.store, bare.h.deps.companyId, "payments");
+      await finishCheck(bare.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+      await advanceAfterFailure(bare.h);
+    }
+    expect(await setupGateBeforeBuild(bare.h.deps, { project: "payments", taskId: bareTask.taskId })).toMatchObject({ answer: "blocked" });
+    expect(task.taskId).not.toBe(bareTask.taskId);
   });
 
   it("a stalled check (no worker ever answered) is unclear, twice over: it never blocks anyone", async () => {

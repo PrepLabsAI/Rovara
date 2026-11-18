@@ -5,7 +5,7 @@
 //   - Both paths are hidden from the candidate snapshot (`hideFromCandidate`, isolated-git.ts): the diff, the review and any commit of the copy never show them, tracked or not.
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { LESSON_FILE_PATH, agentXError, type EvalFilesPayload } from "@agentx/contracts";
+import { EVAL_FILES_LESSONS_PATH, agentXError, type EvalFilesPayload } from "@agentx/contracts";
 import { hideFromCandidate } from "./isolated-git.js";
 
 const AGENTS_FILE = "AGENTS.md";
@@ -24,7 +24,7 @@ async function kindOf(path: string): Promise<"missing" | "file" | "directory" | 
 
 /** The agent file with the pointer added, or undefined when it already names the lessons file. */
 export function agentsFileWithPointer(current: string | undefined, pointerLine: string): string | undefined {
-  if (current !== undefined && current.includes(LESSON_FILE_PATH)) return undefined;
+  if (current !== undefined && current.includes(EVAL_FILES_LESSONS_PATH)) return undefined;
   const section = `## Team lessons\n\n${pointerLine}\n`;
   if (current === undefined || current.trim() === "") return `# Agent instructions\n\n${section}`;
   const eol = current.includes("\r\n") ? "\r\n" : "\n";
@@ -40,10 +40,10 @@ export async function placeEvalFiles(files: EvalFilesPayload, repositories: Read
   const folderKind = await kindOf(folder);
   if (folderKind === "other" || folderKind === "file") throw agentXError("CONFIG_INVALID", REFUSAL);
   if (folderKind === "missing") await mkdir(folder, { mode: 0o755 });
-  const target = join(root, LESSON_FILE_PATH);
+  const target = join(root, EVAL_FILES_LESSONS_PATH);
   if ((await kindOf(target)) === "other" || (await kindOf(target)) === "directory") throw agentXError("CONFIG_INVALID", REFUSAL);
   await writeFile(target, files.lessonsFile.content, { mode: 0o644 });
-  hideFromCandidate(root, LESSON_FILE_PATH);
+  hideFromCandidate(root, EVAL_FILES_LESSONS_PATH);
 
   const agents = join(root, AGENTS_FILE);
   const agentsKind = await kindOf(agents);

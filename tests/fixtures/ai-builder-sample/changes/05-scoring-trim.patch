@@ -1,0 +1,11 @@
+diff --git a/evals/support/scoring.py b/evals/support/scoring.py
+index a8604fa..c8f5048 100644
+--- a/evals/support/scoring.py
++++ b/evals/support/scoring.py
+@@ -3,5 +3,5 @@ from __future__ import annotations
+ 
+ 
+ def judge(case: dict, answer: str) -> bool:
+-    text = answer.lower()
++    text = answer.lower().strip()
+     return all(s.lower() in text for s in case.get("must_contain", [])) and not any(s.lower() in text for s in case.get("must_not_contain", []))

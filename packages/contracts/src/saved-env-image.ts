@@ -59,6 +59,18 @@ export function savedEnvRepositoryName(input: { env: string; orgId: string; proj
   return `${savedEnvRepositoryPrefix(input.env)}/o${orgHash}/p${projectHash}`;
 }
 
+/** L4-EVS: whether `name` is the repository of THIS org's THIS project (its last two segments are the hashes `savedEnvRepositoryName` makes for them; the environment prefix is not compared). Never throws. */
+export function savedEnvRepositoryIsFor(name: string, input: { orgId: string; projectId: string }): boolean {
+  try {
+    if (!isSavedEnvRepositoryName(name)) return false;
+    const org = IdText.parse(input.orgId);
+    const project = IdText.parse(input.projectId);
+    const orgHash = sha256Hex(`rovara.saved-env.org\u0000${org}`).slice(0, 32);
+    const projectHash = sha256Hex(`rovara.saved-env.project\u0000${org}\u0000${project}`).slice(0, 32);
+    return name.endsWith(`/o${orgHash}/p${projectHash}`);
+  } catch { return false; }
+}
+
 /** Whether `name` is exactly the shape `savedEnvRepositoryName` makes (no wildcard, no policy variable, no extra segment). */
 export function isSavedEnvRepositoryName(name: string): boolean {
   return REPOSITORY_NAME.test(name);

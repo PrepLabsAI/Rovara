@@ -2,7 +2,7 @@
 // route below (full access only, like the other company-admin routes); `aws/developer-routes.ts` authenticates the caller and hands the request here through its optional `lessons` dependency
 // (absent: every route answers "Lessons are off."). The deployed wiring (Step 6) builds this with `createLessonsApi` for the install.
 //
-//   GET  /v1/dev/projects/{project}/lessons?list=proposed|approved|retired&since=<ms>&limit=1..100&cursor=<next>   one page of one list (since: created at or after); each lesson's `usedInTasks` = distinct tasks given it
+//   GET  /v1/dev/projects/{project}/lessons?list=proposed|approved|retired&since=<ms>&limit=1..50&cursor=<next>   one page of one list (since: created at or after); each lesson's `usedInTasks` = distinct tasks given it
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/approve          { version, edit? }                   Keep: a person approves the version they read, or an edit of it (title, description, body)
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/reject           { version, reason }                  Drop: reason is one of REJECT_REASONS (fixed words, never a person's text)
 //   POST /v1/dev/projects/{project}/lessons/decisions                   { decisions: [...] }                 Keep or Drop for up to 20 proposed lessons at once (the inbox's batch row); one answer each
@@ -15,6 +15,9 @@
 //   GET  /v1/dev/projects/{project}/lessons/measure                                                          phase 0 numbers (fit of what loaded and what was left out, clean-merge rate; counts only): a project admin or a company owner or admin
 //   PUT  /v1/dev/projects/{project}/lessons/mode                        { mode: off | suggest | auto }       a project admin (maintainer) or a company owner or admin only
 //   POST /v1/dev/projects/{project}/lessons/mode/trial-offer            { decision: accept | not_now }       the earned-trust offer (`lessons/earned-trust.ts`): who may change the mode answers it
+//   GET  /v1/dev/projects/{project}/lessons/areas[?repo=&folder= | ?whole=1]                                 lead 4 L4-LP3W: the approved lessons by code area (a tree), and the lessons anchored at one node (`lessons/area-index.ts`)
+//   GET  /v1/dev/projects/{project}/lessons/learning-sources                                                 lead 4 L4-LP3W: "Where Rovara learns from": a row per kind of source with seen / suggested / kept (30 days), one example, paused or not
+//   PUT  /v1/dev/projects/{project}/lessons/learning-sources/{key}      { paused: boolean }                  pause or resume one row (who may set the mode may; audited before the change; a paused source is not read at all: nothing is collected, stored or paid for, and resuming starts again from then)
 //   GET  /v1/dev/projects/{project}/lessons/weekly-summary                                                   whether the weekly lessons summary goes to the chats (`lessons/digest-notice.ts`; off by default)
 //   PUT  /v1/dev/projects/{project}/lessons/weekly-summary              { on: boolean }                      who may set the mode sets it; audited before the write
 //
@@ -24,12 +27,12 @@
 //   - Every read and write goes through the lessons of that company (`lessonsOf(companyId)`), whose keys are all under the company's partition. A project the company does not have, or one the person is not
 //     on the roster of, is "No such project." (the same words, so another company's project names cannot be probed).
 //   - Who decides (approve, reject, retire, the proposed and retired lists, retire requests) is the lessons library's own rule (the project's approvers, read live); the mode is set only by a project
-//     admin or a company owner or admin, read live. A script token never decides or sets anything.
+//     admin or a company owner or admin, read live. A script token gets nothing from this API: it neither reads nor decides nor sets.
 //   - Every write is audited: by the library for approve, reject and retire (its own order: approve records before it commits; reject and retire record after, best effort, as on the laptop), and here BEFORE
 //     the write for the mode and a retire request (no record, no change).
 //   - A person's erased words never come back: reasons are fixed words, people are named live (an erased person is "a former member"), and an erased person's retire request is never listed.
 //   - Refusals are fixed words; nothing a caller sent is echoed.
-import { AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, agentXError, companyScoped, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
+import { AgentXError, AgentXNameSchema, LEARNING_SOURCE_KEYS, LearningSourcePauseBodySchema, OrgIdSchema, OrgRoleSchema, agentXError, companyScoped, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
 import { z } from "zod";
 import { approveLesson, rejectLesson, retireByPerson, type ApprovalFailure } from "../lessons/approve.js";
 import { recordFeedback } from "../lessons/counters.js";
@@ -43,21 +46,26 @@ import { idIn } from "../lessons/types.js";
 import { countLessonUses } from "../lessons/use-count.js";
 import { snoozeTrialOffer, tallyTrialOffer, trialOfferEarned, trialOfferSnoozed, trialWouldStart, type TrialOfferTally } from "../lessons/earned-trust.js";
 import { readDigestSettingStrict, writeDigestSetting } from "../lessons/digest-notice.js";
-import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
+import { LESSON_PAGE_LISTS, LESSON_PAGE_MAX, buildLessonsByArea, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
+import { folderOfRequest, type AreaSelection } from "../lessons/area-index.js";
+import { buildLearningSources, setLearningSourcePause } from "../lessons/learning-sources.js";
 import type { CoreLessons } from "./lessons.js";
+import { LESSONS_GRADUATION_API, answerGraduation } from "./lessons-graduation.js";
+import type { SkillGraduation } from "../lessons/graduate.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40}))$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
-export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
+export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path) || LESSONS_GRADUATION_API.test(path);
 
 export const LESSONS_OFF = "Lessons are off.";
 export const NO_SUCH_PROJECT = "No such project.";
 export const NO_SUCH_TASK = "No such task.";
 export const NO_SUCH_LESSON = "That lesson is no longer there.";
 export const MODE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change its learning mode.";
+export const SOURCE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can pause or resume a source.";
 export const SUMMARY_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change the weekly summary.";
 export const MEASURE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can see how lessons are loaded.";
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
@@ -80,7 +88,7 @@ const FROM_STORED: Record<LearningMode, LessonApiMode> = { Off: "off", Collect: 
 const LESSON_ID = /^[A-Za-z0-9_-]{4,64}$/u;
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const PAGE_DEFAULT = 50;
-const RETIRE_REQUESTS_MAX = 100;
+const RETIRE_REQUESTS_MAX = 50;
 const RETIRE_REQUEST_KEEP_SECONDS = 30 * 86_400;
 
 const EditSchema = z.object({ title: z.string().trim().min(1).max(80), description: z.string().max(160), body: z.string().trim().min(1).max(600) }).strict();
@@ -99,10 +107,13 @@ const TrialOfferBody = z.object({ decision: z.enum(["accept", "not_now"]) }).str
 const WeeklySummaryBody = z.object({ on: z.boolean() }).strict();
 const PageQuery = z.object({
   list: z.enum(LESSON_PAGE_LISTS).default("approved"),
-  limit: z.string().regex(/^[1-9][0-9]{0,2}$/u).transform(Number).refine((n) => n <= 100).optional(),
+  limit: z.string().regex(/^[1-9][0-9]{0,2}$/u).transform(Number).refine((n) => n <= LESSON_PAGE_MAX).optional(),
   cursor: z.string().min(1).max(400).optional(),
   since: z.string().regex(/^[0-9]{1,16}$/u).transform(Number).optional(),
 }).strict();
+/** `repo` is a repository name, or `*` for the lessons that name paths but no repository; `whole=1` asks for the lessons with no area. Nothing else is accepted. */
+const AreasQuery = z.object({ repo: z.string().regex(/^(?:\*|[A-Za-z0-9_.@-]{1,100})$/u).optional(), folder: z.string().max(400).optional(), whole: z.literal("1").optional() }).strict();
+const SOURCE_KEY = z.enum(LEARNING_SOURCE_KEYS);
 const CursorSchema = z.tuple([z.enum(LESSON_PAGE_LISTS), z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), z.string().regex(LESSON_ID)]);
 
 export interface LessonsApiRequest {
@@ -116,7 +127,7 @@ export interface LessonsApiRequest {
 export interface LessonsApiCaller {
   /** The person the sign-in vouched for. */
   personId: string;
-  /** Set when the caller holds a script token: it may read, never decide or set. */
+  /** Set when the caller holds a script token: it gets nothing from this API (a refusal, for reads as well as writes). */
   scriptToken?: { tokenId: string } | undefined;
 }
 
@@ -132,6 +143,8 @@ export interface LessonsApiOptions {
   lessonsOf(companyId: OrgId): Promise<LessonsApiCompany | undefined>;
   /** The same people port the company's lessons were built with (roster and names, for this company only). */
   people: Pick<HostedLessonPeople, "onProjectRoster" | "displayName" | "isErased">;
+  /** The skills library of one company (L4-AK3), for graduating a proven procedure into a skill. Absent: the skill target answers "not available yet". */
+  skillsOf?: (companyId: OrgId) => SkillGraduation | undefined;
   /** The person's role on the project now (a project admin is a `maintainer`); undefined: none. */
   projectRole(companyId: OrgId, project: string, personId: string): Promise<ProjectRole | undefined>;
   /** The task's own project's wiki use report; the caller never chooses the company or project. */
@@ -205,13 +218,15 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   }
 
   async function answer(request: LessonsApiRequest, caller: LessonsApiCaller): Promise<unknown> {
-    const match = LESSONS_API.exec(request.path);
+    // Lessons phase 4 (`lessons-graduation.ts`): its paths are tried first (`tidy` and `check-drafts` would otherwise read as a lesson id); it shares everything below up to the roster check.
+    const graduation = LESSONS_GRADUATION_API.exec(request.path);
+    const match = graduation ?? LESSONS_API.exec(request.path);
     if (match === null) throw notFound(ROUTE_NOT_FOUND);
-    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson] = match;
+    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson, , rawSource] = graduation === null ? match : [match[0], match[1]] as unknown as typeof match;
     const method = request.method;
-    const route = rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
-    if (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
+    const route = graduation !== null ? "graduation" : rawSource !== undefined ? "learning-source" : rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
+    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST", areas: "GET", "learning-sources": "GET", "learning-source": "PUT" };
+    if (graduation === null && (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method)) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
     if (options.lessonsSwitch.mode === "off") throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
@@ -222,8 +237,8 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     if (lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     // The lessons handed back must be the member company's own: anything else is a wiring fault, refused before any read.
     if (lessons.companyId !== companyId) throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
-    const writing = method !== "GET";
-    if (writing && caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+    // A script token neither reads nor changes lessons here: the lists are for team members, on their own screens, a page at a time.
+    if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
 
     let project: string;
     try { project = decodeURIComponent(rawProject!); } catch { throw notFound(NO_SUCH_PROJECT); }
@@ -270,9 +285,11 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     }
     if (!onRoster) throw notFound(NO_SUCH_PROJECT);
 
+    if (graduation !== null) return await answerGraduation(request, graduation, { companyId, project, personId, lessons, skills: options.skillsOf?.(companyId), now: options.now, log }, caller);
+
     if (route === "list") {
       const query = PageQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
-      if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "list takes list (proposed, approved or retired), since, limit (1 to 100) and cursor, once each");
+      if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "list takes list (proposed, approved or retired), since, limit (1 to 50) and cursor, once each");
       const after = query.data.cursor === undefined ? undefined : decodeCursor(query.data.cursor, query.data.list);
       const page = await buildLessonsPage(deps, who, project, { list: query.data.list, limit: query.data.limit ?? PAGE_DEFAULT, ...(after === undefined ? {} : { after }), ...(query.data.since === undefined ? {} : { since: query.data.since }) });
       // "Used in N tasks": the distinct tasks each shown lesson was given to (its use rows, this company and project only). A lesson that could not be counted has no `usedInTasks`, and the page says so (`usedInIncomplete`).
@@ -293,6 +310,36 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
       if (!(await mayChange())) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
       try { return await readLessonMeasure(runtime.documents, { companyId, project, now: options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    }
+
+    // Lead 4 L4-LP3W: the approved lessons by code area (anyone on the project reads, like the approved list).
+    if (route === "areas") {
+      const query = AreasQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
+      if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "areas takes repo (a name, or *), folder and whole=1, once each");
+      let selection: AreaSelection | undefined;
+      if (query.data.whole === "1") {
+        if (query.data.repo !== undefined || query.data.folder !== undefined) throw agentXError("CONFIG_INVALID", "whole=1 takes nothing else");
+        selection = { whole: true };
+      } else if (query.data.repo !== undefined) {
+        const folder = folderOfRequest(query.data.folder ?? "");
+        if (folder === undefined) throw agentXError("CONFIG_INVALID", "folder is not a plain folder path");
+        selection = { repo: query.data.repo === "*" ? null : query.data.repo, folder };
+      } else if (query.data.folder !== undefined) throw agentXError("CONFIG_INVALID", "folder needs repo");
+      return await buildLessonsByArea(deps, who, project, selection === undefined ? {} : { selection });
+    }
+
+    // Lead 4 L4-LP3W: "Where Rovara learns from" and its Pause.
+    if (route === "learning-sources") return await buildLearningSources(deps, who, project, { canPause: await mayChange() });
+    if (route === "learning-source") {
+      const sourceKey = SOURCE_KEY.safeParse(rawSource);
+      if (!sourceKey.success) throw notFound(ROUTE_NOT_FOUND);
+      const body = bodyOf(LearningSourcePauseBodySchema, request.body, "pause takes paused: true or false");
+      if (!(await mayChange())) throw agentXError("FORBIDDEN", SOURCE_NEEDS_ADMIN);
+      let outcome: Awaited<ReturnType<typeof setLearningSourcePause>>;
+      try { outcome = await setLearningSourcePause({ store: runtime.store, audit: runtime.audit, now: options.now }, where, personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+      if (!outcome.ok) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+      log("learning_source_set", { companyId, paused: outcome.paused });
+      return { project, key: sourceKey.data, paused: outcome.paused };
     }
 
     if (route === "weekly-summary") {

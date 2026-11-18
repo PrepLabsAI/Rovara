@@ -279,6 +279,8 @@ export * from "./app-service-status.js";
 // Learning v2 (L4): lesson text hygiene and the learnedContext payload.
 export * from "./lesson-text.js";
 export * from "./learned-context.js";
+export * from "./knowledge-context.js";
+export * from "./lessons-by-area.js";
 export * from "./lesson-citation.js";
 export * from "./code-identifiers.js";
 export * from "./decision-cards.js";
@@ -380,8 +382,8 @@ export * from "./e2e-model-spend.js";
 // Learning v2: the Team record and lessons (R1).
 export * from "./lessons.js";
 export * from "./app-lessons.js";
-export * from "./app-lessons-repo-file.js";
 export * from "./lessons-local-tools.js";
+export * from "./lesson-wording.js";
 export * from "./lesson-keys.js";
 // Lead 4 W2: the project wiki store contract (rows keyed by company AND project).
 export * from "./wiki-store.js";
@@ -445,7 +447,7 @@ export * from "./eval-base-cache.js";
 export * from "./eval-check.js";
 export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter, EvalReservationAdapter } from "./ports/eval-health.js";
 
-export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
+export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendDollarsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendDollars, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
 export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";
 export * from "./machine-setup.js";
@@ -455,6 +457,8 @@ export * from "./machine-size-price.js";
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
 export * from "./eval-plan-delivery.js";
+export * from "./eval-environment.js";
+export * from "./eval-run-diagnostic.js";
 // DEC 253j(1): the trusted EVAL_PLAN record (stored next to EVAL_SPEND, bound by its digest).
 export * from "./eval-plan-record.js";
 export * from "./eval-discovery-report.js";
@@ -474,3 +478,6 @@ export * from "./company-engine-model.js";
 export * from "./report-keys.js";
 export * from "./cost-report.js";
 export * from "./upkeep.js";
+export * from "./prompt-locations.js";
+export * from "./ai-markers.js";
+export * from "./company-egress-addresses.js";

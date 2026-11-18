@@ -55,6 +55,11 @@ export interface AutomatedRunResult {
 
 /** What the host fills in: how a run is actually started on this install (the task flow, a worker machine). */
 export interface AutomatedRunStarter {
+  /**
+   * L4-SR2 (closes #927 REVIEW-1 L2): a starter that really starts the setup agent's repair draft says so, here and nowhere else. A request that carries `setupRepair` is refused by the door (`startUnattendedRun`) before
+   * anything is held unless the starter declares this, so a starter written for agents or jobs can never start an ordinary task from a repair request's text. Absent or any other value: it is not one.
+   */
+  readonly startsSetupRepair?: true | undefined;
   start(request: AutomatedRunRequest): Promise<AutomatedRunResult>;
   /** The run an earlier start with this request id made, or undefined. */
   read(requestId: string): Promise<{ taskId: string } | undefined>;
@@ -81,6 +86,11 @@ export interface UnattendedStartDeps {
   /** The store the open runs are kept in, and the host's view of tasks. Absent: runs are not recorded (a test, or an install with nothing to settle). */
   store?: DocumentStore | undefined;
   tasks?: UnattendedTasks | undefined;
+  /**
+   * Told once a run's task has ended and BEFORE its reservation is settled (lead 4 L4-SR1: the nightly spend line). `costUsd` is the task's cost when the install can tell it (absent: unknown, never 0). A throw leaves
+   * the run open and its reservation held, and the next sweep asks again, so a hook must be safe to repeat (the nightly spend row is written once per request).
+   */
+  onSettled?: ((run: { requestId: string; taskId: string; project: string; origin: string; startedAt: string; costUsd: number | undefined; end: string }) => Promise<void>) | undefined;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -90,6 +100,9 @@ export const UNATTENDED_EVENT_TEXT = "Do your job for this event.";
 
 /** What the owner is told when a run is refused for want of a cap. */
 export const NO_CAP_MESSAGE = "This install has no dollar cap for work that starts with no one present (its admission does not declare that it enforces a cost limit), so nothing is started on its own. Install an admission adapter that holds a limit and declares `enforcesCost: true`, then try again.";
+
+/** What the door says when the host's starter does not start a setup repair draft. Fixed words. */
+export const SETUP_REPAIR_NOT_STARTED = "This install does not start setup repair drafts on its own.";
 
 const OPEN_RUN_PARTITION = "UNATTENDED_RUN_OPEN";
 const RUN_ROW_DAYS = 62;
@@ -114,6 +127,8 @@ export function capProblem(enforces: { dollars: boolean }, request: Pick<Automat
  */
 export async function startUnattendedRun(deps: UnattendedStartDeps, request: AutomatedRunRequest): Promise<AutomatedRunResult> {
   if (!(await automationIsOn(deps.automation))) throw agentXError("NOT_AVAILABLE_HERE", "automation is not switched on");
+  // A repair draft is started only by a starter that declares it (L4-SR2): every other starter refuses the request before it reads or holds anything.
+  if (request.setupRepair !== undefined && deps.starter.startsSetupRepair !== true) throw agentXError("NOT_AVAILABLE_HERE", SETUP_REPAIR_NOT_STARTED);
   const earlier = await deps.starter.read(request.requestId);
   if (earlier !== undefined) return { taskId: earlier.taskId, duplicate: true };
   const uncapped = capProblem(deps.enforces, request);
@@ -181,8 +196,9 @@ export async function sweepUnattendedRuns(deps: UnattendedStartDeps): Promise<Un
       const state = await deps.tasks.read(taskId);
       if (state === undefined || state.end !== undefined) {
         const reservationId = typeof row["reservationId"] === "string" ? row["reservationId"] : undefined;
+        const cost = state === undefined ? undefined : await deps.tasks.costUsd?.(taskId);
+        await deps.onSettled?.({ requestId: text(row["requestId"]), taskId, project: text(row["project"]), origin: text(row["origin"]), startedAt: text(row["startedAt"]), costUsd: cost, end: state?.end ?? "gone" });
         if (reservationId !== undefined) {
-          const cost = state === undefined ? undefined : await deps.tasks.costUsd?.(taskId);
           await deps.admission.settle(reservationId, cost === undefined ? {} : { cost: { micros: Math.round(cost * 1_000_000), currency: "USD" } });
         }
         await deps.store.delete({ key, condition: when.present() });

@@ -24,10 +24,11 @@
 // and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
 import { profileDisplayName } from "../developer/github-profile.js";
 import { projectTaskCapReader, type ProjectSettingsHook } from "./project-settings.js";
+import { enginePolicyHook, policyHookSettingsFromEnvironment } from "./engine-policy-hook.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, HostedPolicyHookSettingsSchema, WIKI_BUILD_WORDS, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -49,6 +50,8 @@ import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
+import { setupAgentKey } from "../core/setup-agent/keys.js";
+import { boundEvalMonthlyCap } from "../core/setup-agent/eval-reservation.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -59,22 +62,34 @@ import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, hostedUpkeepOn, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
+import { createHostedSetupRepair } from "../core-host/setup-repair.js";
 import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
+import { queueSetupBroken } from "../core/notify/attention.js";
+import type { ChatThreads } from "../core-host/chat-threads.js";
+import { channelThreadHandler } from "../core/channel/thread-notices.js";
+import { recordChatThread } from "../core-host/chat-thread-record.js";
+import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
+import { upkeepIsOn } from "../core/upkeep/settings.js";
+import { readUpkeepCap, upkeepRoomCentsOf, type UpkeepCapReader } from "../core/upkeep/cap.js";
+import { upkeepCapReaderFromEnvironment } from "../core-host/upkeep-cap-http.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { listProjectMembers } from "./admin-actions.js";
+import { createKnowledgeApi, scriptTokenAuthenticator, type KnowledgeApi } from "../core-host/knowledge-api.js";
+import { developerIdOf } from "../core/sessions/create.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
 import { WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../core/task-flow/stop-request.js";
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
+import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
-import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type WikiRefreshMark } from "../core/system-runs/access.js";
+import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type SetupRepairMark, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
 import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
@@ -119,8 +134,8 @@ import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
-/** The variable that holds the install's policy hook settings (JSON: `{ address, jwks, thumbprints }`). Absent or empty: no hook. */
-export const CORE_POLICY_HOOK_VARIABLE = "ROVARA_POLICY_HOOK";
+// The policy hook's settings and the engine's hook live in engine-policy-hook.ts (the dispatcher reads them too, without this root); re-exported for the root's existing importers.
+export { CORE_POLICY_HOOK_VARIABLE, enginePolicyHook, policyHookSettingsFromEnvironment } from "./engine-policy-hook.js";
 
 /** What the root gives `codeModules`. */
 export interface BrokerCoreModuleContext {
@@ -149,8 +164,14 @@ export interface BrokerCoreRootInputs {
   extraModules?: () => readonly CoreAdapterModule[];
   /** The policy hook's asker (`policyHookInstallFromEnvironment`). Absent: an install with hook settings refuses its registry. */
   policyHookInstall?: () => PolicyHookInstall | undefined;
-  /** The people lessons ask (per company). Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once). */
-  lessonsPeople?: (companyId: OrgId) => HostedLessonPeople;
+  /** CORE-ROOT-HOOK-WIRING-TEST-20261117: how the root reaches the company rules service (its keys and its answers), for the engine's per-task limit and the hook in front of admission.
+   * Absent: the global fetch (the deployed broker). */
+  policyHookFetch?: typeof fetch;
+  /**
+   * The people lessons ask (per company; `createHostedLessonsPeople`). `context.store` is the company's own core store (the person erase receipts live there), asked for only when an erase is read.
+   * Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once).
+   */
+  lessonsPeople?: (companyId: OrgId, context: { store: () => Promise<DocumentStore> }) => HostedLessonPeople;
   /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   lessonsLearning?: CoreLessonsOptions["learning"];
   /**
@@ -175,6 +196,12 @@ export interface BrokerCoreRootInputs {
    * gateway configured) each company chooses its agents' models on the web page from that list; without it every core step runs on ROVARA_CORE_AGENT_MODEL, exactly as before.
    */
   offeredModels?: OfferedModelsReader;
+  /**
+   * L4-SR1: the gateway's own answer about one company's projects' nightly upkeep caps (core/upkeep/cap.ts; the contract is `UpkeepCapReadSchema`, a service read on the gateway). Absent, it is built from the environment
+   * where the gateway's origin and the task-token signer are configured, and where that gateway does not answer the read nothing that spends AI starts by itself. L4-SR2b: the automatic repair draft's room check is
+   * read from this same reader (`upkeepRoomCentsOf`, core/upkeep/cap.ts), fresh each time: there is no second source of the project's remaining room.
+   */
+  upkeepCap?: (companyId: OrgId) => UpkeepCapReader | undefined;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -185,6 +212,11 @@ export interface BrokerCoreRootInputs {
    * read under the company, and the ticket write-back through the company's own connection on its milestones. Absent: no intake (the Linear app webhook logs `linear.intake_not_wired`).
    */
   linearIntake?: { connections: Pick<LinearConnections, "connection" | "accessToken">; fetch?: typeof fetch };
+  /**
+   * L4-U5b: the company-scoped chat seam (core-host/chat-threads.ts). With it, a core task started from a chat thread has that thread recorded (`CoreTaskEntry.recordThread`), and its milestones (a pause at Build for a broken
+   * setup, the pull request, the end) are told in that thread through the company's own adapter, riding on the company's milestones like the ticket write-back. Absent: no thread is recorded and none is told.
+   */
+  chatThreads?: ChatThreads;
 }
 
 export interface BrokerCoreRoot {
@@ -201,6 +233,13 @@ export interface BrokerCoreRoot {
    * people port: every lessons route then answers "Lessons are off." and reads nothing.
    */
   readonly lessons: LessonsApi | undefined;
+  /**
+   * L4-AK1H: the team knowledge reads for tools outside Rovara (`deps.knowledge`, `core-host/knowledge-api.ts`), behind the same lessons switch and people port as `lessons`. Undefined in the same cases: a person is then
+   * given the fixed "off" answer, a script token is refused, and nothing is read.
+   */
+  readonly knowledge: KnowledgeApi | undefined;
+  /** L4-AK1H: whether a person may be told an admin notice now (they are one of the company's admins, read live). Handed to the notice delivery (`notification.adminNotice`). Undefined with `knowledge`. */
+  readonly adminNotice: ((orgId: string, developerId: string) => Promise<boolean>) | undefined;
   readonly policyHook?: ProjectSettingsHook;
   /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
   readonly intake: HostedIntake | undefined;
@@ -229,21 +268,6 @@ const WORKSPACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const CORE_CALLBACK = /^\/v1\/internal\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/operations\/[0-9a-f-]{36}\/[a-z-]+$/u;
 const callbackAnswer = (statusCode: number, code: string, message: string): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code, message } }) });
 const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable.";
-
-/**
- * The hosted install's policy hook settings (ROVARA_POLICY_HOOK, JSON `{ address, jwks, thumbprints }`).
- * Absent or empty gives undefined. Unreadable settings throw in fixed words, so an install meant to ask always has a hook.
- * Developer-API composition (#717) uses the same resolved setting and hosted client.
- */
-export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): HostedPolicyHookSettings | undefined {
-  const raw = env[CORE_POLICY_HOOK_VARIABLE]?.trim() ?? "";
-  if (raw === "") return undefined;
-  let settings: unknown;
-  try { settings = JSON.parse(raw); } catch { throw new Error("the policy hook settings are not JSON"); }
-  const parsed = HostedPolicyHookSettingsSchema.safeParse(settings);
-  if (!parsed.success) throw new Error("the policy hook settings are not readable");
-  return parsed.data;
-}
 
 // ---- the eval plan source of the deployed callback layer (EVAL-PLAN-CORE-WIRING, DEC 253c/253j(1))
 
@@ -353,12 +377,21 @@ export function hostedTaskAccess(inputs: {
   setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
   /** L4-P1 (owner DEC 254zzl): whether this company's SystemRuns flag is on, read now. With it, a project's SYSTEM OWNER is accepted for the closed list of system purposes (core/system-runs/access.ts) and for nothing else; members' rules are unchanged. Absent: never. */
   systemRunsOn?: () => boolean | Promise<boolean>;
+  /** L4-SR2: whether a project's own upkeep switch is on, read now (a repair draft is accepted only while it is). Absent: off. */
+  upkeepOn?: (project: string) => boolean | Promise<boolean>;
 }): TaskAccess {
   // The gate may read the company's consent (async): it is settled once per decision, and anything but an explicit true is off (a gate that throws is off).
   const settledOn = async (gate: (() => boolean | Promise<boolean>) | undefined): Promise<(() => boolean) | undefined> => {
     if (gate === undefined) return undefined;
     let on = false;
     try { on = (await gate()) === true; } catch { on = false; }
+    return () => on;
+  };
+  // The project's upkeep switch, settled once per decision; anything but an explicit true (a throw included) is off.
+  const settledUpkeep = async (project: string): Promise<(() => boolean) | undefined> => {
+    if (inputs.upkeepOn === undefined) return undefined;
+    let on = false;
+    try { on = (await inputs.upkeepOn(project)) === true; } catch { on = false; }
     return () => on;
   };
   const liveMember = async (personId: string) => {
@@ -385,7 +418,7 @@ export function hostedTaskAccess(inputs: {
   return {
     async checkStart(principal, project, purpose, origin) {
       // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
-      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn) }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
+      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), upkeepOn: purpose === "setup_agent" ? await settledUpkeep(project) : undefined }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
       if (principal.companyId !== inputs.companyId || (await liveMember(principal.personId)) === undefined) return { allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE };
       return (await inputs.projectGrant(principal.personId, project)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
     },
@@ -416,7 +449,13 @@ export function hostedTaskAccess(inputs: {
           const pointer = await readWikiBuildPointer(store, inputs.companyId, task.project).catch(() => undefined);
           if (pointer !== undefined) wikiRefreshMark = { taskId: pointer.taskId, unattended: pointer.unattended === true, requestedBy: pointer.requestedBy };
         }
-        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), wikiRefreshMark }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
+        // A repair draft's mark: the project's setup pointer (read only for a setup purpose; `readSetupAgentPointer` checks company and project), and the project's upkeep switch, read now.
+        let setupRepairMark: SetupRepairMark | undefined;
+        if (store !== undefined && stored?.["purpose"] === "setup_agent") {
+          const pointer = await store.get(setupAgentKey(inputs.companyId, task.project)).catch(() => undefined);
+          if (pointer?.["entityType"] === "SETUP_AGENT" && pointer["orgId"] === inputs.companyId && pointer["project"] === task.project && typeof pointer["taskId"] === "string" && typeof pointer["requestedBy"] === "string") setupRepairMark = { taskId: pointer["taskId"], requestedBy: pointer["requestedBy"] };
+        }
+        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), wikiRefreshMark, setupRepairMark, upkeepOn: stored?.["purpose"] === "setup_agent" ? await settledUpkeep(task.project) : undefined }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
       }
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
@@ -497,15 +536,6 @@ export async function hostedRoundCap(registry: Pick<AdapterRegistry, "require">,
   return { limitUsd: cap.micros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) };
 }
 
-/** L2-5 (b): the company rules service the engine's per-task limit is resolved through, as the settings page's: none on an install without one; settings that did not read, or no
- * install signer, throw (the limit is then unreadable and the work refused). */
-export function enginePolicyHook(settings: HostedPolicyHookSettings | undefined, problem: boolean, install: (() => PolicyHookInstall | undefined) | undefined): ProjectSettingsHook | undefined {
-  if (settings === undefined && !problem) return undefined;
-  const signer = install?.();
-  if (settings === undefined || signer === undefined) throw new Error("the policy hook is not usable");
-  return { settings, install: signer };
-}
-
 /**
  * The deployed identity's display name for a person: read live from their sign-in record, never for a revoked or unknown person. The name goes through the one display helper
  * (`profileDisplayName`, DEC 254p (a)): a GitHub person's is clean, cut text with no markup, address or placeholder shape; any other person's is exactly as stored.
@@ -543,7 +573,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
   // L2-5 (b): each task's cap is lowered to its project's own per-task limit (model_budget_usd) when one is set.
   // The company's rules service, when the install has one, as the settings page reads it (read each time: unreadable settings or no install signer refuse).
-  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall));
+  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall, inputs.policyHookFetch));
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
@@ -607,8 +637,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const recipients = createUpkeepRecipients(companyId, sources);
     const administers = createUpkeepAdministers(companyId, sources);
     const pauses = upkeepPauseHooks({ store, companyId, now: () => now().getTime(), recipients, realtime: registry.get("realtime", registry.names("realtime")[0] ?? ""), log: (entry) => log({ event: "core_engine.upkeep", ...entry }) });
-    return { gate, administers, pauses };
+    // L4-U5: the admins' one "Setup needs repair" notice (queued once per re-check), over the same recipients and attention queue as the pause notice.
+    const setupBroken = (input: { project: string; recheckKey: string }): Promise<unknown> => queueSetupBroken({ store, now: () => now(), recipients, realtime: registry.get("realtime", registry.names("realtime")[0] ?? ""), log: (entry) => log({ event: "core_engine.setup_broken", ...entry }) }, { orgId: companyId, project: input.project, recheckKey: input.recheckKey });
+    return { gate, administers, pauses, setupBroken };
   };
+  // L4-SR1: the gateway's cap read for one company (an injected reader wins; else the environment's, only where the gateway's origin and the task-token signer exist). One reader per company: it never reads another's.
+  const upkeepCapFor = (companyId: OrgId): UpkeepCapReader | undefined => inputs.upkeepCap !== undefined ? inputs.upkeepCap(companyId) : upkeepCapReaderFromEnvironment(env, inputs.taskTokens, companyId);
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
@@ -628,7 +662,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     beforeSeal: (registry) => {
       const settings = hookSettings;
       if (settings === undefined) return;
-      applyHostedPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log });
+      applyHostedPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log, ...(inputs.policyHookFetch === undefined ? {} : { fetch: inputs.policyHookFetch }) });
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
@@ -643,11 +677,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
       ...(inputs.linearIntake === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId) }),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
+      // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
+      // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
+      artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.artifact_read_refused", companyId, reason }) }),
       // DEC 254zm: a starting task pins the project's newest usable approved test environment (the company's own records), as on a laptop.
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => effectiveSystemRunsGateOf(systemRunsFlag.value, companyId, registry.require("storage")).enabled(), people: taskPeople }),
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => effectiveSystemRunsGateOf(systemRunsFlag.value, companyId, registry.require("storage")).enabled(),
+        // L4-SR2: a repair draft is accepted only while the project's own upkeep switch is on (read now, at the start and at every step).
+        upkeepOn: (project) => upkeepIsOn({ store: registry.require("storage"), companyId }, project), people: taskPeople }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
@@ -668,7 +707,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
         } else {
           lessons = createCoreLessons({
-            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId), now: () => now().getTime(), log,
+            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
             ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;
@@ -689,6 +728,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
                 members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }),
               })) lessons.milestones.register(handler);
             }
+            // L4-U5b: the chat thread a task was started from is told its milestones, through this company's own chat adapter only. The person who started the task must still be this company's member.
+            if (inputs.chatThreads !== undefined) {
+              const threads = inputs.chatThreads;
+              lessons.milestones.register(channelThreadHandler({
+                store: registry.require("storage"), registry: { get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : undefined)) as never },
+                now: () => now().getTime(), companyOf: threads.companyOf,
+                isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId,
+                log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }),
+              }));
+            }
             lessons.attach();
             lessonsByCompany.set(companyId, lessons);
             // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
@@ -700,19 +749,37 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-P1: the company's SystemRuns flag, on the flow itself (the free re-check at task start stands behind it), and the system starter and the upkeep night where the flag covers the company (nothing is built otherwise).
         hostedSystemRunsFor(flow.deps, companyId, systemRunsFlag.value);
         const upkeep = upkeepPartsFor(registry, companyId);
+        // L4-U5: a re-check that settles as broken tells the project's admins once (the notice writes its own marker); the same flow's repair card is what the delivery re-reads before every send.
+        flow.deps.setupBroken = async (input) => { await upkeep.setupBroken(input); };
         // L4-P2: the AI step of the night (the wiki refresh) over the SAME flow and its own Admission; it starts only where a dollar cap is really enforced and both locks are open. The file map is the night's own.
         const wikiMapForNight: HostedWikiMapWiring = { standing: setupRunStanding, hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) };
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
+        // L4-SR2: the automatic repair draft, only where the ceiling covers the company (nothing is built otherwise). Its start is behind the effective gate, the project's upkeep switch, an enforced cap with room and the access rule's marks.
+        // L4-SR2b: the project's remaining room is the gateway's own answer (the SAME reader as the night's cap signal), read fresh at the draft's start and at every model token's mint; any doubt is no room.
+        const upkeepRoom = (project: string): Promise<number | undefined> => upkeepRoomCentsOf(upkeepCapFor(companyId), project, now().getTime(), companyId);
+        const repair = switchCovers(systemRunsFlag.value, companyId)
+          ? createHostedSetupRepair({
+            flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured,
+            readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+              .fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
+            room: upkeepRoom,
+            onUpkeepPaused: (scope, reason) => upkeep.pauses.onRunPaused(scope, reason), log,
+          })
+          : undefined;
+        if (repair !== undefined) {
+          flow.deps.afterSetupBroken = repair.hook;
+          flow.deps.upkeepRoomCents = upkeepRoom;
+        }
         const systemRuns = createHostedSystemRuns({
           flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log,
-          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input),
-          refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, log }),
+          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input), cap: upkeepCapFor(companyId),
+          refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, cap: upkeepCapFor(companyId), log }),
         });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
-          ...(inputs.services?.(companyId, flow, registry, { ...wiring, ...(attention === undefined ? {} : { notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }), ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          ...(inputs.services?.(companyId, flow, registry, { ...wiring, ...(attention === undefined ? {} : { notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }), ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
-          ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log }) }),
+          ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log, repairs: repair }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
           "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
         };
@@ -726,6 +793,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   let coreTasks: CoreTaskEntry | undefined;
   let coreApp: CoreAppEntry | undefined;
   let lessons: LessonsApi | undefined;
+  let knowledge: KnowledgeApi | undefined;
+  let adminNotice: BrokerCoreRoot["adminNotice"];
   if (settingsBlocked) {
     const blockedSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value;
     coreTasks = {
@@ -782,6 +851,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
               .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
             displayName: displayNameOf,
+            // L4-EVC (DEC 254zzz20): the eval card. The monthly cap comes only from the install's bound `eval-reservation` adapter (no adapter: no eval is confirmed); the broker hashes the confirmed files from the company's own code host.
+            eval: {
+              ...(boundEvalMonthlyCap(registry) === undefined ? {} : { monthlyCap: boundEvalMonthlyCap(registry)! }),
+              readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+                .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
+            },
             // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
             approval: createHostedSetupApproval({
               flow: runtime.flow.deps, store: runtime.flow.deps.store, approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
@@ -802,12 +877,21 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             displayName: displayNameOf,
           },
           // Lead 4 N1 + L4-P1: the nightly upkeep switch. The same live standing as the wiki controls. `available` follows the company's SystemRuns flag (default off): the system starter and the hourly `upkeep-night` job exist exactly there, so with the flag off the page hides the switch and a change is refused. (The per-project schedule is not used: one hourly job starts every due project.)
-          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value) },
+          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value),
+            // L4-SR1: the project's monthly cap as the gateway says now (the page's "of $Y"); null where the gateway does not answer.
+            cap: async (company, project) => { const read = await readUpkeepCap(upkeepCapFor(company), project, now().getTime(), company); return read.state === "enforced" ? read.limitUsd : null; } },
+          // L4-U5b: the project notices in the person's own inbox are checked against the same live reads the notice delivery uses (does the person still administer the project, is the setup still broken).
+          projectNotices: {
+            administers: upkeepPartsFor(registry, runtime.companyId).administers,
+            setupRead: (orgId, project) => (orgId === runtime.companyId ? readSetupBrokenNotice({ flow: runtime.flow.deps, store: runtime.flow.deps.store, companyId: runtime.companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)),
+          },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,
             projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
+            // Lead 4 L4-LP3W: "Team lessons for this area" reads this company's own lessons library, and no other company's.
+            lessonsOf: (companyId) => (companyId === runtime.companyId ? lessonsByCompany.get(companyId)?.runtime.load : undefined),
           },
           // Lead 4 C1: the wiki's corrections. The role is read live from membership; "Suggest as a lesson" exists only where lessons are on for the company (it writes one PENDING lesson, never approves).
           wikiCorrections: {
@@ -851,12 +935,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       },
     });
     const deployedCallerOf = deployedCallerFromMembership(membershipOf);
-    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf);
+    const chatThreads = inputs.chatThreads;
+    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input));
     // Lane L12: the same routes and caller mapping on /v1/app/*, with the person erase (below) next to them.
     coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
     // runtime's (built once); the person's project role is the broker's own project grant (administrator: maintainer, developer: contributor).
-    const lessonsPeople = inputs.lessonsPeople;
+    const lessonsPeopleOf = inputs.lessonsPeople;
+    const lessonsPeople = lessonsPeopleOf === undefined ? undefined : (companyId: OrgId) => lessonsPeopleOf(companyId, { store: async () => (await app.registry()).require("storage") });
     if (lessonsSwitch.value.mode !== "off" && lessonsPeople !== undefined) {
       lessons = createLessonsApi({
         lessonsSwitch: lessonsSwitch.value,
@@ -877,6 +963,45 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             return await readWikiTaskUse({ store: registry.require("storage"), companyId, now: () => now().getTime() }, { project, taskId });
           } catch { return undefined; }
         },
+        now: () => now().getTime(),
+        log,
+      });
+      // L4-AK1H: the same company, people and lessons, for the reads a tool outside Rovara makes. A script token is checked against its own company's token store and identity (never the caller's word), and only for a company the
+      // lessons switch covers; its creator is read live (a removed member, or one whose role changed, is nobody).
+      const switchValue = lessonsSwitch.value;
+      // Who is told about an unusual amount of reading: the company's owners (the people port's list) now, by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
+      const adminsOf = async (companyId: OrgId): Promise<string[]> => {
+        const listed = await lessonsPeople(companyId).approvers(companyId, undefined);
+        if (!listed.complete) return [];
+        const identity = (await app.registry()).require("identity");
+        const ids: string[] = [];
+        for (const personId of listed.ownerIds.slice(0, 20)) {
+          const principal = await identity.getPrincipal(companyId, personId);
+          if (principal !== undefined) ids.push(developerIdOf(principal));
+        }
+        return ids;
+      };
+      // Delivery's own check, read now: a queued admin notice is told only to a person who is one of the company's admins at that moment (fail closed on any fault).
+      adminNotice = async (orgId, developerId) => (await adminsOf(orgId)).includes(developerId);
+      knowledge = createKnowledgeApi({
+        lessonsSwitch: switchValue,
+        companyOf: async (caller) => await membershipOf(caller.personId),
+        lessonsOf: async (companyId) => {
+          try { await app.runtimeFor(companyId); } catch { return undefined; }
+          return lessonsByCompany.get(companyId);
+        },
+        people: {
+          onProjectRoster: (companyId, project, personId) => lessonsPeople(companyId).onProjectRoster(companyId, project, personId),
+          approvers: (companyId, project) => lessonsPeople(companyId).approvers(companyId, project),
+          projectMembers: async (companyId, project) => (await lessonsPeople(companyId).projectMembers?.(companyId, project)) ?? { complete: true, ids: [] },
+        },
+        authenticateToken: scriptTokenAuthenticator({
+          lessonsSwitch: switchValue, now: () => now().getTime(),
+          // The token is checked against the SHARED registry's store (every key is company-scoped) BEFORE any company runtime is built: a made-up company id in an unverified header builds nothing.
+          companyOf: async () => { const registry = await app.registry(); return { store: registry.require("storage"), audit: registry.require("audit-sink"), identity: registry.require("identity") }; },
+        }),
+        // Who is told about an unusual amount of reading: the company's owners now (the people port's ownerIds; company admins who are not owners are not told until the port lists them), by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
+        adminsOf,
         now: () => now().getTime(),
         log,
       });
@@ -1015,6 +1140,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreTasks,
     coreApp,
     lessons,
+    knowledge,
+    adminNotice,
     intake,
     ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
     ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {

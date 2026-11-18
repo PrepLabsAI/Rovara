@@ -683,7 +683,7 @@ export async function tierGate(
   // A tier that cannot be bound to the head is not a tier: records of reviews are for a head, and there is none to compare.
   if (bound.headSha === undefined) throw agentXError("MERGE_NOT_READY", HEAD_UNBOUND);
   const patchDigest = patchDigestOf(canonicalPatchText(input.diff.files));
-  const fresh = tierFromDiff(input.diff, { ...bound, at, head: input.head });
+  const fresh = tierFromDiff(input.diff, { ...bound, at, head: input.head }); // L4-EVP: no promptLocations here on purpose: the gate only raises the tier, and the location eval_hint is on the recorded tier (raiseTier keeps it)
   const approvedAt: TierLevel = shown ?? "small";
   // What the record says is judged against the task as it is NOW: a growth is written until it is on the record, however often another writer got in first.
   let current: WorkflowSnapshot = task.workflow;

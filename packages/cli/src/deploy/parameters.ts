@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -160,6 +160,12 @@ function optionalOutputs(outputs: Partial<Record<DeployPart, StackOutputs>>, par
     const value = outputs[part]?.[name];
     return typeof value === "string" && value.length > 0 ? [[name, value]] : [];
   }));
+}
+
+/** The control plane's NatEgressAddresses parameter from the foundation's output of the same name, or nothing. */
+function egressAddressesParameter(foundation: StackOutputs | undefined): Record<string, string> {
+  const value = foundation?.[NAT_EGRESS_ADDRESSES_OUTPUT];
+  return typeof value === "string" && value.length > 0 && new RegExp(EGRESS_ADDRESSES_PARAMETER_PATTERN, "u").test(value) ? { [NAT_EGRESS_ADDRESSES_OUTPUT]: value } : {};
 }
 
 function required(outputs: Partial<Record<DeployPart, StackOutputs>>, part: DeployPart, name: string, env: string): string {
@@ -321,6 +327,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),
         // The EC2 session lifecycle (#83) runs in the foundation's network with its key and role.
         ...Object.fromEntries(CONTROL_PLANE_FOUNDATION_PARAMETERS.map((name) => [name, required(outputs, "foundation", name, answers.env)])),
+        // L4-EGR: Rovara's outbound addresses, once the foundation outputs them (named environments only: the legacy foundation never does, and CloudFormation refuses a parameter its template
+        // does not declare). A value that is not a short comma-separated list of addresses is not passed (the template's AllowedPattern would stop the deploy); the parameter keeps its default, empty.
+        ...egressAddressesParameter(outputs.foundation),
         ...(answers.slackAppPostedMessages === undefined ? {} : { SlackAppPostedMessages: answers.slackAppPostedMessages }),
         ...(answers.budget === undefined ? {} : { BudgetMonthlyUsd: String(answers.budget.monthlyUsd), BudgetScope: answers.budget.scope }),
         // F24: only when a stored sign-in choice is actually given; the template's own defaults

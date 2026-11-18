@@ -290,7 +290,7 @@ export async function contradictedByMemberCard(store: StableDeps["store"], key: 
 
 /**
  * Moves one trial lesson to stable if it has earned it. Idempotent; true when this call moved it.
- * Stable is what makes a lesson publishable to a repository, so it is a grant: the ledger entry is written first (ONCE per call, not once per try), and a promotion that cannot be recorded does not happen (it is tried
+ * Stable is what lets a lesson leave Rovara (to a local coding tool), so it is a grant: the ledger entry is written first (ONCE per call, not once per try), and a promotion that cannot be recorded does not happen (it is tried
  * again later). A lesson a pending member-correction card contradicts is not promoted (`contradictedByMemberCard`). A lesson that names an erased person is not tried at all (the store's erasure fence would refuse the commit, and the ledger would hold a grant that never happened), and a commit the fence refuses
  * ("erased", "fenced") is final: only a lost race ("conflict") is tried again. A commit that fails after the entry was written is followed by a `lesson.promote_failed` bookkeeping line.
  */

@@ -341,8 +341,8 @@ describe("EVAL-APPROVED-ROLE-NO-PRINCIPAL", () => {
     // A same-item re-propose keeps the live approval (it is not asked again).
     const item = (await w.store.get(evalSpendKey(A, project)))!;
     const plan = (await w.store.get(evalPlanKey(A, project)))!["plan"] as never;
-    const spend = item["plan"] as { selection: string; inputs: never; estimate: never; budget: never };
-    const again = await proposeEvalSpendApproval({ store: w.store, companyId: A, members: w.members, monthlyCapMicros: 50_000_000 }, project, { selection: spend.selection, inputs: spend.inputs, estimate: spend.estimate, budget: spend.budget }, plan);
+    const spend = item["plan"] as { selection: string; inputs: never; estimate: never; budget: never; dollars: never };
+    const again = await proposeEvalSpendApproval({ store: w.store, companyId: A, members: w.members, monthlyCapMicros: 50_000_000 }, project, { selection: spend.selection, inputs: spend.inputs, estimate: spend.estimate, budget: spend.budget, dollars: spend.dollars }, plan);
     expect(again.state).toBe("approved");
   });
 });
@@ -472,6 +472,25 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
     const { command: _c, ...noCommand } = delivered; void _c;
     expect(await pinned(async () => pinnedEvalFreshCheck(noCommand))).toBeUndefined();
     expect(configs).toHaveLength(1);
+  });
+
+  it("L4-EVS: the environment of the same delivery reaches the fresh sandbox's config; none, or one that cannot be read, is no environment (the bare image, as before)", async () => {
+    const { w, sources, operationId } = await confirmedToCheck();
+    const configs: FreshEvalSandboxConfig[] = [];
+    const scratch = await realpath(await mkdtemp(join(tmpdir(), "edc-scratch-"))); roots.push(scratch);
+    const host: EvalFreshHost = { environment: { AGENTX_WORKER_IMAGE: IMAGE }, docker: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) }, workspaceKey: async () => "0123456789abcdef",
+      make: (config) => { configs.push(config); return { available: () => true, run: async () => ({ report: { root: scratch, cwd: ".", argument: "r.json", notBeforeMs: 0 } }) }; } };
+    const round = { workingSandbox: null, roundBudgetMs: 60_000, scratchDir: scratch };
+    const input = { side: "new" as const, ids: ["q1"], runs: 1 as const, signal: new AbortController().signal, model: { socketPath: "/tmp/e/models/m", token: "a".repeat(32) } };
+    const pinned = <T>(fn: () => Promise<T>) => withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, fn, round);
+    const install = { kind: "install" as const, commands: [{ executable: "python3", args: ["-m", "pip", "install", "-r", "requirements.txt"], cwd: "." }] };
+    await pinned(() => plannedFreshEvalSandbox(host, { operationId }, sources.deliveredPlan, async () => install).sandbox.run(input));
+    await pinned(() => plannedFreshEvalSandbox(host, { operationId }, sources.deliveredPlan).sandbox.run(input));
+    await pinned(() => plannedFreshEvalSandbox(host, { operationId }, sources.deliveredPlan, async () => { throw new Error("unreadable"); }).sandbox.run(input));
+    expect(configs).toHaveLength(3);
+    expect(configs[0]!.evalEnvironment).toEqual(install);
+    expect("evalEnvironment" in configs[1]!).toBe(false);
+    expect("evalEnvironment" in configs[2]!).toBe(false);
   });
 });
 

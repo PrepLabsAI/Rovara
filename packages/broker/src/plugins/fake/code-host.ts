@@ -2,9 +2,9 @@
 // a real adapter must answer what this one answers for the same state.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
-  isAiInstructionPath, type FileEntryType, agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
+  isAiInstructionPath, type FileEntryType, agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
   type BranchPage, type CommitActivityRead, type DirectoryRead, type RepositoryTreeRead, type TreeEntry, type TreeEntryKind, type DeploymentStatusRead, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
-  type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
+  type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
   type RepositoryRef, type SetupFilesRead, type SummaryCheckPost,
 } from "@agentx/contracts";
@@ -272,25 +272,6 @@ export class FakeCodeHost implements CodeHost {
     return text === undefined ? undefined : readCodeOwnersFile(text);
   }
 
-  /** Item C1: the same rules a real host's adapter holds (see `FakeHostModel.commitLessonFiles`). */
-  async commitFiles(input: CommitFilesInput, scope: HostScope): Promise<CommitFilesResult> {
-    this.checkScope(scope);
-    const parsed = CommitFilesInputSchema.parse(input);
-    return this.registered(parsed.repository).commitLessonFiles(parsed);
-  }
-
-  async changeRequestForBranch(repository: RepositoryRef, branch: string, scope: HostScope): Promise<ChangeRequestRef | undefined> {
-    this.checkScope(scope);
-    const found = this.registered(repository).changeRequestForLessonBranch(branch);
-    return found === undefined ? undefined : this.ref(found.id);
-  }
-
-  /** Deleting the source branch of an open change request closes it, as a real host does. */
-  async deleteBranch(repository: RepositoryRef, branch: string, scope: HostScope): Promise<"deleted" | "gone"> {
-    this.checkScope(scope);
-    return this.registered(repository).deleteLessonBranch(branch);
-  }
-
   async reconcileChangeRequest(input: ChangeRequestInput, scope: HostScope): Promise<ChangeRequestReconciled> {
     this.checkScope(scope);
     const parsed = ChangeRequestInputSchema.parse(input);
@@ -310,7 +291,6 @@ export class FakeCodeHost implements CodeHost {
     return {
       ref: this.ref(cr.id), state: cr.state, sourceBranch: cr.sourceBranch, targetBranch: cr.targetBranch, headRevision: this.model.headRevisionOf(cr),
       ...(cr.mergeRevision === undefined ? {} : { mergeRevision: cr.mergeRevision }), ...(cr.mergedAt === undefined ? {} : { mergedAt: cr.mergedAt }), ...(cr.mergedBy === undefined ? {} : { mergedBy: cr.mergedBy }), title: cr.title, body: cr.body,
-      authoredByRovara: cr.author === "rovara-app[bot]", baseRepositoryId: this.model.id,
     };
   }
 

@@ -76,7 +76,7 @@ async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" })
     built?.attach();
     if (built !== undefined) lessons.set(companyId, built);
     const principal = localOwnerPrincipal({ companyId });
-    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint and wrap network calls in withRetry", workflow: true, workflowPath: "QUICK" });
     tasks.set(companyId, task.taskId);
     spaces.set(companyId, task.workspaceId);
   }
@@ -127,13 +127,16 @@ const ROUTES: Array<[string, string, unknown?]> = [
 
 describe("the paths", () => {
   it("the dev router and the API recognise exactly the same paths, and each lessons row of the route table is one of them (full access only)", () => {
-    // The repeats rows are their own API (core-host-lessons-repeats-api.test.ts).
-    const rows = DEV_ROUTES.filter((route) => route.path.includes("/lessons") && !route.path.endsWith("/repeats"));
+    // The repeats rows are their own API (core-host-lessons-repeats-api.test.ts); the POST row on the bare lessons path is the team knowledge read (core-host-knowledge-api.test.ts), answered before this API.
+    // The phase 4 rows (graduation, Tidy, draft checks, both-places) are held by core-host-lessons-graduation.test.ts.
+    const rows = DEV_ROUTES.filter((route) => route.path.includes("/lessons") && !route.path.endsWith("/repeats") && !(route.method === "POST" && route.path.endsWith("/lessons")) && !/\/lessons\/(?:graduation$|tidy\/|check-drafts\/|rules\/|\{lessonId\}\/(?:graduate|graduate-later|both-places)$)/u.test(route.path));
     expect(rows.map((route) => `${route.method} ${route.path}`).sort()).toEqual([...[
       "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
       "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary", "GET /v1/dev/projects/{project}/lessons/measure",
+      // Lead 4 L4-LP3W: by code area, and where Rovara learns from (their own tests: lessons-by-area/lessons-areas-api.test.ts).
+      "GET /v1/dev/projects/{project}/lessons/areas", "GET /v1/dev/projects/{project}/lessons/learning-sources", "PUT /v1/dev/projects/{project}/lessons/learning-sources/{source}",
     ]].sort());
     expect(rows.every((route) => route.requires === "full")).toBe(true);
     const samples = [...rows.map((route) => route.path.replace(/\{[A-Za-z]+\}/g, "x1")), "/v1/dev/projects/x1", "/v1/dev/projects/x1/lessons/", "/v1/dev/projects/x1/lessons/a/b", "/v1/dev/projects/x1/lessons/a/approve/b", "/v1/dev/projects/x1/tasks/t1", "/v1/dev/projects/x1/lessonsx"];
@@ -248,6 +251,21 @@ describe("the company comes from live membership only", () => {
 });
 
 describe("lists and paging", () => {
+  it("a page is at most 50 lessons, and a page of 50 from a long list says where the next one starts", async () => {
+    const w = await setUp();
+    await put(w, A, ...Array.from({ length: 53 }, (_, n) => lesson(A, `les_big${String(n).padStart(5, "0")}`, { updatedAt: 1000 + n })));
+    const { api: target } = api(w);
+    const first = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "50" });
+    expect(first.ok && (first.body["lessons"] as unknown[]).length).toBe(50);
+    expect(first.ok && typeof first.body["next"]).toBe("string");
+    const dflt = await call(target, "a-contrib", "GET", `${P}/lessons`);
+    expect(dflt.ok && (dflt.body["lessons"] as unknown[]).length).toBe(50);
+    expect(await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "51" })).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    const second = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "50", cursor: first.ok ? first.body["next"] as string : "" });
+    expect(second.ok && (second.body["lessons"] as unknown[]).length).toBe(3);
+    expect(second.ok && "next" in second.body).toBe(false);
+  });
+
   it("pages through a list newest change first with an opaque cursor, and refuses a cursor of another list or a malformed one without echoing it", async () => {
     const w = await setUp();
     await put(w, A, ...[1, 2, 3, 4, 5].map((n) => lesson(A, `les_page000${n}`, { updatedAt: n * 10 })));
@@ -266,7 +284,7 @@ describe("lists and paging", () => {
     const wrong = await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list: "retired", cursor });
     expect(wrong).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
     const canary = "CANARY<b>";
-    for (const query of [{ cursor: canary }, { cursor: Buffer.from(`["approved",1,"${canary}"]`).toString("base64url") }, { limit: "0" }, { limit: "101" }, { list: canary }, { other: canary }]) {
+    for (const query of [{ cursor: canary }, { cursor: Buffer.from(`["approved",1,"${canary}"]`).toString("base64url") }, { limit: "0" }, { limit: "51" }, { limit: "101" }, { list: canary }, { other: canary }]) {
       const answer = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, query);
       expect(answer, JSON.stringify(query)).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
       expect(JSON.stringify(answer)).not.toContain("CANARY");
@@ -300,6 +318,28 @@ describe("decisions on one lesson", () => {
     expect(w.world.audit.every((event) => event.actor.id !== "a-contrib")).toBe(true);
   });
 
+  it("Keep (single approve and the batch) on a held lesson clears its review flag in the approval itself; a reader's try and another company's same-named lesson change nothing", async () => {
+    const w = await setUp();
+    await put(w, A, lesson(A, "les_hold0001", { status: "pending", reviewRequired: true }), lesson(A, "les_hold0002", { status: "pending", reviewRequired: true }), lesson(A, "les_hold0003", { status: "pending", reviewRequired: true, contradictsWith: "les_aaaa1111" }));
+    await put(w, B, lesson(B, "les_hold0001", { status: "pending", reviewRequired: true }));
+    const { api: target } = api(w);
+    const store = w.lessons.get(A)!.runtime.store;
+    const key = { workspaceId: A, project: "payments" };
+    expect(await call(target, "a-contrib", "POST", `${P}/lessons/les_hold0001/approve`, { version: 1 })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    expect(await store.get(key, "les_hold0001")).toMatchObject({ status: "pending", reviewRequired: true });
+    expect(await call(target, "a-maint", "POST", `${P}/lessons/les_hold0001/approve`, { version: 1 })).toMatchObject({ ok: true, body: { status: "active" } });
+    const batch = await call(target, "a-maint", "POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_hold0002", version: 1, decision: "keep" }, { lessonId: "les_hold0003", version: 1, decision: "keep" }] });
+    expect(batch.ok && (batch.body["results"] as Array<Record<string, unknown>>).map((r) => r["status"])).toEqual(["active", "active"]);
+    for (const id of ["les_hold0001", "les_hold0002", "les_hold0003"]) {
+      const stored = (await store.get(key, id))!;
+      expect(stored.status).toBe("active");
+      expect(stored.reviewRequired).toBeUndefined();
+    }
+    // The lesson that still contradicts another keeps that flag (it stays out of the agent's pull set until settled).
+    expect((await store.get(key, "les_hold0003"))!.contradictsWith).toBe("les_aaaa1111");
+    expect(await w.lessons.get(B)!.runtime.store.get({ workspaceId: B, project: "payments" }, "les_hold0001")).toMatchObject({ status: "pending", reviewRequired: true, approvals: [] });
+  });
+
   it("reject takes a fixed reason (never a person's text); retire answers the lesson's retire request", async () => {
     const w = await setUp();
     await put(w, A, lesson(A, "les_apend001", { status: "pending" }), lesson(A, "les_aaaa1111"));
@@ -318,15 +358,17 @@ describe("decisions on one lesson", () => {
     expect(await call(target, "a-admin", "GET", `${P}/lessons/retire-requests`)).toMatchObject({ ok: true, body: { requests: [] } });
   });
 
-  it("a script token reads but never decides or sets", async () => {
+  it("a script token gets nothing: not the paginated lists, not a task's lessons, and never a decision or a setting", async () => {
     const w = await setUp();
     await put(w, A, lesson(A, "les_apend001", { status: "pending" }));
     const { api: target } = api(w);
     const token = { scriptToken: { tokenId: "t1" } };
-    for (const [method, path, body] of ROUTES.filter(([method]) => method !== "GET")) {
+    for (const [method, path, body] of ROUTES) {
       expect(await call(target, "a-admin", method, path, body, undefined, token), `${method} ${path}`).toMatchObject({ ok: false, code: "FORBIDDEN", message: "A script token cannot do that." });
     }
-    expect((await call(target, "a-admin", "GET", `${P}/lessons`, undefined, undefined, token)).ok).toBe(true);
+    // The same person without the token reads the same list: the refusal is the token's, not the route's.
+    expect((await call(target, "a-admin", "GET", `${P}/lessons`)).ok).toBe(true);
+    for (const list of ["approved", "proposed", "retired"]) expect(await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list, limit: "2" }, token), list).toMatchObject({ ok: false, code: "FORBIDDEN" });
     expect(lessonEvents(w)).toEqual([]);
   });
 });

@@ -500,6 +500,10 @@ export const MergeTrackingItemSchema = z
     ciMarked: z.array(MarkedCheckEntrySchema).max(CI_EVIDENCE_LIMITS.markedChecksMax).optional(),
     /** TE-E0 option A: since when a head a PERSON pushed has been waited on for its marked checks (Rovara's heads use `lastRovaraPushAt`). */
     ciMarkedSince: InstantSchema.optional(),
+    /** L4-EVCI: the customer's own eval check on this head (one entry, the marked-check shape): what their CI said, kept so the description says it once. Absent on every row written before, and on every project with no eval check named. */
+    ciEval: MarkedCheckEntrySchema.optional(),
+    /** L4-EVCI: since when a head a PERSON pushed has been waited on for the eval check (Rovara's heads use `lastRovaraPushAt`). */
+    ciEvalSince: InstantSchema.optional(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),
     approval: z.object({ hostUserId: z.string().min(1).max(200), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
@@ -615,9 +619,6 @@ export const MERGE_NOT_READY_MESSAGES = {
   /** Where the repository has a CODEOWNERS file that covers changed paths, a code owner has to approve (owner decision 2026-10-27). `owners` are the logins and teams, as the file names them. */
   needsCodeOwner: (owners: string): string => `A code owner has to approve the files this pull request changes (${owners}).`,
   codeOwnersUnreadable: "Rovara couldn't read this repository's code owners, so it can't tell whether a code owner approved. Try again in a minute.",
-  /** Lessons in the repo (decision 50.4): `.rovara/lessons.md` is the team's file and changes only through Rovara's own weekly lessons pull request, never through a task's. */
-  touchesLessonsFile: "This pull request changes .rovara/lessons.md, which only the team's weekly lessons pull request may change. Take that file out of this pull request.",
-  lessonsFileUnreadable: "Rovara couldn't read the full list of files this pull request changes, so it can't tell whether it leaves .rovara/lessons.md alone. Try again in a minute.",
   riskChanged: (level: "low" | "medium" | "high"): string => `The risk of this pull request is now ${level}. Check it and press Merge again.`,
 } as const;
 
@@ -728,8 +729,11 @@ export type SetupDraftApplyBody = z.infer<typeof SetupDraftApplyBodySchema>;
 
 // ---- milestones
 
-/** `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. */
-export const CODE_MILESTONE_KINDS = ["questions", "answered", "plan_ready", "pr_ready", "review_nudge", "fixing", "stuck", "approved", "merged", "started", "closed"] as const;
+/**
+ * `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. `setup_paused` (L4-U5): the task paused before Build because
+ * the project's setup stopped working; the chat thread and the ticket it came from are told once, in fixed words (the handlers read the rest from the project's own re-check rows, never from the milestone's text).
+ */
+export const CODE_MILESTONE_KINDS = ["questions", "answered", "plan_ready", "pr_ready", "review_nudge", "fixing", "stuck", "approved", "merged", "started", "closed", "setup_paused"] as const;
 export const CodeMilestoneKindSchema = z.enum(CODE_MILESTONE_KINDS);
 export type CodeMilestoneKind = z.infer<typeof CodeMilestoneKindSchema>;
 /** The milestones that come before the pull request: written only for 1.1.0 tasks, so version 1 records stay as they were. */
@@ -743,6 +747,8 @@ export const CodeMilestoneSchema = z
     sessionId: SessionIdSchema.optional(),
     at: InstantSchema,
     text: z.string().min(1).max(500),
+    /** L4-EVCI: on a `pr_ready` milestone, the customer's own eval result as `evalCiLine` says it (fixed words, numbers and a plain https address), for the chat and ticket lines. Absent: nothing to say. */
+    evalLine: z.string().min(1).max(500).optional(),
     /** L4-PRP: a `pr_ready` milestone's verdict heading (fixed words and counts: `Verified · Low risk · nothing extra to check`), the same words as the pull request's description, for the chat and the ticket. */
     verdict: z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}<>@[\]`*_~#|!]*$/u).optional(),
     pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048) }).strict()).max(32).optional(),

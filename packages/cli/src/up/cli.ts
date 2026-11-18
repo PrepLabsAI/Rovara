@@ -350,7 +350,7 @@ export function registerOpenCommand(program: Command, context: Pick<UpCommandCon
       try {
         response = await context.fetch(`${url}/v1/local/pages/open`, {
           method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
-          // The lessons page opens in a new page session: switching on a repository's lessons file asks for one opened in the last few minutes.
+          // The lessons page opens in a new page session: letting lessons leave Rovara for every project asks for one opened in the last few minutes.
           body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : task === "connections" ? { path: "/connections", fresh: true } : task === "models" ? { path: "/models", fresh: true } : task === "browser-evidence" ? { path: "/browser-evidence", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
         });
       } catch {

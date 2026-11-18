@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_HOST_WAIT_MAX_HOURS, SetupEvalDiscoveryReportSchema } from "../../packages/contracts/src/index.js";
+import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_HOST_WAIT_MAX_HOURS, SetupEvalDiscoveryReportSchema, SetupRunSummarySchema, UPKEEP_PAUSE_MESSAGES } from "../../packages/contracts/src/index.js";
 import { assertCommitsMatch, hostAnswerNote, runSetupAgent, serialize, setupRepositoriesOf, type SetupRunInput, type SetupRunPorts } from "../../packages/worker/src/setup-agent-run.js";
 import { createSetupSandbox, type TrackedFilesVerdict } from "../../packages/worker/src/setup-agent.js";
 import { helperRunArgs, networkCreateArgs, setupWorkspaceKey, setupNetworkAddresses, setupNetworkName, setupNetworkSlot, startRunNetwork } from "../../packages/worker/src/setup-network.js";
@@ -730,5 +730,37 @@ describe("DEC 253q(a): the eval the agent drafts goes to the broker through the 
     const result = await runSetupAgent(t.input);
     expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
     expect(result.setupProposal).toBeDefined();
+  });
+});
+
+// L4-SR2: the gateway's upkeep pause under an unattended repair draft. The worker reads the gateway's fixed sentence (as the wiki build's worker does), ends the run `infrastructure` and puts the reason in the summary; a plain
+// model refusal, a spent budget and any other fault carry none. The broker takes the word only from an unattended draft (tests/unit/setup-repair-draft.test.ts).
+describe("L4-SR2: the gateway's upkeep pause", () => {
+  const errored = (message: string) => async ({ emit }: { emit: (event: unknown) => void }) => { emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: message, content: [], usage: { input: 10 } } }); };
+  it.each(Object.entries(UPKEEP_PAUSE_MESSAGES))("a turn that failed with the %s sentence ends the run `infrastructure` with that reason in the summary (mutant: the pause is not read)", async (reason, sentence) => {
+    const t = await world({ script: errored(`422 ${sentence}`) });
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "infrastructure", pause: reason });
+    expect(SetupRunSummarySchema.safeParse(result.setupRunSummary).success).toBe(true);
+  });
+  it("a prompt that throws the sentence reports the same", async () => {
+    const t = await world({ script: async () => { throw new Error(UPKEEP_PAUSE_MESSAGES.monthly_limit); } });
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "infrastructure", pause: "monthly_limit" });
+  });
+  it("any other refusal carries no pause, and words that only look like the sentence are not one", async () => {
+    for (const script of [errored("the provider is down"), errored("upkeep_paused: nightly upkeep is paused"), async () => { throw new Error("the provider is down"); }]) {
+      const t = await world({ script });
+      const result = await runSetupAgent(t.input);
+      expect(result.setupRunSummary).not.toHaveProperty("pause");
+    }
+    const ordinary = await world();
+    expect((await runSetupAgent(ordinary.input)).setupRunSummary).not.toHaveProperty("pause");
+  });
+  it("the summary's pause is one of the gateway's reasons only (the strict schema refuses any other word)", () => {
+    const base = { stop: "infrastructure", commandsRun: 0, spendCents: 0, elapsedMs: 0, hostAsks: 0, partial: false };
+    expect(SetupRunSummarySchema.safeParse({ ...base, pause: "monthly_limit" }).success).toBe(true);
+    for (const pause of ["because I said so", "", 3, null, "MONTHLY_LIMIT"]) expect(SetupRunSummarySchema.safeParse({ ...base, pause }).success, String(pause)).toBe(false);
+    expect(SetupRunSummarySchema.safeParse(base).success).toBe(true);
   });
 });

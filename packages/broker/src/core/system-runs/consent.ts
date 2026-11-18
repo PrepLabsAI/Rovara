@@ -5,9 +5,20 @@
 //   - Only a LIVE company owner or admin writes it (the setup PUT, core/upkeep/settings.ts), after an audit record, in ONE transaction with the project's upkeep switch. No person's id is kept on the row (the audit
 //     record names the person), so the person erase has no step here.
 //   - The gate every system run stands behind reads it NOW, on every use (never remembered), and fails closed: a read that throws is "off".
-import { OrgIdSchema, companyScoped, type DocumentKey, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { OrgIdSchema, companyScoped, when, type Condition, type DocumentKey, type DocumentStore, type OrgId } from "@agentx/contracts";
 
 export const systemRunsConsentKey = (orgId: OrgId): DocumentKey => ({ pk: companyScoped(OrgIdSchema.parse(orgId), "SYSTEM_RUNS"), sk: "CONSENT" });
+
+/**
+ * The fence for a write that replaces a row this act READ (L4-FENCE): the write lands only if the row is still as it was seen. Never an unconditional write.
+ *   - no row seen: the row must still be absent (two creators: one wins);
+ *   - a row seen with `changedAt`: it must still hold that same `changedAt`;
+ *   - a row seen WITHOUT `changedAt` (an older row): it must still exist and still hold no `changedAt` (the first writer stamps one, so the second loses).
+ */
+export function seenRowFence(seen: Record<string, unknown> | undefined): Condition {
+  if (seen === undefined) return when.absent();
+  return typeof seen["changedAt"] === "string" ? when.eq("changedAt", seen["changedAt"]) : when.and(when.present(), when.notExists("changedAt"));
+}
 
 export interface SystemRunsConsentRow { enabled: boolean; changedAt?: string; requestId?: string }
 

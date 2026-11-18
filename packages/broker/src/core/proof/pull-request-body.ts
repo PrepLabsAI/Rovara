@@ -2,7 +2,7 @@
 // code is, between markers that Rovara rewrites after every fix or sync, and it ends with the line that says a person approves and a person merges. The description is public to the repository's
 // readers: every line that a model, a file name or a branch name wrote goes through `inertLine` (redacted, one line, no mention, link, image, cross-reference or hidden comment), every list is bounded,
 // and the whole body stays under the byte cap with its markers, risk and closing line intact so it can always be regenerated in place.
-import { attributionBodyLines, hideEmailAddresses, type ActingAttribution, type PrVerdict, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
+import { EVAL_CI_LINE_PATTERN, attributionBodyLines, hideEmailAddresses, type ActingAttribution, type PrVerdict, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import { inertLine } from "./inert-text.js";
 import { reviewModelLines } from "./review-model-lines.js";
@@ -96,10 +96,15 @@ export interface PullRequestBodyContext {
   browserEvidenceLines?: readonly string[] | undefined;
   /** L4-SC (DEC 254z c): one line per mock the approved plan made for this task (`mockPrLines`). Absent or empty: the description is exactly what it was. */
   setupLines?: readonly string[] | undefined;
+  /**
+   * L4-U5: the one line about the setup when Rovara re-checked it for this task ("Setup re-checked after dependency files changed: still works." or the note that the check could not be made), from the task's own re-check rows
+   * (`setupPullRequestLineOf`). Printed first in the "Test setup" drawer. Absent (no drift): the description is exactly what it was.
+   */
+  setupLine?: string | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
-export interface LessonUsedEntry { title: string; notHelpfulUrl: string; /** The number a comment command names it by (`/rovara lesson <number> wrong`), for an install with no page this description can link to. */ number?: number }
+export interface LessonUsedEntry { title: string; /** The lesson's reason, one line; shown after the title where there is one. */ why?: string; notHelpfulUrl: string; /** The number a comment command names it by (`/rovara lesson <number> wrong`), for an install with no page this description can link to. */ number?: number }
 /** The "Lessons used" section: how many lessons the task used, the task page's link, and the lessons themselves only where the repository is known to be private (`entries` is empty otherwise). */
 export interface LessonsUsedSection { count: number; taskUrl: string; entries: readonly LessonUsedEntry[]; /** The section is there and says none were used. `reason`: lessons are `off` on this install, or on but none `unused` yet; absent: an install with no lessons at all. */ none?: true; reason?: "off" | "unused" }
 const SAFE_LINK = /^https:\/\/[^\s()<>[\]\\]{1,500}$/u;
@@ -117,7 +122,7 @@ export function lessonsUsedLines(used: LessonsUsedSection | undefined, limit: nu
     // A public repository, or one whose visibility is unknown: no titles, one link (the task page, behind sign-in), so the lessons' words are not published to everyone who can read the code.
     return ["## Lessons used", `Rovara used ${used.count} ${noun} from this project's record.${link === undefined ? "" : ` Review them, or tell Rovara one did not help, on the [task page](${link}).`}`, ""];
   }
-  const shown = used.entries.slice(0, limit).map((entry) => `- ${entry.number === undefined ? "" : `${String(entry.number)}. `}${inertLine(entry.title, 100)}${SAFE_LINK.test(entry.notHelpfulUrl) ? ` ([not helpful](${entry.notHelpfulUrl}))` : ""}`);
+  const shown = used.entries.slice(0, limit).map((entry) => `- ${entry.number === undefined ? "" : `${String(entry.number)}. `}${inertLine(entry.title, 100)}${entry.why === undefined || inertLine(entry.why, 160) === "" ? "" : ` Why: ${inertLine(entry.why, 160)}`}${SAFE_LINK.test(entry.notHelpfulUrl) ? ` ([not helpful](${entry.notHelpfulUrl}))` : ""}`);
   const byComment = used.entries.some((entry) => entry.number !== undefined && !SAFE_LINK.test(entry.notHelpfulUrl));
   return ["## Lessons used", `Rovara used ${used.count} ${noun} from this project's record. ${byComment ? "Comment `/rovara lesson <number> wrong` to tell Rovara one did not help." : "Tell Rovara when one did not help."}`, ...shown, ...(used.count > shown.length ? [`- and ${used.count - shown.length} more`] : []), ""];
 }
@@ -381,6 +386,42 @@ export function withLinearCloseLine(body: string, key: string | undefined): { ki
   } else {
     if (found.length === 1 && inner[found[0]!] === wanted) return { kind: "same" };
     next = inner.flatMap((line, index) => (index === found[0] ? [wanted] : found.includes(index) ? [] : [line]));
+  }
+  return { kind: "changed", body: `${body.slice(0, start + ROVARA_STATUS_START.length)}${next.join(eol)}${body.slice(end)}` };
+}
+
+// ---- the customer's own eval result (L4-EVCI)
+
+/** The sub-line of the "Proven" line the customer's eval result is written as (the same shape as the risk reasons under "Risk"). */
+const EVAL_CI_BULLET = "  - ";
+
+/**
+ * An open pull request's description with the customer's own eval result (`evalCiLine`) as one sub-line under the verdict's "Proven" line, which is where Rovara's own eval label stands: two verdicts side by
+ * side, never one. Replaced when there is one already, taken out when `line` is undefined (the result no longer speaks for the head). Only the marked block is touched, only a line that is exactly
+ * `evalCiLine`'s own words, and the person's words around the block stay. `same`: nothing to change. `no_block`: a line is wanted but the block is not as Rovara wrote it (no "Proven" line, edited away,
+ * doubled or cut) or the line is not one Rovara writes, so nothing is written; with no `line` and no block there is nothing of Rovara's to take out.
+ */
+export function withEvalCiLine(body: string, line: string | undefined): { kind: "same" } | { kind: "changed"; body: string } | { kind: "no_block" } {
+  if (line !== undefined && !EVAL_CI_LINE_PATTERN.test(line)) return { kind: "no_block" };
+  const start = body.indexOf(ROVARA_STATUS_START);
+  const end = body.indexOf(ROVARA_STATUS_END);
+  if (start === -1 && end === -1) return line === undefined ? { kind: "same" } : { kind: "no_block" };
+  if (start === -1 || end === -1 || end < start || body.indexOf(ROVARA_STATUS_START, start + 1) !== -1 || body.indexOf(ROVARA_STATUS_END, end + 1) !== -1) return { kind: "no_block" };
+  const eol = body.includes("\r\n") ? "\r\n" : "\n";
+  const inner = body.slice(start + ROVARA_STATUS_START.length, end).split(eol);
+  const found = inner.flatMap((text, index) => (text.startsWith(EVAL_CI_BULLET) && EVAL_CI_LINE_PATTERN.test(text.slice(EVAL_CI_BULLET.length)) ? [index] : []));
+  const wanted = line === undefined ? undefined : `${EVAL_CI_BULLET}${line}`;
+  let next: string[];
+  if (found.length === 0) {
+    if (wanted === undefined) return { kind: "same" };
+    const proven = inner.findIndex((text) => text.startsWith("**Proven** "));
+    if (proven === -1) return { kind: "no_block" };
+    next = [...inner.slice(0, proven + 1), wanted, ...inner.slice(proven + 1)];
+  } else if (wanted === undefined) {
+    next = inner.filter((_text, index) => !found.includes(index));
+  } else {
+    if (found.length === 1 && inner[found[0]!] === wanted) return { kind: "same" };
+    next = inner.flatMap((text, index) => (index === found[0] ? [wanted] : found.includes(index) ? [] : [text]));
   }
   return { kind: "changed", body: `${body.slice(0, start + ROVARA_STATUS_START.length)}${next.join(eol)}${body.slice(end)}` };
 }

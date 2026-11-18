@@ -77,6 +77,12 @@ const NAMING_CODES: ReadonlySet<string> = new Set<string>([...TIER_REASON_CODES.
 export const isOutageReason = (reason: { code: string; path?: string | undefined }): boolean =>
   reason.code === "reviewer_unavailable" || (reason.code === "quick_check_failed" && /did not run \((?:unavailable|refused)\)/u.test(reason.path ?? "") && !/\b[1-9]\d* must be fixed/u.test(reason.path ?? ""));
 
+/** A tier raised by nothing but a reviewer outage. The hints (`eval_hint`, `ai_code_touched`) never raise a tier and ride beside the outage's reason, so they do not make it something else (L4-EVP: Retry still works for a change that names a model SDK). */
+export const isOutageOnly = (reasons: ReadonlyArray<{ code: string; path?: string | undefined }>): boolean => {
+  const rest = reasons.filter((reason) => reason.code !== "eval_hint" && reason.code !== "ai_code_touched");
+  return rest.length > 0 && rest.every(isOutageReason);
+};
+
 /** Whether the task grew from a small plan to risky (the case the question is for). */
 export function grewToRisky(flow: WorkflowFlow | undefined): boolean {
   return skippedPlanning(flow) && planningLevelOf(flow) === "small" && flow?.tier?.level === "risky";
@@ -355,7 +361,7 @@ export async function retryScopeChecks(deps: Pick<TaskFlowDeps, "store" | "now">
   const head = tier.headSha;
   const own = (flow.quickChecks ?? []).filter((check) => !(check.detail ?? "").startsWith("tier_") && head !== undefined && (check.detail ?? "").includes(`head=${head}`));
   if (own.some((check) => check.outcome === "failed" && /\b[1-9]\d* must be fixed/u.test(check.detail ?? ""))) return "refused_must_fix";
-  const outage = tier.reasons.length > 0 && tier.reasons.every(isOutageReason);
+  const outage = isOutageOnly(tier.reasons);
   const failedHere = own.filter((check) => check.outcome === "failed" && /did not run/u.test(check.detail ?? ""));
   if (!outage && failedHere.length === 0) return "nothing_to_retry";
   const before = outage ? [...(flow.tierHistory ?? [])].reverse().find((entry) => entry.headSha === head && entry.level !== "risky") : undefined;

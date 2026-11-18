@@ -32,7 +32,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
@@ -52,6 +52,10 @@ import { SWEBENCH_DEPLOYMENT_MODE } from "./swebench-eval-definition.js";
 const MAX_DISPATCH_ATTEMPTS = 5;
 /** Days an evidence pack stored under the `evidence-record` tag value is kept before the bucket expires it. */
 export const EVIDENCE_RECORD_RETENTION_DAYS = 365;
+
+/** L4-IAMR: the one statement that lets the dispatcher read a company's stored artifacts (named environments): its Sid and the two key prefixes it names, tests/contract/dispatcher-artifacts-read.test.ts pins them. */
+export const DISPATCHER_ARTIFACTS_READ_SID = "ReadCompanyArtifacts";
+export const DISPATCHER_ARTIFACTS_READ_PREFIXES = ["private/*", "workspaces/*"] as const;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
 export const SLACK_MAX_RECEIVE_COUNT = 5;
 // What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024):
@@ -390,6 +394,12 @@ export class ControlPlaneStack extends Stack {
     state.grantReadWriteData(dispatcher);
     // The dispatcher holds a CHECKS reference's kind to the admission it names; it reads only the immutable admission objects.
     dispatcher.addToRolePolicy(new iam.PolicyStatement({ actions: ["s3:GetObject"], resources: [artifacts.arnForObjects("workflow-e2e-admissions/*")] }));
+    // L4-IAMR (owner decision 2026-11-18, DEC 254zzz26), named environments only (the core engine's): the dispatcher's company-bound artifact reader (createCompanyArtifactReader, for the
+    // second eval pass and the like) reads a company's stored artifacts. Read only: GetObject on the two prefixes the reader's keys live under, no List, no Put, no other prefix, no other
+    // bucket. The bucket is S3-managed encrypted (no KMS key), so no kms grant. Every read is still checked in code against company, workspace owner and the ARTIFACT row.
+    if (naming.env !== undefined) {
+      dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: DISPATCHER_ARTIFACTS_READ_SID, actions: ["s3:GetObject"], resources: DISPATCHER_ARTIFACTS_READ_PREFIXES.map((prefix) => artifacts.arnForObjects(prefix)) }));
+    }
     // EC2 workers (#76): the idle reaper and reconciler find sessions by state through this sparse index.
     state.addGlobalSecondaryIndex({
       indexName: WORKSPACE_SESSION_STATE_INDEX.name,
@@ -994,12 +1004,18 @@ export class ControlPlaneStack extends Stack {
       slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
       // DEC 254zk: the switch's conditioned value (enabled only with company sign-in on too), as every other consumer gets it.
       addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.flag);
+      // DEC 254zzz32: the broker reads a company's own bot token (slack-company-wiring.ts readSecret: the hosted core's Slack task threads, link notices), as the other
+      // Slack consumers do. Read-only, the token family only, its own policy under the switch's condition (nothing while it is off; never the broker's DefaultPolicy).
+      // DEC 254zzz35: and the install's own Slack app secret (agentx/<env>/slack), read-only, for the install's own workspace (built-in company), which has no company token: its
+      // bot token is that secret's (the broker's Slack company wiring passes it as legacyToken). Same policy, same condition: nothing while company mode is off.
+      slackCompany.grant("Broker", broker.role!, [slackCompany.tokenRead(),
+        new iam.PolicyStatement({ sid: "ReadInstallSlackToken", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] })]);
       // DEC 254zk: the channel API's company factory needs the environment's name too (it already has STATE_TABLE_NAME and SLACK_ADAPTER_TEAM_ID); "" while off.
       channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
     }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
+        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords,
         ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
       // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
@@ -1223,6 +1239,15 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) {
       sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
       sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
+    }
+    // L4-EGR: Rovara's fixed outbound addresses (the foundation's NatEgressAddresses output, which the release and `agentx deploy` pass when the foundation has it), shown to a company's owners
+    // and admins (aws/company-egress-routes.ts). Empty until then. A plain variable, not a packed setting: a packed value cannot hold the commas, and the broker has the room.
+    if (naming.env !== undefined) {
+      const natEgressAddresses = new CfnParameter(this, NAT_EGRESS_ADDRESSES_OUTPUT, {
+        type: "String", default: "", allowedPattern: EGRESS_ADDRESSES_PARAMETER_PATTERN, maxLength: 64,
+        description: "The foundation's NAT gateway Elastic IPs, comma-separated: the addresses Rovara's machines connect from. Empty on an install whose foundation does not output them yet.",
+      });
+      broker.addEnvironment(EGRESS_ADDRESSES_VARIABLE, natEgressAddresses.valueAsString);
     }
     broker.addEnvironment("EC2_WORKER_SUBNETS", foundationParameter("Ec2WorkerSubnets"));
     broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));

@@ -21,13 +21,15 @@ import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
+import { codeHostAreaPorts } from "../lessons/area-check-hosts.js";
+import { codeHostForRecord } from "../plugins/routing.js";
 import type { ChannelCompanyOf } from "../core/channel/company.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
 import { gatedByLessonsSwitch } from "../lessons/model-gate.js";
 import type { LearningSpend, PipelineModel } from "../lessons/ports.js";
 import { createLessonsRuntime, type LessonsRuntime } from "../lessons/runtime.js";
-import { lessonDeletionPort } from "../lessons/deletion.js";
+import { lessonDeletionPort } from "../lessons/deletion.js"; import { graduatedCleanup } from "../lessons/graduated-cleanup.js";
 import { DocumentLessonStore } from "../lessons/document-store.js";
 import { documentLessonVectors } from "../lessons/document-vectors.js";
 import { lessonAuditSink } from "../lessons/audit-sink.js";
@@ -183,6 +185,8 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
       // Another company's person is never "not erased": the answer for it is yes (nothing is learned).
       isErased: async (orgId, developerId) => (orgId !== companyId ? true : await options.people.isErased(companyId, developerId)),
     },
+    // The nightly area checks read the project's repositories through the company's own code hosts (a host that is not registered is "not known": nothing is marked).
+    areaChecks: codeHostAreaPorts({ projects: deps.projects, companyId, hostOf: (repository) => { try { return codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }); } catch { return undefined; } } }),
     now, log,
   });
 
@@ -283,7 +287,7 @@ export interface ErasePersonLessonsReport {
 export async function erasePersonLessons(input: { store: DocumentStore; audit: AuditSink; companyId: OrgId; personId: string; now: () => number; vectors?: LessonVectors; log?: (entry: Record<string, unknown>) => void }): Promise<ErasePersonLessonsReport> {
   const { store, companyId, personId, now } = input;
   const lessons = new DocumentLessonStore(store, now, (id) => id, () => undefined);
-  const deletion = lessonDeletionPort({ store: lessons, vectors: input.vectors ?? documentLessonVectors(store), audit: lessonAuditSink(input.audit, now, companyId), now });
+  const deletion = lessonDeletionPort({ store: lessons, vectors: input.vectors ?? documentLessonVectors(store), audit: lessonAuditSink(input.audit, now, companyId), now, onGone: graduatedCleanup(store, now) });
   const projects = await companyProjects(store, companyId);
   let purged = 0;
   let scrubbed = 0;

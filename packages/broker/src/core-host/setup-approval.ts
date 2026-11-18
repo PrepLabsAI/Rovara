@@ -11,13 +11,16 @@
 // The proof: the hosted approvers point's one method, a fresh step-up proved for this one act (hosted-approvers.ts `issueSetupStepUpApproval`), bound to the company, the person, the request id,
 // the candidate's revision and digest, the answer and the card `setup_proposal:<project>` at that digest. A candidate that moved (another digest or revision, the project no longer at the base
 // revision) is refused by the gate (`stale`) or by the decision's own transaction.
+import type { SessionMembers } from "../core/sessions/access.js";
 import { type AuditSink, type Approvers, type IdentityProvider, type OrgId, type OrgRole, type DocumentStore } from "@agentx/contracts";
 import { createDecisionGate, type Credential, type DecisionGate } from "../core/decisions/approval-gate.js";
 import { createSetupProposalSubject } from "../core/setup-agent/apply.js";
+import { createEvalSpendSubject } from "../core/setup-agent/eval-spend.js";
 import { createSetupHostSubject } from "../core/setup-agent/host-ask.js";
 import { SETUP_RISK_APPROVER, setupApproverAllows, setupHostApproverAllows, type SetupApproverStanding, type SetupRisk } from "../core/setup-agent/setup-risk.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
-import { issueSetupHostStepUpApproval, issueSetupStepUpApproval, type SetupHostStepUpApprovalInput, type SetupStepUpApprovalInput } from "./hosted-approvers.js";
+import { deployedSessionMembers } from "./deployed-decisions.js";
+import { issueEvalSpendStepUpApproval, issueSetupHostStepUpApproval, issueSetupStepUpApproval, type SetupHostStepUpApprovalInput, type SetupStepUpApprovalInput } from "./hosted-approvers.js";
 
 export const SETUP_NEEDS_ADMIN = "This setup change reaches outside the project's commands (a website, a secret, a registry, an integration or something Rovara does not recognise), so a company owner or admin must approve it.";
 export const SETUP_HOST_NEEDS_ADMIN = "A website for a setup run changes what the project's code can reach, so only a company owner or admin can allow or refuse it.";
@@ -35,6 +38,9 @@ export const setupCardOf = (project: string, artifactDigest: string): { cardId: 
 /** The card a website ask is decided on, at the digest the person saw (the host and when it was asked): the hosted approvers point checks the proof was issued for it. */
 export const setupHostCardOf = (subjectId: string, artifactDigest: string): { cardId: string; contentVersion: string } => ({ cardId: `setup_host:${subjectId}`, contentVersion: artifactDigest });
 
+/** The card an eval spend item is decided on, at the digest the person saw (L4-EVC; the hosted approvers point checks the proof was issued for it). */
+export const evalSpendCardOf = (project: string, artifactDigest: string): { cardId: string; contentVersion: string } => ({ cardId: `eval_spend:${project}`, contentVersion: artifactDigest });
+
 /** What the hosted setup route needs to decide a candidate, and a website ask. */
 export interface HostedSetupApproval {
   /** The approval gate over the company's approvers point, with the hosted setup subject (risk from the diff, the live standing rule). */
@@ -43,6 +49,10 @@ export interface HostedSetupApproval {
   issue: (act: SetupStepUpApprovalInput) => Credential | Promise<Credential>;
   /** L4-SF (d): the approvers point's proof of one act on a website ask (a fresh step-up bound to the ask's id, digest, answer and card). Throws when it cannot be issued (the route refuses). */
   issueHost: (act: SetupHostStepUpApprovalInput) => Credential | Promise<Credential>;
+  /** L4-EVC: the same proof, for one act on the project's eval spend item (its own subject: a setup proof can never stand for it). Decided through the same gate and the eval subject's live rule (owner, admin or the project's maintainer). */
+  issueEval: (act: SetupStepUpApprovalInput) => Credential | Promise<Credential>;
+  /** L4-EVC: the company's live members as the eval seams read them (the same people as `standing`). */
+  evalMembers: SessionMembers;
   /** The person's live standing in THIS company on the project. Undefined: not a live member here. Throws when it cannot be read (the route refuses). */
   standing: (personId: string, project: string) => Promise<SetupApproverStanding | undefined>;
 }
@@ -100,13 +110,16 @@ export function createHostedSetupApproval(options: HostedSetupApprovalOptions): 
     store: options.store,
     approval: { mayDecide: async (approver, input) => approver.companyId === companyId && setupHostApproverAllows(await standing(approver.personId, input.project)), refusal: SETUP_HOST_NEEDS_ADMIN },
   });
+  // L4-EVC: the project's eval spend item, decided by a company owner or admin or the project's maintainer, read live inside the decision (eval-spend.ts `roleFor`).
+  const evalMembers = deployedSessionMembers(companyId, options.people);
   const gate = createDecisionGate({
-    store: options.store, approvers: options.approvers, audit: options.audit, subjects: [subject, hostSubject], now: options.now,
+    store: options.store, approvers: options.approvers, audit: options.audit, subjects: [subject, hostSubject, createEvalSpendSubject({ store: options.store, companyId, members: evalMembers })], now: options.now,
     ...(options.identity === undefined ? {} : { identity: options.identity }),
   });
   return {
-    gate, standing,
+    gate, standing, evalMembers,
     issue: (act) => issueSetupStepUpApproval(options.proofKey, act, options.now().getTime()),
     issueHost: (act) => issueSetupHostStepUpApproval(options.proofKey, act, options.now().getTime()),
+    issueEval: (act) => issueEvalSpendStepUpApproval(options.proofKey, act, options.now().getTime()),
   };
 }

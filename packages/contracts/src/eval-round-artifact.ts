@@ -1,6 +1,7 @@
 // Bound, browser-safe eval evidence. Labels are derived from comparison facts, never worker prose.
 import { z } from "zod";
 import { inertEvidenceText } from "./evidence-inert.js";
+import { EvalRunDiagnosticSchema } from "./eval-run-diagnostic.js";
 import { EVAL_NOT_RUN_REASONS, EVAL_QUESTION_LIMIT, evalCheckResult, evalNotRunResult, type EvalCheckInput, type EvalCheckResult, type EvalQuestionComparison } from "./eval-check.js";
 import { EVAL_ROUND_KINDS } from "./eval-hidden-set.js";
 
@@ -88,7 +89,9 @@ export function captureEvalRoundEvidence(input: EvalEvidenceCaptureInput): EvalR
 }
 const artifactShape = {
   schemaVersion: z.literal(1), candidateDigest: hash, roundKind: z.enum(EVAL_ROUND_KINDS), evalPass: z.union([z.literal(1), z.literal(2)]),
-  outcome: z.enum(["not_run", "done"]), notRunReason: z.enum(EVAL_NOT_RUN_REASONS).optional(), ...evidenceShape,
+  outcome: z.enum(["not_run", "done"]), notRunReason: z.enum(EVAL_NOT_RUN_REASONS).optional(),
+  /** L4-EVS: why the eval could not run (a fixed code, one allow-listed name, a redacted bounded tail). Only with `eval_run_failed`. */
+  runFailure: EvalRunDiagnosticSchema.optional(), ...evidenceShape,
   usage: z.object({ calls: integer, costMicros: integer.optional() }).strict().optional(), cache: z.enum(["hit", "filled", "not_filled", "not_used"]).optional(), evalConfigured: z.boolean().optional(),
   feedback: z.union([
     z.object({ notRun: z.literal(true) }).strict(),
@@ -102,9 +105,10 @@ const artifactShape = {
 type ArtifactFields = z.infer<z.ZodObject<typeof artifactShape>>;
 const consistent = (a: ArtifactFields): boolean => {
   if ((a.outcome === "not_run") !== (a.notRunReason !== undefined)) return false;
+  if (a.runFailure !== undefined && (a.outcome !== "not_run" || a.notRunReason !== "eval_run_failed")) return false;
   if (a.outcome === "done" && (a.roundKind === "working" || a.evalConfigured === false || a.context?.discovery === "not_configured")) return false;
   const hidden = a.privatePass !== undefined || a.privateSet === true;
-  if (hidden) return a.context === undefined && a.questions === undefined && a.options === undefined && a.excluded === undefined && a.notices === undefined && a.basis === undefined && a.usage === undefined && a.cache === undefined && a.evalConfigured === undefined && a.label === undefined && a.summary === undefined && a.feedback === undefined && a.fixRequested === undefined && (a.outcome === "done" ? a.privatePass !== undefined && a.roundKind === "check_sealed" : a.privatePass === undefined);
+  if (hidden) return a.runFailure === undefined && a.context === undefined && a.questions === undefined && a.options === undefined && a.excluded === undefined && a.notices === undefined && a.basis === undefined && a.usage === undefined && a.cache === undefined && a.evalConfigured === undefined && a.label === undefined && a.summary === undefined && a.feedback === undefined && a.fixRequested === undefined && (a.outcome === "done" ? a.privatePass !== undefined && a.roundKind === "check_sealed" : a.privatePass === undefined);
   if (a.context === undefined || a.context.previousPasses !== a.evalPass - 1 || a.usage === undefined || a.cache === undefined || a.excluded === undefined || a.notices === undefined) return false;
   if (a.evalConfigured !== undefined && a.context.discovery !== (a.evalConfigured ? "configured" : "not_configured")) return false;
   if ((a.questions !== undefined) !== (a.options !== undefined) || (a.outcome === "done" && (a.questions?.length ?? 0) === 0)) return false;
@@ -141,7 +145,7 @@ export function evalResultFromArtifact(input: unknown): EvalCheckResult {
   if (a === undefined) return invalid();
   const hidden = a.privatePass !== undefined || a.privateSet === true;
   if (a.outcome === "not_run") {
-    const result = evalNotRunResult({ roundKind: a.roundKind, reason: a.notRunReason!, hiddenSetUsed: hidden });
+    const result = evalNotRunResult({ roundKind: a.roundKind, reason: a.notRunReason!, hiddenSetUsed: hidden, ...(a.runFailure === undefined || hidden ? {} : { runFailure: a.runFailure }) });
     if (hidden) return result;
     if (a.notRunReason === "no_eval_configured") return { ...result, summary: noEvalNotice, notices: [noEvalNotice], disposition: { ...result.disposition, retry: false } };
     return addContext(result, a);

@@ -14,7 +14,7 @@ import type { AccessCheckPort } from "../../../packages/broker/src/lessons/acces
 import type { TaskVisibilityPort } from "../../../packages/broker/src/lessons/access-port.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import { expectLinearScalingAsync } from "../../support/scaling.js";
-import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, directory, embedder, lessonRecord, seed, settings, wideAudience, NO_VECTORS } from "./lesson-helpers.js";
+import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, directory, embedder, lessonRecord, seed, settings, wideAudience, NO_VECTORS, NO_FIT_FLOOR } from "./lesson-helpers.js";
 
 /** A lesson-audience port over a table (a task missing from the table, or mapped to undefined, is unknown; "throw" throws). Counts its batched reads. */
 function audiencePort(table: Record<string, LessonTaskAudience | undefined | "throw">) {
@@ -177,7 +177,7 @@ describe("every read path", () => {
     const vectors = new MemoryVectors();
     await seed(w.store, narrowed, open);
     for (const l of [narrowed, open]) await vectors.upsert(l.workspaceId, l.project, l.id, await embedder.embed(`${l.title}\n${l.description}\n${l.body}`), { status: l.status });
-    const deps: LoadDeps = { access: w.access, store: w.store, embedder, vectors, settings: settings(), audit: new Audit(), now: w.clock.now };
+    const deps: LoadDeps = { ranking: NO_FIT_FLOOR, access: w.access, store: w.store, embedder, vectors, settings: settings(), audit: new Audit(), now: w.clock.now };
     const request: LoadRequest = { workspaceId: WS, project: PROJECT, taskId: "task-9", stage: "IMPLEMENT", round: 1, intent: "x", repos: ["api"], files: [], languages: [], taskAudience: { kind: "shared" } };
     const result = await loadLessonsForStage(deps, request);
     expect(result.context?.lessons.map((l) => l.id)).toEqual(["les_stayopen1"]);
@@ -246,7 +246,7 @@ describe("the reader of an agent's lessons is the audience of the RUNNING task, 
     const clock = new Clock();
     const access = accessOf(options.bare === true ? team : withLessonAudiences(team, a.value));
     const identityCalls: string[] = [];
-    const load: LoadDeps = { store, vectors: NO_VECTORS, settings: settings(), access, audit: new Audit(), now: clock.now };
+    const load: LoadDeps = { ranking: NO_FIT_FLOOR, store, vectors: NO_VECTORS, settings: settings(), access, audit: new Audit(), now: clock.now };
 
 
     // What the dispatcher does at a coding stage: load the lessons for the running task and keep only their ids and versions.
@@ -410,7 +410,7 @@ describe("rank and filter first, check in pages, one reader per request", () => 
     const clock = new Clock();
     await seed(store, ...lessons);
     // (The project's budget is raised to the caps: the default is 5 lessons and 2 KB per stage, and this test is about which twelve are chosen.)
-    const result = await loadLessonsForStage({ access: accessOf(p.value), store, vectors: NO_VECTORS, settings: settings({ loadBudget: { lessons: 12, bytes: 6 * 1024 } }), audit: new Audit(), now: clock.now }, request);
+    const result = await loadLessonsForStage({ ranking: NO_FIT_FLOOR, access: accessOf(p.value), store, vectors: NO_VECTORS, settings: settings({ loadBudget: { lessons: 12, bytes: 6 * 1024 } }), audit: new Audit(), now: clock.now }, request);
     // Stays inside the budget: the work grows linearly with the project's lessons (50 with 10 narrowed, then 400 with 80), not faster.
     const sized = new Map<number, { work: () => Promise<unknown>; loaded: () => string[] }>();
     for (const count of [50, 400]) {
@@ -421,7 +421,7 @@ describe("rank and filter first, check in pages, one reader per request", () => 
       const sizedClock = new Clock();
       let loaded: string[] = [];
       sized.set(count, {
-        work: async () => { loaded = (await loadLessonsForStage({ access: accessOf(ports.value), store: sizedStore, vectors: NO_VECTORS, settings: settings({ loadBudget: { lessons: 12, bytes: 6 * 1024 } }), audit: new Audit(), now: sizedClock.now }, request)).context?.lessons.map((l) => l.id) ?? []; },
+        work: async () => { loaded = (await loadLessonsForStage({ ranking: NO_FIT_FLOOR, access: accessOf(ports.value), store: sizedStore, vectors: NO_VECTORS, settings: settings({ loadBudget: { lessons: 12, bytes: 6 * 1024 } }), audit: new Audit(), now: sizedClock.now }, request)).context?.lessons.map((l) => l.id) ?? []; },
         loaded: () => loaded,
       });
     }
@@ -453,7 +453,7 @@ describe("rank and filter first, check in pages, one reader per request", () => 
     const p = lessonPorts({ ...table, "t-retired": aud() });
     const store = new InMemoryLessonStore();
     await seed(store, ...lessons, old);
-    await loadLessonsForStage({ access: accessOf(p.value), store, vectors: NO_VECTORS, settings: settings(), audit: new Audit(), now: new Clock().now }, request);
+    await loadLessonsForStage({ ranking: NO_FIT_FLOOR, access: accessOf(p.value), store, vectors: NO_VECTORS, settings: settings(), audit: new Audit(), now: new Clock().now }, request);
     expect(p.reads.flat()).not.toContain("t-retired");
   });
 

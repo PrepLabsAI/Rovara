@@ -382,6 +382,23 @@ describe("followers, the conversation a task was started from, and the footer", 
     expect(failed.quiet.delivered).toHaveLength(1);
   });
 
+  it("L4-U5: skips the thread's reminder for a task whose setup pause was already told there (one message for the requester), and only for that", async () => {
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    const setup = async () => { const w = await needsYou(); const quiet = new FakeChannelAdapter(); w.registry.register("channel", "otherchat", quiet); await w.prefs([target()]); return { w, quiet }; };
+    const told = await setup();
+    const asked: string[] = [];
+    await told.w.deliver({ thread, setupPausedTold: async (session: { sessionId: string }) => { asked.push(session.sessionId); return true; } });
+    expect(asked).toEqual([SESSION]);
+    expect(told.quiet.delivered).toEqual([]);
+    expect(told.w.adapter.delivered).toHaveLength(1);
+    for (const setupPausedTold of [async () => false, async () => { throw new Error("store down"); }]) {
+      const open = await setup();
+      await open.w.deliver({ thread, setupPausedTold });
+      expect(open.quiet.delivered).toHaveLength(1);
+    }
+  });
+
   it("applies the reminder skip to needs-you only: a paused, ready, failed or done notice still goes to the thread even when the plan is carded", async () => {
     const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
     const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);

@@ -4,8 +4,8 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
-  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
-  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
+  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, promptLocationsOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type PromptLocation, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { evalRequestForChecks } from "../proof/eval-round-reader.js";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
@@ -29,6 +29,8 @@ import {
   AUTOMATIC_REVIEW_NOTE, AUTOMATIC_REVIEW_ONLY_NOTE, NO_PUBLISH_NOTE, implementPrompt, ownerConstraintsSection, promptTagId, reviewCheckCommand, reviewPrompt, selectedCheckCommands,
   sendBackPrompt, sendBackProblemsPromptSection,
 } from "./prompts.js";
+/** The timeline line and milestone text of the pause: fixed words, never the check's failing step (repository text). */
+const SETUP_PAUSED_TIMELINE = "Paused before Build: the project's setup needs repair.";
 
 /** A UUID made from text (the workflow's retry record wants one): the same text always gives the same one, so a repeated retry is recognised. */
 export function uuidFrom(text: string): string {
@@ -36,7 +38,7 @@ export function uuidFrom(text: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((parseInt(hex[16] ?? "0", 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-export interface RowRef { taskId: string; workflowRevision: number }
+export interface RowRef { taskId: string; workflowRevision: number; firstEvent?: string }
 
 /** The task a row stands for, when it is still open at the revision the row was written for; the workspace, when it can take a step. */
 export interface Located { task: TaskRecord & { workflow: WorkflowSnapshot }; workspace: WorkspaceRecord }
@@ -80,6 +82,16 @@ async function generalFakesOf(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
     // it (`approvedCodingPlan`); a plan that cannot be read adds none, and nothing here ever writes the project's setting.
     const approved = workflow.artifacts.some((artifact) => artifact.type === "plan") ? await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined) : undefined;
     return fakesFor(setting, approved?.setupChanges);
+  } catch {
+    return undefined;
+  }
+}
+
+/** L4-EVP: the prompt locations the project confirmed, at the revision the task started on, for the eval's changed-prompt classifier. Undefined: none, or the project cannot be read (the eval then runs as it did). */
+async function promptLocationsFor(deps: TaskFlowDeps, task: TaskRecord): Promise<readonly PromptLocation[] | undefined> {
+  try {
+    const found = promptLocationsOf((await deps.projects.revision(task.project, task.startingRevision))?.definition.promptLocations);
+    return found.length === 0 ? undefined : found;
   } catch {
     return undefined;
   }
@@ -129,7 +141,14 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   const setupGate = await setupGateBeforeBuild(deps, { project: task.project, taskId: task.taskId });
   if (setupGate.answer === "wait") return "WAITING";
   if (setupGate.answer === "blocked") {
-    await commitWorkflow(deps, task, blockWorkflow(workflow, setupGate.words.slice(0, 500), iso(deps)));
+    const blocked = blockWorkflow(workflow, setupGate.words.slice(0, 500), iso(deps));
+    // L4-U5: the thread and the ticket the task came from are told ONCE that it paused, in the same transaction as the pause (the milestone hook tells them and tries again after a failure). The handlers read the words from the
+    // project's own re-check rows; the text here is only the session's timeline line.
+    const told = deps.milestones === undefined ? [] : deps.milestones.items({
+      kind: "setup_paused", orgId: deps.companyId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: iso(deps), text: SETUP_PAUSED_TIMELINE,
+    }, blocked.revision);
+    const committed = await commitWorkflow(deps, task, blocked, told);
+    if (committed && told.length > 0) await deps.milestones?.deliver(task.taskId).catch(() => undefined);
     return settled(deps, row, "STALE");
   }
   // A fix is made for the head Rovara pushed: if a person pushed meanwhile, the round ends here and the task waits for the merge again.
@@ -213,7 +232,8 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE]),
     ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source"],
-    ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),
+    ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId }),
+    ...((row.firstEvent === undefined && graph?.note === undefined) ? {} : { firstEvent: [row.firstEvent, graph?.note].filter((line): line is string => line !== undefined).join("\n") }),
   });
   return settled(deps, row, accepted.result);
 }
@@ -279,11 +299,12 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     return settled(deps, row, "STALE");
   }
   const evalRequest = await evalRequestForChecks(deps, task, workflow);
+  const evalPromptLocations = evalRequest === undefined ? undefined : await promptLocationsFor(deps, task);
   const generalFakes = await generalFakesOf(deps, task, workflow);
   // TE-H1 browser evidence (DEC 241): only with the evidence capture, and only for a project whose owner set a recipe (read fail-closed by the seam; a fault is no recipe). It asks the worker to photograph the changed pages; a worker without
   // the feature is refused the step by `requires` below, never sent a field it cannot read.
   const browserRecipe = capture ? await deps.browserEvidence?.recipe(task).catch(() => undefined) : undefined;
-  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...(browserRecipe === undefined ? {} : { browserEvidence: browserRecipe }), ...baseOf(task, workflow) });
+  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(evalPromptLocations === undefined ? {} : { evalPromptLocations }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...(browserRecipe === undefined ? {} : { browserEvidence: browserRecipe }), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,

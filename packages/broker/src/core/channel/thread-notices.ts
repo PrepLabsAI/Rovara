@@ -6,6 +6,9 @@
 //                   not take a decision made in this chat, has no button: the card links to the task page, where approval needs a fresh sign-in (owner decision of 2026-11-12). With no gate, a plain line with the link.
 //   pull request    the pull request was marked ready for review: one line with its link.
 //   done            the task merged or was closed: one line.
+//   setup paused    (L4-U5) the task paused before Build because the project's setup stopped working: one message, in the page's own fixed words and where to go, once per re-check (so a task paused twice by the same break says it once). It is a
+//                   "someone must act" notice, so it is not one of the milestone lines the host's `milestones` switch turns off. No buttons and no cost: what a fix costs is said where it is pressed, on the web.
+//                   The pull request line also carries the setup's evidence line when the check could not be made or finished (a pass never posts here).
 //
 // Needs-you notices are not these: they are `deliverAttention`'s and stay as they are. There is no step-by-step narration: nothing else is told here.
 //
@@ -15,7 +18,7 @@
 // stays on while the host gives a gate. Nothing here is a reason for the work to fail: a handler that throws is told again, up to the hook's limit.
 import { createHash } from "node:crypto";
 import {
-  INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
+  EVAL_CI_LINE_PATTERN, INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
   type AgentSessionRecord, type ChannelEvent, type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type OrgId, type RegistryView, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { CodeMilestoneHandler } from "../milestones/milestones.js";
@@ -26,6 +29,7 @@ import { taskKey } from "../task-flow/keys.js";
 import { readPlanFeature } from "../report/plan-feature.js";
 import { taskSessionId } from "../sessions/create.js";
 import { inertTicketTitle } from "../ticket-updates/handler.js";
+import { setupEvidenceOf, setupPausedMessage, setupTrustLineOf } from "../setup-agent/recheck-rows.js";
 import { postApprovalCard } from "./cards.js";
 import { personIsServed, tenantIsCompanys, type ChannelCompanyOf, type ChannelMemberRule } from "./company.js";
 import { readTaskThread, type TaskThread } from "./threads.js";
@@ -35,8 +39,8 @@ type Log = (event: string, fields: Record<string, unknown>) => void;
 /** The handler's name on the milestone hook. */
 export const CHANNEL_THREAD_HANDLER = "channel_thread";
 
-type Moment = "plan_ready" | "pr_opened" | "done";
-const MOMENT_OF: Partial<Record<CodeMilestoneKind, Moment>> = { plan_ready: "plan_ready", pr_ready: "pr_opened", merged: "done", closed: "done" };
+type Moment = "plan_ready" | "pr_opened" | "done" | "setup_paused";
+const MOMENT_OF: Partial<Record<CodeMilestoneKind, Moment>> = { plan_ready: "plan_ready", pr_ready: "pr_opened", merged: "done", closed: "done", setup_paused: "setup_paused" };
 
 /** How long a claim on a notice holds, and how often a send in progress renews it: a send that takes longer than the lease (a slow chat tool) keeps its claim, so a second one cannot take over and post a second card. */
 const CLAIM_LEASE_MS = 60_000;
@@ -58,6 +62,8 @@ export interface ThreadNoticeDeps {
   taskUrl?: ((taskId: string) => string | undefined) | undefined;
   /** What tells a person where to open a task when the host has no address to link (fixed words, set by the install). */
   footer?: string | undefined;
+  /** L4-U5: the project's setup page, when the host has an https address for it (a hosted install). Absent: the words tell the person to open it in Rovara. */
+  setupUrl?: ((project: string) => string | undefined) | undefined;
   /** The decision gate, for the plan card: its risk, revision and digest come from the same load a decision is made on. Absent: no card, and a plain line says the plan is ready. */
   plan?: { gate: Pick<DecisionGate, "requirement"> } | undefined;
   log?: Log | undefined;
@@ -106,6 +112,24 @@ export function planCardPosted(deps: { store: Pick<DocumentStore, "get">; now: (
     const claimed = await deps.store.get(claimKey(session.orgId, sessionId, planCardKey(workflow.revision, digest)));
     // A card nobody can answer any more (it stops being answerable after CARD_TTL_SECONDS) is no card: the reminder is then sent.
     return claimed?.["state"] === "done" && typeof claimed["cardUntil"] === "number" && claimed["cardUntil"] * 1000 > deps.now();
+  };
+}
+
+/**
+ * L4-U5: whether the task's "I can't build this yet" message (the setup pause) was already told in its thread, for the break that holds the task now: the answer the needs-you reminder asks (`deliverAttention`'s
+ * `setupPausedTold`), so the thread is not told twice for one pause. True only for a task that is blocked on a broken re-check whose message was sent; anything else (or a read that fails) is "not told".
+ */
+export function setupPausedPosted(deps: { store: Pick<DocumentStore, "get"> }): (session: AgentSessionRecord) => Promise<boolean> {
+  return async (session) => {
+    if (session.subject.kind !== "task") return false;
+    const task = await deps.store.get(taskKey(session.subject.taskId));
+    const workflow = task?.["workflow"] as Partial<WorkflowSnapshot> | undefined;
+    const project = task?.["project"];
+    if (task === undefined || (task["orgId"] ?? task["companyId"]) !== session.orgId || task["closedAt"] !== undefined || workflow?.state !== "BLOCKED" || typeof project !== "string") return false;
+    const evidence = await setupEvidenceOf({ store: deps.store, companyId: session.orgId }, project, session.subject.taskId);
+    if (evidence?.state !== "broken" || evidence.recheckKey === undefined) return false;
+    const sessionId = typeof task["sessionId"] === "string" ? task["sessionId"] : session.sessionId;
+    return (await deps.store.get(claimKey(session.orgId, sessionId, `setup_paused#${evidence.recheckKey}`)))?.["state"] === "done";
   };
 }
 
@@ -171,7 +195,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
       const moment = MOMENT_OF[milestone.kind];
       if (moment === undefined) return;
       const cards = deps.plan !== undefined;
-      if (moment === "plan_ready" ? !cards && !milestonesOn() : !milestonesOn()) return;
+      if (moment === "setup_paused") { /* a notice that someone must act, not a milestone line: the switch does not turn it off */ } else if (moment === "plan_ready" ? !cards && !milestonesOn() : !milestonesOn()) return;
       const { orgId, taskId } = milestone;
       const task = await deps.store.get(taskKey(taskId));
       const taskOrg = task?.["orgId"] ?? task?.["companyId"];
@@ -186,6 +210,17 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
       const base = (key: string) => ({ version: 1 as const, id: eventIdOf(orgId, sessionId, key), channel: conversation.channel, conversation, createdAt: new Date(deps.now()).toISOString() });
       const tell = (event: ChannelEvent): Promise<void> => adapter.deliver(event);
       const where = open(taskId);
+
+      if (moment === "setup_paused") {
+        // The words come from the project's own re-check rows (never from the milestone's text), and only while the task's re-check says the setup is broken.
+        const project = typeof task["project"] === "string" ? task["project"] : undefined;
+        if (project === undefined || task["closedAt"] !== undefined) return;
+        const evidence = await setupEvidenceOf({ store: deps.store, companyId: orgId }, project, taskId);
+        if (evidence?.state !== "broken" || evidence.recheckKey === undefined) return;
+        const key = `setup_paused#${evidence.recheckKey}`;
+        await send(orgId, sessionId, key, () => tell({ ...base(key), type: "progress", data: { text: setupPausedMessage(evidence.failedStep ?? "setup", deps.setupUrl?.(project)) } }));
+        return;
+      }
 
       if (moment === "plan_ready") {
         const workflow = task["workflow"] as Partial<WorkflowSnapshot> | undefined;
@@ -227,9 +262,15 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const requests = (milestone.pullRequests ?? []).slice(0, PULL_REQUESTS_MAX);
         const key = `pr_opened#${sha(requests.map((request) => `${request.repository}#${String(request.number)}`).join(",")).slice(0, 24)}`;
         const links = requests.flatMap((request) => plainHttpsLink(request.url) ?? []);
-        await send(orgId, sessionId, key, () => tell(links.length === 1
+        // L4-U5: when the setup could not be re-checked (or the check did not finish), the one evidence line goes with the pull request, in the page's own words. A pass never does.
+        const project = typeof task["project"] === "string" ? task["project"] : undefined;
+        const trust = project === undefined ? undefined : await setupTrustLineOf({ store: deps.store, companyId: orgId }, project, taskId);
+        // L4-EVCI: the customer's own eval result, when it had landed by the time the pull request was marked ready: the same one line as in the description (fixed words, numbers and a plain https address; a line that is
+        // not exactly Rovara's own words is not sent). The typed pull request card has no place for either line, so a ready line that carries one is the plain progress text (which keeps the verdict heading).
+        const evalLine = milestone.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(milestone.evalLine) ? milestone.evalLine : undefined;
+        await send(orgId, sessionId, key, () => tell(links.length === 1 && trust === undefined && evalLine === undefined
           ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened", ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }) } }
-          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}` } }));
+          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}${trust === undefined ? "" : `\n${trust}`}` } }));
         return;
       }
 

@@ -1,6 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
+import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
 import { Template } from "aws-cdk-lib/assertions";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -10,6 +11,7 @@ import { environmentNaming } from "../../infra/lib/naming.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
+import { withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
@@ -74,6 +76,8 @@ function parentRemainderDigest(template: TemplateJson): string {
     withoutCoreEngine(remainder);
     // The switch-over parity additions of a named control plane (switchover-parity-infrastructure.test.ts); shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
+    // L4-EGR: the NatEgressAddresses parameter and the broker variable that reads it (egress-addresses-infrastructure.test.ts).
+    withoutNatEgressControlPlane(remainder);
   } else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
@@ -289,7 +293,8 @@ describe("the named TEST proof-only installation gate", () => {
       });
       // DEC 254h: GitHub sign-in's named-environment additions are asserted and taken out (tests/support/github-signin-template.ts); legacy has none.
       // ENV-ROOM 2's additions (the broker names parameter and the IAM room made for it) are asserted and taken out first (tests/support/broker-environment-template.ts).
-      const pinned = label === "legacy" ? template : withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(structuredClone(template))), label === "named" ? "agentxlivetest123" : "staging");
+      // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's question signer is asserted and taken out (tests/support/dispatcher-hook-signer-template.ts); legacy has none.
+      const pinned = label === "legacy" ? template : withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(structuredClone(template))), label === "named" ? "agentxlivetest123" : "staging"));
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;

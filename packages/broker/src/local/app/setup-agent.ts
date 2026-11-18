@@ -24,6 +24,8 @@ import { SETUP_HOST_KIND, approvedHostsOf, forgetApprovedHost, createSetupHostSu
 import type { SetupAgentCallbackDeps } from "../../core/setup-agent/callback.js";
 import { readSetupJournal } from "../../core/setup-agent/journal.js";
 import type { DecisionSubject } from "../../core/decisions/approval-gate.js";
+import { resumeSetupPausedTasks } from "../../core/setup-agent/auto-resume.js";
+import { log as logTaskFlow } from "../../core/task-flow/support.js";
 
 /** The subjects the approval gate must know for the setup agent: a website a run asked for, a project's waiting setup, then independent eval spend. */
 export function setupDecisionSubjects(flow: TaskFlowDeps, sandboxDenied?: (project: string) => readonly string[]): DecisionSubject[] {
@@ -163,7 +165,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       return {
         id: item.id, kind: item.kind, lines: lines.slice(0, 20), verdict,
         from: item.proposed.from.slice(0, 4).map((citation) => (citation.path === undefined ? "inferred by Rovara, from no file" : `${citation.repo ?? ""}/${citation.path}${citation.line === undefined ? "" : `:${String(citation.line)}`}`)),
-        usable: (item.kind === "setup" || item.kind === "tests") && setupItemHandling(item.kind, item.proposed.value) === "settings",
+        usable: (item.kind === "setup" || item.kind === "tests" || item.kind === "prompt_location") && setupItemHandling(item.kind, item.proposed.value) === "settings",
       };
     });
     const apply = await readSetupApply({ flow, store, companyId, now: options.now }, project);
@@ -182,7 +184,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       hostAsks: asks.map((ask): SetupHostAskView => ({ host: ask.host, status: ask.state, international: isInternationalName(ask.host), ...(ask.from === undefined ? {} : { from: ask.from }), ...(ask.journalN === undefined ? {} : { journalN: ask.journalN }), ...(ask.state === "open" ? { approval: offerOfHost(ask) } : {}) })),
       check: { status: check.status, ...(check.failedStep === undefined ? {} : { failedStep: check.failedStep }) },
       ...(!waiting ? {} : { apply: {
-        candidateRevision: apply.candidateRevision, setup: apply.setup, readiness: apply.readiness, check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
+        candidateRevision: apply.candidateRevision, setup: apply.setup, readiness: apply.readiness, ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }), check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
         // The decision is offered only once the candidate check passed: before that there is nothing the owner could be asked to approve.
         ...(apply.checkState.status === "ready" ? { approval: { requestId: proposalRequestId(apply.digest, apply.candidateRevision), revision: apply.candidateRevision, artifactDigest: apply.digest, kind: "setup" as const, risk: "high" as const } } : {}),
       } }),
@@ -198,6 +200,9 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       credentials: [{ method: input.proof.method, token: input.proof.token, ...(input.proof.claimedAccount === undefined ? {} : { claimedAccount: input.proof.claimedAccount }) }],
       ...(input.decision === "reject" ? { reason: "Not now (setup)" } : {}), details: { via: "PAGE" },
     });
+    if (kind === SETUP_APPLY_KIND && input.decision === "approve" && result.status !== "refused") {
+      void resumeSetupPausedTasks(flow, subjectId, { kind: "approved", revision: input.approval.revision }).catch((error: unknown) => logTaskFlow(flow, { event: "setup_apply.resume_failed", error: error instanceof Error ? error.name : "unknown" }));
+    }
     return localResultOf(result, done);
   };
 

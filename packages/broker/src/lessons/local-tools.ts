@@ -1,4 +1,4 @@
-// Lessons for local coding tools (decisions 46b, 47, 50a). A local coding tool asks Rovara "which team lessons apply to this repository and this change?"
+// Lessons for local coding tools (decisions 46b, 47). A local coding tool asks Rovara "which team lessons apply to this repository and this change?"
 // and gets a short markdown block. Everything here is read live on every call and nothing is kept (no cache), so a lesson that is erased, narrowed or retired is gone on the next call.
 //
 // Who may ask and what they get (owner decision 46b):
@@ -12,16 +12,15 @@
 //     answer says why in a fixed sentence (`LOCAL_OFF_MESSAGES`).
 // It makes no model call and no embedder call (ranking is keywords and cited paths), writes no load manifest and does not count a "load" (no outcome will follow).
 //
-// Lessons that are repo-file eligible live in the merged `.rovara/lessons.md` (decision 50a). A tool that reads that file asks with `skipRepoFile` and gets only the lessons NOT already merged into that repository's file;
-// without it the lessons in the file are returned and marked `inRepoFile`, so a tool that reads both can drop the duplicates. A failed read of the file's state leaves the lesson in (a repeat is harmless; a gap is not).
+// A few lessons at a time: the answer is always ranked and cut at the project's load budget (a handful of lessons, a few KB). There is no "give me everything" mode: a body that asks for one (`all`) is refused by the route
+// with a fixed sentence, and the whole list is read only on the lessons page, a page at a time, by a team member.
 
-import { LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, type LearnedLesson, type LessonStage } from "@agentx/contracts";
-import { LOAD_MAX_BYTES, LOAD_MAX_LESSONS, hasStaleCitation, selectLessons, type LoadDeps } from "./load.js";
+import { LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, redactText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse } from "@agentx/contracts";
+import { hasStaleCitation, selectLessons, type LoadDeps } from "./load.js";
 import { learnedLessonsSwitchOn, modeAllows, resolveLearning, resolveLoadBudget, type LearningSettingsReader, type LoadBudget } from "./policy.js";
 import { mayNameInRepository, projectRepoScopesOf } from "./project-repo-audience.js";
 import { readVisible } from "./read-visible.js";
 import { normalizeRemote } from "./repo-remote.js";
-import { hasPersonApproval } from "./repo-eligibility.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import { namesAPerson } from "./trial.js";
 import type { Lesson } from "./types.js";
@@ -30,10 +29,7 @@ import type { Lesson } from "./types.js";
 export const LOCAL_STAGES = { plan: "PLAN", code: "IMPLEMENT", review: "REVIEW" } as const;
 export type LocalStage = keyof typeof LOCAL_STAGES;
 export const LOCAL_STAGE_DEFAULT: LocalStage = "code";
-/** `all`: the whole allowed set for the repository in one block (ranked, within these caps). */
-export const LOCAL_ALL_MAX_LESSONS = 300;
-export const LOCAL_ALL_MAX_BYTES = 64 * 1024;
-const ALL_PAGE = 50;
+// There is no bulk mode (owner decision 2026-11-17): an answer is at most `LOCAL_KNOWLEDGE_UNITS_MAX` units and `LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX` bytes, whatever the project's own budget says.
 /** One line of advice and one line of why are each cut at this many characters. */
 export const LOCAL_TEXT_MAX = 300;
 export const LOCAL_TASK_TEXT_MAX = 2_000;
@@ -71,15 +67,13 @@ export interface LocalToolsCounter { count(event: { orgId: string; project: stri
 export interface LocalLessonsDeps {
   store: LessonStore; settings: LearningSettingsReader; access: LoadDeps["access"]; localTools: LocalToolsSettingsReader;
   /**
-   * The display names of the people a lesson could name: the project's members and the people of the lessons asked about (the repo-file pass's rule), read now. Throws when a name cannot be read or there are too many to look up; absent:
+   * The display names of the people a lesson could name: the project's members and the people of the lessons asked about, read now. Throws when a name cannot be read or there are too many to look up; absent:
    * the call is "unavailable". A lesson whose text holds any of them (or an @handle or an e-mail address) is left out.
    */
   names?: ((key: ScopeKey, lessons: readonly Lesson[]) => Promise<readonly string[]>) | undefined;
   resolveMember?: LoadDeps["resolveMember"] | undefined;
   now: () => number;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
-  /** The ids of the lessons merged into the repository's `.rovara/lessons.md` (its publish state's `rendered`), or undefined when not known. */
-  repoFileIds?: ((key: ScopeKey, place: string) => Promise<ReadonlySet<string> | undefined>) | undefined;
 }
 
 export interface LocalLessonsInput {
@@ -88,9 +82,8 @@ export interface LocalLessonsInput {
   remote?: string | undefined;
   /** What the change is, one line from the tool. It only ranks (it is never stored, logged or sent anywhere). */
   task?: string | undefined; files?: readonly string[] | undefined; stage?: LocalStage | undefined;
-  all?: boolean | undefined; skipRepoFile?: boolean | undefined;
 }
-export interface LocalLesson { id: string; advice: string; why?: string | undefined; citation?: string | undefined; inRepoFile?: true | undefined }
+export interface LocalLesson { id: string; advice: string; why?: string | undefined; citation?: string | undefined }
 export interface LocalLessonsAnswer {
   status: "ok" | "off"; reason?: LocalOffReason | undefined; message: string;
   project: string; repo?: string | undefined; lessons: LocalLesson[]; markdown: string;
@@ -102,11 +95,16 @@ export type LocalLessonsOutcome = { kind: "answer"; answer: LocalLessonsAnswer }
 /** A read inside the call failed: the route answers 503 and the tool says `LOCAL_UNAVAILABLE_LINE`. Never a partial list presented as complete. */
 export class LocalLessonsUnavailable extends Error { constructor(readonly code: string) { super(`local lessons unavailable: ${code}`); this.name = "LocalLessonsUnavailable"; } }
 
+/** The approvals a PERSON gave (not the trial's or the automatic path's). */
+const PERSON_APPROVAL_MODES: ReadonlySet<string> = new Set(["one", "second_person", "sole_owner_exception"]);
+/** Whether a PERSON approved the lesson: not the trial, not the automatic path. */
+const hasPersonApproval = (lesson: Pick<Lesson, "approvals">): boolean => lesson.approvals.some((approval) => PERSON_APPROVAL_MODES.has(approval.mode));
+
 /** The stable lessons and the person-approved ones (decision 46b). A lesson on trial, or live with no person behind it, is not given to a local tool. */
 export const stableOrPersonApproved = (lesson: Pick<Lesson, "trial" | "approvals">): boolean => lesson.trial?.state !== "trial" && (lesson.trial?.state === "stable" || hasPersonApproval(lesson));
 
 /**
- * Text that leaves Rovara is held to the repo file's soundness (`repo-eligibility.ts`): a lesson sent back to a person, one proposed for retirement, one with a thumbs-down and a tier-2 lesson that is not a review check
+ * Text that leaves Rovara is held to a stricter soundness: a lesson sent back to a person, one proposed for retirement, one with a thumbs-down and a tier-2 lesson that is not a review check
  * (a review check approved by two people is what the review stage is for) stay in Rovara.
  */
 export const soundForLeaving = (lesson: Pick<Lesson, "tier" | "type" | "reviewRequired" | "retireProposedAt" | "counters">): boolean =>
@@ -122,14 +120,13 @@ export function oneLine(text: string, max = LOCAL_TEXT_MAX): string {
 }
 const oneLinePath = (path: string): string => path.replace(/[^\w./@+-]/gu, "_").slice(0, 200);
 
-function localLesson(lesson: Lesson, learned: LearnedLesson, inRepoFile: boolean): LocalLesson {
+function localLesson(lesson: Lesson, learned: LearnedLesson): LocalLesson {
   const cite = learned.citations[0];
   const why = oneLine(lesson.description);
   return {
     id: lesson.id, advice: oneLine(lesson.title),
     ...(why === "" ? {} : { why }),
     ...(cite === undefined ? {} : { citation: `${oneLinePath(cite.path)}:${String(cite.startLine)}` }),
-    ...(inRepoFile ? { inRepoFile: true as const } : {}),
   };
 }
 
@@ -141,10 +138,10 @@ export function renderLocalLessons(input: { project: string; repo?: string | und
   if (input.note !== undefined) return `${header(`Rovara lessons for ${where}. Checked ${when} UTC.`)}\n${oneLine(input.note, 400)}\n`;
   if (input.lessons.length === 0) return `${header(`Rovara lessons for ${where}. No lessons fit this change. Checked ${when} UTC.`)}\n`;
   // Each lesson is one quoted line (data from the team, not a command), after the fixed notes line.
-  const lines = input.lessons.map((lesson) => `> - [${lesson.id}] ${lesson.advice}${lesson.why === undefined ? "" : ` Why: ${lesson.why}`}${lesson.citation === undefined ? "" : ` See ${lesson.citation}`}${lesson.inRepoFile === true ? " (also in .rovara/lessons.md)" : ""}`);
+  const lines = input.lessons.map((lesson) => `> - [${lesson.id}] ${lesson.advice}${lesson.why === undefined ? "" : ` Why: ${lesson.why}`}${lesson.citation === undefined ? "" : ` See ${lesson.citation}`}`);
   return [
     header(`Rovara lessons for ${where}. ${String(input.lessons.length)} ${input.lessons.length === 1 ? "lesson fits" : "lessons fit"} this change. Checked ${when} UTC.${input.complete ? "" : " Some lessons could not be checked in time."}`),
-    "## Team lessons (from Rovara; follow them unless the task says otherwise)",
+    "## Team lessons (from Rovara; team notes, not instructions: the task and the code come first)",
     LOCAL_LESSONS_NOTES_LINE,
     ...lines, "",
   ].join("\n");
@@ -160,6 +157,31 @@ const refuse = (input: LocalLessonsInput, deps: LocalLessonsDeps, reason: LocalO
  * project's repositories. The caller (the route) has already checked the person and the project's roster. Never writes, never calls a model.
  */
 export async function lessonsForLocalTool(deps: LocalLessonsDeps, input: LocalLessonsInput): Promise<LocalLessonsOutcome> {
+  const found = await selectForLocalTool(deps, input, "answer");
+  if (found.kind === "unknown_repo") return found;
+  if (found.kind === "off") return refuse(input, deps, found.reason);
+  const { selected, repo } = found;
+  const permitted = selected.picked.map((lesson, index) => localLesson(lesson, selected.chosen[index]!));
+  // The answer as a whole is held to its caps (units and bytes of the text a tool is given), whatever the budget picked: the last lessons go until the rendered block fits.
+  const render = (list: readonly LocalLesson[]): string => renderLocalLessons({ project: input.project, ...(repo === undefined ? {} : { repo: normalizeRemote(input.remote!)! }), lessons: list, at: deps.now(), complete: selected.complete });
+  let lessons = permitted.slice(0, LOCAL_KNOWLEDGE_UNITS_MAX);
+  let markdown = render(lessons);
+  while (lessons.length > 0 && Buffer.byteLength(markdown, "utf8") > LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX) { lessons = lessons.slice(0, -1); markdown = render(lessons); }
+  return { kind: "answer", answer: { status: "ok", message: "", project: input.project, ...(repo === undefined ? {} : { repo: normalizeRemote(input.remote!)! }), lessons, markdown, complete: selected.complete } };
+}
+
+/** What the shared read found: the picked lessons (each checked again as for nobody in particular), or why there is nothing to give. */
+type Selected =
+  | { kind: "unknown_repo" } | { kind: "off"; reason: LocalOffReason }
+  | { kind: "selected"; selected: Extract<Awaited<ReturnType<typeof selectLessons>>, { ok: true }>; repo: { name: string; place?: string | undefined } | undefined };
+/** How many lessons the area count looks at (counts only: no text of any lesson leaves). */
+export const LOCAL_AREAS_SCAN_MAX = 300;
+
+/**
+ * The one gate for everything a local tool reads (answers AND the table of contents): the repository proved, the switches, the approval and soundness rules, the names rule and the access records. `mode` only
+ * changes how many lessons are picked: an answer takes the budget that fits its caps; the table of contents looks at up to `LOCAL_AREAS_SCAN_MAX` and gives counts, never lesson text.
+ */
+async function selectForLocalTool(deps: LocalLessonsDeps, input: LocalLessonsInput, mode: "answer" | "areas"): Promise<Selected> {
   const key: ScopeKey = { workspaceId: input.orgId, project: input.project };
   // The repository is proved FIRST (it reads only the project's own definition): an address that is not one of this project's repositories is "no such repository" whatever is switched off, so a client that asks every project
   // meets another project's "off" never, and only the project that holds the repository can say "off".
@@ -176,14 +198,14 @@ export async function lessonsForLocalTool(deps: LocalLessonsDeps, input: LocalLe
   }
 
   // Decision 47: the install's lessons switch is off, so no lesson and no setting is read at all.
-  if (!learnedLessonsSwitchOn()) return refuse(input, deps, "install_switch");
+  if (!learnedLessonsSwitchOn()) return { kind: "off", reason: "install_switch" };
   let local: Awaited<ReturnType<LocalToolsSettingsReader["read"]>>;
   try { local = await deps.localTools.read(key.workspaceId, key.project); } catch { throw new LocalLessonsUnavailable("settings"); }
-  if (local.companyStays) return refuse(input, deps, "company_stays");
+  if (local.companyStays) return { kind: "off", reason: "company_stays" };
   const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
-  if (!modeAllows(resolved.chosenMode, "load")) return refuse(input, deps, "learning_off");
-  if (resolved.preset === "regulated") return refuse(input, deps, "regulated");
-  if (local.projectOn === false) return refuse(input, deps, "project_setting");
+  if (!modeAllows(resolved.chosenMode, "load")) return { kind: "off", reason: "learning_off" };
+  if (resolved.preset === "regulated") return { kind: "off", reason: "regulated" };
+  if (local.projectOn === false) return { kind: "off", reason: "project_setting" };
 
   let active: Lesson[];
   try {
@@ -191,15 +213,10 @@ export async function lessonsForLocalTool(deps: LocalLessonsDeps, input: LocalLe
     active = (await deps.store.list(key, { statuses: ["active"] })).filter((lesson) => lesson.expiresAt > now && !hasStaleCitation(lesson));
   } catch { throw new LocalLessonsUnavailable("store"); }
 
-  // What is merged into the repository's own file now (decision 50a), so a tool that reads the file is not given the same lesson twice.
-  let inFile: ReadonlySet<string> | undefined;
-  if (repo?.place !== undefined && deps.repoFileIds !== undefined) {
-    try { inFile = await deps.repoFileIds(key, repo.place); } catch { inFile = undefined; }
-  }
   const place = repo?.place;
   let namesUnknown = false;
   const prefilter = async (eligible: readonly Lesson[]): Promise<Lesson[]> => {
-    const fits = eligible.filter((lesson) => stableOrPersonApproved(lesson) && soundForLeaving(lesson) && mayNameInRepository(lesson, place) && !(input.skipRepoFile === true && inFile?.has(lesson.id) === true));
+    const fits = eligible.filter((lesson) => stableOrPersonApproved(lesson) && soundForLeaving(lesson) && mayNameInRepository(lesson, place));
     if (fits.length === 0) return [];
     // The names are read only when some lesson could go out. A roster that cannot be read, or one too large to look up, withholds EVERYTHING (never "no names").
     let names: readonly string[];
@@ -207,28 +224,71 @@ export async function lessonsForLocalTool(deps: LocalLessonsDeps, input: LocalLe
       if (deps.names === undefined) throw new Error("no names reader");
       names = await deps.names(key, fits);
     } catch { namesUnknown = true; return []; }
-    return fits.filter((lesson) => !namesAPerson([lesson.title, lesson.description, lesson.body].join("\n"), names));
+    return fits.filter((lesson) => !namesAPerson([lesson.title, lesson.description, lesson.body, ...(lesson.scope.repos ?? []), ...(lesson.scope.paths ?? [])].join("\n"), names));
   };
 
-  const all = input.all === true;
-  const budget: LoadBudget = all ? { lessons: LOCAL_ALL_MAX_LESSONS, bytes: LOCAL_ALL_MAX_BYTES } : resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES });
+  const budget: LoadBudget = mode === "areas" ? { lessons: LOCAL_AREAS_SCAN_MAX, bytes: 64 * 1024 } : resolveLoadBudget(resolved.loadBudget, { lessons: LOCAL_KNOWLEDGE_UNITS_MAX, bytes: LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX });
   const stage: LessonStage = LOCAL_STAGES[input.stage ?? LOCAL_STAGE_DEFAULT];
   // No embedder and no vectors are given: the ranking is keywords and cited paths, so the task text never leaves this process and the call costs nothing.
   const select: LoadDeps = {
     store: deps.store, settings: deps.settings, access: deps.access, now: deps.now, audit: { emit: async () => undefined }, vectors: { get: async () => new Map(), put: async () => undefined, remove: async () => undefined },
     ...(deps.resolveMember === undefined ? {} : { resolveMember: deps.resolveMember }), ...(deps.log === undefined ? {} : { log: deps.log }),
   };
+  // The table of contents with no repository named looks across the project's repositories: every repository a lesson names counts as asked about (a lesson restricted to one repository still needs that repository, as for an answer).
   const files = (input.files ?? []).slice(0, LOCAL_FILES_MAX);
   const selected = await selectLessons(select, {
-    key, stage, resolved, active, intent: (input.task ?? "").slice(0, LOCAL_TASK_TEXT_MAX), repos: repo === undefined ? [] : [repo.name], files, languages: [],
-    reader: {}, where: "local_tools", budget, prefilter, ...(all ? { pageSize: ALL_PAGE } : {}),
+    key, stage, resolved, active, intent: (input.task ?? "").slice(0, LOCAL_TASK_TEXT_MAX), repos: repo !== undefined ? [repo.name] : mode === "areas" ? [...new Set(active.flatMap((lesson) => lesson.scope.repos ?? []))] : [], files, languages: [],
+    reader: {}, where: "local_tools", budget, prefilter,
   });
   if (namesUnknown) throw new LocalLessonsUnavailable("names");
   if (!selected.ok) throw new LocalLessonsUnavailable(selected.skipped);
   // The last line before anything leaves Rovara: what was picked goes through the one read path again, as for nobody in particular, with the same reader (so no task is read twice). It can only remove a lesson.
   let allowed: ReadonlySet<string>;
   try { allowed = new Set((await readVisible({ access: deps.access, key, viewer: undefined, live: selected.live, lessons: selected.picked, where: "local_tools", log: deps.log })).map((lesson) => lesson.id)); } catch { throw new LocalLessonsUnavailable("access"); }
-  const lessons = selected.picked.flatMap((lesson, index) => (allowed.has(lesson.id) ? [localLesson(lesson, selected.chosen[index]!, inFile?.has(lesson.id) === true)] : []));
-  const markdown = renderLocalLessons({ project: input.project, ...(repo === undefined ? {} : { repo: normalizeRemote(input.remote!)! }), lessons, at: deps.now(), complete: selected.complete });
-  return { kind: "answer", answer: { status: "ok", message: "", project: input.project, ...(repo === undefined ? {} : { repo: normalizeRemote(input.remote!)! }), lessons, markdown, complete: selected.complete } };
+  return { kind: "selected", selected: { ...selected, picked: selected.picked.filter((lesson) => allowed.has(lesson.id)), chosen: selected.chosen.filter((_, index) => allowed.has(selected.picked[index]!.id)) }, repo };
+}
+
+/** The top folder a path glob is about (`src/billing/**` is `src/`); a glob with no fixed folder (`**\/*.sql`, `*.md`) is `any folder`. One line, safe characters only. */
+export function areaOfGlob(glob: string): string {
+  const fixed = glob.search(/[*?[{]/u);
+  const head = fixed === -1 ? glob.slice(0, glob.lastIndexOf("/") + 1) : glob.slice(0, glob.lastIndexOf("/", fixed) + 1);
+  const top = head.replace(/^\.?\//u, "").split("/")[0] ?? "";
+  const clean = top.replace(/[^\w.@+-]/gu, "_").slice(0, 100);
+  const secretShaped = redactText(top) !== top;
+  // A label that holds a secret-shaped string is not shown (the tree is names and numbers only).
+  return clean === "" || secretShaped || redactText(clean) !== clean ? "any folder" : `${clean}/`;
+}
+/** The (repository, top folder) rows a lesson is about: for each repository it names (or `any repository`) and each distinct top folder of its path globs (or `whole repository`). */
+export function areasOfLesson(lesson: Pick<Lesson, "scope">): Array<{ repo: string; area: string }> {
+  const repos = (lesson.scope.repos ?? []).length > 0 ? [...new Set((lesson.scope.repos ?? []).map((repo) => { const label = oneLinePath(repo); return redactText(label) === label ? label : LOCAL_KNOWLEDGE_ANY_REPO; }))] : [LOCAL_KNOWLEDGE_ANY_REPO];
+  const areas = (lesson.scope.paths ?? []).length > 0 ? [...new Set((lesson.scope.paths ?? []).map(areaOfGlob))] : ["whole repository"];
+  return repos.flatMap((repo) => areas.map((area) => ({ repo, area })));
+}
+
+export type LocalKnowledgeAreasOutcome = { kind: "answer"; answer: LocalKnowledgeAreasResponse } | { kind: "unknown_repo" };
+/**
+ * The table of contents of the project's team knowledge: a tree project > repository > top folder with how many units of each kind, never a unit's text or id. It goes through the same gate as an answer
+ * (`selectForLocalTool`: the repository proved to be the project's, the approval, names and access rules), so a unit a tool could not be given is not counted. With `remote` the tree is that repository's (and the units
+ * that apply to every repository); cut at `LOCAL_KNOWLEDGE_AREAS_MAX` folder rows, biggest first.
+ */
+export async function knowledgeAreasForLocalTool(deps: LocalLessonsDeps, input: Pick<LocalLessonsInput, "orgId" | "project" | "remote">): Promise<LocalKnowledgeAreasOutcome> {
+  const found = await selectForLocalTool(deps, { ...input }, "areas");
+  if (found.kind === "unknown_repo") return found;
+  if (found.kind === "off") return { kind: "answer", answer: { status: "off", reason: found.reason, message: LOCAL_OFF_MESSAGES[found.reason], project: input.project, repos: [], more: 0, complete: true } };
+  const counts = new Map<string, number>();
+  for (const lesson of found.selected.picked) {
+    for (const { repo, area } of areasOfLesson(lesson)) {
+      // With a repository given, only its own rows and the rows that apply to every repository: another repository's units are not part of this tree.
+      if (found.repo !== undefined && repo !== oneLinePath(found.repo.name) && repo !== LOCAL_KNOWLEDGE_ANY_REPO) continue;
+      counts.set(`${repo}\u0000${area}`, (counts.get(`${repo}\u0000${area}`) ?? 0) + 1);
+    }
+  }
+  const ranked = [...counts].map(([key, lessons]) => { const [repo, area] = key.split("\u0000") as [string, string]; return { repo, area, lessons }; })
+    .sort((a, b) => b.lessons - a.lessons || a.repo.localeCompare(b.repo) || a.area.localeCompare(b.area));
+  const kept = ranked.slice(0, LOCAL_KNOWLEDGE_AREAS_MAX);
+  const byRepo = new Map<string, Array<{ area: string; rules: number; lessons: number; facts: number; skills: number }>>();
+  for (const row of kept) byRepo.set(row.repo, [...(byRepo.get(row.repo) ?? []), { area: row.area, rules: 0, lessons: row.lessons, facts: 0, skills: 0 }]);
+  const total = (rows: ReadonlyArray<{ lessons: number }>): number => rows.reduce((sum, row) => sum + row.lessons, 0);
+  const repos = [...byRepo].map(([repo, areas]) => ({ repo, areas })).sort((a, b) => total(b.areas) - total(a.areas) || a.repo.localeCompare(b.repo));
+  return { kind: "answer", answer: { status: "ok", message: "", project: input.project, repos, more: ranked.length - kept.length, complete: found.selected.complete && found.selected.picked.length < LOCAL_AREAS_SCAN_MAX } };
 }

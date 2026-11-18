@@ -1,6 +1,7 @@
 // The reflector. One tool-less model call per finished task, and a nightly pass. Its output is schema-checked JSON that
 // code turns into lesson drafts; the model never writes to a store. Any parse failure drops the whole output, with no retry loop.
 import { randomUUID } from "node:crypto";
+import { lessonWordingWarnings } from "@agentx/contracts";
 import { cleanForLearning } from "./guards.js";
 import { currentLearningAttempt } from "./learning-deadline.js";
 import { isLearningRefusal, noteModelFailure, notePause, noteRecovered, pauseOfLook, spendLook, type LessonsPauseStore } from "./pause.js";
@@ -8,13 +9,13 @@ import { emitAudit, learningCaps, modeAllows, resolveLearning, type Edition, typ
 import type { Clock, LearningSpend, LessonAuditSink, Metrics, PipelineModel } from "./ports.js";
 import { repoOnlyScopes } from "./project-repo-audience.js";
 import { buildReflectorInput, type MarkedSpan, type ReflectSubject } from "./reflect-input.js";
-import { citationsStayIn, repoVisibilityOf, type RepoVisibility } from "./repo-eligibility.js";
 import { NO_REASON_TEXT } from "./task-subject.js";
 import { lessonClaimsSupported } from "./trial.js";
 import {
   LessonCandidateSchema, ReflectorOutputSchema, MAX_READ_FROM, distinctIds, idIn, minTrust, narrowestAudience, normId, normSource, sameId,
-  type Audience, type LessonCitation, type LessonProvenance, type LessonScope, type LessonStage, type LessonType, type TrustClass,
+  type Audience, type LessonCitation, type LessonProvenance, type LessonScope, type LessonStage, type LessonType, type SpanKind, type TrustClass,
 } from "./types.js";
+import { withoutPausedSpans } from "./paused-kinds.js";
 
 /** An outcome event and the person who caused it: whoever reverted, sent back, or pushed the revision that failed CI. */
 export interface OutcomeEvent { kind: "revert" | "send_back" | "ci_failure"; actor: string | undefined }
@@ -54,6 +55,11 @@ export interface ReflectDeps {
   pause?: LessonsPauseStore;
   /** The task's running total of model holds (`TaskFailureTally.heldUsd`): the reflection adds its hold, so the outcome judge that comes after it shares Public's one per-task cap. Absent: nothing is added. */
   taskBudget?: { heldUsd: number; reserve?: ((usd: number) => Promise<boolean>) | undefined };
+  /**
+   * Lead 4 L4-LP3Wc: the kinds of evidence a person paused for the project, read live (`pausedKindsFor`, which fails closed). `reflectSubject` leaves their spans out before anything is built or sent: the last line behind the places that
+   * gather spans (a path that forgot to filter still reads nothing paused). Absent: none is paused (a test, or a runtime with no store).
+   */
+  pausedKinds?: (key: { workspaceId: string; project: string }) => Promise<ReadonlySet<SpanKind>>;
 }
 
 const MAX_OUTPUT_TOKENS = 1800;
@@ -124,7 +130,9 @@ export async function reflectSubject(deps: ReflectDeps, subject: ReflectSubject,
   const inherited = [...new Set(subject.inheritedTasks ?? [])].filter((id) => id !== subject.id);
   if (inherited.length > 50) { deps.metrics?.count("learning.reflect_ineligible", { reason: "inherited_overflow" }); return none("ineligible", "inherited_overflow"); }
 
-  const input = buildReflectorInput(subject);
+  // A pause is a stop: the spans of a paused kind are not read, so they never reach the prompt, the trust or the audience of anything (read live, before any model call).
+  const paused = deps.pausedKinds === undefined ? undefined : await deps.pausedKinds({ workspaceId: subject.workspaceId, project: subject.project });
+  const input = buildReflectorInput(paused === undefined || paused.size === 0 ? subject : { ...subject, spans: withoutPausedSpans(subject.spans, paused) });
   if (!input.eligible) {
     deps.metrics?.count("learning.reflect_ineligible", { reason: input.reason });
     return none("ineligible", input.reason);
@@ -192,15 +200,12 @@ export async function reflectSubject(deps: ReflectDeps, subject: ReflectSubject,
   await noteRecovered(deps.pause, subject.workspaceId, subject.project);
 
   const runId = (deps.newId ?? randomUUID)();
-  // Whether EVERY input the reflector was given is readable by the readers of one repository. One answer per reflection, from the input and not from what the model cited. No model is called for it.
-  const visibility = repoVisibilityOf(subject, input.spans.values());
-  deps.metrics?.count("learning.reflect_repo_visible", { visible: visibility.repoOnly === undefined ? "false" : "true" });
   const drafts: LessonDraft[] = [];
   for (const raw of output.candidates) {
     // No flat cap: every valid candidate is collected (the prompt asks for at most 3; the output schema bounds a runaway reply at 20).
     const parsed = LessonCandidateSchema.safeParse(raw);
     if (!parsed.success) continue;
-    const draft = await toDraft(deps, subject, input.spans, input.allowedTypes, parsed.data, runId, reply.model, visibility);
+    const draft = await toDraft(deps, subject, input.spans, input.allowedTypes, parsed.data, runId, reply.model);
     if (draft !== undefined) drafts.push(draft);
   }
   return { status: "ok", reason: drafts.length === 0 ? "no_candidates" : "candidates", drafts, costUsd: cost };
@@ -221,7 +226,7 @@ export function copiedCodeLines(text: string): number {
 
 async function toDraft(
   deps: ReflectDeps, subject: ReflectSubject, spans: Map<string, MarkedSpan>, allowedTypes: readonly LessonType[],
-  candidate: ReturnType<typeof LessonCandidateSchema.parse>, runId: string, model: string, visibility: RepoVisibility,
+  candidate: ReturnType<typeof LessonCandidateSchema.parse>, runId: string, model: string,
 ): Promise<LessonDraft | undefined> {
   if (!allowedTypes.includes(candidate.type)) return undefined;
   // C1 again, in code: every cited span must exist and must not be an outsider's.
@@ -236,13 +241,14 @@ async function toDraft(
   const evidence = cited.filter((s) => s.kind !== "loaded_lesson");
   if (evidence.length === 0) return undefined;
   if (subject.requireEvidenceKind !== undefined) {
-    const required: readonly string[] = typeof subject.requireEvidenceKind === "string" ? [subject.requireEvidenceKind] : subject.requireEvidenceKind;
-    if (!evidence.some((s) => required.includes(s.kind))) return undefined;
+    if (!evidence.some((s) => s.kind === subject.requireEvidenceKind)) return undefined;
   }
   const title = cleanForLearning(candidate.title, 80);
   const description = cleanForLearning(candidate.description, 160);
   const body = cleanForLearning(candidate.body, 600);
   if (title === "" || body === "") return undefined;
+  // Agent knowledge (a): how the lesson reads is checked SOFTLY. A lesson that departs from the shape is kept as it is; only a count (fixed codes, no text) says how often the drafter does it.
+  for (const code of lessonWordingWarnings({ title, description, body })) deps.metrics?.count("learning.lesson_wording_warning", { code });
   // C6: a lesson that asks for a change to tools, permissions, domains, budgets, models or approvals is NOT dropped. It is kept as a person-approval lesson with a fixed reason
   // (`capability_request`, set by the tier step), so the approver sees it and decides; nothing is silently lost.
 
@@ -322,9 +328,6 @@ async function toDraft(
       }),
       // true: every source was project-wide when reflected; false: it was not (a merge keeps that); unset: not known (never read, or unreadable).
       ...(subject.sharedTask === undefined ? {} : { fromSharedTask: subject.sharedTask }),
-      // Set only when every input was one repository's; otherwise the fixed codes of what blocked it (never text).
-      // A kept citation in another repository (or a pull request that is not the repository's) puts the lesson's text beyond that repository's readers: the citations are the model's output, so they are judged here.
-      ...(visibility.repoOnly !== undefined && citationsStayIn(subject.repoInputs, citations) ? { repoOnly: visibility.repoOnly } : { repoBlockCodes: visibility.repoOnly === undefined ? visibility.blocked : ["other_repo" as const] }),
     },
   };
 }

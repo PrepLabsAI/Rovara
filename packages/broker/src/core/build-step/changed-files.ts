@@ -1,3 +1,4 @@
+import { setupPullRequestLineOf } from "../setup-agent/recheck-rows.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L12: the files the checked code changes, for the pull request's description and the risk it shows.
 //
@@ -7,7 +8,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //   - the risk and the description's list come from the CODE HOST, after the push: the files changed between the pull request's base and the pushed, checked head (`verifyPublishedChanges`);
 //   - without a verified list the risk is HIGH (`riskUntilVerified`), never lower, and says why.
 import { createHash } from "node:crypto";
-import { change, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
+import { change, promptLocationsOf, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { flowIs } from "../task-flow/flow-guard.js";
 import { boundCommits, readHeadFacts, tierFilesOfRead } from "../merge/change-tier-read.js";
@@ -150,7 +151,9 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const judged = riskFromFiles(workflow, read);
   // The tier of the code the host shows, bound to the head commits Rovara checked and the base they were built on. It only goes up, and the growth after the build is recorded.
   const at = iso(deps);
-  const fresh = tierFromDiff({ files: tierFiles, complete: tierComplete && hosts.length > 0 }, { ...boundCommits(pullRequests.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.headSha ?? "", baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }))), at, ...(headFacts === undefined ? {} : { head: headFacts }) });
+  // L4-EVP: the prompt locations the project confirmed, at the revision the task started on; none is today's tier, byte for byte.
+  const promptLocations = promptLocationsOf(project?.definition.promptLocations);
+  const fresh = tierFromDiff({ files: tierFiles, complete: tierComplete && hosts.length > 0 }, { ...boundCommits(pullRequests.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.headSha ?? "", baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }))), at, ...(headFacts === undefined ? {} : { head: headFacts }), ...(promptLocations.length === 0 ? {} : { promptLocations }) });
   const tiered = recordTier(workflow.flow, fresh);
   const previousLevel = workflow.flow?.tier?.level;
   const flow = tiered.grew && previousLevel !== undefined ? recordGrowth(tiered.flow, previousLevel, tiered.tier.level, at) : tiered.flow;
@@ -197,6 +200,8 @@ export interface DescriptionInputs {
   browserLines: readonly string[];
   /** L4-SC (#916): one line per mock the plan approved for this task (task-only, made by Rovara, not yet the project's setup). */
   setupLines: readonly string[];
+  /** L4-U5: the one line about the setup when it was re-checked for this task (none when there was no drift). */
+  setupLine: string | undefined;
 }
 
 /**
@@ -216,13 +221,16 @@ export async function descriptionInputsOf(deps: TaskFlowDeps, task: TaskRecord, 
   // TE-H1: what the browser evidence run showed for exactly this code, as fixed text lines (none on an install without it, or for a run that took none).
   const browserLines: readonly string[] = await deps.browserEvidence?.linesOf(task, candidateDigest).catch((): readonly string[] => []) ?? [];
   const setupLines = mockPrLines(plan?.setupChanges);
-  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines };
+  // L4-U5: the one line about the setup when it was re-checked for this task (none when there was no drift).
+  const setupLine = await setupPullRequestLineOf(deps, task.project, task.taskId).catch(() => undefined);
+  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines, setupLine };
 }
 
 /** The description's context for one repository: the inputs, plus what depends on the repository (its changed files, the order lines, the lessons its readers may read). */
 export function descriptionContextOf(inputs: DescriptionInputs, own: { changedFiles?: ChangedFilesRead | undefined; mergeOrderLines: readonly string[]; lessonsUsed: LessonsUsedSection | undefined }): PullRequestBodyContext {
-  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines } = inputs;
+  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines, setupLine } = inputs;
   return {
+    ...(setupLine === undefined ? {} : { setupLine }),
     ...(setupLines.length === 0 ? {} : { setupLines }),
     ...(own.changedFiles === undefined ? {} : { changedFiles: own.changedFiles }),
     ...(own.mergeOrderLines.length === 0 ? {} : { mergeOrderLines: own.mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }),

@@ -80,6 +80,12 @@ async function noteProjectVolume(deps: LessonDeps, store: LessonStore, key: Scop
 export const attributableSources = (provenance: { sources: readonly string[]; inputSources: readonly string[] }): string[] =>
   [...new Set([...provenance.sources, ...provenance.inputSources.filter((s) => memberOfSource(s) === undefined)])];
 
+/**
+ * Every key a lesson can be HELD under: its attributable sources (a member, a channel, CI: paused by a spike). Lead 4 L4-LP3Wc: a kind of evidence a person pauses from "Where Rovara learns from" (`kind:<span kind>`) is NOT
+ * a hold any more: it is a stop (`paused-kinds.ts`), so no lesson rests on a paused kind and none is held under one.
+ */
+export const heldKeysOf = (provenance: { sources: readonly string[]; inputSources: readonly string[] }): string[] => attributableSources(provenance);
+
 /** True when any of a lesson\'s attributable sources is paused: the lesson is held. */
 export const isHeldBySource = (flags: ProjectFlags, sources: readonly string[]): boolean => sources.some((s) => pausedKey(flags, s) !== undefined);
 
@@ -89,7 +95,7 @@ export const pausedKey = (flags: ProjectFlags, source: string): string | undefin
   return Object.keys(flags.pausedSources ?? {}).find((name) => normSource(name) === wanted);
 };
 
-/** Clears one source's pause and nothing else. Internal: callers use `resumeAndResettle`, which also re-settles the lessons that were held. */
+/** Clears one source's pause and nothing else. A spiking source's resume goes through `resumeAndResettle` (which also re-settles the lessons held for it); a learning source's resume (`learning-sources.ts`) re-settles nothing. */
 export async function clearSourcePause(deps: LessonDeps, store: LessonStore, key: ScopeKey, source: string, actor: string): Promise<boolean> {
   const flags = await store.flags(key);
   const stored = pausedKey(flags, source);

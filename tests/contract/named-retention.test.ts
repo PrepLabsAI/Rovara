@@ -42,7 +42,10 @@ describe("retained resources in a named environment", () => {
       // Batch 13 (#906, DEC 254zm): the five test-service starter copy repositories, kept so a pinned copy outlives a replacement (their names are checked below).
       "agentx-staging-foundation": [
         "Ec2WorkersTestServiceMirrorRepository0 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository1 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository2 AWS::ECR::Repository",
-        "Ec2WorkersTestServiceMirrorRepository3 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository4 AWS::ECR::Repository", "VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key",
+        "Ec2WorkersTestServiceMirrorRepository3 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository4 AWS::ECR::Repository",
+        // Batch 17 (#994, owner DEC 254zzz18): the two NAT addresses are kept, so Rovara's outbound addresses survive a replacement.
+        "NatEip1 AWS::EC2::EIP", "NatEip2 AWS::EC2::EIP",
+        "VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key",
       ],
       "agentx-staging-identity": [],
       "agentx-staging-runtime": [],

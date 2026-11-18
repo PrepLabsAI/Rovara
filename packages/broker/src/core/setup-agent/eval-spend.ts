@@ -9,6 +9,7 @@ import { SubjectRefusal, type DecisionSubject } from "../decisions/approval-gate
 import { localOwnerMembers, type SessionMembers, type SessionPerson } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import { setupPartition } from "./keys.js";
+import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
 
 export const EVAL_SPEND_KIND = "setup-eval-spend";
 /** Cap and membership come from the trusted host, never the proposal or a stored approver role. */
@@ -58,20 +59,44 @@ async function approvedRole(deps: Table, row: EvalSpendApprovalRecord) {
   return roleFor(deps, row.project, { companyId: row.company, developerId: developerIdOf(row.approvedBy), principal });
 }
 
+/** The envelope an approval holds across edits to the eval's cases (DEC 254zzz20 D6): the suite, the model and exact version, the route and row, the command and the judge. Only the eval set's own hash may differ. */
+function sameEnvelope(a: EvalSpendPlan, b: EvalSpendPlan): boolean {
+  const names = ["judgePin", "modelVersion", "model", "catalogRowId", "commandFingerprint", "settingsFingerprint"] as const;
+  return a.selection === b.selection && names.every(name => a.inputs[name] === b.inputs[name]);
+}
+
+/**
+ * DEC 254zzz20 D6: a changed eval set rides on the earlier approval ONLY when every one of these holds: the earlier item is approved by someone who still holds the right to approve (read live),
+ * it carries the dollars the person saw, the suite, model, route, command and judge are the same, the most a check can cost does not exceed the approved most, and the new estimate fits inside the
+ * approved per-check ceiling (calls and dollars). The approved ceiling and the approved monthly figure stay exactly as approved; nothing the person did not see is ever added.
+ */
+function carriedPlanOf(before: EvalSpendApprovalRecord, plan: EvalSpendPlan): EvalSpendPlan | undefined {
+  const approved = before.plan;
+  if (approved.dollars === undefined || plan.dollars === undefined || !sameEnvelope(approved, plan)) return undefined;
+  const ceiling = approved.budget.maximum;
+  if (plan.estimate.calls > ceiling.calls || plan.estimate.costMicros > ceiling.costMicros) return undefined;
+  if (plan.dollars.perCheckHighMicros > approved.dollars.perCheckHighMicros) return undefined;
+  return { ...plan, budget: { usual: plan.estimate, maximum: ceiling }, dollars: { perCheckLowMicros: plan.dollars.perCheckLowMicros, perCheckHighMicros: approved.dollars.perCheckHighMicros, monthlyCapMicros: approved.dollars.monthlyCapMicros } };
+}
+
 /** Called only with the trusted discovery/estimate, never request JSON or a model's approval claim.
- * A refresh may reuse approval through the producers; proposing a changed item always asks again. */
-export async function proposeEvalSpendApproval(deps: Table, project: string, input: Omit<EvalSpendPlan, "budget" | "evalPlanDigest"> & { budget?: EvalSpendPlan["budget"] }, evalPlan?: EvalPlanBody): Promise<EvalSpendApprovalRecord> {
+ * A refresh may reuse approval through the producers; proposing a changed item asks again, except (DEC 254zzz20 D6) a changed eval set that stays inside the approved limit, which rides on the earlier approval. */
+export async function proposeEvalSpendApproval(deps: Table, project: string, input: Omit<EvalSpendPlan, "budget" | "evalPlanDigest"> & { budget?: EvalSpendPlan["budget"] }, evalPlan?: EvalPlanBody, meta?: { setupRevision?: number }): Promise<EvalSpendApprovalRecord> {
   // DEC 253j(1): the plan's digest is the broker's own, computed here from the trusted plan; a caller's `evalPlanDigest` is never taken.
   const { evalPlanDigest: _ignored, ...fields } = input as typeof input & { evalPlanDigest?: unknown };
   void _ignored;
   const body = evalPlan === undefined ? undefined : EvalPlanBodySchema.parse(evalPlan);
   if (body !== undefined && (body.selection !== fields.selection || evalSpendInputsDigest(body.inputs) !== evalSpendInputsDigest(fields.inputs))) throw agentXError("CONFIG_INVALID", "The eval plan does not match the eval spend item.");
-  const plan = EvalSpendPlanSchema.parse({ ...fields, budget: fields.budget ?? { usual: fields.estimate, maximum: { calls: EVAL_DEFAULT_CALL_BUDGET, costMicros: EVAL_DEFAULT_COST_BUDGET_MICROS } },
+  const proposed = EvalSpendPlanSchema.parse({ ...fields, budget: fields.budget ?? { usual: fields.estimate, maximum: { calls: EVAL_DEFAULT_CALL_BUDGET, costMicros: EVAL_DEFAULT_COST_BUDGET_MICROS } },
     ...(body === undefined ? {} : { evalPlanDigest: evalPlanDigest(deps.companyId, project, body) }) });
-  if (!fitsMonthlyCap(deps, plan)) throw agentXError("CONFIG_INVALID", "The eval budget does not fit the monthly cap.");
   const key = evalSpendKey(deps.companyId, project);
   const raw = await deps.store.get(key);
   const before = parseRecord(deps, project, raw);
+  // D6: the earlier approval carries a changed eval set inside its limit (only while its approver still may approve); otherwise the item asks again, and says why when it replaces an approval.
+  const earlier = before?.state === "approved" && before.digest !== evalSpendDigest(deps.companyId, project, proposed) && await approvedRole(deps, before) !== undefined ? before : undefined;
+  const carriedPlan = earlier === undefined ? undefined : carriedPlanOf(earlier, proposed);
+  const plan = carriedPlan ?? proposed;
+  if (!fitsMonthlyCap(deps, plan)) throw agentXError("CONFIG_INVALID", "The eval budget does not fit the monthly cap.");
   const digest = evalSpendDigest(deps.companyId, project, plan);
   const planRecord = body === undefined ? undefined : EvalPlanRecordSchema.parse({ entityType: "EVAL_PLAN", schemaVersion: 1, company: deps.companyId, project, planDigest: plan.evalPlanDigest, spendDigest: digest, plan: body });
   if (before?.digest === digest && (before.state === "waiting" || (before.state === "approved" && await approvedRole(deps, before) !== undefined))) {
@@ -89,21 +114,28 @@ export async function proposeEvalSpendApproval(deps: Table, project: string, inp
   // Corrupt records need a new revision even when their previous revision is unreadable,
   // so an old DecisionGate replay cannot masquerade as the new decision.
   const previousRevision = before?.revision ?? (raw === undefined ? 0 : randomInt(1, 2 ** 48));
-  const row = EvalSpendApprovalRecordSchema.parse({ entityType: "EVAL_SPEND_APPROVAL", schemaVersion: 1, company: deps.companyId, project, revision: previousRevision + 1, digest, inputsDigest: evalSpendInputsDigest(plan.inputs), plan, state: "waiting" });
+  const asksAgain = carriedPlan !== undefined ? undefined
+    : earlier !== undefined ? { reason: sameEnvelope(earlier.plan, proposed) ? "grew" as const : "changed" as const, ...(earlier.plan.dollars === undefined ? {} : { approvedHighMicros: earlier.plan.dollars.perCheckHighMicros }) }
+      : before?.state === "waiting" ? before.asksAgain : undefined;
+  const row = EvalSpendApprovalRecordSchema.parse({ entityType: "EVAL_SPEND_APPROVAL", schemaVersion: 1, company: deps.companyId, project, revision: previousRevision + 1, digest, inputsDigest: evalSpendInputsDigest(plan.inputs), plan,
+    state: carriedPlan === undefined ? "waiting" : "approved",
+    ...(carriedPlan === undefined || earlier === undefined ? {} : { approvedBy: earlier.approvedBy, carriedFrom: earlier.revision }),
+    ...(asksAgain === undefined ? {} : { asksAgain }), ...(meta?.setupRevision === undefined ? {} : { setupRevision: meta.setupRevision }) });
   const { approvedBy, ...waiting } = row;
+  const stored = carriedPlan === undefined ? waiting : row;
   void approvedBy;
   const condition = raw === undefined ? when.absent() : when.and(
     ...Object.entries(raw).map(([name, value]) => when.eq([name], value)),
     ...["revision", "digest", "state", "approvedBy"].filter(name => !Object.hasOwn(raw, name)).map(name => when.notExists([name])),
   );
   if (planRecord === undefined) {
-    const result = await deps.store.put({ item: { ...key, ...waiting } as unknown as StoredDocument, condition });
+    const result = await deps.store.put({ item: { ...key, ...stored } as unknown as StoredDocument, condition });
     if (!result.applied) throw agentXError("CHANGE_STALE", "The eval approval changed. Read it again.");
     return row;
   }
   // The item and its plan are written together or not at all; the plan row is the broker's only writer.
   const result = await deps.store.transact([
-    { kind: "put", item: { ...key, ...waiting } as unknown as StoredDocument, condition },
+    { kind: "put", item: { ...key, ...stored } as unknown as StoredDocument, condition },
     { kind: "put", item: { ...evalPlanKey(deps.companyId, project), ...planRecord } as unknown as StoredDocument },
   ]);
   if (!result.applied) throw agentXError("CHANGE_STALE", "The eval approval changed. Read it again.");
@@ -143,16 +175,45 @@ export async function readApprovedEvalPlan(deps: Pick<Table, "store" | "companyI
   } catch { return undefined; }
 }
 
-export async function readEvalSpendItem(deps: Table, project: string) {
+/** What the setup card shows of the eval spend item (L4-EVC, DEC 254zzz20 D5/D6/D8): dollars only. Present only for an item that carries its approved dollars. */
+export interface EvalSpendCardView {
+  /** "Running your evals on each AI change will cost about $A-$B per PR, at most $X a month. Approve?" */
+  sentence: string;
+  perPr: string;
+  monthly: string;
+  /** D6: set on a waiting item that replaced an approval: "Needs approval: your eval set grew past the approved $X". */
+  needsApproval?: string;
+  /** D6: a changed eval set rode on the earlier approval (it stayed inside the approved limit). */
+  carried?: boolean;
+  /** The project's setup revision the item was proposed against. */
+  setupRevision?: number;
+}
+export interface EvalSpendItemView {
+  state: "waiting" | "approved" | "rejected" | "approval needs renewing"; label: string; budget: string; card?: EvalSpendCardView;
+  approval?: { requestId: string; revision: number; artifactDigest: string; kind: typeof EVAL_SPEND_KIND; risk: "high" };
+}
+
+/** The stored item itself (digest-checked, this company's and project's), for the host's own readers (the card, the health request). Undefined: none or unreadable. */
+export const readEvalSpendRecord = readRecord;
+
+export async function readEvalSpendItem(deps: Table, project: string): Promise<EvalSpendItemView | undefined> {
   try {
     const row = await readRecord(deps, project);
     if (row === undefined) return undefined;
     const money = (n: number): string => `$${(n / 1_000_000).toFixed(2)}`;
-    const { estimate, budget } = row.plan;
+    const { estimate, budget, dollars } = row.plan;
     const state = row.state === "approved" && await approvedRole(deps, row) === undefined ? "approval needs renewing" as const : row.state;
-    return { state, label: `Run the eval health check: about ${estimate.calls} calls, about ${money(estimate.costMicros)}`,
-      budget: `Usually about ${budget.usual.calls} calls (about ${money(budget.usual.costMicros)}), at most ${budget.maximum.calls} calls (about ${money(budget.maximum.costMicros)})${fitsMonthlyCap(deps, row.plan) ? ", within the monthly cap" : ""}.`,
-      ...(row.state === "waiting" ? { approval: { requestId: `eval-${row.digest.slice(0, 40)}-${row.revision}`, revision: row.revision, artifactDigest: row.digest, kind: EVAL_SPEND_KIND as typeof EVAL_SPEND_KIND, risk: "high" as const } } : {}),
+    const card: EvalSpendCardView | undefined = dollars === undefined ? undefined : {
+      sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
+      ...(row.state === "waiting" && row.asksAgain !== undefined ? { needsApproval: evalAsksAgainWords(row.asksAgain) } : {}),
+      ...(row.state === "approved" && row.carriedFrom !== undefined ? { carried: true } : {}),
+      ...(row.setupRevision === undefined ? {} : { setupRevision: row.setupRevision }),
+    };
+    return { state, ...(card === undefined
+      ? { label: `Run the eval health check: about ${estimate.calls} calls, about ${money(estimate.costMicros)}`,
+        budget: `Usually about ${budget.usual.calls} calls (about ${money(budget.usual.costMicros)}), at most ${budget.maximum.calls} calls (about ${money(budget.maximum.costMicros)})${fitsMonthlyCap(deps, row.plan) ? ", within the monthly cap" : ""}.` }
+      : { label: "Run your evals on each AI change", budget: `${card.perPr} per PR, at most ${card.monthly} a month.`, card }),
+      ...(row.state === "waiting" ? { approval: { requestId: `eval-${row.digest.slice(0, 40)}-${row.revision}`, revision: row.revision, artifactDigest: row.digest, kind: EVAL_SPEND_KIND, risk: "high" as const } } : {}),
     };
   } catch { return undefined; }
 }

@@ -7,7 +7,7 @@ import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
 import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
-  ApprovalOffer, AutomationPageView, ChatPageView, CommentView, DesignReviewView, LessonLocalToolsView, LessonReposView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView, TestEnvironmentPageView,
+  ApprovalOffer, AutomationPageView, ChatPageView, CommentView, DesignReviewView, LessonLocalToolsView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView, TestEnvironmentPageView,
 } from "./views.js";
 import type { SecondReviewState } from "@agentx/contracts";
 
@@ -260,21 +260,9 @@ const LOCAL_TOOLS_WHY: Readonly<Record<string, string>> = {
   project_setting: "switched off for this project",
 };
 
-export function renderLessons(context: PageContext, lessons: readonly LessonView[], repos: readonly LessonReposView[] = [], localTools?: LessonLocalToolsView): string {
+export function renderLessons(context: PageContext, lessons: readonly LessonView[], localTools?: LessonLocalToolsView): string {
   const form = (lesson: LessonView, action: "approve" | "retire" | "wrong", label: string, cls = "") =>
     `<form method="post" action="${esc(context.base)}/lessons/act" class="row">${hidden("lessonId", lesson.id)}${hidden("action", action)}${hidden("ft", context.formToken({ action: "lesson.act", subject: `${lesson.id}:${action}:${lesson.status}`, ...(action === "approve" && lesson.offer !== undefined ? { requestId: lesson.offer.requestId, revision: lesson.offer.revision, artifactDigest: lesson.offer.artifactDigest } : {}) }))}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
-  const repoForm = (project: string, repo: string, action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline" | "retire_confirm" | "retire_keep", label: string, cls = "", held?: string) =>
-    `<form method="post" action="${esc(context.base)}/lessons/repo" class="row">${hidden("project", project)}${hidden("repo", repo)}${hidden("action", action)}${held === undefined ? "" : hidden("held", held)}${hidden("ft", context.formToken({ action: "lesson.repo", subject: `${project}:${repo}:${action}${held === undefined ? "" : `:${held}`}` }))}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
-  // Lessons that went missing from the file in one change are retired only when the owner says so: the card names how many, and both answers carry the digest of the set the owner saw.
-  const retireCard = (project: string, row: LessonReposView["repos"][number]) => row.retireConfirm === undefined ? ""
-    : `<br><strong>${esc(String(row.retireConfirm.missing))} ${row.retireConfirm.missing === 1 ? "lesson is" : "lessons are"} missing from this file. Retire ${row.retireConfirm.missing === 1 ? "it" : "them"}, or keep ${row.retireConfirm.missing === 1 ? "it" : "them"}?</strong>${repoForm(project, row.repo, "retire_confirm", "Retire", "", row.retireConfirm.digest)}${repoForm(project, row.repo, "retire_keep", "Keep", "primary", row.retireConfirm.digest)}`;
-  const repoBlocks = repos.filter((view) => view.repos.length > 0 || view.available.length > 0).map((view) => {
-    const lines = view.repos.map((row) => `<tr><td>${untrusted(row.repo)}</td><td>${row.enabled ? "on" : "off"}</td><td>${row.notices.map((line) => untrusted(line)).join("<br>")}${retireCard(view.project, row)}</td>`
-      + `<td>${row.enabled ? repoForm(view.project, row.repo, "off", "Switch off") : repoForm(view.project, row.repo, "on", "Switch on", "primary")}${row.fileDeleted ? repoForm(view.project, row.repo, "resume", "Resume") : ""}${row.pointer === "missing" ? repoForm(view.project, row.repo, "pointer_add", "Add the pointer") + repoForm(view.project, row.repo, "pointer_decline", "Do not ask again") : ""}</td></tr>`);
-    const more = view.canEnable ? view.available.map((name) => `<tr><td>${untrusted(name)}</td><td>off</td><td></td><td>${repoForm(view.project, name, "on", "Switch on", "primary")}</td></tr>`) : [];
-    return `<h3>${untrusted(view.project)}</h3><table><thead><tr><th>Repository</th><th>Lessons file</th><th></th><th></th></tr></thead><tbody>${[...lines, ...more].join("")}</tbody></table>`;
-  });
-  const repoSection = repoBlocks.length === 0 ? "" : `<h2>Lessons in the repository</h2><p class="muted">Rovara can keep a <code>.rovara/lessons.md</code> file in a repository and open one pull request a week to update it. Switching it on needs a page opened in the last few minutes: run <code>rovara open lessons</code> to open one.</p>${repoBlocks.join("")}`;
   // Decision 46b: whether a local coding tool (with your API token, or a script token with the lessons permission) may fetch the lessons the whole project may read. Each switch is your form on this page.
   const localForm = (subject: string, fields: string, label: string, cls = "") =>
     `<form method="post" action="${esc(context.base)}/lessons/local-tools" class="row">${fields}${hidden("ft", context.formToken({ action: "lesson.local_tools", subject }))}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
@@ -291,7 +279,7 @@ export function renderLessons(context: PageContext, lessons: readonly LessonView
     + `<td>${lesson.status === "proposed" ? form(lesson, "approve", "Approve", "primary") : ""}${lesson.status !== "retired" ? form(lesson, "wrong", "Wrong", "danger") + form(lesson, "retire", "Retire") : ""}</td></tr>`);
   return layout({
     title: "Lessons", nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
-    body: `<h1>Lessons</h1>${rows.length === 0 ? "<p class=\"muted\">Rovara has not learned a lesson here yet.</p>" : `<table><thead><tr><th>Lesson</th><th>Status</th><th>Used in</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`}${repoSection}${localSection}`,
+    body: `<h1>Lessons</h1>${rows.length === 0 ? "<p class=\"muted\">Rovara has not learned a lesson here yet.</p>" : `<table><thead><tr><th>Lesson</th><th>Status</th><th>Used in</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`}${localSection}`,
   });
 }
 
@@ -326,7 +314,7 @@ export function renderProof(context: PageContext, view: ProofReportView): string
 // ---- script tokens
 
 const TOKEN_STATUS_CLASS = { active: "ok", expired: "warn", revoked: "bad" } as const;
-const PERMISSION_WORDS: Record<string, string> = { read: "read your tasks on these projects", start: "start tasks on these projects", lessons: "read the team lessons of these projects", wiki: "read the project wiki of these projects (hosted)" };
+const PERMISSION_WORDS: Record<string, string> = { read: "read your tasks on these projects", start: "start tasks on these projects", lessons: "read the team knowledge of these projects", wiki: "read the project wiki of these projects (hosted)" };
 
 /**
  * The script tokens page: the tokens (names, hints and states, never a secret), a form to make one when this page session is fresh enough, and a Revoke button for each live token. A token reaches only

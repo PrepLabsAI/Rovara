@@ -1,0 +1,9 @@
+{
+  "id": "returns-window",
+  "category": "ordinary",
+  "question": "How many days do I have to return an item?",
+  "must_contain": [
+    "30 days"
+  ],
+  "must_not_contain": []
+}

@@ -826,4 +826,10 @@ describe("what did not change", () => {
 // Rule D (proof list): and for one new row (GET /v1/dev/tasks/{taskId}/evidence tasks:read, Cloud's Proof tab; added, none changed; removing exactly that row still gives 8e72149c...).
 // Batch 14 combined (rule D): those two rows plus #960's GET /v1/dev/projects/{project}/lessons/measure (full). All 3 added, none changed: removing exactly those 3 rows
 // still gives 425c010b... (the batch-14 table above).
-const EXISTING_ROUTES_DIGEST = "e585a6143bf06e59b70b86b207dec41c343aee0253436308d29fe83771fa8b9c";
+// L4-GH (rule D): and for the 4 new /v1/dev/me/github* rows (GET, DELETE, POST link, POST link/claim; all added, none changed; removing exactly those 4 rows still gives 8e72149c...).
+// Batch 16 (rule D): with batch 14's rows above and #975's 4 /v1/dev/me/github* rows. All added, none changed: removing exactly those 4 rows still gives e585a614... (the batch-14 combined pin).
+// L4-AK1H (rule D): and for the 2 hosted team knowledge rows (POST /v1/dev/projects/{project}/lessons full, POST /v1/dev/projects/{project}/knowledge/areas full; all added, none changed; removing exactly
+// those 2 rows still gives 8e72149c128813727deb3c8af95007454d20f7fb60e4762249e438a8b497ca80).
+// Batch 17 (rule D): with batch 16's table and the batch's 15 new /v1/dev rows (#992 lessons areas, learning-sources and its PUT; #1003's 9 graduation, Tidy, check-draft and rule rows; #995's POST lessons and
+// knowledge/areas; #994's GET company/egress-addresses). All added, none changed: removing exactly those 15 rows still gives eaf715d5... (the batch-16 pin above).
+const EXISTING_ROUTES_DIGEST = "d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711";

@@ -7,10 +7,10 @@
 // or email adapter that can send queues and delivers nothing (`canNotify` is false).
 import type { DocumentStore, OrgId, RealtimePublisher, RegistryView } from "@agentx/contracts";
 import { readTaskThread } from "../core/channel/threads.js";
-import { deliverAttention, queueAttention, type AttentionBudget, type PeopleOf, type AttentionDeliveryDependencies, type AttentionOutcome } from "../core/notify/attention.js";
+import { deliverAttention, queueAdminNotice, queueAttention, type AdminNoticeKind, type AttentionBudget, type PeopleOf, type AttentionDeliveryDependencies, type AttentionOutcome } from "../core/notify/attention.js";
 import type { SessionChange } from "../core/sessions/summary.js";
 
-type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets" | "footer" | "thread" | "companyOf" | "access" | "address" | "urgent" | "emailLinks" | "doneToldInThread" | "planCarded" | "upkeep">;
+type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets" | "footer" | "thread" | "companyOf" | "access" | "address" | "urgent" | "emailLinks" | "doneToldInThread" | "planCarded" | "setupPausedTold" | "upkeep" | "adminNotice">;
 
 export interface NoticeServiceOptions extends DeliveryOptions {
   store: DocumentStore;
@@ -31,6 +31,8 @@ export interface NoticeService {
   canNotify(): boolean;
   /** A session change hook: queues what the change calls for. Never throws. */
   queue(change: SessionChange): Promise<void>;
+  /** An admin notice (not about a task) for the people named. Nothing when nobody can be told. Never throws; answers how many rows were queued. */
+  queueAdmin(notice: { orgId: string; developerIds: readonly string[]; noticeId: string; kind: AdminNoticeKind }): Promise<number>;
   /** One delivery sweep, stopping new work at the deadline. Nothing when nobody can be told. */
   deliver(budget?: AttentionBudget): Promise<AttentionOutcome | undefined>;
 }
@@ -48,6 +50,7 @@ export function createNoticeService(options: NoticeServiceOptions): NoticeServic
       const told = await queueAttention({ store, now: clock, ...(options.log === undefined ? {} : { log: options.log }), realtime: realtime(), ...(options.peopleOf === undefined ? {} : { peopleOf: options.peopleOf }), ...(canNotify() ? {} : { pending: false }) }, change);
       if (told > 0 && options.remember !== undefined) { try { await options.remember(change); } catch { /* never a reason for the queue to fail */ } }
     },
+    queueAdmin: (notice) => queueAdminNotice({ store, now: clock, ...(options.log === undefined ? {} : { log: options.log }), pending: canNotify() }, notice),
     async deliver(budget = {}) {
       if (!canNotify()) return undefined;
       const { store: _store, registry: _registry, now: _now, log, peopleOf: _peopleOf, ...rest } = options; // eslint-disable-line @typescript-eslint/no-unused-vars -- the rest are the delivery's own options

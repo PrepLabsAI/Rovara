@@ -124,6 +124,13 @@ describe("Slack company mode's switch (18a)", () => {
     expect(statementsOf(policy(named, "SessionReconciler"))).toStrictEqual([TOKENS]);
     expect(roleOf(policy(named, "SlackOrchestrator"))).toEqual([byPrefix(named, "SlackOrchestratorTaskRole", "AWS::IAM::Role")[0]]);
     expect(statementsOf(policy(named, "SlackOrchestrator"))).toStrictEqual([TOKENS, reads("ReadSlackWorkspaceBindings", state, BINDINGS)]);
+    // DEC 254zzz32: the broker reads a company's bot token (the hosted core's Slack task threads), the token family only; DEC 254zzz35: and the install's own Slack app secret
+    // (its bot token for the install's workspace, which has no company token), that one secret by its ARN, read-only. Nothing else.
+    expect(roleOf(policy(named, "Broker"))).toEqual([roleOfFunction(named, "Broker")]);
+    const slackSecret = byPrefix(named, "SlackSecret", "AWS::SecretsManager::Secret")[0];
+    expect(statementsOf(policy(named, "Broker"))).toStrictEqual([TOKENS, { Sid: "ReadInstallSlackToken", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecret } }]);
+    expect(policy(named, "Broker").Condition).toBe(on);
+    expect(policy(named, "Broker").Properties.PolicyName).toBe("slack-company-workspaces-broker");
   });
 
   it("adds the proof's reads only where the proof is installed, under both conditions", () => {
@@ -173,7 +180,10 @@ describe("Slack company mode's switch (18a)", () => {
     const actions = Object.values(named.Resources).filter((r) => r.Type === "AWS::IAM::Policy" && roleOf(r).includes(brokerRole))
       .flatMap(statementsOf).filter((s) => s.Effect === "Allow" && s.Condition === undefined && JSON.stringify(s.Resource).includes(stateId)).flatMap((s) => [s.Action].flat());
     for (const action of ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:ConditionCheckItem"]) expect(actions, action).toContain(action);
-    expect(Object.values(named.Resources).some((r) => r.Type === "AWS::IAM::Policy" && r.Condition === on && roleOf(r).includes(brokerRole))).toBe(false);
+    // DEC 254zzz32/35: the broker's one conditional policy holds secret reads only (asserted in full above), no table grant.
+    const conditional = Object.values(named.Resources).filter((r) => r.Type === "AWS::IAM::Policy" && r.Condition === on && roleOf(r).includes(brokerRole));
+    expect(conditional).toHaveLength(1);
+    expect(conditional.flatMap(statementsOf).flatMap((s) => [s.Action].flat())).toEqual(["secretsmanager:GetSecretValue", "secretsmanager:GetSecretValue"]);
   });
 
   it("stays inside the default permissions boundary (allowed service, no Deny matches)", () => {

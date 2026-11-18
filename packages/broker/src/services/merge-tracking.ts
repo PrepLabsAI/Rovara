@@ -152,6 +152,10 @@ export interface MergeTrackingServiceOptions {
   /** Retained by a short-lived pass composer, per company; never stored or shared between companies. */
   scan?: { cursor: string | undefined; complete?: boolean };
   ciMode?: MergeTrackingDependencies["ciMode"];
+  /** TE-E0 / L4-EVCI: the project's CI evidence settings (the checks the customer marked, and their own eval check), read per pass; the host stores them. Absent: nothing is marked or named and a pass is what it always was. */
+  ciEvidence?: MergeTrackingDependencies["ciEvidence"];
+  /** TE-E0 option B: the host's per-test report parser. Absent: no per-test report is read. */
+  reportParser?: MergeTrackingDependencies["reportParser"];
   /**
    * TE-B4: the one "Rovara" Check on each head. The host decides whether it is written and where it points (`enabled`, `facts`, `detailsUrl`, `personName`); the service adds the verdict: unless the host gives its own `verdict`, the
    * Check's title and text carry the same verdict sentence as the pull request's description (`createPullRequestVerdictSource`, L4-PRP). Absent: no Check is written, as before.
@@ -210,6 +214,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const base: MergeTrackingDependencies = {
     store, now,
     ...(options.ciMode === undefined ? {} : { ciMode: options.ciMode }),
+    ...(options.ciEvidence === undefined ? {} : { ciEvidence: options.ciEvidence }),
+    ...(options.reportParser === undefined ? {} : { reportParser: options.reportParser }),
     settings, milestones, timeline, people, links: storeLinkedChangeRequests(store),
     scope: (orgId) => ({ orgId }),
     loadTask,

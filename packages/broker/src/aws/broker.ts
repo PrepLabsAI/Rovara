@@ -288,7 +288,7 @@ import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
@@ -297,6 +297,7 @@ import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusa
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
+import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
@@ -335,6 +336,7 @@ import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
 import { installEngineModel } from "../core-host/company-engine-model.js";
+import { createHostedLessonsPeople } from "./hosted-lessons-people.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -381,7 +383,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { CORE_OFFERED_MODELS_ADMIN_PATH, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -396,7 +398,7 @@ import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEve
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { companyInvitesThroughLambda, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
-import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js"; import { signInLinksThroughLambda } from "./sign-in-link-routes.js";
+import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js"; import { githubLinkWiringFromEnvironment } from "./github-link-wiring.js"; import { signInLinksThroughLambda } from "./sign-in-link-routes.js";
 import { companyImportThroughLambda } from "./company-import-forwarding.js";
 import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
@@ -761,8 +763,10 @@ export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTask
 /** Spec 025 phase 25d: what the admin read routes need, from the broker's own dependencies. */
 function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDependencies {
   const developer = dependencies.developer;
+  // DEC 254zzz6 D2: production sets the membership reader on the developer configuration only (COMPANY_SIGNIN), never top-level; without it here every admin read's company check passed.
+  const companies = adminCompanyReader(dependencies);
   return {
-    ...(dependencies.companies === undefined ? {} : { companies: dependencies.companies }),
+    ...(companies === undefined ? {} : { companies }),
     ...(dependencies.workspaces === undefined ? {} : { slackWorkspaces: {
       requireCompany: (teamId: string) => dependencies.workspaces!.requireCompany(teamId),
       scopesForCompany: (companyId: string) => listSlackWorkspaceScopes({ client: dependencies.documentClient, tableName: dependencies.tableName }, companyId),
@@ -779,6 +783,11 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     log: brokerLogLine,
     ...dependencies.adminReads,
   };
+}
+
+/** DEC 254zzz6 D2: the live company membership reader for admin routes: the top-level one (tests, the Slack company handler), else the developer configuration's (production). */
+function adminCompanyReader(dependencies: AwsBrokerDependencies): CompanyMembershipReader | undefined {
+  return dependencies.companies ?? dependencies.developer?.companies;
 }
 
 /** Spec 025 phase 25e: the existing admin handlers a confirmed change applies through (FR-040). */
@@ -1465,7 +1474,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -6025,7 +6034,7 @@ async function cancelWorkspaceTask(
   identity: AuthenticatedIdentity,
   workspaceId: string,
 ): Promise<TaskCancellation | CoreStopOutcome> {
-  const core = await coreAdminStop(dependencies, dependencies.developer?.coreTasks, identity, workspaceId, (project) => requireAdministrator(dependencies, identity, project)); if (core !== undefined) return core; // S2: a core task's workspace: the core's stop (core-stop-entry.ts)
+  const core = await coreAdminStop(dependencies, dependencies.developer?.coreTasks, identity, workspaceId, (project) => requireAdministratorGrant(dependencies, identity, project)); if (core !== undefined) return core; // S2: a core task's workspace: the core's stop (core-stop-entry.ts), which binds the grant to the task's company itself (D2)
   const workspace = await requireWorkspace(dependencies, workspaceId); await requireAdministrator(dependencies, identity, workspace.projectName);
   return cancelRunningTask(dependencies, workspace, {});
 }
@@ -6301,6 +6310,11 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   if (existingWorkflowThread !== undefined || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) {
     throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
   }
+  // L4-U5b: a company the core serves starts the task on the core (no channel share: the core has none) and remembers this Slack thread, so the task's pause at Build, its pull request and its end are told here too.
+  // Only where Slack runs in company mode (the thread can then be remembered and told); the single-workspace install keeps the start it always had.
+  const onCore = dependencies.workspaces === undefined ? undefined : await startSlackWorkflowOnCore(dependencies.developer.coreTasks, { caller, thread, userId, requestId, project: binding.projectName, instructions, workflowPath: event.workflowPath },
+    brokerLogLine);
+  if (onCore !== undefined) return { task: { taskId: onCore.taskId } };
   const developer = dependencies.workspaces === undefined ? dependencies.developer : { ...dependencies.developer, slackTeamId: thread.teamId };
   const routeDeps = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller, thread);
   const request = {
@@ -14912,7 +14926,21 @@ async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: stri
   return getItem<MembershipRecord>(dependencies, { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` });
 }
 
+/**
+ * A name-only admin project route's check: the claim, the name-keyed administrator grant, then (DEC 254zzz6 D2) a refusal when a named company also has a project of
+ * that name (admin-name-collision.ts). The collision check runs last, so a caller without the grant gets exactly today's answers.
+ */
 async function requireAdministrator(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  projectName: string,
+): Promise<void> {
+  await requireAdministratorGrant(dependencies, identity, projectName);
+  await refuseNamedCompanyName({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, companies: adminCompanyReader(dependencies) }, identity.developer?.developerId ?? identity.ownerKey, projectName);
+}
+
+/** The claim and the name-keyed administrator grant only. Only for a caller that binds the grant to a company itself (the core's administrator stop, core-stop-entry.ts). */
+async function requireAdministratorGrant(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   projectName: string,
@@ -15499,6 +15527,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
       // Guided onboarding PR 1: GitHub connect (github-connect-routes.ts), through the same App secret's client (slug, OAuth client) and the State table's bindings.
       githubConnect: { bindings: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")), github: new GitHubAppClient(github.clientOptions), log: brokerLogLine },
+      // L4-GH: a person links their own GitHub account (github-account-link-routes.ts), through the same App client's OAuth client and the core's own store.
+      ...((wiring) => (wiring === undefined ? {} : { githubLink: wiring }))(githubLinkWiringFromEnvironment(process.env, { dynamo: dynamoClient, github: new GitHubAppClient(github.clientOptions), log: brokerLogLine })),
       // Guided onboarding PR 4: Add to Slack (slack-company-install.ts).
       ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
       ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
@@ -15506,6 +15536,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       ...(linear === undefined ? {} : { linearConnect: linear.connect }),
       // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
       ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine } }),
+      // L4-EGR: Rovara's outbound addresses (the stack parameter NatEgressAddresses); an empty or absent value reads as an empty list.
+      companyEgress: { addresses: () => process.env[EGRESS_ADDRESSES_VARIABLE] },
       // DEC 254w: connected sign-ins, through the same sign-in Lambda (it owns the sign-in table).
       signInLinks: signInLinksThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -15600,12 +15632,22 @@ function buildBrokerHandler(callbackSigningKey: string) {
         log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
       }),
     }),
-    services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.notification === undefined && wiring.upkeep === undefined ? {} : { notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }) } }) }),
+    services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }),
+      // The email seams travel with the upkeep notice's (#959); L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now (the core root answers once built; before that: no one).
+      notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
+    }),
+    // L4-LPPL: who approves, who is on a project's roster and who a lesson may name, from the install's own live member and grant records (aws/hosted-lessons-people.ts). Without the sign-in table
+    // (no company layer) nothing is given, so lessons stay unbuilt and are reported (core_engine.lessons_not_wired), never built over no people.
+    ...(process.env.DEVELOPER_SIGNIN_TABLE_NAME === undefined || process.env.DEVELOPER_SIGNIN_TABLE_NAME === "" ? {} : {
+      lessonsPeople: createHostedLessonsPeople({ documentClient, stateTableName: requiredEnvironment("STATE_TABLE_NAME"), signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME, now: Date.now }),
+    }),
     policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
     origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
     log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
     // L2-4: the tracker intake and ticket write-back over the company's own Linear connection, where Linear is wired.
     ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections } }),
+    // L4-U5b: where Slack runs in company mode, a core task started from a Slack thread is told its milestones there, through its own company's workspace token only.
+    ...(slackCompany === undefined ? {} : { chatThreads: hostedSlackThreads({ workspaces: slackCompany.workspaces, log: brokerLogLine }) }),
   });
   builtCoreRoot = coreRoot;
   // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.

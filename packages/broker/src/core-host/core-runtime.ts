@@ -47,7 +47,11 @@ export interface CoreRuntime {
 export interface CoreServiceWiring {
   ciMode?: CheckedCiReporting["ciMode"] | undefined; /** The attention email's own seams (hosted core, switch on): the person's address and per-person links. Absent: as before. */ notification?: (Pick<AttentionDeliveryDependencies, "address" | "emailLinks"> & { remember?: (change: SessionChange) => Promise<void> }) | undefined;
   /** L4-P2: the notice service's live "does this person still administer the project" read for the admins' upkeep notice (`createUpkeepAdministers`). Absent: no upkeep row is delivered. */
-  upkeep?: { administers(orgId: OrgId, developerId: string, project: string): Promise<boolean> } | undefined;
+  upkeep?: {
+    administers(orgId: OrgId, developerId: string, project: string): Promise<boolean>;
+    /** L4-U5: the project's open repair card now, for the admins' "Setup needs repair" notice (dropped when the setup is no longer broken). Absent: no setup row is delivered. */
+    setupRead?(orgId: OrgId, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined>;
+  } | undefined;
   /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request, for merge tracking to tell. Undefined when lessons are not built for the company. */
   humanEdit?: HumanEditSink | undefined;
 }

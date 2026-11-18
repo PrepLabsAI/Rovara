@@ -3,6 +3,7 @@
 //
 //   POST <gateway>/v1/product/eval/hold     {grant, calls, costMicros}             -> 200 {scope, calls, costMicros, ...}; anything else holds nothing
 //   POST <gateway>/v1/product/gemini/<path>[?query]   x-rovara-eval-scope, x-api-key -> 200 application/x-ndjson: one head, base64 chunks, one settle
+//   POST <gateway>/v1/product/vertex/<path>[?query]   (L4-EVV: a Vertex AI shaped call, the same scope, the same answer; google publisher only)
 //   POST <gateway>/v1/product/eval/release  {scope, calls, costMicros, unknown}    -> 200, once
 //
 // Money rules, each with a test (tests/unit/worker-eval-gateway-access.test.ts):
@@ -28,6 +29,7 @@ import type { EvalModelAccess, EvalModelHold } from "./eval-model-access.js";
 export const EVAL_GATEWAY_HOLD_PATH = "/v1/product/eval/hold";
 export const EVAL_GATEWAY_RELEASE_PATH = "/v1/product/eval/release";
 export const EVAL_GATEWAY_GEMINI_PREFIX = "/v1/product/gemini";
+export const EVAL_GATEWAY_VERTEX_PREFIX = "/v1/product/vertex";
 export const EVAL_GATEWAY_SCOPE_HEADER = "x-rovara-eval-scope";
 /** The hold and release requests' own deadline. Default 30 seconds. */
 export const EVAL_GATEWAY_CONTROL_TIMEOUT_MS = 30_000;
@@ -53,6 +55,12 @@ const SCOPE = /^[A-Za-z0-9._~-]{1,128}$/u;
 const B64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 /** The two Gemini calls the product route takes; anything else (a dot segment, an encoded character, another operation) never leaves. */
 const GEMINI_PATH = /^\/(?:v1|v1beta)\/models\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}:(?:generateContent|streamGenerateContent)$/u;
+/**
+ * The two Vertex AI calls the product route takes, in the shape the gateway's own parser reads (`/v1` or `/v1beta1`, a project, a location, Google's own publisher, a model, one of the two operations). The project and location are
+ * the CLIENT's words and are not trusted here (this adapter does not know the connected ones): the gateway builds the upstream path from its key store and refuses any pair that is not the connected one or Rovara's placeholder.
+ * Anything else (the express form with no project, another publisher, a dot segment, an encoded character, another operation) never leaves.
+ */
+const VERTEX_PATH = /^\/(?:v1|v1beta1)\/projects\/(?:[a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{1,20})\/locations\/(?:global|[a-z]{2,15}-[a-z]{2,15}[0-9]{1,2})\/publishers\/google\/models\/[a-z0-9][a-z0-9.-]{0,95}:(?:generateContent|streamGenerateContent)$/u;
 const QUERIES: readonly string[] = ["", "alt=sse"];
 /** The only frame headers that leave: the body's type and what the client accepts. Credentials, cookies and `x-rovara-*` never do. */
 const FORWARDED_HEADERS: readonly string[] = ["content-type", "accept"];
@@ -94,8 +102,8 @@ async function boundedText(response: Response, limit: number): Promise<string | 
 async function discard(response: Response): Promise<void> { try { await response.body?.cancel(); } catch { /* nothing to read */ } }
 
 /** One of the adapter's own refusals as events: a head with the fixed refusal answer, its body, and a settle at cost 0. Nothing was sent. */
-function* ownRefusal(word: Extract<ModelEgressRefusal, "cap" | "not_allowed" | "not_found">): Generator<ModelEgressEvent> {
-  const answer = refusalResponse("gemini", word);
+function* ownRefusal(word: Extract<ModelEgressRefusal, "cap" | "not_allowed" | "not_found">, family: "gemini" | "vertex" = "gemini"): Generator<ModelEgressEvent> {
+  const answer = refusalResponse(family, word);
   yield { kind: "head", status: answer.status, headers: answer.headers };
   yield { kind: "chunk", bytes: answer.body };
   yield { kind: "settle", status: answer.status, class: word === "cap" ? "cap" : "refused", refusal: word, costMicros: 0, estimated: false };
@@ -192,17 +200,20 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
       const parsed = parseModelEgressFrame(input);
       if (!parsed.ok) { yield* ownRefusal("not_allowed"); return; }
       const frame = parsed.frame;
-      if (frame.method !== "POST" || !GEMINI_PATH.test(frame.path) || !QUERIES.includes(frame.query)) { yield* ownRefusal("not_allowed"); return; }
+      // The path's own shape decides the product route; a Vertex path is never sent to the Gemini route and the other way round.
+      const vertex = VERTEX_PATH.test(frame.path);
+      const family = vertex ? "vertex" : "gemini";
+      if (frame.method !== "POST" || !(vertex || GEMINI_PATH.test(frame.path)) || !QUERIES.includes(frame.query)) { yield* ownRefusal("not_allowed", family); return; }
       const headers: Record<string, string> = {};
       for (const [name, value] of frame.headers) {
         const lower = name.toLowerCase();
         if (FORWARDED_HEADERS.includes(lower) && HEADER_VALUE.test(value) && headers[lower] === undefined) headers[lower] = value;
       }
       const apiKey = await token();
-      if (apiKey === undefined) { yield* ownRefusal("not_allowed"); return; }
+      if (apiKey === undefined) { yield* ownRefusal("not_allowed", family); return; }
       // The #704 rule's second line, checked after the last await before sending: nothing more once the stage was released or
       // stopped (an overrun settle, an unknown cost), its held count is used, or its known spend reached the held cost.
-      if (released || stopped || unknown || forwarded >= heldCalls || known >= heldCost) { yield* ownRefusal("cap"); return; }
+      if (released || stopped || unknown || forwarded >= heldCalls || known >= heldCost) { yield* ownRefusal("cap", family); return; }
       forwarded++; open++;
       // Set when the settle is handed over. A caller that stops reading before it (the meter's own answer limit) leaves the
       // call's cost unknown here too, and its body is cancelled at once.
@@ -210,7 +221,7 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
       try {
         let response: Response;
         try {
-          response = await transport(`${base}${EVAL_GATEWAY_GEMINI_PREFIX}${frame.path}${frame.query === "" ? "" : `?${frame.query}`}`, {
+          response = await transport(`${base}${vertex ? EVAL_GATEWAY_VERTEX_PREFIX : EVAL_GATEWAY_GEMINI_PREFIX}${frame.path}${frame.query === "" ? "" : `?${frame.query}`}`, {
             method: "POST", redirect: "error", ...(signal === undefined ? {} : { signal }),
             headers: { ...headers, [EVAL_GATEWAY_SCOPE_HEADER]: scope, "x-api-key": apiKey },
             body: frame.body,

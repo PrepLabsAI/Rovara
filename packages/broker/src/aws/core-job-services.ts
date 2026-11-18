@@ -89,7 +89,8 @@ export interface BrokerCoreServicesOptions {
   /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request (the core engine gives it with the company's own lessons). Absent: nothing is told. */
   humanEdit?: HumanEditSink | undefined;
   summary?: Pick<SummaryDependencies, "facts" | "cost">;
-  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep"> & Pick<NoticeServiceOptions, "remember">;
+  /** `adminNotice` (L4-AK1H): whether a person may be told an admin notice now (an owner or admin of the company, read at delivery). Absent: no one is, and a queued admin notice is dropped (fail closed). */
+  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep" | "adminNotice"> & Pick<NoticeServiceOptions, "remember">;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }

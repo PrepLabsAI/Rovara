@@ -1,6 +1,7 @@
 // AI evidence is a projection of the bound eval artifact, never another verdict rule.
 import { z } from "zod";
 import { EVAL_NOT_RUN_REASONS } from "./eval-check.js";
+import { EvalRunDiagnosticSchema, type EvalRunDiagnostic } from "./eval-run-diagnostic.js";
 import { evalResultFromArtifact, readEvalRoundArtifact } from "./eval-round-artifact.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 
@@ -16,6 +17,8 @@ const countsSchema = z.object({ questions: count, broke: count, newlyFail: count
 const summaryShape = {
   label: z.enum(["Worse on eval", "No regression measured (eval)", "Improved on eval", "Not run"]),
   notRunReason: z.enum(EVAL_NOT_RUN_REASONS).optional(),
+  /** L4-EVS: why the eval could not run. Private views carry the allow-listed name and an inert redacted tail; public views carry the code and phase only (empty tail). */
+  runFailure: EvalRunDiagnosticSchema.optional(),
   privateSet: z.boolean(), counts: countsSchema.optional(),
 };
 const questionSchema = z.object({ id: excerpt(160), change: z.enum(["broke", "newly_fail", "newly_pass", "flaky"]), category: z.enum(["ordinary", "safety", "refusal"]).optional(), old: z.array(excerpt(300)).max(3), new: z.array(excerpt(300)).max(3) }).strict();
@@ -26,6 +29,7 @@ export const EvidenceAiSchema = z.object({
 }).strict().refine(a => {
   const e = a.eval;
   if ((e.label === "Not run") !== (e.notRunReason !== undefined)) return false;
+  if (e.runFailure !== undefined && (e.label !== "Not run" || e.notRunReason !== "eval_run_failed" || e.privateSet)) return false;
   if (a.promptWithoutEval && (e.label !== "Not run" || e.notRunReason !== "no_eval_configured" || e.privateSet)) return false;
   if (e.privateSet) return e.counts === undefined && e.questions.length === 0 && e.fixRound === undefined && e.catchableDrop === undefined && e.notices.length === 0 && a.oldNewLines === undefined && a.realModelRun.status === "not_run";
   const c = e.counts;
@@ -109,8 +113,10 @@ export function evidenceAiFromArtifact(input: unknown, candidateDigest: string, 
     if (artifact.options?.subsetSupported === false) notices.push("subset_unsupported");
     if (artifact.options?.sameJudgeFamily === true) notices.push("same_judge_family");
   }
+  // The tail is untrusted text from the customer's own command (already redacted by the worker): it is made inert again here, once, and cut.
+  const runFailure: EvalRunDiagnostic | undefined = hidden || result.notRun?.runFailure === undefined ? undefined : { ...result.notRun.runFailure, tail: inertEvidenceText(result.notRun.runFailure.tail, 1000) };
   return {
-    eval: { label: result.label, ...(result.notRun === undefined ? {} : { notRunReason: result.notRun.reason }), privateSet: hidden,
+    eval: { label: result.label, ...(result.notRun === undefined ? {} : { notRunReason: result.notRun.reason }), ...(runFailure === undefined ? {} : { runFailure }), privateSet: hidden,
       ...(!hidden ? { counts, fixRound: artifact.evalPass === 2 ? 1 as const : 0 as const, ...(sensitivity.success ? { catchableDrop: sensitivity.data } : {}) } : {}), notices, questions: hidden ? [] : questions },
     realModelRun, promptWithoutEval, ...(oldNewLines === undefined ? {} : { oldNewLines }),
   };
@@ -120,6 +126,8 @@ export function evidenceAiFromArtifact(input: unknown, candidateDigest: string, 
 export function publicEvidenceAi(input: unknown) {
   const ai = readEvidenceAi(input);
   if (ai === undefined) return undefined;
-  return { eval: { label: ai.eval.label, privateSet: ai.eval.privateSet, ...(ai.eval.notRunReason === undefined ? {} : { notRunReason: ai.eval.notRunReason }), ...(ai.eval.counts === undefined ? {} : { counts: ai.eval.counts }) }, realModelRun: ai.realModelRun, promptWithoutEval: ai.promptWithoutEval };
+  return { eval: { label: ai.eval.label, privateSet: ai.eval.privateSet, ...(ai.eval.notRunReason === undefined ? {} : { notRunReason: ai.eval.notRunReason }),
+    // Public: the code and phase only (no name, no exit code, no output).
+    ...(ai.eval.runFailure === undefined ? {} : { runFailure: { code: ai.eval.runFailure.code, phase: ai.eval.runFailure.phase, tail: "" } }), ...(ai.eval.counts === undefined ? {} : { counts: ai.eval.counts }) }, realModelRun: ai.realModelRun, promptWithoutEval: ai.promptWithoutEval };
 }
 export type PublicEvidenceAi = NonNullable<ReturnType<typeof publicEvidenceAi>>;

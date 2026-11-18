@@ -24,7 +24,9 @@ async function legacyTask(companies?: Map<string, string | Error>, share = compa
   const started = await source.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code", ...(share ? { shareToChannel: true, shareMode: "continue" } : {}) });
   expect(started.status, JSON.stringify(started.body)).toBe(200);
   const taskId = (started.body.task as { taskId: string }).taskId;
-  const harness = companies === undefined ? source : await createDeveloperTaskBroker({ developerExtra: { companies: { companyOf: async (personId: string) => {
+  // register: false: every row (project, binding, grants) is copied from `source` below, so the harness's own setup never runs its admin routes under the memberships being tested
+  // (an unreadable one is refused by the name-only admin routes' company check, DEC 254zzz6 D2).
+  const harness = companies === undefined ? source : await createDeveloperTaskBroker({ register: false, developerExtra: { companies: { companyOf: async (personId: string) => {
     const found = companies.get(personId);
     if (found instanceof Error) throw found;
     return found;

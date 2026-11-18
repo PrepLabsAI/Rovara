@@ -6,6 +6,7 @@
 //     trial lesson that earned it to stable (`lessonsPromoteJob`: 14 days live, 3 loads, no thumbs-down), because a lesson that is never loaded again would otherwise wait for a load that never comes.
 //     Before that it moves lessons past their expiry (and pending ones nobody decided in time) to `expired` (`lessonsExpireJob`), so an expired lesson is never promoted or published.
 // Both are bounded (projects, tasks, time) and a failure of one project never stops the others.
+import { pausedKindsFor } from "./paused-kinds.js";
 import { createHash } from "node:crypto";
 import { OrgIdSchema, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { modeAllows, resolveLearning, type LearningSettingsReader } from "./policy.js";
@@ -15,8 +16,6 @@ import type { ReflectQueue } from "./reflect-queue.js";
 import type { RevertedTasksReader } from "./task-outcome-rows.js";
 import { sweepExpired } from "./expiry.js";
 import { retireLesson } from "./curate.js";
-import { mergeKeepsRepoOnly } from "./repo-eligibility.js";
-import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob, type RepoFileRuntime } from "./repo-file-job.js";
 import { contradictedByMemberCard, isTrialLesson, memberCardsOf, promoteStableTrials, type StableDeps } from "./trial.js";
 
 /** 72 hours. The rows are found by their event time, and a revert can reach the record late (GitHub redelivers for three days); the worker's once-claim on `LEARN#<task>#reverted` makes a repeat free. */
@@ -38,8 +37,6 @@ export interface LessonsJobDeps {
   pinned?: ((orgId: string, project: string) => Promise<ReadonlySet<string>>) | undefined;
   /** Where the passes remember their starting project and each project's grace window. Absent: the document store's own item. */
   state?: NightlyStateStore | undefined;
-  /** The weekly file pass. Absent: it does not run. */
-  repoFile?: RepoFileRuntime | undefined;
   /** Tries every unfinished deletion of the project (`LessonDeletionPort.resumeAll`): one that fails never stops the ones after it. */
   resume(orgId: string, project: string): Promise<{ finished: number; failed: number }>;
   now(): number;
@@ -90,12 +87,15 @@ export async function lessonsRevertJob(deps: LessonsJobDeps, orgId: string, proj
   if (!org.success || deps.queue === undefined || deps.reverts === undefined) return { revertsEnqueued: 0 };
   const workspaceId: OrgId = org.data;
   const started = deps.now();
+  const stopStore = deps.maintain?.store ?? deps.counters?.store;
   let enqueued = 0, failed = 0, truncated = 0, capped = 0;
   for (const project of projects.slice(0, MAX_PROJECTS_PER_JOB)) {
     if (deps.now() - started > budgetMs) break;
     try {
       // The worker checks the mode too; asking here keeps a project with learning off from sending anything.
       if (!modeAllows((await resolveLearning(deps.settings, orgId, project)).mode, "reflect")) continue;
+      // Lead 4 L4-LP3Wc: "After merge" stopped: no revert is looked for or queued (fail closed: an unreadable flag store stops it).
+      if (stopStore !== undefined && (await pausedKindsFor(stopStore, { workspaceId, project })).has("outcome")) continue;
       const found = await deps.reverts.since(workspaceId, project, deps.now() - REVERT_WINDOW_MS);
       // A project cut off by the page limit says so in one fixed line, the project only as a hash.
       if (found.truncated) { truncated += 1; deps.log("lessons_job.revert_window_truncated", { project: createHash("sha256").update(`${orgId}\u0000${project}`).digest("hex").slice(0, 12) }); }
@@ -207,8 +207,6 @@ export async function lessonsTrialRepairJob(deps: Pick<LessonsJobDeps, "store" |
         examined += 1;
         const other = await deps.maintain.store.get(key, card.contradictsWith!);
         if (other === undefined || !isTrialLesson(other) || other.status !== "active") continue;
-        // A card across the repo-only line is for a person; the nightly repair never retires a trial lesson on it (as curate does not).
-        if (!mergeKeepsRepoOnly(other, card)) continue;
         try {
           if (await retireLesson(deps.maintain, key, other.id, "contradicted", undefined, "lesson.trial_retired")) { retired += 1; done += 1; } else refused += 1;
         } catch { failed += 1; deps.log("lessons_job.trial_repair_failed", {}); }
@@ -283,14 +281,10 @@ export async function lessonsExpireJob(deps: Pick<LessonsJobDeps, "store" | "set
 /** The nightly run: the revert re-reflection with the first half of the budget, then the expiry sweep, the trial repair and the trial promotion with what is left, so neither can starve the other. */
 export async function lessonsNightlyJob(deps: LessonsJobDeps, orgId: string, projects: readonly string[], budgetMs: number): Promise<Record<string, number>> {
   const started = deps.now();
-  // The erasure sweep comes FIRST and has a share of the night's budget of its own (a fifth), so no other pass can starve it.
-  const sweep = deps.repoFile === undefined ? {} : await lessonsRepoFileSweepJob(deps.repoFile, orgId, projects, budgetMs / 5, Math.floor(deps.now() / 86_400_000));
   const reverts = await lessonsRevertJob(deps, orgId, projects, budgetMs / 2);
   const expiries = await lessonsExpireJob(deps, orgId, projects, Math.max(0, (budgetMs - (deps.now() - started)) / 2));
   // The repair of a trial lesson a card contradicts comes before the promotion: a contradicted lesson is not made stable first.
   const repairs = await lessonsTrialRepairJob(deps, orgId, projects, Math.max(0, (budgetMs - (deps.now() - started)) / 4));
   const promotions = await lessonsPromoteJob(deps, orgId, projects, Math.max(0, (budgetMs - (deps.now() - started)) / 2));
-  // The weekly lessons file pass comes last, with what is left: it opens a pull request only after the sweep above has retired and expired what should go.
-  const repoFile = deps.repoFile === undefined ? {} : await lessonsRepoFilePublishJob(deps.repoFile, orgId, projects, Math.max(0, budgetMs - (deps.now() - started)), Math.floor(deps.now() / 86_400_000));
-  return { ...sweep, ...reverts, ...expiries, ...repairs, ...promotions, ...repoFile };
+  return { ...reverts, ...expiries, ...repairs, ...promotions };
 }

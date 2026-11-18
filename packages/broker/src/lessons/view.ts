@@ -1,11 +1,13 @@
 // What the Lessons tab, the Sources tab and the task page's lessons list read (design 1.2). Everything a viewer is told goes through `readVisible` (the frozen
 // snapshot AND the access records now), so a lesson from a source the viewer cannot see is counted for a person who decides and otherwise not mentioned. People are named the way the
 // rest of Rovara names them (`attributionNameOf`; an erased or unreadable person is "a former member"). Nothing here writes: the writes are in routes.ts, through the lesson library.
-import { agentXError, type LessonPerson, type LessonsPauseCode, type LessonView, type LessonsViewAnswer, type OrgId } from "@agentx/contracts";
+import { agentXError, type LessonAreasAnswer, type LessonPerson, type LessonsPauseCode, type LessonView, type LessonsViewAnswer, type OrgId } from "@agentx/contracts";
+import { buildAreaIndex, lessonsAnchoredIn, type AreaSelection } from "./area-index.js";
 import { attributionNameOf, type AttributionReader } from "./people.js";
 import type { AccessCheckPort } from "./access-port.js";
 import { approversRequired, resolveLearning, stricterMode, LearningModeSchema, type LearningSettingsReader } from "./policy.js";
 import { buildWeeklyDigest } from "./digest.js";
+import type { WeeklyExtras, WeeklyRow } from "./weekly-order.js";
 import { lessonPanelRows } from "./panel.js";
 import { createLessonLiveReader, LESSON_LIVE_TIMEOUT_MS } from "./live-visibility.js";
 import { readVisible, readVisibleRanked, type LessonLog } from "./read-visible.js";
@@ -25,6 +27,8 @@ export interface LessonViewDeps {
   pause?: LessonsPauseStore;
   /** Whether a recorded reason still holds (true), or its cause is gone (false: a provider was connected, the budget was raised). A reason whose cause is gone is cleared when it is read. Absent: every reason is shown until a learning call succeeds. */
   pauseStillApplies?: (workspaceId: string, project: string, code: LessonsPauseCode) => Promise<boolean>;
+  /** What the weekly list needs beyond the lessons (lessons under question, lessons a person was asked to keep, repeat counts, recent tasks, names): read once per digest. Absent or failing: the list is built from the lessons alone. */
+  weeklyExtras?: (key: ScopeKey) => Promise<WeeklyExtras | undefined>;
 }
 export interface LessonCaller { orgId: OrgId; developerId: string }
 
@@ -64,15 +68,11 @@ async function namePeople(deps: LessonViewDeps, orgId: OrgId, me: string, ids: r
     }));
   }
   return (id) => {
-    // A lesson written in the repository file is approved by the repository edit, not by a person (read-back): shown as that.
-    if (id === REPOSITORY_APPROVER) return { name: "repository edit" };
     const name = found.get(normId(id));
     return name === undefined ? { name: FORMER } : { name, ...(sameId(id, me) ? { you: true as const } : {}) };
   };
 }
 
-/** The `by` of the approval read-back gives (`repo-file-readback.ts`). */
-const REPOSITORY_APPROVER = "system:repository-edit";
 const personIdsOf = (lesson: Lesson): string[] => [...lesson.provenance.authors, ...lesson.approvals.map((a) => a.by)];
 
 /** What a pending lesson still needs: the people the policy asks for, who approved first, and the groups not yet represented. */
@@ -133,9 +133,11 @@ function toView(lesson: Lesson, ctx: Context): LessonView {
     // Who approved is for people who decide; a reader sees the lesson, not its approvers.
     approvals: ctx.canDecide ? lesson.approvals.map((a) => ({ by: ctx.person(a.by), at: a.at, mode: a.mode })) : [],
     ...(lesson.trial === undefined ? {} : { trial: lesson.trial.state }),
-    ...(lesson.reviewRequired === true ? { reviewRequired: true as const } : {}), ...(lesson.contradictsWith === undefined ? {} : { contradicts: lesson.contradictsWith }), ...(lesson.possibleDuplicateOf === undefined ? {} : { possibleDuplicate: lesson.possibleDuplicateOf }), ...(lesson.possibleDuplicateOf !== undefined && lesson.tierReasons.includes("repo_twin") ? { mergeBlocked: true as const } : {}),
+    ...(lesson.reviewRequired === true ? { reviewRequired: true as const } : {}), ...(lesson.contradictsWith === undefined ? {} : { contradicts: lesson.contradictsWith }), ...(lesson.possibleDuplicateOf === undefined ? {} : { possibleDuplicate: lesson.possibleDuplicateOf }),
     ...(lesson.retireProposedAt === undefined ? {} : { retireProposed: true as const }), ...(lesson.supersedes === undefined ? {} : { supersedes: lesson.supersedes }),
     ...(lesson.status === "rejected" && lesson.rejectedReason !== undefined ? { rejectedReason: lesson.rejectedReason } : {}),
+    // What a graduated lesson became (phase 4): it is retired, and keeps this link and its history.
+    ...(lesson.became === undefined ? {} : { became: { kind: lesson.became.kind, ref: lesson.became.ref, at: lesson.became.at } }),
     canApprove, canReject: ctx.canDecide && pending, canRetire: ctx.canDecide && (lesson.status === "active" || lesson.status === "stale" || pending),
   };
 }
@@ -159,7 +161,7 @@ async function queuedCount(deps: LessonViewDeps, key: ScopeKey, viewer: Identity
  * The Lessons tab. `surface: "home"` is Home's card: it needs only the lessons waiting for this person, so only those are read and checked (the other lists come back empty). Either way each status is
  * read on its own, the lists are ranked BEFORE the visibility check and checked a page at a time until one more than the list's cap survives, and one reader serves the whole request (no task is read twice).
  */
-export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCaller, project: string, options: { surface?: "tab" | "home"; /** Tests: the whole tab's deadline (default `TAB_DEADLINE_MS`). */ deadlineMs?: number } = {}): Promise<LessonsViewAnswer> {
+export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCaller, project: string, options: { surface?: "tab" | "home"; /** Cut every list at this many lessons (never above its own cap): the API route shows at most one page. */ listMax?: number; /** Tests: the whole tab's deadline (default `TAB_DEADLINE_MS`). */ deadlineMs?: number } = {}): Promise<LessonsViewAnswer> {
   const key = keyOf(caller, project);
   const [resolved, raw, state] = await Promise.all([
     resolveLearning(deps.settings, key.workspaceId, key.project),
@@ -201,20 +203,21 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
     return result.kept;
   };
   // People who do not decide read the active lessons only: the approval queue, who approved and what waits are for the people who can act on them. What waits for a decision is read first.
-  const waitingAll = state.canDecide ? await top("waiting", ["pending"], byValue, WAITING_MAX) : [];
-  const activeAll = home ? [] : await top("active", ["active", "stale"], byValue, ACTIVE_MAX);
+  const waitingMax = Math.min(WAITING_MAX, options.listMax ?? WAITING_MAX), activeMax = Math.min(ACTIVE_MAX, options.listMax ?? ACTIVE_MAX), removedMax = Math.min(REMOVED_MAX, options.listMax ?? REMOVED_MAX);
+  const waitingAll = state.canDecide ? await top("waiting", ["pending"], byValue, waitingMax) : [];
+  const activeAll = home ? [] : await top("active", ["active", "stale"], byValue, activeMax);
   const queued = state.canDecide && !home ? await queuedCount(deps, key, state.viewer, deadlineAt, legacyHeld) : 0;
-  const removedAll = state.canDecide && !home ? await top("removed", ["retired", "expired", "rejected"], byUpdated, REMOVED_MAX) : [];
-  const waiting = waitingAll.slice(0, WAITING_MAX), active = activeAll.slice(0, ACTIVE_MAX), removed = removedAll.slice(0, REMOVED_MAX);
+  const removedAll = state.canDecide && !home ? await top("removed", ["retired", "expired", "rejected"], byUpdated, removedMax) : [];
+  const waiting = waitingAll.slice(0, waitingMax), active = activeAll.slice(0, activeMax), removed = removedAll.slice(0, removedMax);
   const person = await namePeople(deps, caller.orgId, caller.developerId, [...waiting, ...active, ...removed].flatMap(personIdsOf));
   const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
 
   const setVersion = await deps.store.setVersion(key);
   const snapshots = state.canDecide && !home ? (await deps.store.snapshots(key)).filter((s) => s.setVersion !== setVersion).slice(-SNAPSHOTS_MAX).map((s) => ({ setVersion: s.setVersion, at: s.at, lessons: s.members.length })) : [];
   const truncated: Array<"waiting" | "active" | "removed"> = [];
-  if (waitingAll.length > WAITING_MAX || cut.has("waiting")) truncated.push("waiting");
-  if (activeAll.length > ACTIVE_MAX || cut.has("active")) truncated.push("active");
-  if (removedAll.length > REMOVED_MAX || cut.has("removed")) truncated.push("removed");
+  if (waitingAll.length > waitingMax || cut.has("waiting")) truncated.push("waiting");
+  if (activeAll.length > activeMax || cut.has("active")) truncated.push("active");
+  if (removedAll.length > removedMax || cut.has("removed")) truncated.push("removed");
   return {
     // `mode` is the project's own setting (after the company's lock); while the install's lessons switch is off the pipeline runs as Collect whatever it says, which `lessonsSwitchedOff` tells the people who decide.
     project, mode: resolved.chosenMode, lockedByCompany, ...(resolved.switchedOff && state.canDecide ? { lessonsSwitchedOff: true as const } : {}), preset: resolved.preset, presetLockedByCompany: companyPresetLocks(raw),
@@ -236,7 +239,8 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
 export const LESSON_PAGE_LISTS = ["proposed", "approved", "retired"] as const;
 export type LessonPageList = (typeof LESSON_PAGE_LISTS)[number];
 const PAGE_STATUSES: Record<LessonPageList, Lesson["status"][]> = { proposed: ["pending"], approved: ["active", "stale"], retired: ["retired", "expired", "rejected"] };
-export const LESSON_PAGE_MAX = 100;
+/** One page of a list: at most 50 lessons (owner decision 2026-11-17: lessons are read a few at a time). */
+export const LESSON_PAGE_MAX = 50;
 /** Where the next page starts: just after this lesson, in the list's order (newest change first, then id). Opaque to the caller. */
 export interface LessonPageCursor { list: LessonPageList; updatedAt: number; id: string }
 export interface LessonsPageAnswer {
@@ -287,17 +291,22 @@ export async function buildLessonHistory(deps: LessonViewDeps, caller: LessonCal
   return { versions: versions.map((v) => ({ version: v.version, at: v.updatedAt, status: v.status, title: v.title, body: v.body, approvedBy: v.approvals.filter((a) => a.mode !== "auto" && a.mode !== "trial").map((a) => person(a.by)) })) };
 }
 
+/** A weekly row as the API gives it: only the fields the contract names (no internal rank). */
+const weeklyRow = (r: WeeklyRow) => ({ id: r.id, title: r.title, type: r.type, ...(r.band === undefined ? {} : { band: r.band }), ...(r.cause === undefined ? {} : { cause: r.cause }), area: r.area, reason: r.reason, ...(r.repeat === undefined ? {} : { repeat: r.repeat }) });
+
 /** The weekly digest, led by the top lessons. For people who decide. */
 export async function buildLessonsDigest(deps: LessonViewDeps, caller: LessonCaller, project: string) {
   const key = keyOf(caller, project);
   const state = await deciderState(deps, key, caller);
   if (!state.canDecide) throw agentXError("FORBIDDEN", "Only a maintainer of this project, or an admin, can read the weekly digest.");
-  const digest = await buildWeeklyDigest(deps.store, key, deps.now(), state.viewer, deps.access, deps.log);
+  const extras = await deps.weeklyExtras?.(key).catch(() => undefined);
+  const digest = await buildWeeklyDigest(deps.store, key, deps.now(), state.viewer, deps.access, deps.log, extras);
   const item = (i: { id: string; title: string; type: Lesson["type"]; tier: Lesson["tier"]; links: string[] }) => ({ id: i.id, title: i.title, type: i.type, tier: i.tier, links: i.links.slice(0, 10) });
   return {
     since: digest.since, top: digest.top.map(item), needsReview: digest.needsReview.map(item), autoApplied: digest.autoApplied.map(item), waiting: digest.waiting.slice(0, 100).map(item),
     retired: digest.retired.slice(0, 100).map(item), staleOrRetireProposed: digest.staleOrRetireProposed.slice(0, 100).map(item),
     queued: digest.queuedCount, pausedSources: digest.pausedSources.slice(0, 50), pausedSourcesHidden: digest.pausedSourcesHidden, hidden: digest.restrictedHidden,
+    weekly: { needLook: digest.weekly.needLook.map(weeklyRow), picks: digest.weekly.picks.map(weeklyRow) },
   };
 }
 
@@ -313,4 +322,39 @@ export async function buildLoadedLessons(deps: LessonViewDeps, caller: LessonCal
   const viewer = await deps.directory.identity(key.workspaceId, caller.developerId);
   const rows = await lessonPanelRows(deps.store, key, taskId, viewer, deps.access, deps.log);
   return { lessons: rows.slice(0, 500).map((r) => ({ stage: r.stage, round: r.round, lessonId: r.lessonId, version: r.version, why: r.why, citation: r.citation, visible: r.visible, ...(r.title === undefined ? {} : { title: r.title }), ...(r.type === undefined ? {} : { type: r.type }), ...(r.helpful === undefined ? {} : { helpful: r.helpful }), ...(r.harmful === undefined ? {} : { harmful: r.harmful }), canMark: r.canMark, ...(r.trial === undefined ? {} : { trial: r.trial }) })) };
+}
+
+/** The most lessons the area index counts and the most one area lists (the Lessons tab's own list cap for the active lessons is `ACTIVE_MAX`). */
+export const AREA_INDEX_MAX = 400;
+export const AREA_LESSONS_MAX = 50;
+
+/**
+ * Lead 4 L4-LP3W: the approved lessons of one project by code area, for the Learned page. The tree counts the lessons this person may read now (`readVisibleRanked`: the frozen snapshot and the access records, the same
+ * check as the Lessons tab), anchored where their scope says (`area-index.ts`); an optional selection lists the lessons anchored at one node or below it, in the tab's order (`lessonValue`). Anyone on the project may read
+ * it, like the approved list. Counts what was read: `partial` says the project holds more than the limit or the time ran out. No model call.
+ */
+export async function buildLessonsByArea(deps: LessonViewDeps, caller: LessonCaller, project: string, input: { selection?: AreaSelection; deadlineMs?: number } = {}): Promise<LessonAreasAnswer> {
+  const key = keyOf(caller, project);
+  const [resolved, state] = await Promise.all([resolveLearning(deps.settings, key.workspaceId, key.project), deciderState(deps, key, caller)]);
+  const byValue = (a: Lesson, b: Lesson): number => lessonValue(b) - lessonValue(a) || b.createdAt - a.createdAt || a.id.localeCompare(b.id);
+  const all = (await deps.store.list(key, { statuses: ["active", "stale"] })).sort(byValue);
+  const ranked = all.slice(0, AREA_INDEX_MAX);
+  const deadlineAt = Date.now() + (input.deadlineMs ?? TAB_DEADLINE_MS);
+  const live = createLessonLiveReader({ port: deps.access.taskVisibility, key, where: "view", log: deps.log, timeoutMs: () => Math.max(1, Math.min(LESSON_LIVE_TIMEOUT_MS, deadlineAt - Date.now())) });
+  const read = await readVisibleRanked({ access: deps.access, key, viewer: state.viewer, where: "view", log: deps.log, live, ranked, pageSize: 50, enough: () => false, deadlineAt });
+  const index = buildAreaIndex(read.kept);
+  const partial = all.length > ranked.length || !read.complete || index.partial === true;
+  let selection: LessonAreasAnswer["selection"];
+  if (input.selection !== undefined) {
+    const sel = input.selection;
+    const matching = lessonsAnchoredIn(read.kept, sel);
+    const shown = matching.slice(0, AREA_LESSONS_MAX);
+    const person = await namePeople(deps, caller.orgId, caller.developerId, shown.flatMap(personIdsOf));
+    const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
+    selection = {
+      ...(sel.whole === true ? { whole: true as const } : { repo: sel.repo, folder: sel.folder }),
+      lessons: shown.map((lesson) => toView(lesson, ctx)), ...(matching.length > shown.length ? { moreLessons: matching.length - shown.length } : {}),
+    };
+  }
+  return { project, total: index.total, wholeProject: index.wholeProject, repos: index.repos, ...(partial ? { partial: true as const } : {}), ...(selection === undefined ? {} : { selection }) };
 }

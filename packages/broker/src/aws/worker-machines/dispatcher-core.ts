@@ -26,6 +26,7 @@ import type { GitHubCodeHostProvider } from "../../plugins/code-host/github/inde
 import type { GitHubActionsProvider } from "../../plugins/check-runner/github-actions/index.js";
 import { createCoreHostApp, type CoreHostApp } from "../../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../../core-host/code-modules.js";
+import { createCompanyArtifactReader } from "../../core-host/company-artifact-reader.js";
 import { coreEngineServes, readCoreEngineFlags, switchCovers } from "../../core-host/flags.js";
 import { readCoreLessonsSwitch } from "../../core-host/lessons.js";
 import type { CoreAdapterModule } from "../../core-host/registry.js";
@@ -36,7 +37,7 @@ import { workspaceCompanyReader } from "./workspace-company.js";
 import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
 import type { MoneyStop } from "../../core/task-flow/money-stop.js";
-import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
+import { gatewayModelAccessFromEnvironment, gatewayModelRoute, readGatewayUrl } from "../../core-host/gateway-model-access.js";
 import { companyEngineModelRoute } from "../../core-host/company-engine-model.js";
 import { hostedSystemRunsFor, readSystemRunsSwitch } from "../../core-host/system-runs.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
@@ -45,6 +46,8 @@ import { hostedServiceCatalog } from "../hosted-test-services.js";
 import { createWikiForStep } from "../../core/wiki/agent-context.js";
 import { wikiBuildEndedHook } from "../../core/wiki-build/wiring.js";
 import { createDispatcherLearned, type DispatcherLessonsOptions } from "./dispatcher-lessons.js";
+import { createStandingInstructions } from "../../core/instructions/step-block.js";
+import { createTeamRulesSource } from "../../lessons/team-rules.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
 export interface DispatcherRecord extends CoreDispatchRecord {
@@ -142,9 +145,19 @@ export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryT
     // A narrowed lessons switch must not attach a reader to another company's runtime.
     if (options !== undefined && !switchCovers(lessonsSwitch, options.companyId)) return { standingInstructions: null, modelAccess, learned: null };
     const reader = options === undefined ? learned : createDispatcherLearned({ ...options, lessonsSwitch });
-    return typeof reader !== "function" ? undefined : { standingInstructions: null, modelAccess, learned: reader };
+    // Lessons phase 4: a rule a person made permanent from a proven lesson is read from THIS company's own team-rule row (one `get`, never another company's) and put in front of the steps it applies to as standing
+    // instructions; with no rules the step is byte for byte what it was. Only where lessons are on for the company and the deployment gave its store.
+    const standing = options === undefined ? null : createStandingInstructions({ companyId: options.companyId, teamRules: createTeamRulesSource({ store: options.store, companyId: options.companyId }) });
+    return typeof reader !== "function" ? undefined : { standingInstructions: standing, modelAccess, learned: reader };
   }
   return { standingInstructions: null, modelAccess, learned: null };
+}
+
+/** The dispatcher's `evalGatewayUrl` flow option: the gateway's checked https origin, only where a model route is configured; `{}` otherwise (also for an unset or malformed setting). */
+export function evalGatewayOf(env: NodeJS.ProcessEnv, modelAccess: unknown): { evalGatewayUrl?: string } {
+  if (modelAccess === null || modelAccess === undefined) return {};
+  const origin = readGatewayUrl(env);
+  return typeof origin === "string" ? { evalGatewayUrl: origin } : {};
 }
 
 /** The words a code host call says on the dispatcher. */
@@ -276,6 +289,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
+        // The gateway's origin goes to a hosted worker with an eval request (the worker has no setting of its own), only where the gateway is configured (the same checked origin the model route uses); otherwise nothing is sent.
+        ...evalGatewayOf(env, modelAccess),
         // The broker's switch controls whether it writes fresh validation rows. The dispatcher always uses a fresh row when present and otherwise its configured default.
         stepModels: dispatcherStoredAgentModelChoice({ store: registry.require("storage"), companyId, now: () => now().getTime(), defaultRoute: async () => modelAccess?.route(), log: inputs.log }),
         ...(learned === null || learned === undefined ? {} : { learned }),
@@ -284,6 +299,9 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended (this company's store only).
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
+        // L4-ART: the flow's reader of saved documents (the approved plan, a diff, the eval rounds), held to THIS company's own workspaces (an outside key or another company's workspace reads as "not there").
+        // The dispatcher's role reads only the admission objects today, so a read of the others fails closed here until the install grants it (the first eval round needs no read at all).
+        artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.artifact_read_refused", companyId, reason }) }),
         // DEC 254zm: a coding or verification step is told the plan of the test environment its task pinned (the company's own records; the owner starter list is the catalog while test services are switched on).
         testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
       };

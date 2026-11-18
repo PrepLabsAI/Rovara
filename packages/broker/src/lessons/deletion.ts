@@ -20,7 +20,6 @@ import { randomUUID } from "node:crypto";
 import { nextVersion, type DeletionIntent, type LessonStore, type ScopeKey } from "./store.js";
 import { ERASED_MARK, idIn, peopleOf, recordIdsOf, sameId, type Lesson, type LessonCitation } from "./types.js";
 import { scrubLesson, stripAudienceIds } from "./scrub.js";
-import { notifyLessonGone } from "./repo-file-hook.js";
 export { ERASED_MARK, scrubLesson };
 
 export type DeletionCause = "sources_deleted" | "source_deleted" | "person_erased";
@@ -61,7 +60,9 @@ export function supportedByCode(lesson: Pick<Lesson, "citations" | "lastValidate
 }
 
 
-export interface DeletionDeps { store: LessonStore; vectors: LessonVectors; audit: LessonAuditSink; now: () => number; newId?: () => string }
+export interface DeletionDeps { store: LessonStore; vectors: LessonVectors; audit: LessonAuditSink; now: () => number; newId?: () => string;
+  /** Phase 4: called when a lesson is gone for good (withdrawn or purged), so the rule, the draft check task or the claim made from it ends too (`graduated-cleanup.ts`). A throw is a failed step: the deletion is retried. */
+  onGone?: (key: ScopeKey, lessonId: string) => Promise<void> }
 
 export function lessonDeletionPort(deps: DeletionDeps): LessonDeletionPort {
   const key = (orgId: string, project: string): ScopeKey => ({ workspaceId: orgId, project });
@@ -107,8 +108,8 @@ export function lessonDeletionPort(deps: DeletionDeps): LessonDeletionPort {
   async function perform(k: ScopeKey, intent: DeletionIntent, step: string): Promise<void> {
     const { workspaceId: orgId, project } = k;
     if (step === "vector") { await deps.vectors.remove(orgId, project, intent.lessonId); return; }
-    if (step === "rows") { await deps.store.purge(k, intent.lessonId); return; }
-    if (step === "tombstone") { await deps.store.markGone(k, intent.lessonId, "withdrawn"); return; }
+    if (step === "rows") { await deps.onGone?.(k, intent.lessonId); await deps.store.purge(k, intent.lessonId); return; }
+    if (step === "tombstone") { await deps.onGone?.(k, intent.lessonId); await deps.store.markGone(k, intent.lessonId, "withdrawn"); return; }
     if (step === "versions") { await everyVersion(k, intent.lessonId, (l) => rewrite(intent, l)); return; }
     // "commit": one conditional write that carries the scrub AND the decision (status, review mark) together.
     for (let attempt = 0; attempt < MAX_TRIES; attempt += 1) {
@@ -130,8 +131,6 @@ export function lessonDeletionPort(deps: DeletionDeps): LessonDeletionPort {
     }
     intent.finished = true;
     await deps.store.putIntent(k, intent);
-    // A lesson that is only an add in Rovara's open lessons pull request comes out of it at once.
-    if (intent.outcome === "withdraw" || intent.outcome === "purge") await notifyLessonGone(k, intent.lessonId);
     if (intent.outcome === "withdraw" || intent.outcome === "purge") {
       await emitAudit(deps.audit, { action: "lesson.withdrawn", workspaceId: k.workspaceId, project: k.project, lessonId: intent.lessonId, facts: { cause: intent.cause, ...(intent.outcome === "purge" ? { purged: true } : {}) } });
     }
@@ -187,6 +186,8 @@ export function lessonDeletionPort(deps: DeletionDeps): LessonDeletionPort {
       const empty = hadSources && scrubLesson(lesson, deleted).provenance.sourceEvents.length === 0;
       if (empty) outcome = supportedByCode(lesson) ? "downgrade" : "withdraw";
     }
+    // A lesson that became a rule or a draft check task is retired, so the branch above does not look at it: when its sources are all gone, what it became goes too (the rule is retired and blanked, the draft is dropped).
+    if (lesson.became !== undefined && h.all.some((l) => l.provenance.sourceEvents.length > 0) && scrubLesson(lesson, deleted).provenance.sourceEvents.length === 0) await deps.onGone?.(k, lessonId);
     await start(k, { lessonId, kind: "forget", cause, deleted: [...deleted], outcome, inSet: h.inSet });
   }
 

@@ -127,6 +127,9 @@ export const AgentXErrorCodeSchema = z.enum([
   // Guided onboarding PR 7: the Linear workspace is already connected to another Rovara company (409), and the company's Linear connection is missing or needs reconnecting (409). Appended: no code changes meaning.
   "LINEAR_WORKSPACE_TAKEN",
   "LINEAR_NOT_CONNECTED",
+  // L4-GH (409): the GitHub account a person tries to connect to themselves is another member's of the company; the person already has a different GitHub account connected. Appended: no code changes meaning.
+  "GITHUB_ACCOUNT_TAKEN",
+  "GITHUB_ACCOUNT_LINK_EXISTS",
 ]);
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";

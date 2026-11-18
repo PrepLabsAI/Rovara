@@ -1010,8 +1010,52 @@
                 "needs_fresh_sandbox",
                 "checks_failed",
                 "stopped",
-                "questions_changed"
+                "questions_changed",
+                "eval_run_failed"
               ]
+            },
+            "runFailure": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "missing_package",
+                    "missing_file",
+                    "command_not_found",
+                    "install_failed",
+                    "install_timed_out",
+                    "run_timed_out",
+                    "exited"
+                  ]
+                },
+                "phase": {
+                  "type": "string",
+                  "enum": [
+                    "install",
+                    "run"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.+/-]{0,79}$"
+                },
+                "exitCode": {
+                  "type": "integer",
+                  "minimum": -1,
+                  "maximum": 255
+                },
+                "tail": {
+                  "type": "string",
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "code",
+                "phase",
+                "tail"
+              ],
+              "additionalProperties": false
             },
             "privateSet": {
               "type": "boolean"

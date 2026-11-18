@@ -9,6 +9,7 @@ import { signInClientRegistration, signInClientUpdate } from "../../packages/cli
 import { DEV_ROUTES, devRouteOf, type DevRoute } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import type { DeveloperApiConfiguration, DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { localSigner } from "../support/developer-fakes.js";
@@ -81,7 +82,7 @@ describe("the route table", () => {
 
 /** The concrete paths a router regex literal matches, each `([^/]+)` or bare `[^/]+` (R4's grouped task-read pattern) as `{}`. */
 function expandRegex(source: string): string[] {
-  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}").replaceAll("([a-f0-9]{64})", "{}");
+  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}").replaceAll("([a-f0-9]{64})", "{}").replaceAll("([a-z0-9_]{1,40})", "{}");
   const expand = (text: string): string[] => {
     const start = text.search(/\((\?:)?/);
     if (start < 0) return [text];
@@ -112,7 +113,7 @@ function expandRegex(source: string): string[] {
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
   // The company reads' paths are constants of their contract (#649), which the router imports.
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/github-connect-routes.ts", "packages/broker/src/aws/slack-company-install.ts", "packages/broker/src/aws/slack-channel-link.ts", "packages/broker/src/aws/linear-connect-routes.ts", "packages/broker/src/aws/company-engine-model-routes.ts"]) {
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/contracts/src/company-egress-addresses.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/github-connect-routes.ts", "packages/broker/src/aws/github-account-link-routes.ts", "packages/broker/src/aws/slack-company-install.ts", "packages/broker/src/aws/slack-channel-link.ts", "packages/broker/src/aws/linear-connect-routes.ts", "packages/broker/src/aws/company-engine-model-routes.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
@@ -200,6 +201,7 @@ async function setUp(mode: "linking" | "developer") {
     companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
     // Guided onboarding PR 1: the GitHub connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
     githubConnect: { bindings: { claimPerson: async () => "taken", companyInstallations: async () => [], ownersOf: async () => [], disconnect: async () => ({ outcome: "not_found" }) }, github: { appSlug: async () => "app", oauthClient: async () => undefined, userControlledInstallations: async () => { throw new Error("none"); } }, log: () => undefined },
+    githubLink: { store: new MemoryDocumentStore(), github: { oauthClient: async () => undefined, githubUserOfCode: async () => { throw new Error("none"); } }, log: () => undefined },
     // Guided onboarding PR 4: the Add to Slack routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
     slackInstall: { slack: { clientId: async () => undefined, exchange: async () => "not_set_up" as const, revoke: async () => false, store: async () => undefined, revokeStored: async () => undefined, drop: async () => undefined }, log: () => undefined },
     // Guided onboarding PR 5: a project's Slack channel routes need their wiring to exist; this one sees no channel, so only the route table's answer is tested here.
@@ -210,6 +212,7 @@ async function setUp(mode: "linking" | "developer") {
     coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
     // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
     companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
+    companyEgress: { addresses: () => "44.235.136.195,44.226.134.187" },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };

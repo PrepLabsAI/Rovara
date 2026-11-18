@@ -122,6 +122,25 @@ describe("capture of a finished task", () => {
     expect((await recordEndedTask({ record: w.a, source, companyId: A, taskId: "task-7", now: () => w.clock.now, rows: rows({}), origin: "app" })).written).toBe(0);
   });
 
+  it("a kind of evidence a person stopped on Where Rovara learns from is not read or kept (L4-LP3Wc): no comment, no close reason, no send-back row; the rest is recorded as before", async () => {
+    const w = world();
+    const seen: string[][] = [];
+    const inner = sourceWith([
+      span({ kind: "intent", text: "Add a /health endpoint", authorId: "ann" }),
+      span({ kind: "close_reason", text: "STOPPED-WORDS closing it", authorId: "ann" }),
+      span({ kind: "pr_comment", text: "STOPPED-WORDS name the route healthz", authorId: "bob", eventId: "github:repo/1#pr7:review_comment1" }),
+    ], ["r1"]);
+    const source: TaskSubjectSource = { projectOf: async () => "payments", read: async (input) => { seen.push([...(input.skip ?? [])].sort()); return inner.read(input); } };
+    const stopped = new Set(["pr_comment", "review_finding", "send_back", "close_reason"] as const);
+    let rowsRead = 0;
+    const counting: OutcomeRowReader = { async sendBack() { rowsRead += 1; return { id: "task:task-7:sendback:r1", origin: "human", actorDeveloperId: "bob", actorTrust: "member", reasonText: "STOPPED-WORDS add a test" }; }, async revertedBy() { return undefined; } };
+    const result = await recordEndedTask({ record: w.a, source, rows: counting, companyId: A, taskId: "task-7", now: () => w.clock.now, origin: "app", paused: async () => stopped, projectOf: async () => "payments" });
+    expect(result.written).toBe(1);
+    expect(rowsRead).toBe(0);
+    expect(seen).toEqual([["close_reason", "pr_comment", "review_finding", "send_back"]]);
+    expect(JSON.stringify((await w.store.query({ pk: teamRecordPk(A, "payments") })).items)).not.toContain("STOPPED-WORDS");
+  });
+
   it("a send-back whose only words are code's (a findings summary) is never recorded as the person's; their per-finding notes are", async () => {
     const w = world();
     const source = sourceWith([], ["f1", "f2", "f3", "f4"]);

@@ -43,6 +43,17 @@ function jobDeps(w: World, over: Partial<LessonsJobDeps> = {}) {
 }
 
 describe("the nightly re-reflection", () => {
+  it("After merge stopped (L4-LP3Wc): no revert is looked for or queued; another project and resumed are as before", async () => {
+    const w = await setup();
+    w.revert("task-a", hoursAgo(3));
+    w.revert("task-z", hoursAgo(3), "api");
+    const lessonStore = new InMemoryLessonStore();
+    await lessonStore.setFlags({ workspaceId: ORG_A, project: "web" }, { stoppedKinds: { outcome: { at: 1 } } });
+    const { deps, sent } = jobDeps(w, { maintain: { store: lessonStore } as never });
+    expect(await lessonsRevertJob(deps, ORG_A, ["web", "api"], 10_000)).toMatchObject({ revertsEnqueued: 1 });
+    expect((sent as Array<{ taskId: string }>).map((m) => m.taskId)).toEqual(["task-z"]);
+  });
+
   it("sends {outcome: reverted} per reverted task of the window to the same queue as a task's end: ids only, and the company is the job's, never a row's claim", async () => {
     const w = await setup();
     w.revert("task-a", hoursAgo(3));
@@ -219,17 +230,6 @@ describe("a trial lesson a member's card contradicts is retired by the nightly r
     expect(audit.events.find((event) => event.action === "lesson.trial_retired")).toMatchObject({ lessonId: "les_old1", facts: { reason: "contradicted" } });
     expect(await lessonsTrialRepairJob(deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 0 });
     expect(audit.events.filter((event) => event.action === "lesson.trial_retired")).toHaveLength(1);
-  });
-  it("a card across the repo-only line (a repo-only card against a lesson that is not, or the reverse) is for a person: the nightly repair retires nothing, as curate does not; a card on the same side still retires", async () => {
-    const only = { ...lessonRecord().provenance, memberCorrection: true, repoOnly: { place: "github:repo/1001" } };
-    const across = await repair([trialOld(), card({ provenance: only })]);
-    expect(await lessonsTrialRepairJob(across.deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 0 });
-    expect((await across.store.get(KEYW, "les_old1"))!.status).toBe("active");
-    const reverse = await repair([trialOld({ provenance: { ...lessonRecord().provenance, repoOnly: { place: "github:repo/1001" } } }), card()]);
-    expect(await lessonsTrialRepairJob(reverse.deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 0 });
-    expect((await reverse.store.get(KEYW, "les_old1"))!.status).toBe("active");
-    const same = await repair([trialOld({ provenance: { ...lessonRecord().provenance, repoOnly: { place: "github:repo/1001" } } }), card({ provenance: only })]);
-    expect(await lessonsTrialRepairJob(same.deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 1 });
   });
   it("only the rule curate applies: a card that is not from a member's correction, a lesson that is not live on trial, a card that is not pending, or a card naming nothing leaves everything as it was", async () => {
     for (const lessons of [

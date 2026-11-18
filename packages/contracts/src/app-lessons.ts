@@ -94,9 +94,9 @@ export const LessonViewSchema = z.object({
   reviewRequired: z.literal(true).optional(), contradicts: z.string().max(64).optional(), retireProposed: z.literal(true).optional(), supersedes: z.string().max(64).optional(),
   /** The lesson this one may duplicate (kept apart from it, never merged): a person decides to merge, keep both or reject. */
   possibleDuplicate: z.string().max(64).optional(),
-  /** Set on a possible-duplicate card that cannot be merged into the other lesson: this one came only from the repository's own reviews, the other did not, and a merge would take that away. Approve (keep both) or reject. */
-  mergeBlocked: z.literal(true).optional(),
   rejectedReason: z.string().max(200).optional(),
+  /** Phase 4: a lesson a person made permanent is retired and says what it became: a team rule, a draft check task (`ref` is the draft's id) or a skill (`ref` is its name). */
+  became: z.object({ kind: z.enum(["rule", "check", "skill"]), ref: z.string().min(1).max(100), at: z.number() }).strict().optional(),
   /** What this viewer may do with it, worked out by the server (the routes check again when asked). */
   canApprove: z.boolean(), canReject: z.boolean(), canRetire: z.boolean(),
   /** "Used in N tasks": the distinct tasks the lesson was given to in the last 180 days, at most 500 (`usedInTasksMore`: there were more). Absent: not counted (the Lessons tab, the proposed list), or it could not be counted. */
@@ -157,6 +157,15 @@ const DigestItemSchema = z.object({
   /** Pull request links the lesson came from (https only). */
   links: z.array(z.string().url().max(300)).max(10),
 }).strict();
+/** One row of the weekly list (lessons phase 1): why it is there in plain words, never a score; a suggestion carries its band, a need-a-look card its cause. */
+const WeeklyRowSchema = z.object({
+  id: z.string().min(1).max(64), title: z.string().max(80), type: LessonTypeSchema,
+  band: z.enum(["direct_correction", "measured", "weak_twice"]).optional(),
+  cause: z.enum(["conflict", "retire_proposed", "revert_overlap", "area_gone", "area_rewritten", "asked_to_keep", "sent_back"]).optional(),
+  area: z.string().max(200), reason: z.string().max(500),
+  /** "Since this lesson: the correction came back `back` times in `matched` matching tasks." */
+  repeat: z.object({ matched: z.number().int().min(0), back: z.number().int().min(0) }).strict().optional(),
+}).strict();
 export const LessonsDigestSchema = z.object({
   since: z.number(),
   /** The most important lessons first: measured outcomes, then recurrence, then severity. */
@@ -165,6 +174,8 @@ export const LessonsDigestSchema = z.object({
   queued: z.number().int().min(0),
   /** Sources paused because they spiked, named only where the viewer can see every lesson that mentions them. */
   pausedSources: z.array(z.string().max(120)).max(50), pausedSourcesHidden: z.number().int().min(0), hidden: z.number().int().min(0),
+  /** The weekly list in bands with a reason per row: need-a-look cards first (not counted), then at most 5 suggestions. Absent from an older broker. */
+  weekly: z.object({ needLook: z.array(WeeklyRowSchema).max(3), picks: z.array(WeeklyRowSchema).max(5) }).strict().optional(),
 }).strict();
 export const LessonsDigestReaderSchema = forwardReader(LessonsDigestSchema);
 

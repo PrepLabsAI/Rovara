@@ -2,15 +2,18 @@
 // passed: a fresh step-up, the risk read from the candidate's diff (low and medium: a project maintainer; high: a company owner or admin), the hosted approvers point's proof bound to the
 // candidate's digest, revision and card, and the ONE approval gate. Two companies and two projects never reach each other's candidate; a moved or stale candidate is refused.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, systemOwnerIdOf, type ApprovalProof, type ApprovalRequest, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { setupApplyDigest, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
-import { recheckRowKey, repairNoticeKey } from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
+import { driftTaskKey, recheckRowKey, repairNoticeKey, setupBrokenTaskWords, type RecheckRow } from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
 import { repairCurrentKey, repairRowKey } from "../../packages/broker/src/core/setup-agent/repair-rows.js";
+import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
@@ -22,6 +25,8 @@ import {
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
+import { createHarness, newRequestId } from "../support/task-flow-harness.js";
+import { setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
 
 const OTHER = "org_corehost00000000000b";
 const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
@@ -52,13 +57,28 @@ async function seedCandidate(world: FakeWorld, companyId: string, name: string, 
   await world.store.put({ item: { ...projectRevisionKey(companyId, name, 2), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
   const workspaceId = randomUUID();
   await world.store.put({ item: { ...workspaceKey(companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId, orgId: companyId, status } });
-  const digest = setupApplyDigest(definition.setup, definition.readiness);
+  const digest = setupApplyDigest(definition.setup, definition.readiness, changes["promptLocations"] === undefined ? {} : { promptLocations: changes["promptLocations"] });
   const at = new Date(world.clock.now).toISOString();
   await world.store.put({ item: {
     ...setupApplyKey(companyId, name), entityType: "SETUP_APPLY", orgId: companyId, project: name, taskId: "", requestId: randomUUID(), by: "p-runner", digest, baseRevision: 1, candidateRevision: 2,
     state: "checking", check: { workspaceId, revision: 2, startedAt: at, startedBy: "p-runner" }, reply: {}, createdAt: at,
   } });
   return { digest, workspaceId };
+}
+
+async function seedPausedTask(world: FakeWorld, name: string): Promise<string> {
+  const h = createHarness({ companyId: FAKE_COMPANY, backend: () => ({ store: world.store, queues: world.queues }) });
+  await h.registerProject(project(name));
+  await world.store.put({ item: { ...projectMetaKey(FAKE_COMPANY, name), entityType: "PROJECT_META" } });
+  const task = (await h.flow.start(h.owner, { requestId: newRequestId(), project: name, instructions: "Keep building", workflow: true, workflowPath: "QUICK" })).task;
+  const before = (await readTask(h.deps, task.taskId))!;
+  const brokenStep = "setup: npm ci failed";
+  await world.store.update({ key: projectMetaKey(FAKE_COMPANY, name), ops: [change.set("setupCheck", { workspaceId: "failed-check", revision: 1, startedAt: "2026-11-16T10:00:00.000Z", startedBy: "system" })] });
+  await world.store.put({ item: { ...driftTaskKey(FAKE_COMPANY, name, task.taskId), entityType: "SETUP_DRIFT_TASK", orgId: FAKE_COMPANY, project: name, taskId: task.taskId, recheckKey: "failed-recheck", state: "pending", at: "2026-11-16T10:00:00.000Z" } });
+  const row: RecheckRow = { entityType: "SETUP_RECHECK", orgId: FAKE_COMPANY, project: name, key: "failed-recheck", setupRevision: 1, commits: {}, classes: ["lockfile"], state: "broken", attempt: 2, check: { workspaceId: "failed-check", revision: 1, startedAt: "2026-11-16T10:00:00.000Z", startedBy: "system" }, startedAt: "2026-11-16T10:00:00.000Z", failedStep: brokenStep };
+  await world.store.put({ item: toDocument({ ...recheckRowKey(FAKE_COMPANY, name, row.key), ...row }) });
+  await world.store.update({ key: taskKey(task.taskId), ops: [change.set("workflow", { ...before.workflow, stage: "IMPLEMENT", state: "BLOCKED", blockReason: setupBrokenTaskWords(brokenStep) } as unknown as JsonValue)] });
+  return task.taskId;
 }
 
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
@@ -136,6 +156,37 @@ describe("hosted setup approval: who may decide, by the candidate's risk", () =>
     expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
     expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "approved", decidedBy: "p-maint" });
     expect(audit.find((event) => event.action === "decision.approved")).toMatchObject({ companyId: FAKE_COMPANY, actor: { id: "p-maint" }, subject: { type: SETUP_PROPOSAL_SUBJECT, id: "payments" }, details: { risk: "low" } });
+  });
+
+  it("resumes an eligible task when a hosted approval approves its setup", async () => {
+    const { world, person, call } = await setupWorld();
+    const taskId = await seedPausedTask(world, "payments");
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--cache", ".npm-cache"])] });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
+    expect(decided.status, decided.raw).toBe(200);
+    expect(decided.body).toMatchObject({ decision: "approved", revision: 2 });
+    await vi.waitFor(async () => expect((await readTask(createHarness({ companyId: FAKE_COMPANY, backend: () => ({ store: world.store, queues: world.queues }) }).deps, taskId))?.workflow?.state).toBe("READY"));
+    expect((await world.store.get(driftTaskKey(FAKE_COMPANY, "payments", taskId)))?.["resumedSetupRevision"]).toBe(2);
+  });
+
+  it("answers approved when the store fails during the best-effort auto-resume", async () => {
+    const { world, person, call } = await setupWorld();
+    await seedPausedTask(world, "payments");
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--cache", ".npm-cache"])] });
+    const query = world.store.query.bind(world.store);
+    const querySpy = vi.spyOn(world.store, "query").mockImplementation((request) => request.pk === setupPartition(FAKE_COMPANY, "payments")
+      ? Promise.reject(new Error("store unavailable"))
+      : query(request));
+    try {
+      const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+      const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
+      expect(decided.status, decided.raw).toBe(200);
+      expect(decided.body).toMatchObject({ decision: "approved", revision: 2 });
+      expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
+    } finally {
+      querySpy.mockRestore();
+    }
   });
 
   it("lets a project maintainer approve a MEDIUM risk candidate (a test mock), shown with what changed", async () => {
@@ -478,5 +529,61 @@ describe("hosted setup run: the broken-setup card and a candidate Rovara drafted
     const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
     expect(decided.status, decided.raw).toBe(200);
     expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
+  });
+});
+
+describe("L4-EVP: prompt locations in a setup candidate", () => {
+  const LOCATIONS = [{ repo: "demo", path: "deskbot/agent.py", kind: "function", symbol: "DeskAgent.build_contents" }];
+  const storedLocations = async (world: FakeWorld, companyId: string, name: string, revision: number) =>
+    (await world.store.get(projectRevisionKey(companyId, name, revision)) as { definition?: { promptLocations?: unknown } } | undefined)?.definition?.promptLocations;
+
+  it("is MEDIUM: a project maintainer sees the locations whole, approves, and the project's revision then holds them", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    const view = await call(get(RUN), maintainer);
+    expect(view.body["apply"]).toMatchObject({ risk: "medium", changes: [{ area: "prompt_locations", risk: "medium" }], approver: "maintainer", canApprove: true, promptLocations: ["demo/deskbot/agent.py: function DeskAgent.build_contents"] });
+    const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
+    expect(decided.status, decided.raw).toBe(200);
+    expect(decided.body).toMatchObject({ decision: "approved", risk: "medium" });
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
+    expect(await storedLocations(world, FAKE_COMPANY, "payments", 2)).toEqual(LOCATIONS);
+  });
+  it("a candidate with no locations shows no promptLocations field (the view as it was)", async () => {
+    const { world, person, call } = await setupWorld();
+    await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--cache", ".c"])] });
+    const view = await call(get(RUN), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }));
+    expect(view.body["apply"]).not.toHaveProperty("promptLocations");
+  });
+  it("a developer grant and a member with no grant cannot approve it; a rejection removes it and the project keeps none", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), person("p-dev", FAKE_COMPANY, "member", { payments: "developer" }))).status).toBe(403);
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), person("p-none", FAKE_COMPANY, "member"))).status).toBe(404);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+    const rejected = await call(post(`${RUN}/decide`, decideBody(digest, "reject")), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }));
+    expect(rejected.status, rejected.raw).toBe(200);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+    expect(await storedLocations(world, FAKE_COMPANY, "payments", 1)).toBeUndefined();
+  });
+  it("is bound to the digest the person saw: another digest (the locations changed under them) is refused", async () => {
+    const { world, person, call } = await setupWorld();
+    await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    const other = setupApplyDigest([command("npm", ["ci"])], [command("npm", ["test"])]);
+    expect((await call(post(`${RUN}/decide`, decideBody(other)), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }))).status).toBeGreaterThanOrEqual(400);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+  });
+  it("two projects and two companies: approving one project's locations leaves the other project, and another company's same-named project, without any", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    await seedCandidate(world, OTHER, "payments", { promptLocations: [{ repo: "demo", path: "other/agent.py", kind: "file" }] });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator", ledger: "administrator" });
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), maintainer)).status).toBe(200);
+    expect(await storedLocations(world, FAKE_COMPANY, "payments", 2)).toEqual(LOCATIONS);
+    expect(await storedLocations(world, FAKE_COMPANY, "ledger", 1)).toBeUndefined();
+    expect(await latestOf(world, FAKE_COMPANY, "ledger")).toBe(1);
+    expect(await latestOf(world, OTHER)).toBe(1);
+    expect(await storedLocations(world, OTHER, "payments", 2)).toEqual([{ repo: "demo", path: "other/agent.py", kind: "file" }]);
+    expect((await applyRow(world, OTHER))).toMatchObject({ state: "checking" });
   });
 });

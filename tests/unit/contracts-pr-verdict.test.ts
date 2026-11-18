@@ -95,6 +95,7 @@ const TABLE: Array<[PrExceptionKind, Partial<PrVerdictInput>]> = [
   ["browser_problem", { browser: { pages: 1, problems: ["- `/invoice`: Not run: the app did not start"] } }],
   ["eval_worse", { evalCheck: { label: "Worse on eval", promptChanged: true } }],
   ["eval_prompt_without_run", { evalCheck: { label: "Not run", promptChanged: true } }],
+  ["eval_no_run", { noEval: { reason: "not_a_prompt_change" } }],
   ["files_incomplete", { changed: { source: "host", files: 40, added: 1, removed: 1, complete: false, testsAdded: 1, codeChanged: true } }],
   ["files_not_read", { changed: undefined, risk: { level: "high", reasons: [], judged: false } }],
   ["merge_order", { mergeOrder: ["Merge the app pull request first, then the docs pull request."] }],
@@ -572,5 +573,35 @@ describe("one set of words for the description and the Check (design rule 2.1.7)
     const text = rovaraCheckOf({ ...RECEIVED, verdict: prVerdictForCheck(many) });
     expect(text.conclusion).toBe("success");
     expect(text.text.length).toBeLessThanOrEqual(65_535);
+  });
+});
+
+describe("L4-EVP: AI code was touched and no eval ran", () => {
+  const item = (over: Partial<PrVerdictInput>) => verdict(over).items.find((entry) => entry.kind === "eval_no_run");
+  it("says so with the reason, counts as a thing to check, and is advisory (it never changes the result)", () => {
+    for (const reason of ["no_eval_configured", "not_a_prompt_change", "not_connected"] as const) {
+      const found = item({ noEval: { reason } })!;
+      expect(found.title).toBe("No eval ran for this change.");
+      expect(found.detail).toMatch(/^Reason: /u);
+    }
+    expect(item({ noEval: { reason: "no_eval_configured" } })!.detail).toContain("no AI eval set up");
+    expect(item({ noEval: { reason: "not_a_prompt_change" } })!.detail).toContain("not a prompt location the project confirmed");
+    expect(item({ noEval: { reason: "not_connected" } })!.detail).toContain("not connected");
+    expect(item({ noEval: { reason: "other", detail: "an owner must confirm the eval's call estimate in setup" } })!.detail).toBe("Reason: an owner must confirm the eval's call estimate in setup");
+    const v = verdict({ noEval: { reason: "not_a_prompt_change" } });
+    expect(v.heading).toBe("Verified · Low risk · 1 thing to check");
+    expect(v.result).toBe(verdict().result);
+  });
+  it("makes the reason inert and refuses a reason it does not know", () => {
+    expect(item({ noEval: { reason: "other", detail: "x\n## pwn <details> [a](http://x)" } })!.detail).not.toMatch(/\n|<details>/u);
+    expect(item({ noEval: { reason: "made-up" as never } })).toBeUndefined();
+  });
+  it("is one line per fact: not beside a result, a worse result or the existing prompt-changed item; and absent it is today's verdict", () => {
+    expect(item({ noEval: { reason: "not_connected" }, evalCheck: { label: "No regression measured", promptChanged: true } })).toBeUndefined();
+    expect(item({ noEval: { reason: "not_connected" }, evalCheck: { label: "Improved on eval", promptChanged: true } })).toBeUndefined();
+    expect(kinds(verdict({ noEval: { reason: "not_connected" }, evalCheck: { label: "Worse on eval", promptChanged: true } }))).toEqual(["eval_worse"]);
+    expect(kinds(verdict({ noEval: { reason: "no_eval_configured" }, evalCheck: { label: "Not run", promptChanged: true } }))).toEqual(["eval_prompt_without_run"]);
+    expect(kinds(verdict({ noEval: { reason: "not_connected" }, evalCheck: { label: "Not run", promptChanged: false } }))).toEqual(["eval_no_run"]);
+    expect(verdict({ noEval: undefined })).toEqual(verdict());
   });
 });

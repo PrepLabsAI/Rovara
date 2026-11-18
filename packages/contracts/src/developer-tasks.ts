@@ -225,6 +225,11 @@ export const DeveloperTaskViewSchema = z.object({
    * `needsAcknowledgement` is true for an `on` review that did not run until the task owner acknowledges it, and `acknowledged` says they have. Absent when there is nothing to show (shadow that did not run is silent).
    */
   secondReview: z.object({ lines: z.array(z.string().min(1).max(320)).min(1).max(7), needsAcknowledgement: z.boolean(), acknowledged: z.boolean(), /** True for the task's owner while an acknowledgement is asked for: the page offers "I've seen it". */ canAcknowledge: z.boolean().optional() }).strict().optional(),
+  /**
+   * L4-U5: the one evidence line when Rovara re-checked the project's setup for this task (design 1, steps 3b to 3d): "Checking setup again...", "Setup re-checked after dependency files changed: still works.",
+   * "Setup may be out of date after ... changed.", "Couldn't re-check setup ...". Fixed words (only the check's own redacted failing step is repository text); absent when there was no drift.
+   */
+  setupRecheck: z.string().min(1).max(600).optional(),
   /** Plan 6, Task 12 (version 2 only, like `verificationReport`): the review round whose problems are being fixed, with the sentence the thread says. */
   reviewRound: z.object({ round: z.number().int().min(1).max(100), max: z.number().int().min(1).max(5), message: z.string().min(1).max(200) }).strict().optional(),
   /**

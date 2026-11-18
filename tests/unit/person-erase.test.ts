@@ -17,6 +17,8 @@ import { VersionedBucket } from "../support/versioned-bucket.js";
 import { prefsKey } from "../../packages/broker/src/core/notify/prefs.js";
 import { notifySentKey } from "../../packages/broker/src/core/notify/attention.js";
 import { inboxKey, inboxPartition, inboxRow } from "../../packages/broker/src/core/notify/inbox-rows.js";
+import { involvedPartition, involvedRowPut } from "../../packages/broker/src/core/task-flow/involved.js";
+import { githubLinkOf, linkGithubAccount, linkedGithubPerson } from "../../packages/broker/src/core/people/github-links.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -167,6 +169,36 @@ describe("person erase: what it removes", () => {
     expect(await w.store.get(inboxKey(A, "someone-else", session, "needs_you"))).toBeDefined();
   });
 
+  it("removes the person's involved-task pointers across every task in this company, and nobody else's, nor their pointers in another company", async () => {
+    const w = world();
+    const task = (n: number) => `bbbbbbbb-bbbb-4bbb-8bbb-${String(n).padStart(12, "0")}`;
+    const at = (n: number) => `2026-11-0${n}T10:00:00.000Z`;
+    const put = async (company: string, person: string, n: number) => w.store.put({ item: involvedRowPut({ companyId: company, personId: person, taskId: task(n), createdAt: at(n) }, "2026-11-09T10:00:00.000Z").item });
+    for (const n of [1, 2, 3]) await put(A, MALLORY, n);
+    await put(B, MALLORY, 4);
+    await put(A, "someone-else", 5);
+    await put(B, "someone-else", 6);
+    await erase(w);
+    expect((await w.store.query({ pk: involvedPartition(A, MALLORY) })).items).toEqual([]);
+    expect((await w.store.query({ pk: involvedPartition(B, MALLORY) })).items).toHaveLength(1);
+    expect((await w.store.query({ pk: involvedPartition(A, "someone-else") })).items).toHaveLength(1);
+    expect((await w.store.query({ pk: involvedPartition(B, "someone-else") })).items).toHaveLength(1);
+  });
+
+  it("removes more involved pointers than one page holds", async () => {
+    const w = world();
+    for (let n = 0; n < 130; n += 1) {
+      await w.store.put({ item: involvedRowPut({ companyId: A, personId: MALLORY, taskId: `cccccccc-cccc-4ccc-8ccc-${String(n).padStart(12, "0")}`, createdAt: `2026-11-01T10:00:00.${String(n).padStart(3, "0")}Z` }, "2026-11-09T10:00:00.000Z").item });
+    }
+    await erase(w);
+    expect((await w.store.query({ pk: involvedPartition(A, MALLORY) })).items).toEqual([]);
+  });
+
+  it("erases a person whose id can never name an involved partition without error (nothing to read)", async () => {
+    const w = world();
+    await expect(erasePerson(w.deps, { companyId: A, personId: "_odd", by: ADMIN, requestId: REQ })).resolves.toMatchObject({ personId: "_odd" });
+  });
+
   it("removes the person's chat links in this company, but not an actor row a re-link gave someone else, nor their links in another company", async () => {
     const w = world();
     await link(w, A, MALLORY, "U1");
@@ -180,6 +212,22 @@ describe("person erase: what it removes", () => {
     expect(await w.store.get(orgChannelLinkKey(A, { channel: "teams", tenant: "tenant1", userId: "U2" }))).toMatchObject({ developerId: OTHER });
     expect(await w.store.get(orgDeveloperChannelLinkKey(A, MALLORY, { channel: "teams", tenant: "tenant1", userId: "U1" }))).toBeUndefined();
     expect(await w.store.get(orgChannelLinkKey(B, { channel: "teams", tenant: "tenant1", userId: "U3" }))).toMatchObject({ developerId: MALLORY });
+  });
+
+  it("removes the person's GitHub account link in this company (both rows), but not another person's, nor the same person's link in another company (L4-GH)", async () => {
+    const w = world();
+    const at = "2026-11-17T10:00:00.000Z";
+    await linkGithubAccount(w.store, { companyId: A, githubUserId: "7", login: "mallory", personId: MALLORY, linkedAt: at });
+    await linkGithubAccount(w.store, { companyId: A, githubUserId: "8", login: "other", personId: OTHER, linkedAt: at });
+    await linkGithubAccount(w.store, { companyId: B, githubUserId: "7", login: "mallory", personId: MALLORY, linkedAt: at });
+    await erase(w);
+    expect(await githubLinkOf(w.store, A, MALLORY)).toBeUndefined();
+    expect(await linkedGithubPerson(w.store, A, "7")).toBeUndefined();
+    expect(await w.store.get({ pk: `ORG#${A}#GITHUB_ACCOUNT_OF`, sk: `PERSON#${MALLORY}` })).toBeUndefined();
+    expect(await githubLinkOf(w.store, A, OTHER)).toMatchObject({ accountId: "8" });
+    expect(await githubLinkOf(w.store, B, MALLORY)).toMatchObject({ accountId: "7" });
+    // The erase is repeatable with the link already gone.
+    await expect(erase(w)).resolves.toMatchObject({ alreadyErased: true });
   });
 
   it("asks the learning erase for this company and person", async () => {

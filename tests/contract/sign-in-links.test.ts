@@ -4,6 +4,9 @@
 import { createHash } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it } from "vitest";
+import { Stack } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import { buildAgentXApp } from "../../infra/lib/app.js";
 import { AgentXError, SIGN_IN_LINK_TEXT, SLACK_OIDC_ISSUER, type WorkspaceInstance } from "@agentx/contracts";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
@@ -14,6 +17,8 @@ import { GITHUB_ISSUER, githubSignInProvider } from "../../packages/broker/src/d
 import { API, authorizeQuery, httpEvent, TEAM } from "../support/developer-fakes.js";
 import { B, SECRET, WEB, X, person, sharedSignInWorld } from "../support/company-shared-signin-world.js";
 import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, fakeGithub, type FakeGithubUser } from "../support/fake-github.js";
+import { signInRolePolicy, underSignInRole, type TableCall } from "../support/signin-role-policy.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 const OTHER = "T0OTHER9";
 const githubUsers: FakeGithubUser[] = [
@@ -104,6 +109,14 @@ function world() {
   const linkRows = () => w.db.find((row) => row.entityType === "SIGNIN_LINK_ROW");
   const companyLog = (event: string) => w.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === event);
   return Object.assign(w, { slackCode, redeem, gh, api, githubSignIn, stepUp, start, atProvider, finish, link, githubMember, linkRows, companyLog });
+}
+skipLambdaBundling();
+
+/** The named (staging) control plane, synthesized here (a deployment test may import the CDK). */
+function namedControlPlane(): unknown {
+  const app = buildAgentXApp({ agentxEnv: "staging" });
+  const stack = app.node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === "agentx-staging-control-plane")!;
+  return Template.fromStack(stack).toJSON();
 }
 const REFUSED = { status: 403, body: { error: { code: "FORBIDDEN", message: SIGN_IN_LINK_TEXT.refused } } };
 
@@ -436,7 +449,11 @@ describe("unlinking (DEC 254w)", () => {
     w.tick(1_000);
     expect(await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).toEqual({ status: 200, body: { removed: true } });
     expect(w.linkRows()).toEqual([]);
-    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toBeUndefined();
+    // DEC 254zzz33 (4): the linked identity's record is kept (never deleted), no longer pointing at P, with when and from whom it was unlinked.
+    const unlinked = w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")!;
+    expect(unlinked).toMatchObject({ revoked: false, unlinkedFrom: P, unlinkedAt: expect.any(String) as unknown, companyless: true });
+    expect(unlinked).not.toHaveProperty("mergedInto");
+    expect(w.db.find((row) => row.pk === `DEVELOPER#${sid("U0LINKME1")}`)).toHaveLength(1);
     const record = w.db.get(`DEVELOPER#${P}`, "META")!;
     expect(record).not.toHaveProperty("slackUserId");
     expect(record).not.toHaveProperty("linkedSlackUserId");
@@ -446,6 +463,9 @@ describe("unlinking (DEC 254w)", () => {
     // Slack is a stranger again: it signs in as nobody's person (no company), never as P.
     const slack = await w.signIn("U0LINKME1", { slackTeam: TEAM });
     expect(decodeJwt(slack.access!).sub).toBe(sid("U0LINKME1"));
+    // DEC 254zzz33 (review H1): the kept record joins NO company: no membership row (never a "legacy" seat in the built-in company), and its session names no company.
+    expect(w.db.get(membershipKey(sid("U0LINKME1")).pk, "COMPANY")).toBeUndefined();
+    expect(w.db.find((row) => row.entityType === "SESSION" && row.developerId === sid("U0LINKME1") && row.revokedAt === undefined)).toEqual([expect.not.objectContaining({ companyId: expect.anything() as unknown })]);
   });
 
   it("a code (or a session) made by the removed method before the unlink never becomes or stays a session", async () => {
@@ -477,7 +497,7 @@ describe("unlinking (DEC 254w)", () => {
     w.db.set({ ...w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")!, revoked: true });
     w.stepUp(p);
     expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(200);
-    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ revoked: true });
+    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ revoked: true, unlinkedFrom: P });
     expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).not.toHaveProperty("mergedInto");
     expect((await w.signIn("U0LINKME1", { slackTeam: TEAM })).refused).toBeDefined();
   });
@@ -508,4 +528,37 @@ describe("unlinking (DEC 254w)", () => {
     expect((await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, owner)).status).toBe(200);
     expect(w.companyLog("company-signin-unlink")).toEqual([expect.objectContaining({ personId: P, createdBy: person("owner") })]);
   });
+});
+
+// DEC 254zzz33: on staging the sign-in role refused a link's finish (ConditionCheckItem), the connected list (Query SIGNIN_LINKS#) and an unlink (DeleteItem). Here the whole flow runs
+// over a client that answers as DynamoDB would for the sign-in role of the synthesized named control plane (the broker's own sign-in table reads here are GetItem only, a subset).
+describe("a link, the list and an unlink under the synthesized sign-in role (DEC 254zzz33)", () => {
+  it("every sign-in table call is allowed, and the unlink deletes only the link row (the linked identity's record is kept)", async () => {
+    const policy = signInRolePolicy({ template: namedControlPlane() });
+    const w = world();
+    const seen: Array<TableCall & { allowed: boolean }> = [];
+    const wrapped = underSignInRole({ send: w.db.send.bind(w.db) }, policy, "signin", seen);
+    (w.db as unknown as { send: unknown }).send = wrapped.send;
+    const p = await w.githubMember();
+    expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    expect((await w.api("GET", "/v1/dev/me/sign-ins", p)).status).toBe(200);
+    w.stepUp(p);
+    expect(await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).toEqual({ status: 200, body: { removed: true } });
+    const shape = (call: TableCall) => `${call.action} ${call.pk.replace(/org_[0-9a-z]{20}/gu, "<org>").replace(/[a-f0-9]{64}|[0-9a-f-]{36}/gu, "<id>")}`;
+    expect(seen.filter((call) => !call.allowed).map(shape)).toEqual([]);
+    const shapes = new Set(seen.map(shape));
+    for (const needed of ["dynamodb:ConditionCheckItem COMPANY_MEMBER#<id>", "dynamodb:ConditionCheckItem SESSION#<id>",
+      "dynamodb:Query SIGNIN_LINKS#<id>", "dynamodb:DeleteItem SIGNIN_LINKS#<id>"]) expect(shapes, needed).toContain(needed);
+    // The only delete is the link row; the linked identity's DEVELOPER# record is updated, never deleted.
+    expect([...shapes].filter((one) => one.startsWith("dynamodb:DeleteItem"))).toEqual(["dynamodb:DeleteItem SIGNIN_LINKS#<id>"]);
+    // Before this change (the template without SignInCompanyGrants) each of these was AccessDenied: the staging failures.
+    const template = structuredClone(policy.template);
+    for (const id of Object.keys(template.Resources).filter((one) => /^DeveloperSignInSignInCompanyGrants[0-9A-F]{8}$/u.test(one))) delete template.Resources[id];
+    const before = signInRolePolicy({ template });
+    const added = ["dynamodb:ConditionCheckItem", "dynamodb:Query", "dynamodb:DeleteItem"];
+    const newCalls = seen.filter((call) => added.includes(call.action) && !(call.action === "dynamodb:Query" && call.pk.startsWith("SIGNIN_CLIENTS")));
+    expect(newCalls.length).toBeGreaterThan(0);
+    for (const call of newCalls) expect(before.allows(call), shape(call)).toBe(false);
+    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ unlinkedFrom: P });
+  }, 120_000);
 });

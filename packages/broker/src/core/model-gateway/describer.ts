@@ -1,4 +1,5 @@
-import { UPKEEP_ORIGIN, ROVARA_CODE_AGENT_ID, ModelRouteSchema, WorkOriginSchema, OperationSchema, PAYER_UNRESOLVED, resolvePayer, agentXError } from "@agentx/contracts";
+import { UPKEEP_ORIGIN, ROVARA_CODE_AGENT_ID, isSystemOwnerId, systemOwnerIdOf, ModelRouteSchema, WorkOriginSchema, OperationSchema, PAYER_UNRESOLVED, resolvePayer, agentXError } from "@agentx/contracts";
+import { upkeepIsOn } from "../upkeep/settings.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import type { TaskTokenDescriber } from "./token.js";
 import { readTaskTokenRecords } from "./records.js";
@@ -19,14 +20,31 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps): TaskTokenDescriber
       const origin = WorkOriginSchema.optional().safeParse(task.origin);
       if (!origin.success || origin.data === "linear") throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED);
       // Lead 4 N1: the origin `nightly` marks nightly UPKEEP AI for the gateway's upkeep cap, so a task that is not a nightly wiki refresh (the model-free nightly test run, any other task somehow marked nightly) gets no model access.
-      if (origin.data === UPKEEP_ORIGIN && task.purpose !== "wiki_build") return undefined;
+      // L4-SR2: the other upkeep AI is a repair draft: a setup run whose developer is exactly this project's system owner (derived from the company and the project), never a person's setup run marked nightly.
+      const repairDraft = origin.data === UPKEEP_ORIGIN && task.purpose === "setup_agent" && isSystemOwnerId(task.developerId) && task.developerId === systemOwnerIdOf(operation.companyId, workspace.projectName);
+      if (origin.data === UPKEEP_ORIGIN && task.purpose !== "wiki_build" && !repairDraft) return undefined;
+      // L4-SR2 (REVIEW-1 L3): a repair draft's model token is minted only while the company's effective system-runs gate, the project's own upkeep switch AND the upkeep cap's room are all open NOW (read at every mint; an absent gate, a throw or any doubt: no token),
+      // so withdrawing consent or switching upkeep off stops new model access at once, not only at the next progress pass.
+      if (repairDraft) {
+        const open = await (async (): Promise<boolean> => {
+          try {
+            if (deps.systemRuns === undefined || (await deps.systemRuns.enabled()) !== true || !(await upkeepIsOn({ store: deps.store, companyId: deps.companyId }, workspace.projectName))) return false;
+            // L4-SR2b: and the project's upkeep cap has room NOW, as the gateway says (read at every mint). An absent reader, no answer, an invalid one, zero or less: no token (a manual "Fix setup" is another path).
+            // "Room above zero" is a stop for an exhausted cap, not a promise of room for the next step: the draft's start needed the whole run's budget, and the gateway holds the real cap on every call.
+            const room = deps.upkeepRoomCents === undefined ? undefined : await deps.upkeepRoomCents(workspace.projectName);
+            return typeof room === "number" && Number.isSafeInteger(room) && room > 0;
+          } catch { return false; }
+        })();
+        if (!open) return undefined;
+      }
       // No project AI setting means projectPays=false. This core runs only Rovara Code
       // (createTaskFlowRunStarter rejects other agents). Chain payer and Linear
       // assigner facts remain unavailable; never infer them from the session.
       let payer;
       try {
         // A wiki build (W3b) is paid by the PROJECT (its monthly limit), never the person who pressed Build, whatever surface started it (DEC 254zh review fix 3). The task record's purpose, written by the start, decides.
-        if (task.purpose === "wiki_build") {
+        if (task.purpose === "wiki_build" || repairDraft) {
+          // A repair draft (L4-SR2) is paid by the project too, and counted by the gateway under the project's upkeep cap through the origin; its step is named for what it is, so the spend reads as `repair_draft`.
           payer = { kind: "project" as const, project: workspace.projectName };
         } else if (origin.data === undefined) {
           // Old records have no origin. The checked starter pays; do not infer or persist a start surface.
@@ -37,7 +55,7 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps): TaskTokenDescriber
         }
       }
       catch { throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED); }
-      return { companyId: operation.companyId, project: workspace.projectName, ...(person === undefined ? {} : { person }), payer, taskId: task.taskId, step, ...(origin.data === undefined ? {} : { origin: origin.data }), models: [model.data.alias] };
+      return { companyId: operation.companyId, project: workspace.projectName, ...(person === undefined ? {} : { person }), payer, taskId: task.taskId, step: repairDraft ? "repair_draft" : step, ...(origin.data === undefined ? {} : { origin: origin.data }), models: [model.data.alias] };
     },
   };
 }

@@ -43,7 +43,7 @@ import type { ModelSelectionService } from "../model-selection/service.js";
 import type { UsableModels } from "../model-selection/usable-models.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
-import type { LearnedContext, WikiContext } from "@agentx/contracts";
+import type { KnowledgeContext, LearnedContext, WikiContext } from "@agentx/contracts";
 import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
@@ -177,7 +177,7 @@ export interface ArtifactReader {
  */
 export interface BuildSteps {
   /** Starts the step a dispatch row stands for. Same answers as the stage machine's own runner: STARTED, DUPLICATE, STALE (the row is no longer wanted), WAITING (try again). */
-  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
+  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind" | "firstEvent">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
   /** After a coding run, a rerun of the checks, the reviews or a publication ended (the operation's result is committed). Idempotent; never throws for a task that moved on. */
   onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void>;
 }
@@ -238,6 +238,16 @@ export interface TaskFlowDeps {
    * re-check at task start included. A hosted install fills it from the flag, read for this company.
    */
   systemRuns?: { enabled(): boolean | Promise<boolean> } | undefined;
+  /**
+   * L4-U5: tells the project's admins ONCE that its setup broke (the re-check settled as broken). The host builds it over its own recipient read and the attention queue (`queueSetupBroken`); it never throws and says
+   * nothing twice for one re-check. Absent: nobody is told here (the setup page's card and the task's pause still say it).
+   */
+  setupBroken?: (input: { project: string; recheckKey: string }) => Promise<void>;
+  /**
+   * L4-SR2b: whole cents of a project's monthly upkeep cap still free, as the model gateway says NOW (core/upkeep/cap.ts `upkeepRoomCentsOf`: company, project and month checked, nothing cached). The model token of an
+   * AUTOMATIC repair draft is minted only while it answers a number above zero (read at every mint); absent, undefined, a throw, zero or less: no token. A hosted install fills it with the repair draft's wiring only.
+   */
+  upkeepRoomCents?: (project: string) => Promise<number | undefined>;
   /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
   repositoryGrants: Pick<RepositoryGrantService, "issue">;
   /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */
@@ -352,6 +362,11 @@ export interface TaskFlowDeps {
    */
   modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
   /**
+   * The model gateway's https origin (the install's `ROVARA_CORE_MODEL_GATEWAY_URL`, already checked), set by the dispatcher only where the gateway is configured. A task step that carries an `evalRequest` and goes to a worker that lists
+   * EVAL_GATEWAY_FEATURE is sent it as `evalGatewayUrl`, so the hosted worker can bind the final-check eval with no setting of its own. Absent (a laptop, no gateway): nothing is sent and the eval reads "not connected", exactly as before.
+   */
+  evalGatewayUrl?: string;
+  /**
    * DEC 254n (1): the company's engine model check, asked once before a task starts (after the access and project checks, before the limits, the admission and any write). An answer is the
    * refusal (fixed words) and the start writes nothing but its refusal audit; undefined lets the start go on. Absent: no check, exactly as before.
    */
@@ -412,8 +427,10 @@ export interface TaskFlowDeps {
   /**
    * The lessons a step is given: asked when the step's invocation is built, only for a task step. `features` are the worker's. The answer is the worker's `learnedContext` or none; it never throws into the dispatch, and a slow
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
+   * Lead 4 L4-AK2: for a worker that lists "task.knowledgeContext.v1" the answer may also carry the `knowledgeContext` (facts, skill names, the "more" line, the look-up's pull set), and a fix round passes the correction's
+   * words in `fix` so the lessons are picked again by them (ranking only).
    */
-  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
+  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }) => Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
   /**
    * The project wiki a step is given (lead 4 A1): asked when the step's invocation is built, only for a task step whose worker lists "task.wikiContext.v1". The caller passes the task's OWN project (from the
    * workspace record), its task id and the repositories of the revision it runs on; the answer is the worker's `wikiContext` or none, built from the company's wiki as it is at that moment. It never throws into the

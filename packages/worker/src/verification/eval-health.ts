@@ -72,8 +72,9 @@ export async function runEvalHealth(input: EvalHealthInput): Promise<EvalHealthR
         const output = await input.run({ run, call });
         await Promise.allSettled([...pending]);
         if (failed || usedCalls - before < 1) return refused("provider_incomplete", "the provider did not complete the run");
+        // L4-VX: a project's own eval cannot know Rovara's eval-set hash (`evalSetHashOf`, computed from the confirmed question files), so a file that omits it is measured against Rovara's own hash, exactly as the comparison run reads it (`eval-round.ts`: omitted is fine, a different hash is refused).
         const parsed = MeasuresFileSchema.safeParse(output.measures);
-        if (!parsed.success || parsed.data.questions === undefined || parsed.data.eval_set_hash !== input.key.evalSetHash || !isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit || !Number.isFinite(output.seconds) || output.seconds < 0) return refused("invalid_results", "the main-branch run has no complete attested question results");
+        if (!parsed.success || parsed.data.questions === undefined || (parsed.data.eval_set_hash !== undefined && parsed.data.eval_set_hash !== input.key.evalSetHash) || !isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit || !Number.isFinite(output.seconds) || output.seconds < 0) return refused("invalid_results", "the main-branch run has no complete attested question results");
         measures = parsed.data;
         const rows = measures.questions!;
         if (rows.length !== ids.length || rows.some(q => !saved.has(q.id) || q.samples.length !== 1)) return refused("incomplete_questions", "some questions were missing or repeated");

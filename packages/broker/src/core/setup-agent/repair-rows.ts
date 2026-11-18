@@ -8,6 +8,8 @@
 // Rows, in the project's setup partition (`setupPartition(orgId, project)`), so another company's project of the same name never meets them:
 //   REPAIR#<recheckKey>   ONE repair draft per failure (the re-check that found it broken): its state, the run's task, the request ids, why it ended
 //   REPAIR_CURRENT        the project's latest repair draft: when it started (the project's cooldown reads this)
+//   REPAIR_REV#<revision> ONE automatic draft per (project, broken setup revision), whatever the re-checks (L4-SR2): written in the claim's transaction only if absent, kept after the draft ends (a failed or
+//                         ended draft of a revision is not tried again at that revision; the manual "Fix setup" stays open) and given back only with a claim whose start never happened
 import type { DocumentKey, OrgId, SetupDriftClass } from "@agentx/contracts";
 import { setupPartition } from "./keys.js";
 
@@ -15,10 +17,11 @@ import { setupPartition } from "./keys.js";
  *  failed: the draft did not work (see `reason`); it is final, one repair per failure. ended: the draft stopped mattering (the project moved on, or a person rejected or discarded it). */
 export const REPAIR_STATES = ["starting", "drafting", "checking", "ready", "approved", "failed", "ended"] as const;
 export type RepairState = (typeof REPAIR_STATES)[number];
-export const REPAIR_REASONS = ["run_failed", "no_usable_fix", "check_failed", "superseded", "decided"] as const;
+export const REPAIR_REASONS = ["run_failed", "no_usable_fix", "check_failed", "superseded", "decided", "withdrawn", "upkeep_paused"] as const;
 export type RepairReason = (typeof REPAIR_REASONS)[number];
 
 export const repairRowKey = (orgId: OrgId, project: string, key: string): DocumentKey => ({ pk: setupPartition(orgId, project), sk: `REPAIR#${key}` });
+export const repairRevisionKey = (orgId: OrgId, project: string, revision: number): DocumentKey => ({ pk: setupPartition(orgId, project), sk: `REPAIR_REV#${String(revision)}` });
 export const repairCurrentKey = (orgId: OrgId, project: string): DocumentKey => ({ pk: setupPartition(orgId, project), sk: "REPAIR_CURRENT" });
 
 export interface RepairRow {
@@ -38,6 +41,8 @@ export interface RepairRow {
   budgetCents: number;
   claimedAt: string; startedAt?: string; decidedAt?: string;
 }
+/** The claim of a broken revision: which re-check's draft owns it. */
+export interface RepairRevisionRow { entityType: "SETUP_REPAIR_REVISION"; orgId: OrgId; project: string; revision: number; key: string; claimedAt: string }
 export interface RepairCurrentRow { entityType: "SETUP_REPAIR_CURRENT"; orgId: OrgId; project: string; key: string; startedAt: string }
 
 /** The least time between two automatic repair drafts of one project: a failure that comes back with every commit costs one draft at a time, never one per commit. */
@@ -55,7 +60,10 @@ export const REPAIR_WORDS = {
     run_failed: "Rovara tried to draft a fix but could not finish. Nothing was changed.",
     no_usable_fix: "Rovara drafted a fix but none of it could be used. Nothing was changed.",
     check_failed: "Rovara drafted a fix but it did not pass its check on a fresh machine. Nothing was changed.",
+    upkeep_paused: "Rovara stopped drafting a fix because nightly upkeep reached its limit. Nothing was changed.",
   },
+  /** An automatic draft that a person's change stopped (the company's consent withdrawn, or upkeep switched off) before it finished. */
+  withdrawn: "Rovara stopped drafting a fix because automatic runs were switched off. Nothing was changed.",
 } as const;
 
 /** "$4" for 400 cents, "$1.50" for 150. */

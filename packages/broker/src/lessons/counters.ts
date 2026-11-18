@@ -13,6 +13,8 @@ import type { AccessCheckPort } from "./access-port.js";
 import { readVisible, type LessonLog } from "./read-visible.js";
 import type { IdentitySet, Lesson } from "./types.js";
 import type { LoadReport } from "@agentx/contracts";
+import { lessonCreditShares, type UseReport } from "./credit.js";
+import type { EvidenceSink } from "./evidence.js";
 
 const DAY = 86_400_000;
 export const REVERT_WINDOW_MS = 14 * DAY;
@@ -30,6 +32,16 @@ export interface CounterDeps extends LessonDeps {
   store: LessonStore; judge: CorrectionJudge; settings: LearningSettingsReader; alerts?: AlertSink; /** Where lesson vectors are kept: a lesson the counters retire loses its vector. */ vectors?: LessonVectors;
   /** Asked before each judge call: false means this task's time for judging is used up (the correction is then unjudged and the outcome is reported `deferred`). Absent: always. */
   mayCall?: () => boolean;
+  /**
+   * Phase 2: where the graded evidence rows are written (`evidence.ts`): a "for" (a share of a clean merge, 1/k), an "against" (a person's direct mark, or a correction that came back with the lesson loaded) and each task's
+   * repeat result. Absent: no rows are written (the lesson's own counters are all the strength has). A write that fails never fails the mark that caused it.
+   */
+  evidence?: EvidenceSink;
+  /**
+   * Phase 2: the task's use reports, one per Build or Fix step (the step's own account of which lessons it used and whether the change touched each one's area; L4-AK2's `knowledgeUseReport` as the broker keeps it). Absent, or
+   * no report: the credit of a clean merge is shared among the loaded lessons whose area the change touched (`credit.ts`). A read that fails is no report.
+   */
+  useReports?: (key: ScopeKey, taskId: string) => Promise<readonly UseReport[]>;
 }
 
 export interface TaskCorrection {
@@ -42,8 +54,12 @@ export interface TaskCorrection {
 export interface TaskOutcome {
   workspaceId: string; project: string; taskId: string; outcome: "merged" | "closed" | "abandoned" | "reverted"; sendBacks: number; mergedAt?: number;
   corrections: readonly TaskCorrection[];
+  /** The files the task's change touched (the merged change's own file list), for the area overlap a clean merge's credit needs. Absent: not known (only a lesson with no code area can then share the credit unless a use report says its area was touched). */
+  touchedPaths?: readonly string[];
   /** An eval run writes no counters. */
   evalRun?: boolean;
+  /** Lead 4 L4-LP3Wc: the project paused "After merge": no merge mark is queued for this task (a revert never gets here). Corrections are still rated. */
+  skipOutcomeMarks?: true;
 }
 
 /**
@@ -91,9 +107,12 @@ export async function reverseHarm(deps: LessonDeps & { store: LessonStore }, key
 }
 
 /** Adds one harmful mark and runs the auto-retire rule: harmful at least 2 and more than helpful. Tier 0 retires at once; others go to a person. */
-async function addHarmful(deps: CounterDeps, key: ScopeKey, lessonId: string, forceProposal: boolean): Promise<void> {
+async function addHarmful(deps: CounterDeps, key: ScopeKey, lessonId: string, forceProposal: boolean, evidenceId: string): Promise<void> {
   const updated = await deps.store.mutate(key, lessonId, (l) => ({ counters: { ...l.counters, harmful: l.counters.harmful + 1 } }));
   if (updated === undefined) return;
+  // A person's direct mark is a whole "against" in the lesson's strength (never a revert: a revert is not evidence against a lesson). The marks it already had are kept as the lesson's baseline first.
+  await deps.evidence?.baseline({ workspaceId: key.workspaceId, project: key.project, lessonId, forW: updated.counters.helpful, againstW: updated.counters.harmful - 1, at: deps.now() });
+  await deps.evidence?.note({ workspaceId: key.workspaceId, project: key.project, lessonId, kind: "against", weight: 1, at: deps.now(), id: evidenceId });
   const failing = meetsRetireRule(updated);
   // A lesson live with no person behind it (tier 0, or on trial / stable) retires itself when its marks turn against it; the others go to a person.
   if (failing && (updated.tier === 0 || isTrialLesson(updated)) && updated.status === "active") {
@@ -108,10 +127,18 @@ async function addHarmful(deps: CounterDeps, key: ScopeKey, lessonId: string, fo
   }
 }
 
-async function addHelpful(deps: CounterDeps, key: ScopeKey, lessonId: string, expiryDays: number | undefined): Promise<void> {
+/** `weight` is the share of the evidence this mark is worth (1 for a person's button; 1/k for a clean merge shared among k lessons). The counter still counts the mark (it renews the lesson); the strength counts the share. */
+async function addHelpful(deps: CounterDeps, key: ScopeKey, lessonId: string, expiryDays: number | undefined, weight: number, evidenceId: string): Promise<void> {
   const now = deps.now();
   const updated = await deps.store.mutate(key, lessonId, (l) => ({ counters: { ...l.counters, helpful: l.counters.helpful + 1 }, lastHelpfulAt: now }));
-  if (updated !== undefined) await renewLesson(deps.store, key, lessonId, now, expiryDays, "helpful");
+  if (updated === undefined) return;
+  // The marks the lesson already had stand as its baseline (written once, even when it had none), so its first piece of evidence does not throw them away and no mark is counted twice.
+  await deps.evidence?.baseline({ workspaceId: key.workspaceId, project: key.project, lessonId, forW: updated.counters.helpful - 1, againstW: updated.counters.harmful, at: now });
+  await deps.evidence?.note({ workspaceId: key.workspaceId, project: key.project, lessonId, kind: "for", weight, at: now, id: evidenceId });
+  await renewLesson(deps.store, key, lessonId, now, expiryDays, "helpful");
+  // A lesson that helped is not quiet any more: its fade state starts again (the quiet renewal is once per quiet stretch). Only written when there is a state to clear.
+  const fade = await deps.evidence?.readFade(key, lessonId);
+  if (fade !== undefined && fade !== "unreadable" && (fade.renewals > 0 || fade.askedAt !== undefined)) await deps.evidence?.writeFade(key, lessonId, { renewals: 0 }, now);
 }
 
 /**
@@ -153,6 +180,16 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
   const named = (lesson: Lesson): boolean => (lesson.scope.paths ?? []).length > 0 && outcome.corrections.some((c) => c.paths.length > 0 && inScope(lesson, c));
   const shuffle = (lesson: Lesson): string => createHash("sha256").update(`${outcome.taskId}\u0000${lesson.id}`).digest("hex");
   lessons.sort((a, b) => Number(named(b)) - Number(named(a)) || shuffle(a).localeCompare(shuffle(b)));
+  // Phase 2: one clean merge is ONE credit, shared (1/k) among the lessons the agent reported using whose area the change touched (`credit.ts`). Only worked out for a merge that can be credited at all.
+  let shares = new Map<string, number>();
+  if (outcome.outcome === "merged" && outcome.sendBacks <= 1) {
+    let reports: readonly UseReport[] | undefined;
+    // A use report that cannot be read is NOT "no report" (that would send the credit down the weaker road): nothing is counted now and a later delivery counts the task (`deferred`).
+    try { reports = await deps.useReports?.(key, outcome.taskId); } catch { result.deferred = true; return result; }
+    // With no report the credit is shared among the lessons of the Build and Fix steps (the steps whose change was merged); with reports the reports name them.
+    const buildLoaded = reachedLessonIds((await deps.store.manifests(key, outcome.taskId)).filter((m) => m.stage === "IMPLEMENT" && m.memory === "live"));
+    shares = lessonCreditShares({ lessons: new Map(lessons.map((l) => [l.id, l] as const)), loaded: reports !== undefined && reports.length > 0 ? loaded : buildLoaded, reports, touched: outcome.touchedPaths });
+  }
   let judgeCalls = 0;
   for (const lesson of lessons) {
     const lessonId = lesson.id;
@@ -185,6 +222,17 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
       if (rating === "caused" || rating === "contradicts") { blamed = true; if (correction.authorId !== undefined) blamers.add(correction.authorId); }
       if (rating === "same_ignored") { ignored = true; deps.metrics?.count("learning.loaded_but_ignored"); }
     }
+    // Phase 2: this task ended with the lesson loaded (a revert is not an end of a task's own work: it adds no row). Whether the correction came back although the lesson said it is the judge's `same_ignored` finding, an
+    // "against" of weight 1 (the lesson is not working as worded); a task where it did not come back is a "matching task" the lesson is shown to have held in. Once per task and lesson.
+    if (outcome.outcome === "merged" || outcome.outcome === "closed") {
+      const taskDone = { workspaceId: key.workspaceId, project: key.project, lessonId, at: deps.now() };
+      await deps.evidence?.repeat({ ...taskDone, taskId: outcome.taskId, back: ignored });
+      if (ignored) {
+        // This may be the lesson's first piece of evidence: its counters stand as the baseline first (the same rule as a person's mark), so the marks it already had are not thrown away.
+        await deps.evidence?.baseline({ ...taskDone, forW: lesson.counters.helpful, againstW: lesson.counters.harmful });
+        await deps.evidence?.note({ ...taskDone, kind: "against", weight: 1, id: `ignored:${outcome.taskId}` });
+      }
+    }
     if (blamed) {
       // The task's record that this lesson was blamed: harm wins, so a later pass that rates the same task differently queues no helpful mark for it.
       await deps.store.markOnce(key, `harmful:${outcome.taskId}:${lessonId}`);
@@ -198,7 +246,7 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
         if (ref === undefined) continue;
         if (!(await deps.store.markOnce(key, `feedback:${lessonId}:${ref}`))) continue;
         await deps.store.noteHarm(key, ref, lessonId);
-        await addHarmful(deps, key, lessonId, false);
+        await addHarmful(deps, key, lessonId, false, `mark:${ref}`);
         marked = true;
       }
       if (marked) result.harmful.push(lessonId);
@@ -213,13 +261,16 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
       await deps.store.markOnce(key, `reverted:${outcome.taskId}:${lessonId}`);
       continue;
     }
-    if (outcome.outcome === "merged" && outcome.sendBacks <= 1 && !unjudged && !ignored) {
+    if (outcome.outcome === "merged" && outcome.skipOutcomeMarks !== true && outcome.sendBacks <= 1 && !unjudged && !ignored) {
       // A task end delivered again after its mark settled, or after that task's revert took the mark back, queues nothing (the settled and reverted once-keys are the record): a repeat extends nothing and counts nothing.
       // Nor does a lesson this task already blamed.
       if (await deps.store.seenOnce(key, `helpful-final:${outcome.taskId}:${lessonId}`) || await deps.store.seenOnce(key, `reverted:${outcome.taskId}:${lessonId}`) || await deps.store.seenOnce(key, `harmful:${outcome.taskId}:${lessonId}`)) continue;
+      // No credit without a share: a lesson the agent did not report (or whose area the change did not touch) earned nothing from this merge, and nothing is queued for it.
+      const share = shares.get(lessonId);
+      if (share === undefined) continue;
       const dueAt = (outcome.mergedAt ?? deps.now()) + REVERT_WINDOW_MS;
       // The queued mark is the whole hold: the expiry sweep leaves a lesson with a queued mark alone, so a revert (which takes the mark back) ends the hold and the lesson then fades. No expiry is moved here.
-      await deps.store.addPending({ key: `helpful:${outcome.taskId}:${lessonId}`, workspaceId: key.workspaceId, project: key.project, lessonId, taskId: outcome.taskId, dueAt });
+      await deps.store.addPending({ key: `helpful:${outcome.taskId}:${lessonId}`, workspaceId: key.workspaceId, project: key.project, lessonId, taskId: outcome.taskId, dueAt, weight: share });
       result.queuedHelpful.push(lessonId);
     }
   }
@@ -231,7 +282,7 @@ export async function settleHelpful(deps: CounterDeps, key: ScopeKey, limit = 20
   const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
   let applied = 0;
   for (const entry of await deps.store.duePending(key, deps.now(), limit)) {
-    if (await deps.store.markOnce(key, `helpful-final:${entry.taskId}:${entry.lessonId}`)) { await addHelpful(deps, key, entry.lessonId, resolved.expiryDays); applied += 1; }
+    if (await deps.store.markOnce(key, `helpful-final:${entry.taskId}:${entry.lessonId}`)) { await addHelpful(deps, key, entry.lessonId, resolved.expiryDays, entry.weight ?? 1, `settled:${entry.taskId}`); applied += 1; }
     await deps.store.removePending(key, entry.key);
   }
   return applied;
@@ -256,8 +307,8 @@ export async function recordFeedback(deps: CounterDeps & { access: AccessCheckPo
   if (ref === undefined) return { ok: false, code: "not_permitted" };
   if (!(await deps.store.markOnce(key, `feedback:${input.lessonId}:${ref}`))) return { ok: false, code: "repeat" };
   const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
-  if (input.kind === "helpful") await addHelpful(deps, key, input.lessonId, resolved.expiryDays);
-  else await addHarmful(deps, key, input.lessonId, true);
+  if (input.kind === "helpful") await addHelpful(deps, key, input.lessonId, resolved.expiryDays, 1, `mark:${ref}`);
+  else await addHarmful(deps, key, input.lessonId, true, `mark:${ref}`);
   await emitAudit(deps.audit, { action: input.kind === "helpful" ? "lesson.helpful" : "lesson.wrong_here", workspaceId: key.workspaceId, project: key.project, lessonId: input.lessonId, actor: input.userId, facts: { task: input.taskId } });
   return { ok: true };
 }
@@ -277,7 +328,7 @@ async function thumbsDown(deps: CounterDeps, key: ScopeKey, lesson: Lesson, inpu
     return { ok: true };
   }
   if (!(await deps.store.markOnce(key, `feedback:${input.lessonId}:${ref}`))) return { ok: false, code: "repeat" };
-  await addHarmful(deps, key, lesson.id, true);
+  await addHarmful(deps, key, lesson.id, true, `mark:${ref}`);
   await emitAudit(deps.audit, { action: "lesson.wrong_here", workspaceId: key.workspaceId, project: key.project, lessonId: lesson.id, actor: input.userId, facts: { task: input.taskId } });
   return { ok: true };
 }

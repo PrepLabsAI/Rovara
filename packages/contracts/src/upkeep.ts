@@ -5,6 +5,7 @@
 //   - a refused upkeep call is HTTP 422 `upkeep_paused` with the header `x-rovara-upkeep-pause` = one of `UPKEEP_PAUSE_REASONS`; its message is one of the fixed sentences below (the gateway's `UPKEEP_PAUSE_MESSAGES`).
 //   - the admins' notice is Code's: one attention event per company, project, month and reason (`upkeepNoticeId`), kind `upkeep_paused`, in fixed words.
 import { z } from "zod";
+import { OrgIdSchema } from "./browser-ids.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** The TC-1 `src` claim that marks nightly upkeep AI (Cloud: model-gateway-token.ts WORK_ORIGINS, upkeep-cap.ts UPKEEP_ORIGIN). */
@@ -13,6 +14,19 @@ export const UPKEEP_ORIGIN = "nightly" as const;
 export const UPKEEP_TARGET_KIND = "upkeep" as const;
 /** The default upkeep cap, shown by the setup page; the gateway holds the real number. */
 export const UPKEEP_DEFAULT_MONTH_USD = 25;
+/**
+ * L4-SR1 (nightly wiki refresh): the gateway's cap READ. Code never starts nightly AI on a guess that the upkeep cap is enforced: it starts only while the gateway itself says so for THIS company, project and month.
+ * A service read, the same family as the offered-models read (broker `offered-models-http.ts`): `GET <gateway>/v1/service/companies/<company>/upkeep/<project>` with a service token (aud `UPKEEP_CAP_AUDIENCE`),
+ * answering `UpkeepCapReadSchema`. Anything else (no route, 404, a bad answer, a late one, another month or project) is "not known", and nothing is started.
+ */
+export const UPKEEP_CAP_AUDIENCE = "rovara-model-gateway-upkeep-cap" as const;
+/** What the gateway says of one project's nightly upkeep cap (`company` echoes the company the token named: Code refuses an answer for another): `enforced` is always true (a gateway that does not hold the cap does not answer); `limitMicros` is the effective `upkeep_month` limit (the default when none was set, 0 = no upkeep spend); `spentMicros` is what finished upkeep calls cost this month. */
+export const UpkeepCapReadSchema = z.object({
+  version: z.literal(1), company: OrgIdSchema, project: z.string().regex(AGENTX_NAME_PATTERN), month: z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/u), enforced: z.literal(true),
+  limitMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), spentMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export type UpkeepCapRead = z.infer<typeof UpkeepCapReadSchema>;
+
 /** The header the gateway names the pause reason in. */
 export const UPKEEP_PAUSE_HEADER = "x-rovara-upkeep-pause" as const;
 
@@ -110,6 +124,13 @@ export type UpkeepSwitchBody = z.infer<typeof UpkeepSwitchBodySchema>;
 export const UpkeepCapSchema = z.object({ monthlyUsd: z.number().nonnegative().nullable(), canRaise: z.boolean() }).strict();
 export type UpkeepCap = z.infer<typeof UpkeepCapSchema>;
 /**
+ * L4-SR1: what nightly upkeep spent on this project this UTC month, for the page's "Nightly upkeep: $X of $Y" line ($Y is `cap.monthlyUsd`). Only people who manage the project get it (as the cap). It is built from
+ * the settled cost of each finished nightly run, as the install's own cost ledger booked it: `spentUsd` counts the runs whose cost is KNOWN; a run whose cost is not known (no price, another currency, no usage
+ * booked) is counted in `unknownRuns` and adds nothing, so when `unknownRuns` is more than 0 `spentUsd` is a floor ("at least"), never a made-up number and never a quiet zero.
+ */
+export const UpkeepSpendSchema = z.object({ month: UpkeepMonthSchema, spentUsd: z.number().nonnegative(), runs: z.number().int().nonnegative(), unknownRuns: z.number().int().nonnegative() }).strict();
+export type UpkeepSpend = z.infer<typeof UpkeepSpendSchema>;
+/**
  * What GET and PUT answer.
  *   enabled              the PROJECT's switch (off by default).
  *   canManage            the caller may change the project's switch: a live company owner or admin, or the project's administrator.
@@ -117,9 +138,12 @@ export type UpkeepCap = z.infer<typeof UpkeepCapSchema>;
  *   systemRunsOn         EFFECTIVE system runs: the ceiling AND the company's consent (what actually runs now).
  *   canEnableSystemRuns  the caller may set the company's consent (a live company owner or admin) and the ceiling is on (there is something to consent to).
  *   cap                  see `UpkeepCapSchema`.
+ *   paused               (L4-U5, managers only) nightly upkeep is paused right now and why; see the schema.
  */
 export const UpkeepViewSchema = z.object({
-  enabled: z.boolean(), canManage: z.boolean(), available: z.boolean(), systemRunsOn: z.boolean(), canEnableSystemRuns: z.boolean(), cap: UpkeepCapSchema,
+  enabled: z.boolean(), canManage: z.boolean(), available: z.boolean(), systemRunsOn: z.boolean(), canEnableSystemRuns: z.boolean(), cap: UpkeepCapSchema, spend: UpkeepSpendSchema.optional(),
+  /** L4-U5: for a person who manages the project, only while the LAST night that was decided was a pause this month: why nightly upkeep is paused (the admins' notice's reason; the page says it in `UPKEEP_NOTICE_WORDS`). Absent otherwise. */
+  paused: z.object({ reason: UpkeepPauseReasonSchema, month: UpkeepMonthSchema }).strict().optional(),
 }).strict();
 export type UpkeepView = z.infer<typeof UpkeepViewSchema>;
 

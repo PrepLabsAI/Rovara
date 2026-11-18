@@ -16,15 +16,16 @@ import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, projectMemberKey, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } from "./github-connect-routes.js";
+import { isGithubLinkPath, routeGithubLink, type GithubLinkWiring } from "./github-account-link-routes.js";
 import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
 import { routeHostedIntake } from "./hosted-intake-routes.js";
 import type { HostedIntake } from "./hosted-intake.js";
-import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
+import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js"; import { knowledgeSwitchedOff, type KnowledgeApi } from "../core-host/knowledge-api.js"; import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
 import { isSlackChannelLinkPath, routeSlackChannelLink, type SlackChannelWiring } from "./slack-channel-link.js";
-import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js";
+import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js"; import { isCompanyEgressPath, routeCompanyEgress, type CompanyEgressWiring } from "./company-egress-routes.js";
 import {
   AgentXNameSchema, AgentXError,
   IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type OrgRole,
@@ -197,6 +198,8 @@ export interface DeveloperApiConfiguration {
   companyMembers?: CompanyMemberActions;
   /** Guided onboarding PR 1: the GitHub connect routes (github-connect-routes.ts). Absent (or no company layer): those routes are unknown. */
   githubConnect?: GithubConnectWiring;
+  /** L4-GH: a person links their own GitHub account (github-account-link-routes.ts). Absent (or no company layer): those routes are unknown. */
+  githubLink?: GithubLinkWiring;
   /** Guided onboarding PR 4: Add to Slack (slack-company-install.ts). Absent (or no company layer): those routes are unknown. */
   slackInstall?: SlackInstallWiring;
   /** Guided onboarding PR 5: a project's Slack channel (slack-channel-link.ts). Absent (or no company layer): those routes are unknown. */
@@ -206,7 +209,7 @@ export interface DeveloperApiConfiguration {
   /** L2-4: a project's waiting tickets on the core (hosted-intake-routes.ts), set only while the core switch serves and Linear is wired. Absent (or no company layer): those routes are unknown. */
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
-  companyEngineModel?: CompanyEngineModelWiring;
+  companyEngineModel?: CompanyEngineModelWiring; companyEgress?: CompanyEgressWiring; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
   /**
    * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
    * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
@@ -239,7 +242,7 @@ export interface DeveloperRouteDependencies {
   /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
   tasks?: DeveloperTaskActions;
   /** Lane LM8: the Code lessons API (`core-host/lessons-api.ts`), behind the lessons switch. Absent (the default, until the deployment wires it): every lessons route answers "Lessons are off." and reads nothing. */
-  lessons?: Pick<LessonsApi, "answer">;
+  lessons?: Pick<LessonsApi, "answer">; /** L4-AK1H: the hosted team knowledge reads for tools outside Rovara (`core-host/knowledge-api.ts`), behind the same lessons switch. Absent: a person gets the fixed "off" answer, a script token is refused, and nothing is read. */ knowledge?: Pick<KnowledgeApi, "answer">;
   /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
   lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
@@ -2105,7 +2108,13 @@ async function companySelfCreateRoute(deps: DeveloperRouteDependencies, request:
 }
 
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
-export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40}))$/u;
+
+/** L4-AK1H: the team knowledge reads' paths (`core-host/knowledge-api.ts` parses the same paths; a test holds the two equal). Both are POSTs (a repository's address stays out of addresses and access logs). */
+export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/areas)$/u;
+
+/** Lessons phase 4: the weekly cards and what a person does with them (`core-host/lessons-graduation.ts` parses the same paths, with strict ids; a test holds the two equal where they are valid). Answered by the same lessons API. */
+export const LESSONS_GRADUATION_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/(?:(graduation)|tidy\/(retire-chosen|later)|check-drafts\/([^/]+)\/(started|dismiss)|rules\/([^/]+)\/(retire)|([^/]+)\/(graduate|graduate-later|both-places))$/u;
 
 /** The Home number's paths (`core-host/lessons-repeats-api.ts` parses the same paths; a test holds the two equal). */
 export const LESSONS_REPEATS_ROUTES = /^\/v1\/dev\/(?:projects\/([^/]+)\/)?lessons\/repeats$/u;
@@ -2126,6 +2135,7 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
   return routeCompanyMembers({
     documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
     projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
+    ...(deps.developer.githubLink === undefined ? {} : { githubLinks: { store: deps.developer.githubLink.store, log: deps.developer.githubLink.log } }),
   }, { caller: person, stepUp, companyId }, request, url);
 }
 
@@ -2140,6 +2150,19 @@ async function githubConnectRoute(deps: DeveloperRouteDependencies, request: Ada
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   return routeGithubConnect({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url, stepUp);
+}
+
+/** L4-GH: the person's own GitHub link routes. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function githubLinkRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.githubLink;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // The step-up the verified token carries travels beside the caller (its age is checked at start and at claim).
+  const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeGithubLink({ documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url, stepUp);
 }
 
 /** Guided onboarding PR 4: the Add to Slack routes. Unknown, before anyone is authenticated, without the company layer or the wiring. */
@@ -2269,15 +2292,45 @@ async function routeMachineSize(deps: DeveloperRouteDependencies, caller: Develo
   }
 }
 
+/** L4-EGR: the company's view of Rovara's outbound addresses. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function companyEgressRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.companyEgress;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // Full access only (the route table's row), checked while authenticating, before any membership is read.
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeCompanyEgress({ documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, wiring }, caller, companyId, request);
+}
+
+/**
+ * L4-AK1H: `POST /v1/dev/projects/{project}/lessons` and `POST .../knowledge/areas` on a hosted install. A script token (`Bearer rvst_...`) is checked by the knowledge API itself (it reaches only these two reads, and only with the
+ * `lessons` permission naming the project); anything else is a person's sign-in, verified like every other developer route (the row's scope applies). The company is never read from the request.
+ */
+async function knowledgeRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL, route: DevRoute): Promise<unknown> {
+  const wire = { method: request.method, path: url.pathname, authorization: request.headers.authorization, ...(request.body === undefined ? {} : { body: request.body }) };
+  if (isScriptTokenHeader(request.headers.authorization)) {
+    if (deps.knowledge === undefined) throw agentXError("AUTH_REQUIRED", "Script tokens are turned off here.");
+    return deps.knowledge.answer(wire, { kind: "token" });
+  }
+  const { caller } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  if (deps.knowledge === undefined) return knowledgeSwitchedOff(wire, deps.now());
+  return deps.knowledge.answer(wire, { kind: "person", personId: caller.developerId });
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
+  if (isGithubLinkPath(url.pathname)) return githubLinkRoute(deps, request, url);
   if (isSlackChannelLinkPath(url.pathname)) return slackChannelLinkRoute(deps, request, url);
   if (isSlackInstallPath(url.pathname)) return slackInstallRoute(deps, request, url);
   if (isLinearConnectPath(url.pathname)) return linearConnectRoute(deps, request, url);
   const intakeMatch = HOSTED_INTAKE_ROUTES.exec(url.pathname);
   if (intakeMatch !== null) return hostedIntakeRoute(deps, request, url, intakeMatch);
   if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
+  if (isCompanyEgressPath(url.pathname)) return companyEgressRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company") return companySelfCreateRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
@@ -2353,6 +2406,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   // Spec 065: a registered service acting as its signed-in person, within its scopes.
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
+  // L4-AK1H: team knowledge for a tool outside Rovara: a signed-in person, or a script token with the Team knowledge permission. It is answered before the person sign-in below because a script token is not a JWT.
+  if (request.method === "POST" && KNOWLEDGE_API_ROUTES.test(url.pathname)) return knowledgeRoute(deps, request, url, route);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
   const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
@@ -2372,7 +2427,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (url.pathname === "/v1/dev/me/sign-in-factors") return routeSignInFactors(deps.developer.signInLinks, caller, request, url); // L4-MF4: the caller's own confirmation email (masked) and passkeys (sign-in-link-routes.ts).
   if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
   // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
-  if (LESSONS_API_ROUTES.test(url.pathname)) {
+  if (LESSONS_API_ROUTES.test(url.pathname) || LESSONS_GRADUATION_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
   }

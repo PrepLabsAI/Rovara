@@ -36,6 +36,8 @@ export interface DeveloperRecord { developerId: string; provider: DeveloperSignI
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
   email?: string; slackUserId?: string; /** DEC 254w: a connected install-workspace Slack user (kept by every sign-in), and on a connected sign-in's own record the person it signs in as. */ linkedSlackUserId?: string; mergedInto?: string;
+  /** DEC 254zzz33 (4): on a connected sign-in's own record that was unlinked (kept, never deleted): when, and from which person. */
+  unlinkedAt?: string; unlinkedFrom?: string;
   /** DEC 254e: the Slack workspace (id, and its name when Slack gives one) of a Slack sign-in with Code's company layer on. Never a company. */
   slackTeamId?: string; slackTeamName?: string;
   firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
