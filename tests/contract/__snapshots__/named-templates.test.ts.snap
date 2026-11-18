@@ -6034,13 +6034,55 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             {
               "Action": "kms:Sign",
               "Condition": {
+                "StringEquals": {
+                  "kms:MessageType": "RAW",
+                  "kms:SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256",
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "DispatcherServiceRole904BCD09",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+              "Sid": "DispatcherSignsPolicyQuestions",
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "DispatcherServiceRole904BCD09",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+              "Sid": "DispatcherReadsPolicyQuestionKey",
+            },
+            {
+              "Action": "kms:Sign",
+              "Condition": {
                 "ArnNotEquals": {
-                  "aws:PrincipalArn": {
-                    "Fn::GetAtt": [
-                      "BrokerServiceRole1938BCC9",
-                      "Arn",
-                    ],
-                  },
+                  "aws:PrincipalArn": [
+                    {
+                      "Fn::GetAtt": [
+                        "BrokerServiceRole1938BCC9",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DispatcherServiceRole904BCD09",
+                        "Arn",
+                      ],
+                    },
+                  ],
                 },
               },
               "Effect": "Deny",
@@ -6064,6 +6106,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     {
                       "Fn::GetAtt": [
                         "DeveloperSignInFunctionServiceRole47322E59",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DispatcherServiceRole904BCD09",
                         "Arn",
                       ],
                     },
@@ -7262,6 +7310,20 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
+            "DEVELOPER_TOKEN_ISSUER": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/auth",
+                ],
+              ],
+            },
             "INVOKE_SIGNING_KEY_ARN": {
               "Fn::GetAtt": [
                 "InvokeSigningKey2B33EC11",
@@ -7269,6 +7331,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               ],
             },
             "MAX_DISPATCH_ATTEMPTS": "5",
+            "POLICY_HOOK_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInPolicyHookKey1CC2C9E2",
+                "Arn",
+              ],
+            },
             "PROVISIONER_ARN": {
               "Ref": "SessionsProvisioner9C44055B",
             },

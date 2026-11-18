@@ -1,6 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
+import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
 import { Template } from "aws-cdk-lib/assertions";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -289,7 +290,8 @@ describe("the named TEST proof-only installation gate", () => {
       });
       // DEC 254h: GitHub sign-in's named-environment additions are asserted and taken out (tests/support/github-signin-template.ts); legacy has none.
       // ENV-ROOM 2's additions (the broker names parameter and the IAM room made for it) are asserted and taken out first (tests/support/broker-environment-template.ts).
-      const pinned = label === "legacy" ? template : withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(structuredClone(template))), label === "named" ? "agentxlivetest123" : "staging");
+      // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's question signer is asserted and taken out (tests/support/dispatcher-hook-signer-template.ts); legacy has none.
+      const pinned = label === "legacy" ? template : withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(structuredClone(template))), label === "named" ? "agentxlivetest123" : "staging"));
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
