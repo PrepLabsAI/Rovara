@@ -539,6 +539,27 @@ export async function hostedRoundCap(registry: Pick<AdapterRegistry, "require">,
   return { limitUsd: cap.micros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) };
 }
 
+/** The most admins one notice names (a company with more is told through its first ones, by the port's sorted list). */
+export const ADMIN_NOTICE_PEOPLE_MAX = 20;
+
+/**
+ * Who is told an admin notice (L4-MCPA): the company's owners AND admins, read live. The people port is asked company-wide (no project), whose `eligibleIds` are the live owners and admins and never a project's
+ * maintainers (`ownerIds` alone would leave out every non-owner admin). They are given as the ids notices are addressed by (`developerIdOf`); a person the identity no longer names is left out. A list the port could
+ * not complete tells nobody. Queueing and delivery both ask this one function, so a person removed or demoted since a notice was queued is not told.
+ */
+export async function adminNoticeIdsOf(
+  people: Pick<HostedLessonPeople, "approvers">, identity: { getPrincipal(companyId: string, personId: string): Promise<Pick<Principal, "provider" | "personId"> | undefined> }, companyId: OrgId,
+): Promise<string[]> {
+  const listed = await people.approvers(companyId, undefined);
+  if (!listed.complete) return [];
+  const ids: string[] = [];
+  for (const personId of listed.eligibleIds.slice(0, ADMIN_NOTICE_PEOPLE_MAX)) {
+    const principal = await identity.getPrincipal(companyId, personId);
+    if (principal !== undefined) ids.push(developerIdOf(principal));
+  }
+  return ids;
+}
+
 /**
  * The deployed identity's display name for a person: read live from their sign-in record, never for a revoked or unknown person. The name goes through the one display helper
  * (`profileDisplayName`, DEC 254p (a)): a GitHub person's is clean, cut text with no markup, address or placeholder shape; any other person's is exactly as stored.
@@ -984,18 +1005,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L4-AK1H: the same company, people and lessons, for the reads a tool outside Rovara makes. A script token is checked against its own company's token store and identity (never the caller's word), and only for a company the
       // lessons switch covers; its creator is read live (a removed member, or one whose role changed, is nobody).
       const switchValue = lessonsSwitch.value;
-      // Who is told about an unusual amount of reading: the company's owners (the people port's list) now, by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
-      const adminsOf = async (companyId: OrgId): Promise<string[]> => {
-        const listed = await lessonsPeople(companyId).approvers(companyId, undefined);
-        if (!listed.complete) return [];
-        const identity = (await app.registry()).require("identity");
-        const ids: string[] = [];
-        for (const personId of listed.ownerIds.slice(0, 20)) {
-          const principal = await identity.getPrincipal(companyId, personId);
-          if (principal !== undefined) ids.push(developerIdOf(principal));
-        }
-        return ids;
-      };
+      // Who is told about an unusual amount of reading: the company's owners and admins now (`adminNoticeIdsOf`; a list that cannot be completed tells nobody, the audit record still says it).
+      const adminsOf = async (companyId: OrgId): Promise<string[]> => await adminNoticeIdsOf(lessonsPeople(companyId), (await app.registry()).require("identity"), companyId);
       // Delivery's own check, read now: a queued admin notice is told only to a person who is one of the company's admins at that moment (fail closed on any fault).
       adminNotice = async (orgId, developerId) => (await adminsOf(orgId)).includes(developerId);
       knowledge = createKnowledgeApi({
