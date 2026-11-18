@@ -221,6 +221,7 @@ it("pins S3 migration text and every catalog constructor caller, including all w
     "packages/broker/src/aws/broker.ts": [5, 0], // registration + repair dual-write corePlan in the legacy transaction; other calls read/check
     "packages/broker/src/aws/core-project-backfill.ts": [0, 1], // fenced L4 planner, appended atomically by registration/repair
     "packages/broker/src/aws/admin-name-collision.ts": [1, 1], // DEC 254zzz6 D2: read-only: the legacy catalog row's company and the caller's own named company's catalog row (a name-only admin route's collision refusal); no write
+    "packages/broker/src/aws/company-layout.ts": [0, 1], // DEC 254zzz80: the named company's catalog pointer read (latest revision in the core's order); no write
     "packages/broker/src/aws/company-project-names.ts": [0, 3], // L2-1: own-company name check reads + one ConditionCheck in the registration transaction; no catalog write
     "packages/broker/src/aws/developer-tasks.ts": [1, 0], // legacy task ConditionCheck
     "packages/broker/src/aws/project-catalog-backfill.ts": [0, 3], // operator reads + fenced mark/undo
