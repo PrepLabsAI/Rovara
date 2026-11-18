@@ -42,6 +42,18 @@ export function hasEscalationWords(...texts: readonly string[]): boolean {
 }
 
 /**
+ * The LITERAL part of that list: things that are an address or a piece of shell on their own, whatever the sentence around them says (a script-shaped token or path, a URL or host or IP address, shell syntax and an
+ * environment assignment). A team suggestion (`propose.ts`) is refused for these and for nothing wordier: the verbs above ("run", "install") are the normal words of a procedure.
+ */
+const LITERAL_COMMANDS: readonly RegExp[] = [
+  // Script-shaped tokens and paths.
+  /(^|[\s`'"(])\.{1,2}\/[\w.-]+/u, /\b[\w.-]+\.(sh|ps1|bat|cmd|zsh|bash|run|bin|exe|msi|pkg|deb|rpm)\b/iu, /(^|\/)scripts?\//iu,
+  // URLs with or without a scheme, and IP addresses.
+  /\bhttps?:\/\//iu, /\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|xyz|sh|app|cloud|info|biz|ru|cn|tk|ml|ga|cf|gq|top|site|online|link|zip|mov|ai|ly|gl|gd)(?:\/\S*)?\b/iu, /\b\d{1,3}(?:\.\d{1,3}){3}\b/u,
+  // Shell syntax and environment.
+  /\brm\s+-/iu, /\b(export\s+)?[A-Z][A-Z0-9_]{2,}=\S+/u, /&&|\|\||;\s*\w+\s+-|\$\(|\$\{|`[^`\n]*\s[^`\n]*`|>\s*\/|\/dev\//u,
+];
+/**
  * Tier 0 is a positive shape: a plain statement of where something is or what it is called. Anything that tells the agent to run, install, fetch,
  * download, execute, pipe, source or change something goes to people. A list of known commands is always one spelling behind, so this is a list of the
  * KINDS of instruction: verbs, script-shaped tokens, make targets, hosts with or without a scheme, shell syntax, environment assignments.
@@ -55,12 +67,7 @@ const COMMANDS: readonly RegExp[] = [
   /\b(go\s+(run|install|get|build|test|generate)|uv\s+(tool|pip|run|sync|add|venv)|bun\s+(run|install|add|x)|make\s+(?!sure\b|it\b|the\b|a\b|an\b|this\b|that\b|them\b|your\b|our\b|no\b|any\b)[a-z][\w-]*)\b/iu,
   /\b(python3?|node|ruby|perl|php|bash|sh|zsh|pwsh|powershell|java)\s+(-[a-zA-Z-]+\b|[\w-]*[./][\w./-]*)/iu,
   /\|\s*(sh|bash|zsh|python3?|node|perl|ruby|iex)\b/iu,
-  // Script-shaped tokens and paths.
-  /(^|[\s`'"(])\.{1,2}\/[\w.-]+/u, /\b[\w.-]+\.(sh|ps1|bat|cmd|zsh|bash|run|bin|exe|msi|pkg|deb|rpm)\b/iu, /(^|\/)scripts?\//iu,
-  // URLs with or without a scheme, and IP addresses.
-  /\bhttps?:\/\//iu, /\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|xyz|sh|app|cloud|info|biz|ru|cn|tk|ml|ga|cf|gq|top|site|online|link|zip|mov|ai|ly|gl|gd)(?:\/\S*)?\b/iu, /\b\d{1,3}(?:\.\d{1,3}){3}\b/u,
-  // Shell syntax and environment.
-  /\brm\s+-/iu, /\b(export\s+)?[A-Z][A-Z0-9_]{2,}=\S+/u, /&&|\|\||;\s*\w+\s+-|\$\(|\$\{|`[^`\n]*\s[^`\n]*`|>\s*\/|\/dev\//u,
+  ...LITERAL_COMMANDS,
 ];
 /** Folds look-alikes and undoes defanged dots and schemes (`acme[.]com`, `hxxp`), so a host written to dodge a filter reads as the host it is. */
 export function normaliseForScan(text: string): string {
@@ -72,6 +79,12 @@ const EXTRA_COMMANDS: readonly RegExp[] = [
   new RegExp(`\\b[a-z0-9-]+\\.(?!(?:${CODE_EXT})\\b)[a-z]{2,24}\\/`, "iu"), /(^|[\s`'"(])(bin|tools)\/\S+/iu, /\.(ps1|exe|pl)\b/iu,
   /\b(base64|decoded|decode|decrypt|deobfuscate|untar)\b/iu, /^```/mu,
 ];
+/** Whether a text holds a literal address, script or shell syntax (`LITERAL_COMMANDS`, after the same look-alike and defanging fold), or an encoded blob's usual wrapper. Narrower than `hasCommandOrUrl`: ordinary advice that says "run" or "install" passes. */
+/** A host-like name followed by a slash (`evil.example.co/payload`), unless the "extension" is a code file's (`index.ts/`). */
+const BARE_HOST_PATH = new RegExp(`\\b[a-z0-9-]+\\.(?!(?:${CODE_EXT})\\b)[a-z]{2,24}\\/`, "iu");
+export function hasLiteralExecutable(...texts: readonly string[]): boolean {
+  return texts.map(normaliseForScan).some((text) => LITERAL_COMMANDS.some((pattern) => pattern.test(text)) || BARE_HOST_PATH.test(text) || /\b[a-z0-9-]+\.[a-z]{2,24}:\d{2,5}\b/iu.test(text) || /^```/mu.test(text) || /\b(base64|deobfuscate|decrypt)\b/iu.test(text));
+}
 export function hasCommandOrUrl(...texts: readonly string[]): boolean {
   return texts.map(normaliseForScan).some((text) => COMMANDS.some((pattern) => pattern.test(text)) || EXTRA_COMMANDS.some((pattern) => pattern.test(text)));
 }

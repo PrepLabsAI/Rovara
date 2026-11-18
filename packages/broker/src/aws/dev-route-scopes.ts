@@ -155,6 +155,12 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/check-drafts/{draftId}/started", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/check-drafts/{draftId}/dismiss", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/rules/{ruleId}/retire", requires: "full" },
+  // L4-AK3: Rovara skills (core-host/lessons-api.ts): list, "Make this a skill?", edit, the two approvals and retire. Full access only; live membership, the project's roster and the approver directory still decide.
+  { method: "GET", path: "/v1/dev/projects/{project}/skills", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/skill", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{project}/skills/{skill}", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/skills/{skill}/approve", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/skills/{skill}/retire", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
   // L4-AK1H: team knowledge for a tool outside Rovara (core-host/knowledge-api.ts): a signed-in person's own token (full access, like the rows above) or a script token with the Team knowledge permission naming the project

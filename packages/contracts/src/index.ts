@@ -384,6 +384,8 @@ export * from "./lessons.js";
 export * from "./app-lessons.js";
 export * from "./lessons-local-tools.js";
 export * from "./lesson-wording.js";
+export * from "./knowledge-propose.js";
+export * from "./rovara-skills.js";
 export * from "./lesson-keys.js";
 // Lead 4 W2: the project wiki store contract (rows keyed by company AND project).
 export * from "./wiki-store.js";

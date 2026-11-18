@@ -10,7 +10,7 @@ import {
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
-  EVAL_GATEWAY_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVAL_PROMPT_LOCATIONS_FEATURE, EvalGatewayOriginSchema, EVAL_ROUND_FEATURE, KNOWLEDGE_CONTEXT_FEATURE,
+  EVAL_GATEWAY_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVAL_PROMPT_LOCATIONS_FEATURE, EvalGatewayOriginSchema, EVAL_ROUND_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
@@ -348,6 +348,8 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     if (learned?.learnedContext !== undefined) payload = { ...payload, learnedContext: learned.learnedContext };
     // The knowledge briefing and look-up go only to a worker that lists the feature (an older worker is sent the lessons alone), whatever a reader answered.
     if (learned?.knowledgeContext !== undefined && features.includes(KNOWLEDGE_CONTEXT_FEATURE)) payload = { ...payload, knowledgeContext: learned.knowledgeContext };
+    // Rovara skills (L4-AK3): only for a worker that lists the feature (the loader asks for it by the same list), never replacing a payload field a step already has.
+    if (learned?.rovaraSkills !== undefined && learned.rovaraSkills.length > 0 && features.includes(ROVARA_SKILLS_FEATURE)) payload = { ...payload, rovaraSkills: learned.rovaraSkills };
   }
   // The project's wiki, when its switch is on (lead 4 A1): built now from the task's own project, for a worker that lists the feature; none otherwise.
   const wikiContext = await wikiContextForStep(deps, workspace, operation, features);
@@ -438,9 +440,9 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     const retriedKnowledge = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutKnowledgeOnly });
     if (retriedKnowledge.success) return retriedKnowledge.data;
   }
-  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined || draft.payload["knowledgeContext"] !== undefined) {
-    const { learnedContext: _dropped, wikiContext: _droppedWiki, knowledgeContext: _droppedKnowledge, ...withoutMemory } = draft.payload;
-    void _dropped; void _droppedWiki; void _droppedKnowledge;
+  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined || draft.payload["knowledgeContext"] !== undefined || draft.payload["rovaraSkills"] !== undefined) {
+    const { learnedContext: _dropped, wikiContext: _droppedWiki, knowledgeContext: _droppedKnowledge, rovaraSkills: _droppedSkills, ...withoutMemory } = draft.payload;
+    void _dropped; void _droppedWiki; void _droppedKnowledge; void _droppedSkills;
     const retried = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutMemory });
     if (retried.success) return retried.data;
   }

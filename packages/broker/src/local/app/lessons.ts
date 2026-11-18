@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import {
   IMPLICIT_COMPANY_ID, codeRepositoriesOf, companyScoped, orgProjectCatalogKey,
-  type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type KnowledgeContext, type LearnedContext, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
+  type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type KnowledgeContext, type LearnedContext, type RovaraSkillFile, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
 } from "@agentx/contracts";
 import type { ModelProviderBook } from "../model-proxy/types.js";
 import type { LocalModelChoice } from "../model-choice.js";
@@ -103,7 +103,7 @@ export interface LocalLessons {
   /** The team knowledge briefing for an answer about one project (lead 4 L4-AK2b); see `LessonsHost.answerBriefing`. */
   answerBriefing(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined>;
   /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
-  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
+  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext; rovaraSkills?: RovaraSkillFile[] }>;
   /** What the callbacks tell after a batch of a worker's events: the load report of a step, applied to the manifest its dispatch recorded. Never throws. */
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
   /** The "Lessons used" section of a task's pull request description. `undefined` for no section. Never throws. */

@@ -20,7 +20,7 @@ export const SCRIPT_TOKEN_NAME_MAX = 60;
 
 /**
  * What a token may do. `read`: read the creator's own tasks on the token's projects (a task, its events, the list). `start`: start a task on one of them.
- * `lessons` (decision 46b): read the project-wide team lessons for a repository of the token's project, for a local coding tool. A token made before it has `read` and `start` only and cannot read lessons.
+ * `lessons` (decision 46b): read the project-wide team lessons for a repository of the token's project, for a local coding tool. A token made before it has `read` and `start` only and cannot read lessons. It is shown as "Team knowledge" and ALSO allows sending team suggestions (`team_propose`: a suggestion waits for a second sighting and a person decides; at most 10 a person a day): the token screen says so, in one line.
  * `wiki`: list and read the wiki of a named project. Never implied by `read`, and never permits wiki writes or model calls.
  * Nothing else is a permission: a token never makes tokens, changes members, roles, billing, company settings or secrets, and never decides anything a person must.
  */

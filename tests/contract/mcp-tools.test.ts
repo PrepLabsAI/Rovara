@@ -52,7 +52,7 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
       "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_keep_pull_request", "agentx_get_pr_feedback", "agentx_decide_pr_feedback", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request", "agentx_get_intake", "agentx_start_intake_ticket", "agentx_dismiss_intake_ticket", "agentx_list_connections", "agentx_get_context_sources", "agentx_get_second_review", "agentx_get_model_selection", "agentx_get_design_review", "agentx_get_diagnosis", "agentx_get_task_people", "agentx_get_task_people_request", "agentx_set_task_person", "agentx_take_task_ownership",
       "agentx_list_agents", "agentx_run_agent", "agentx_list_approvals", "agentx_open_approval",
       "agentx_list_sessions", "agentx_get_session", "agentx_comment_on_session", "agentx_tell_session_agent", "agentx_stop_session", "wiki_list", "wiki_read",
-      "team_knowledge", "team_knowledge_for", "team_knowledge_areas",
+      "team_knowledge", "team_knowledge_for", "team_knowledge_areas", "team_propose",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");

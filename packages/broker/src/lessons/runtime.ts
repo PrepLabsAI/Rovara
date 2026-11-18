@@ -169,7 +169,7 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   };
   const presetStore = new DocumentPresetStore(input.store);
   const soleOwner = new DocumentSoleOwnerSwitch(input.store);
-  const view = { store, directory, settings, access, names, now: input.now, weeklyExtras: (key: { workspaceId: string; project: string }) => weeklyExtrasOf(signals, key), ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
+  const view = { documents: input.store, store, directory, settings, access, names, now: input.now, weeklyExtras: (key: { workspaceId: string; project: string }) => weeklyExtrasOf(signals, key), ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
   const routes: LessonRouteDeps = {
     ...base, ...view, store, directory, settings, access, vectors, embedder, judgeModel, spend, edition, pause, verifier, facts, projectRepos: process.projectRepos,
     judge: outcomeJudge,
