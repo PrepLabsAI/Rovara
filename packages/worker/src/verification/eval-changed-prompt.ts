@@ -1,8 +1,8 @@
 // Worker-only, invocation-local classification. No source identity or changed-prompt claim comes from the sandbox.
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
-  detectPromptChanges, matchChangedItems, modelPromptSegments, planRecording, promptFilePath, readModelRequest, PROMPT_CHANGE_LIMITS,
-  type ModelEgressFrame, type PromptChangedFile, type PromptChangeReport,
+  detectPromptChanges, matchChangedItems, modelPromptSegments, planRecording, promptFilePath, promptLocationTouched, readModelRequest, PROMPT_CHANGE_LIMITS,
+  type ModelEgressFrame, type PromptChangedFile, type PromptChangeReport, type PromptLocation,
 } from "@agentx/contracts";
 import { withIsolatedGit } from "../isolated-git.js";
 import { AI_WALK_LIMITS, CODE_PATH, aiRelatedSet, hasAiMarker, hasDynamicLoad, resolutionFile, walkReads, type AiRelatedSet, type AiWalkLimits } from "./eval-ai-related.js";
@@ -40,7 +40,9 @@ export function evalChangedPrompt(frame: ModelEgressFrame): boolean {
  * the assets they name), when either side of it names an AI SDK or loads code from a computed name, or when it decides how imports resolve
  * (package.json, lockfiles, tsconfig, pyproject, .env). Any such file makes the WHOLE classification unknown, so every call counts as changed.
  * Other changed code and config files still go through F4, whose findings (a named prompt constant, a model name in config) count as well.
- * Anything unresolvable is unknown: an unreadable side or tree file, a non-regular mode, a limit, an import the walk cannot follow. */
+ * Anything unresolvable is unknown: an unreadable side or tree file, a non-regular mode, a limit, an import the walk cannot follow.
+ * L4-EVP: a changed file that holds a prompt location the project confirmed in setup also makes the whole classification unknown (every call counts as changed), whatever the walk says of it. Where the location names a region (Python and YAML)
+ * and both sides of the file give that region whole and equal, the file is NOT a touch of the location; any other case (a region not found, a language not read, a side missing) is a touch of the file. */
 const configPath = /\.(?:json|ya?ml|toml|ini)$/iu;
 const envPath = /(?:^|\/)(?:\.env[^/]*|env(?:\.[^/]*)?|[^/]*\.env)$/iu;
 /** Changed files outside the set that can hold no program text: media, fonts, archives, documentation, styles, repository metadata.
@@ -56,7 +58,7 @@ const CAT_FILE_HEADER = /^([a-f0-9]{40}) blob (\d+)$/u;
  */
 export async function candidatePromptChanges(
   repositories: readonly CandidateRepositoryInput[], candidates: readonly CandidateRepositoryIdentity[], signal: AbortSignal,
-  planBaseCommit: string | undefined, limits: AiWalkLimits = AI_WALK_LIMITS,
+  planBaseCommit: string | undefined, limits: AiWalkLimits = AI_WALK_LIMITS, promptLocations: readonly PromptLocation[] = [],
 ): Promise<PromptChangeReport | undefined> {
   try {
     if (typeof planBaseCommit !== "string" || !objectId.test(planBaseCommit)) return undefined;
@@ -109,7 +111,7 @@ export async function candidatePromptChanges(
           if (!Number.isSafeInteger(bytes) || bytes > limits.fileBytes) throw new Error("incomplete source");
           if (!wanted.has(oid!)) { wanted.set(oid!, bytes); wantedBytes += bytes; }
         }
-        for (const entry of changed) if (textNeeded(entry.path)) for (const oid of [entry.oldOid, entry.newOid]) if (oid !== undefined && !wanted.has(oid)) wanted.set(oid, -1);
+        for (const entry of changed) if (textNeeded(entry.path) || promptLocations.some(location => location.repo === repository.repositoryId && location.path === entry.path)) for (const oid of [entry.oldOid, entry.newOid]) if (oid !== undefined && !wanted.has(oid)) wanted.set(oid, -1);
         if (wanted.size > limits.files + 2 * PROMPT_CHANGE_LIMITS.files || wantedBytes > limits.totalBytes) throw new Error("incomplete source");
 
         // One batch read. Every object must be a blob of the stated size, valid UTF-8 and free of NUL.
@@ -142,6 +144,7 @@ export async function candidatePromptChanges(
       for (const entry of related.changed) {
         const before = entry.oldOid === undefined ? undefined : related.texts.get(entry.oldOid);
         const after = entry.newOid === undefined ? undefined : related.texts.get(entry.newOid);
+        if (promptLocations.some(location => promptLocationTouched(location, { repo: repository.repositoryId, path: entry.path, before, after }))) return undefined;
         if (related.set.has(entry.path) || resolutionFile(entry.path) || promptFilePath(entry.path)) return undefined;
         if (!textNeeded(entry.path)) {
           if (INERT.test(entry.path)) continue; // documentation, images, styles: read by no AI-related file
@@ -163,10 +166,12 @@ export async function withEvalChangedPromptClassifier<T>(
   repositories: readonly CandidateRepositoryInput[], candidates: readonly CandidateRepositoryIdentity[], signal: AbortSignal,
   /** The eval's own plan. Absent, or unreadable: every call counts as changed. */
   plan: (() => Promise<{ readonly key: { readonly baseCommit: string } } | { readonly notRun: string } | undefined>) | undefined, run: () => Promise<T>,
+  /** L4-EVP: the project's confirmed prompt locations (the broker's, with the eval request). Absent: none. */
+  promptLocations: readonly PromptLocation[] = [],
 ): Promise<T> {
   let planBase: string | undefined;
   // A plan the broker answered "not run" (questions changed since approval) has no base: no plan, so every call counts as changed.
   try { const answered = plan === undefined ? undefined : await plan(); planBase = answered !== undefined && "key" in answered ? answered.key.baseCommit : undefined; } catch { planBase = undefined; }
-  const classifier = changedPromptClassifier(await candidatePromptChanges(repositories, candidates, signal, planBase));
+  const classifier = changedPromptClassifier(await candidatePromptChanges(repositories, candidates, signal, planBase, AI_WALK_LIMITS, promptLocations));
   return classifiers.run(classifier, run);
 }

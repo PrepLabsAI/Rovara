@@ -25,6 +25,7 @@ import { WIKI_BUILD_FEATURE, WikiBuildWireSchema } from "./wiki-build.js";
 import { PREPARE_PINS_FEATURE, PreparePinsSchema, SETUP_AGENT_FEATURE, SetupAgentWireSchema } from "./setup-run.js";
 import { NIGHTLY_RUN_FEATURE, NightlyRunPayloadSchema } from "./nightly-run.js";
 import { GENERAL_FAKES_FEATURE, GeneralFakesPayloadSchema } from "./general-fakes.js";
+import { EVAL_PROMPT_LOCATIONS_FEATURE, PromptLocationsSchema } from "./prompt-locations.js";
 import { TEST_ENV_BASELINE_FEATURE } from "./test-env-baseline.js";
 import { TEST_ENV_MULTI_REPO_FEATURE } from "./test-env-multi-repo.js";
 import { STANDING_INSTRUCTIONS_FEATURE, StandingInstructionsPayloadSchema } from "./standing-instructions.js";
@@ -70,7 +71,7 @@ export const EvalRequestSchema = z.object({
 export type EvalRequest = z.infer<typeof EvalRequestSchema>;
 
 export const WORKER_INVOCATION_FEATURES = [TEST_ENV_PROVE_MEASURE_FEATURE, "task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.workflowApprovedPlan.v1", SETUP_AGENT_FEATURE, WIKI_BUILD_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", WIKI_AGENT_FEATURE, OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_ROUND_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TASK_FLAKY_RERUN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
-  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_BASELINE_FEATURE, TEST_ENV_MULTI_REPO_FEATURE] as const;
+  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_BASELINE_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** An agent step's payload (`agentStep`) goes only to a worker that lists this; the agent kind also needs AGENT_RUN_FEATURE. */
 export const AGENT_STEP_FEATURE = "task.agentStep" as const;
@@ -583,6 +584,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          */
         browserEvidence: BrowserEvidencePayloadSchema.optional(),
         evalRequest: EvalRequestSchema.optional(),
+        /** L4-EVP: the project's confirmed prompt locations, for the eval's changed-prompt classifier. Verification mode, with `evalRequest`. Sent only to a worker whose /ping lists "task.evalPromptLocations.v1"; the dispatcher drops the field for an older worker. */
+        evalPromptLocations: PromptLocationsSchema.optional(),
         /**
          * Test environment (wire-testenv): this setup draft also runs the environment detectors over the default branch's files and reports the environment it would propose (a draft, never approved or run). Setup-draft
          * mode only. Sent only while the test environment switch is on, and only to a worker whose /ping lists "task.testEnvDetect.v1"; the dispatcher drops the field for an older worker (the setup draft then has no environment draft and the omission is logged), because its strict parse would refuse it.
@@ -623,6 +626,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.evalRequest !== undefined && payload.workflowMode !== "CHECKS") {
           context.addIssue({ code: "custom", path: ["evalRequest"], message: "eval requires the verification (checks) mode" });
+        }
+        if (payload.evalPromptLocations !== undefined && (payload.workflowMode !== "CHECKS" || payload.evalRequest === undefined)) {
+          context.addIssue({ code: "custom", path: ["evalPromptLocations"], message: "prompt locations go only with an eval request in the verification (checks) mode" });
         }
         if (payload.evidenceCapture !== undefined && payload.workflowMode !== "CHECKS") {
           context.addIssue({ code: "custom", path: ["evidenceCapture"], message: "evidence capture requires the verification (checks) mode" });

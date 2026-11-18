@@ -448,3 +448,5 @@ export * from "./general-fakes-set.js";
 export * from "./openapi-fake.js";
 export * from "./agent-model-choice.js";
 export * from "./company-engine-model.js";
+export * from "./prompt-locations.js";
+export * from "./ai-markers.js";

@@ -13,8 +13,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, setupItemsOf, when,
-  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type SetupVerification, type TransactItem,
+  PROMPT_LOCATIONS_MAX, ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, promptLocationKey, promptLocationsOf, setupItemsOf, when,
+  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type PromptLocation, type SetupVerification, type TransactItem,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "../decisions/approval-gate.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -113,8 +113,39 @@ export function commandsFromProposal(
   return { ...(setup.length === 0 ? {} : { setup }), ...(readiness.length === 0 ? {} : { readiness }), used, unchecked, left };
 }
 
-/** What the owner approves: the commands, as a digest. The candidate check ran exactly these, and the approval names this digest. */
-export const setupApplyDigest = (setup: readonly ProjectCommand[], readiness: readonly ProjectCommand[]): string => createHash("sha256").update(canonicalJson({ setup, readiness })).digest("hex");
+/**
+ * L4-EVP: the prompt locations the proposal's usable `prompt_location` items carry, added to the ones the project already has (a location is removed only by a person's own edit, never by an agent's proposal that
+ * leaves it out). An item that failed its re-read, names a repository the project does not have, or would take the list past its limit is left out, each with its reason. Pure.
+ */
+export interface CandidatePromptLocations { locations: PromptLocation[]; used: string[]; unchecked: string[]; left: CandidateCommands["left"] }
+export function promptLocationsFromProposal(
+  proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string }>; promptLocations?: unknown }, only?: ReadonlySet<string>,
+): CandidatePromptLocations {
+  const existing = promptLocationsOf(definition.promptLocations);
+  const out: CandidatePromptLocations = { locations: [...existing], used: [], unchecked: [], left: [] };
+  const known = new Set(existing.map(promptLocationKey));
+  for (const item of setupItemsOf(proposal)) {
+    if (item.kind !== "prompt_location" || (only !== undefined && !only.has(item.id))) continue;
+    const verdict = verification[item.id] ?? "unchecked";
+    if (verdict === "unverified") { out.left.push({ id: item.id, reason: "unverified" }); continue; }
+    // Like a command: with no choice made, only what the code host confirmed is used; a person's choice may add one that could not be checked against a file.
+    if (only === undefined && verdict !== "verified") continue;
+    if (verdict === "unchecked") out.unchecked.push(item.id);
+    const value = item.proposed.value as PromptLocation;
+    if (!definition.repositories.some((repository) => repository.name === value.repo)) { out.left.push({ id: item.id, reason: "unverified" }); continue; }
+    const key = promptLocationKey(value);
+    if (known.has(key)) { out.used.push(item.id); continue; }
+    if (out.locations.length >= PROMPT_LOCATIONS_MAX) { out.left.push({ id: item.id, reason: "too_many" }); continue; }
+    known.add(key);
+    out.locations.push(value);
+    out.used.push(item.id);
+  }
+  return out;
+}
+
+/** What the owner approves: the commands (and, when the candidate holds prompt locations, those), as a digest. The candidate check ran exactly these, and the approval names this digest. Without locations the digest is the commands' alone, as it always was. */
+export const setupApplyDigest = (setup: readonly ProjectCommand[], readiness: readonly ProjectCommand[], promptLocations?: readonly PromptLocation[]): string =>
+  createHash("sha256").update(canonicalJson(promptLocations === undefined || promptLocations.length === 0 ? { setup, readiness } : { setup, readiness, promptLocations })).digest("hex");
 
 export interface SetupApplyDeps extends SetupAgentDeps { flow: TaskFlowDeps }
 
@@ -143,22 +174,33 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
   if (view.verified !== true || view.verification === undefined) throw agentXError("CHANGE_STALE", SETUP_CONFIRM_WORDS.notChecked);
   const full = await deps.flow.projects.latest(project);
   if (full === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
-  const made = commandsFromProposal(view.proposal!, view.verification, full.definition, body.itemIds === undefined ? undefined : new Set(body.itemIds));
-  if ("error" in made) throw agentXError("CONFIG_INVALID", made.error === "unknown_item" ? SETUP_CONFIRM_WORDS.unknownItem : SETUP_CONFIRM_WORDS.nothing);
+  // L4-EVP: the person's choice may name prompt-location items as well as command items; an id of neither kind is unknown.
+  const items = setupItemsOf(view.proposal!);
+  const chosen = body.itemIds === undefined ? undefined : new Set(body.itemIds);
+  const kindOf = (id: string) => items.find((item) => item.id === id)?.kind;
+  const commandChoice = chosen === undefined ? undefined : new Set([...chosen].filter((id) => kindOf(id) !== "prompt_location"));
+  const onlyLocations = chosen !== undefined && chosen.size > 0 && commandChoice!.size === 0;
+  const locations = promptLocationsFromProposal(view.proposal!, view.verification, full.definition, chosen);
+  const commands = onlyLocations ? { used: [], unchecked: [], left: [] } as CandidateCommands : commandsFromProposal(view.proposal!, view.verification, full.definition, commandChoice);
+  // Nothing usable in the commands is no refusal when a prompt location is usable; anything else (an unknown id) is refused as before.
+  if ("error" in commands && (commands.error !== "nothing" || locations.used.length === 0)) throw agentXError("CONFIG_INVALID", commands.error === "unknown_item" ? SETUP_CONFIRM_WORDS.unknownItem : SETUP_CONFIRM_WORDS.nothing);
+  const made: CandidateCommands = "error" in commands ? { used: [], unchecked: [], left: [] } : commands;
+  if (made.used.length === 0 && locations.used.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.nothing);
   const setup = made.setup ?? full.definition.setup;
   const readiness = made.readiness ?? full.definition.readiness;
   if (readiness.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.noTest);
   const candidateRevision = full.definition.revision + 1;
+  const withLocations = locations.used.length > 0 ? { promptLocations: locations.locations } : {};
   const candidate = ProjectDefinitionSchema.safeParse({
-    ...full.definition, revision: candidateRevision, setup, readiness,
+    ...full.definition, revision: candidateRevision, setup, readiness, ...withLocations,
     origins: { ...(full.definition.origins ?? {}), ...(made.setup === undefined ? {} : { setup: "agent" }), ...(made.readiness === undefined ? {} : { readiness: "agent" }) },
   });
   if (!candidate.success) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.invalid);
   // The approver reads every command whole: one too long to show is refused, never cut.
   if ([...candidate.data.setup, ...candidate.data.readiness].some((command) => formatCommandLine(command).length > SETUP_COMMAND_SHOWN_MAX)) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.tooLong);
-  const digest = setupApplyDigest(candidate.data.setup, candidate.data.readiness);
+  const digest = setupApplyDigest(candidate.data.setup, candidate.data.readiness, candidate.data.promptLocations);
   const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId: body.requestId, candidate: true });
-  const reply = { digest, used: made.used, unchecked: made.unchecked, left: made.left, candidateRevision, proved: false, next: "check" };
+  const reply = { digest, used: [...made.used, ...locations.used], unchecked: [...made.unchecked, ...locations.unchecked], left: [...made.left, ...locations.left], candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
   const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId: view.taskId ?? "", requestId: body.requestId, by, digest, baseRevision: full.definition.revision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now };
   const result = await deps.store.transact([
@@ -175,7 +217,7 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
 }
 
 /** What the page shows of the waiting proposal: the commands, and where the check on them stands. */
-export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[] }) | undefined> {
+export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[]; promptLocations: string[] }) | undefined> {
   const raw = await deps.store.get(setupApplyKey(deps.companyId, project));
   if (raw === undefined || raw["entityType"] !== "SETUP_APPLY") return undefined;
   const row = raw as unknown as SetupApplyRow;
@@ -185,7 +227,9 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
   const checkState = await setupStateOfCheck(deps.flow, row.check, definition.data);
   // Each command as the person would type it (quoted where it needs it) and whole: the approver must see all of what will run.
   const text = (commands: readonly ProjectCommand[]): string[] => commands.map((command) => formatCommandLine(command));
-  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness) };
+  // L4-EVP: the approver sees every prompt location the candidate holds, whole (repository, file, kind and name).
+  const locations = (definition.data.promptLocations ?? []).map((location) => `${location.repo}/${location.path}: ${location.kind === "file" ? "the whole file" : `${location.kind.replace("_", " ")} ${location.symbol ?? ""}`}`);
+  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), promptLocations: locations };
 }
 
 /** The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. */

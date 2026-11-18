@@ -2,7 +2,7 @@
 // field by field, in code: never from the run's words, the model's summary or anything a client sends.
 //
 //   low     the setup (install) and test commands changed, with no new environment on any command: a version bump, another install or test command, a cache path;
-//   medium  a test mock changed (`generalFakes`, Rovara-made fakes);
+//   medium  a test mock changed (`generalFakes`, Rovara-made fakes), or the prompt locations changed (`promptLocations`, L4-EVP: which files and regions ask for the AI evaluation; no command, website or credential rides on one, and the eval's spend is its own separate approval);
 //   high    a website the machines may reach (`network`), a package registry (`registries`, with its credential reference), an integration (`integrations`), the dev container, a command that
 //           gains an environment entry (a secret, a cloud account or a credential can ride on it), ANY other field, a field this code does not know, a value it cannot read, and a missing base.
 //   `revision` and `origins` are bookkeeping (the candidate always has the next number, and origins only say the commands came from the setup run).
@@ -12,7 +12,7 @@
 import { canonicalJson } from "@agentx/contracts";
 
 export type SetupRisk = "low" | "medium" | "high";
-export type SetupChangeArea = "setup_commands" | "test_commands" | "test_mocks" | "websites" | "registries" | "integrations" | "dev_container" | "other";
+export type SetupChangeArea = "setup_commands" | "test_commands" | "test_mocks" | "prompt_locations" | "websites" | "registries" | "integrations" | "dev_container" | "other";
 export interface SetupChange { area: SetupChangeArea; risk: SetupRisk }
 export interface SetupChangeRisk { risk: SetupRisk; changes: SetupChange[] }
 
@@ -25,13 +25,14 @@ const BOOKKEEPING = new Set(["revision", "origins"]);
 /** Fields with a fixed risk when they change. Anything not here (and not a command list or bookkeeping) is `other`, high. */
 const FIXED: Readonly<Record<string, SetupChange>> = {
   generalFakes: { area: "test_mocks", risk: "medium" },
+  promptLocations: { area: "prompt_locations", risk: "medium" },
   network: { area: "websites", risk: "high" },
   registries: { area: "registries", risk: "high" },
   integrations: { area: "integrations", risk: "high" },
   devcontainer: { area: "dev_container", risk: "high" },
 };
 /** The order changes are listed in. */
-const AREA_ORDER: readonly SetupChangeArea[] = ["setup_commands", "test_commands", "test_mocks", "websites", "registries", "integrations", "dev_container", "other"];
+const AREA_ORDER: readonly SetupChangeArea[] = ["setup_commands", "test_commands", "test_mocks", "prompt_locations", "websites", "registries", "integrations", "dev_container", "other"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const same = (left: unknown, right: unknown): boolean => {

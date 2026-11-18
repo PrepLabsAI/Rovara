@@ -10,7 +10,7 @@ import {
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
-  EVAL_PLAN_DELIVERY_ACTION, EVAL_ROUND_FEATURE,
+  EVAL_PLAN_DELIVERY_ACTION, EVAL_PROMPT_LOCATIONS_FEATURE, EVAL_ROUND_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
@@ -327,6 +327,11 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE)) {
     delete payload["evalRequest"];
     log(deps, { event: "eval_request_dropped_unsupported_worker" });
+  }
+  // L4-EVP: the prompt locations ride with the eval request only to a worker that lists them; an older worker's strict parse would refuse the field.
+  if (spec.kind === "task" && payload["evalPromptLocations"] !== undefined && (payload["evalRequest"] === undefined || !features.includes(EVAL_PROMPT_LOCATIONS_FEATURE))) {
+    delete payload["evalPromptLocations"];
+    log(deps, { event: "eval_prompt_locations_dropped_unsupported_worker" });
   }
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {

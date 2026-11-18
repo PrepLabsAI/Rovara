@@ -8,7 +8,7 @@
 // "Listed in the Rovara Check and on the task page"; 5 the list keeps its first 10 items. The quote, the heading, the six lines, the first 10 items, the markers and the closing line never shrink away.
 // Free text never reaches a `<summary>`: summaries are the verdict's (fixed words and counts).
 import {
-  prVerdictMarkdown, prVerdictOf, redactText, TESTING_RESULT_LABELS, weakeningLines, workflowSelectedChecks, type PrVerdict, type PrVerdictInput, type RiskAssessment, type TestingRow, type TestingView, type VerdictAcceptedFinding, type VerdictCheckRow, type VerdictRequirement, type VerdictSecondReview,
+  EVAL_NOT_RUN_SENTENCES, prVerdictMarkdown, prVerdictOf, redactText, TESTING_RESULT_LABELS, weakeningLines, workflowSelectedChecks, type PrVerdict, type PrVerdictInput, type RiskAssessment, type TestingRow, type TestingView, type VerdictAcceptedFinding, type VerdictCheckRow, type VerdictNoEval, type VerdictRequirement, type VerdictSecondReview,
   type WorkflowSnapshot, workflowIsReviewOnly, workflowReviewsSawPartialDiff,
 } from "@agentx/contracts";
 import { boundEvidence } from "./evidence-lines.js";
@@ -92,6 +92,27 @@ export function secondReviewFromLines(lines: readonly string[] | undefined): Ver
 }
 
 /** The verdict of this code, and the lists the layout needs next to it. */
+/**
+ * L4-EVP: the change touched likely-AI code (the tier carries `eval_hint`: a prompt file or a prompt location the project confirmed; or `ai_code_touched`: a patch that names a model SDK) and no eval ran. Undefined: no AI code was touched, an
+ * eval ran, the existing "prompt changed and no evaluation ran" item already says it, or the checks have not finished yet (an eval may still be asked for). Never silent otherwise, and advisory: this is a thing to check.
+ */
+export function noEvalOf(workflow: WorkflowSnapshot, ai: { eval: { label: string; notRunReason?: string | undefined }; promptWithoutEval?: boolean | undefined } | undefined, checksRead: boolean): VerdictNoEval | undefined {
+  const reasons = workflow.flow?.tier?.reasons ?? [];
+  const evalHint = reasons.some((reason) => reason.code === "eval_hint");
+  if (!evalHint && !reasons.some((reason) => reason.code === "ai_code_touched")) return undefined;
+  if (ai !== undefined) {
+    if (ai.eval.label !== "Not run" || ai.promptWithoutEval === true) return undefined;
+    const why = ai.eval.notRunReason;
+    if (why === "no_eval_configured") return { reason: "no_eval_configured" };
+    if (why === "not_connected" || why === "spend_not_approved" || why === "no_product_key") return { reason: "not_connected" };
+    if (why === "no_changed_prompt_call") return { reason: "not_a_prompt_change" };
+    return why === undefined || !Object.hasOwn(EVAL_NOT_RUN_SENTENCES, why) ? { reason: "other" } : { reason: "other", detail: EVAL_NOT_RUN_SENTENCES[why as keyof typeof EVAL_NOT_RUN_SENTENCES].replace(/^not run: /iu, "") };
+  }
+  // No eval result is recorded. A change with no prompt location or prompt file is never sent to the eval, so this is known at once; one that asks for it may still be waiting for the checks.
+  if (!evalHint) return { reason: "not_a_prompt_change" };
+  return checksRead ? { reason: "not_connected" } : undefined;
+}
+
 export function verdictOfLayout(input: LayoutInput): PrVerdict {
   const { workflow, context } = input;
   const digest = workflow.candidate?.digest;
@@ -117,7 +138,9 @@ export function verdictOfLayout(input: LayoutInput): PrVerdict {
   const tests = input.testsAdded;
   const flaky = pack?.checks.reduce((sum, check) => sum + (check.tests?.flakyOnRerunCount ?? 0), 0) ?? 0;
   const aiRead = context.proof?.evidence?.read;
-  const ai = aiRead !== undefined && aiRead.status === "v2" && digest !== undefined && aiRead.pack.candidate.digest === digest ? aiRead.pack.ai : undefined;
+  const packRead = aiRead !== undefined && aiRead.status === "v2" && digest !== undefined && aiRead.pack.candidate.digest === digest;
+  const ai = packRead ? aiRead.pack.ai : undefined;
+  const noEval = noEvalOf(workflow, ai, packRead);
   const risk = input.risk;
   // What was not tested beyond the requirement rows (design 2.1 rule 2: "not tested" is above the fold): a planned scenario or check the table lists, and a mocked service that no dependency row explains.
   const dependenciesKnown = (pack?.environment.dependencies?.length ?? 0) > 0;
@@ -148,6 +171,7 @@ export function verdictOfLayout(input: LayoutInput): PrVerdict {
     reviews: { code: reviewWord("CRITIC"), security: reviewWord("SECURITY"), accepted, partialDiff: workflowReviewsSawPartialDiff(workflow), sameModel: context.reviewSameModel === true },
     ...((): Pick<PrVerdictInput, "secondReview"> => { const second = context.secondReview ?? secondReviewFromLines(context.secondReviewLines); return second === undefined ? {} : { secondReview: second }; })(),
     ...(ai === undefined || (ai.eval.label as string) === "newer" ? {} : { evalCheck: { label: ai.eval.label === "No regression measured (eval)" ? "No regression measured" as const : ai.eval.label as "Improved on eval" | "Worse on eval" | "Not run", promptChanged: ai.promptWithoutEval === true } }),
+    ...(noEval === undefined ? {} : { noEval }),
     ...(flaky > 0 ? { flakyReruns: flaky } : {}),
     ...(context.mergeOrderLines === undefined || context.mergeOrderLines.length === 0 ? {} : { mergeOrder: context.mergeOrderLines }),
     ...((): Pick<PrVerdictInput, "browser"> => { const summary = browserSummary(context.browserEvidenceLines); return summary === undefined ? {} : { browser: summary }; })(),

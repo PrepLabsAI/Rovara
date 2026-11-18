@@ -13,6 +13,7 @@ import { E2E_PROJECT_CHECK_ID } from "./e2e.js";
 import { SettingOriginSchema, type SettingOrigin } from "./provenance.js";
 import { SpecTargetSchema } from "./spec-target.js";
 import { GeneralFakesSettingSchema } from "./general-fakes.js";
+import { PromptLocationsSchema } from "./prompt-locations.js";
 import { ExternalIdSchema, PluginKindSchema } from "./plugins/common.js";
 import { ProjectRegistriesSchema } from "./project-registries.js";
 
@@ -386,6 +387,8 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       generalFakes: GeneralFakesSettingSchema.optional(),
       /** M7 slice 2: the after-merge watcher's own setting. Absent: off. */
       afterMergeWatch: AfterMergeWatchSettingSchema.optional(),
+      /** L4-EVP: where the project's AI prompts live inside code (prompt-locations.ts). Proposed by the setup agent and confirmed with the setup revision; read by the change tier (an `eval_hint`) at the task's starting revision. Absent: none. Control-plane only (`workerProjectDefinition`). */
+      promptLocations: PromptLocationsSchema.optional(),
       origins: ProjectOriginsSchema.optional(),
     })
     .strict();
@@ -539,7 +542,7 @@ export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
  * alone (the DNS firewall enforces `network`, the broker's start check the pins).
  * `includeMeta` keeps a meta repository that is not also code, for the one run that reads it whole (the setup draft).
  */
-export function workerProjectDefinition<Definition extends object>(definition: Definition, options: { includeMeta?: boolean } = {}): Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes" | "afterMergeWatch"> {
+export function workerProjectDefinition<Definition extends object>(definition: Definition, options: { includeMeta?: boolean } = {}): Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes" | "afterMergeWatch" | "promptLocations"> {
   const rest: Record<string, unknown> = { ...(definition as Record<string, unknown>) };
   delete rest.network;
   // N9: the registries reach a worker as the prepare payload's `registries` (where, never how), only if it lists `prepare.registries.v1`; an earlier worker's strict schema does not know the field.
@@ -552,6 +555,8 @@ export function workerProjectDefinition<Definition extends object>(definition: D
   delete rest.generalFakes;
   // M7 slice 2: whether the after-merge watcher is on for the project is the control plane's; an earlier worker's strict schema does not know it.
   delete rest.afterMergeWatch;
+  // L4-EVP: the prompt locations are the control plane's (the change tier reads them); a CHECKS run that asks for the eval is sent `evalPromptLocations` in its payload, only to a worker that lists the feature.
+  delete rest.promptLocations;
   // The same for the repository pins (`installationId`, `githubRepositoryId`) and the meta role: the repository entry of an earlier worker is strict too.
   if (Array.isArray(rest.repositories)) {
     rest.repositories = rest.repositories
@@ -576,7 +581,7 @@ export function workerProjectDefinition<Definition extends object>(definition: D
         return repository;
       });
   }
-  return rest as Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes" | "afterMergeWatch">;
+  return rest as Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes" | "afterMergeWatch" | "promptLocations">;
 }
 
 function isPureMetaRepository(entry: unknown): boolean {

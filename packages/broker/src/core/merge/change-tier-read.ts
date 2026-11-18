@@ -270,7 +270,7 @@ export const BASE_HISTORY_READS_MAX = 40;
 /** The risky reason codes of the rules (the ones before the first standard one). */
 const RISKY_CODES: ReadonlySet<string> = new Set<string>(TIER_REASON_CODES.slice(0, TIER_REASON_CODES.indexOf("more_than_lines")));
 /** Risky reasons that do not flag one commit read on its own: an empty commit, its size (the size of the final diff is what counts), a hint, and the walk's own reasons. */
-const NOT_A_COMMIT_FLAG: ReadonlySet<string> = new Set(["no_diff_files", "large_change", "eval_hint", "incomplete_diff", "unscanned_commits", "unseen_commit_flagged"]);
+const NOT_A_COMMIT_FLAG: ReadonlySet<string> = new Set(["no_diff_files", "large_change", "eval_hint", "ai_code_touched", "incomplete_diff", "unscanned_commits", "unseen_commit_flagged"]);
 const COMMIT_SCAN_AT = new Date(0).toISOString();
 
 /** A commit pushed between checks whose own diff the rules flagged, with the risky reasons it was flagged for (paths as the host listed them; never the flagged text). */

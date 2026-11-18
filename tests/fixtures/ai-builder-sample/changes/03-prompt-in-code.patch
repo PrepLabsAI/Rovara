@@ -1,0 +1,13 @@
+diff --git a/deskbot/agent.py b/deskbot/agent.py
+index 3904247..08b1e7d 100644
+--- a/deskbot/agent.py
++++ b/deskbot/agent.py
+@@ -39,7 +39,7 @@ class DeskAgent:
+         self.data = data if data is not None else load_data()
+ 
+     def build_contents(self, question: str) -> list:
+-        text = f"Policy notes:\n{policy_notes(question, self.data)}\n\nCustomer question: {question.strip()}"
++        text = f"Policy notes (answer only from these):\n{policy_notes(question, self.data)}\n\nCustomer question: {question.strip()}"
+         return [{"role": "user", "parts": [{"text": text}]}]
+ 
+     def answer(self, question: str) -> str:

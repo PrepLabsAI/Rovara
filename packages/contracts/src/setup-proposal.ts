@@ -15,12 +15,13 @@ import { GitBranchNameSchema } from "./git-branch.js";
 import { AgentXNameSchema } from "./names.js";
 import { IntakeSystemSchema } from "./intake.js";
 import { RelativeWorkspacePathSchema } from "./project.js";
+import { PROMPT_LOCATIONS_MAX, PromptLocationSchema } from "./prompt-locations.js";
 import { ProvenanceSchema, proposedSchema, type Proposed, type ProposalRisk } from "./provenance.js";
 
 export const SETUP_PROPOSAL_VERSION = 2;
 
 /** Every kind of thing a proposal item can be. The id of an item starts with its kind (`setup-api`, `repository-web`), assigned by the reader, never by the model. */
-export const SETUP_ITEM_KINDS = ["repository", "setup", "tests", "check", "test_environment", "devcontainer", "knowledge", "spec_target", "source", "intake", "allowed_domain", "secret", "browser_evidence"] as const;
+export const SETUP_ITEM_KINDS = ["repository", "setup", "tests", "check", "test_environment", "devcontainer", "knowledge", "spec_target", "source", "intake", "allowed_domain", "secret", "browser_evidence", "prompt_location"] as const;
 export type SetupItemKind = (typeof SETUP_ITEM_KINDS)[number];
 
 export const SETUP_COMMANDS_MAX = 16;
@@ -29,7 +30,7 @@ export const SETUP_COMMAND_MAX_CHARS = 500;
 export const SETUP_DEVCONTAINER_MAX_BYTES = 6_000;
 export const SETUP_SECRETS_MAX = 20;
 export const SETUP_ITEM_LIMITS = {
-  repositories: 31, setup: 32, tests: 32, checks: 20, testEnvironment: 10, knowledge: 40, sources: 16, intake: 8, allowedDomains: 50, secrets: SETUP_SECRETS_MAX, flagged: 40, found: 20,
+  repositories: 31, setup: 32, tests: 32, checks: 20, testEnvironment: 10, knowledge: 40, sources: 16, intake: 8, allowedDomains: 50, secrets: SETUP_SECRETS_MAX, flagged: 40, found: 20, promptLocations: PROMPT_LOCATIONS_MAX,
 } as const;
 
 /** The only places a dev container's configuration lives. */
@@ -132,6 +133,8 @@ export const SetupProposalSchema = z.object({
   secretsNeeded: z.array(proposedSchema(SetupSecretValueSchema)).max(SETUP_ITEM_LIMITS.secrets),
   /** TE-H1 slice 3: the pages and the start command for browser evidence. Absent: today's proposal, byte for byte. */
   browserEvidence: proposedSchema(SetupBrowserEvidenceValueSchema).optional(),
+  /** L4-EVP: where the project's AI prompts live inside code. Absent: today's proposal, byte for byte. A maintainer confirms them with the setup revision; they ask for the eval when a change touches one. */
+  promptLocations: z.array(proposedSchema(PromptLocationSchema)).max(SETUP_ITEM_LIMITS.promptLocations).optional(),
   flaggedCommands: z.array(SetupFlaggedCommandSchema).max(SETUP_ITEM_LIMITS.flagged),
   foundNotUsed: z.array(SetupFoundNotUsedSchema).max(SETUP_ITEM_LIMITS.found),
   notes: z.string().max(2000),
@@ -152,7 +155,7 @@ export interface SetupItem {
 }
 
 /** Every item of a proposal, in the order the page shows them. */
-export function setupItemsOf(proposal: Pick<SetupProposal, "repositories" | "setup" | "tests" | "checks" | "testEnvironment" | "devcontainer" | "knowledge" | "specTarget" | "sources" | "intake" | "allowedDomains" | "secretsNeeded"> & Partial<Pick<SetupProposal, "browserEvidence">>): SetupItem[] {
+export function setupItemsOf(proposal: Pick<SetupProposal, "repositories" | "setup" | "tests" | "checks" | "testEnvironment" | "devcontainer" | "knowledge" | "specTarget" | "sources" | "intake" | "allowedDomains" | "secretsNeeded"> & Partial<Pick<SetupProposal, "browserEvidence" | "promptLocations">>): SetupItem[] {
   const items: SetupItem[] = [];
   const add = (kind: SetupItemKind, proposed: ReadonlyArray<Proposed<unknown>> | Proposed<unknown> | undefined) => {
     if (proposed === undefined) return;
@@ -171,6 +174,7 @@ export function setupItemsOf(proposal: Pick<SetupProposal, "repositories" | "set
   add("allowed_domain", proposal.allowedDomains);
   add("secret", proposal.secretsNeeded);
   add("browser_evidence", proposal.browserEvidence);
+  add("prompt_location", proposal.promptLocations);
   return items;
 }
 
@@ -189,6 +193,8 @@ export function setupItemHandling(kind: SetupItemKind, value: unknown): SetupIte
   switch (kind) {
     case "setup":
     case "tests":
+    // L4-EVP: a prompt location goes into the setup candidate with the commands, and is approved at the candidate's own risk (setup-risk.ts).
+    case "prompt_location":
       return "settings";
     case "devcontainer": {
       const container = value as { exists?: unknown; proposedContent?: unknown } | undefined;

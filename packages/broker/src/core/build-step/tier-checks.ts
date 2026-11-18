@@ -9,7 +9,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //     nothing that must be fixed. A failed or unanswered review is recorded for the head and never asked again for it (no shopping for a clean review); a new push gets a new review.
 // The record is written under `flowIs` (the record read), re-applied to the newer record when another writer got in first, so a yes is never lost to a race. It reads the record, never the switch: a task that
 // skipped steps owes these checks whether or not the lighter flow is still on.
-import { change, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
+import { change, promptLocationsOf, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import {
   DOCS_ROUTE_LINES_MAX, capReasons, higherLevel, raiseTier, tierGrowthPhrase, type TierReason, plannedPathsExceeded, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
@@ -170,6 +170,8 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       const baseBranch = definition.defaultBranch !== undefined && remote.targetBranch === definition.defaultBranch ? definition.defaultBranch : undefined;
       targets.push({ host, repositoryId: entry.repositoryId, repositoryUrl: definition.url, number: entry.number, headSha: remote.headRevision, ...(baseBranch === undefined ? {} : { baseBranch }) });
     }
+    // L4-EVP: the project's confirmed prompt locations, at the revision the task started on.
+    const promptLocations = promptLocationsOf(project?.definition.promptLocations);
     const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
     const head = bound.headSha;
     if (head === undefined) return "unavailable";
@@ -187,7 +189,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // head risky (only up, so it stays). Walked only when this head is tiered here: a head already tiered keeps what its tier recorded (its walk's reasons are on that tier), and nothing is read again.
     const unseen = needsTier ? await unseenCommits(targets, seenHeadsOf(workflow), scope, beforeRequest, baseCommitsOf(workflow)) : undefined;
     const headTierOf = (): ChangeTier => {
-      const own = tierFromDiff(read.diff, { ...bound, at, head: read.head });
+      const own = tierFromDiff(read.diff, { ...bound, at, head: read.head, ...(promptLocations.length === 0 ? {} : { promptLocations }) });
       return unseen !== undefined ? withUnseenCommits(own, unseen) : withRecordedUnseen(own, flow?.tier?.headSha === head ? flow.tier : undefined);
     };
     const fresh = needsTier ? headTierOf() : undefined;

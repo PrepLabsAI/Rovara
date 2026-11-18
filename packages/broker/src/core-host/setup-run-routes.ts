@@ -162,6 +162,7 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
   const ready = apply.checkState.status === "ready";
   return {
     candidateRevision: apply.candidateRevision, baseRevision: apply.baseRevision, setup: apply.setup, readiness: apply.readiness,
+    ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
     canApprove: ready && setupApproverAllows(who, risk, "approve"), canReject: ready && setupApproverAllows(who, risk, "reject"),
