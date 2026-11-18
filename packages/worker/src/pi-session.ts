@@ -53,6 +53,7 @@ import { knowledgeExtension } from "./knowledge/extension.js";
 import { loadKnowledgeContext, type KnowledgeSessionInput } from "./knowledge/load.js";
 import { MidRunKnowledge } from "./knowledge/session.js";
 import { readKnowledgeTool } from "./read-knowledge-tool.js";
+import { KNOWLEDGE_FOR_TOOL, KNOWLEDGE_REPORT_TOOL, knowledgeStepTools, type KnowledgeStep } from "./knowledge-tools.js";
 import type { KnowledgeStage } from "./knowledge/model.js";
 import type { ResolvedKnowledge } from "./knowledge/resolve.js";
 import type { PiCacheRetention } from "./usage.js";
@@ -122,6 +123,11 @@ export interface PiSessionInput {
   contextFilesAt?: "working-tree" | "base-commit";
   /** The session's live knowledge (K1 C3): offers `read_knowledge` and loads newly applicable rules mid-run. Absent for judging stages and agent steps. */
   knowledgeSession?: MidRunKnowledge;
+  /**
+   * Lead 4 L4-AK2: this step's knowledge record and look-up. Offers `knowledge_for` and `knowledge_report` in the stages that may look up (Understand, Plan, Build and Fix), answering only from the pull set the broker
+   * sent with the step. Absent for judging stages and agent steps.
+   */
+  knowledgeStep?: KnowledgeStep;
   /** Where the agent's shell runs instead of the worker: the project's devcontainer (#121). */
   bashOperations?: BashOperations;
   /** The repository's folder in the devcontainer, which the local file tools resolve to the host folder (#128). */
@@ -194,10 +200,10 @@ export interface AgentRunSession {
 }
 
 /** The names no worker tool of an agent step may take: Pi's own, the shell and `read_skill`. */
-const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "powershell", "read_skill", "read_knowledge", TOOL_SEARCH_TOOL_NAME]);
+const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "powershell", "read_skill", "read_knowledge", KNOWLEDGE_FOR_TOOL, KNOWLEDGE_REPORT_TOOL, TOOL_SEARCH_TOOL_NAME]);
 
 /** The worker's own tools that are always declared, however many connector or source tools there are: they are few and the model needs them every time. */
-const ALWAYS_DIRECT_TOOL_NAMES: ReadonlySet<string> = new Set(["choose_branch", SEARCH_TEAM_KNOWLEDGE_TOOL]);
+const ALWAYS_DIRECT_TOOL_NAMES: ReadonlySet<string> = new Set(["choose_branch", SEARCH_TEAM_KNOWLEDGE_TOOL, KNOWLEDGE_FOR_TOOL, KNOWLEDGE_REPORT_TOOL]);
 
 /**
  * Context sources are for the stages that read and judge, never for Build, where the shell is: untrusted live text must not reach the stage that can run
@@ -279,6 +285,8 @@ export async function createWorkspacePiSession(
     contextMcp?: ContextMcpSession;
     /** Structured answers: the tool(s) the step delivers its answer through (see PiSessionInput.answerTools). */
     answerTools?: readonly ToolDefinition[];
+    /** The step's knowledge look-up (see PiSessionInput.knowledgeStep). */
+    knowledgeStep?: KnowledgeStep;
     /** The compaction hook's inputs (see PiSessionInput.compaction). */
     compaction?: SessionCompactionOptions;
     /** Where the agent works, when that is not the workspace root: a folder inside it (a parallel part's working copy). Its saved transcript and settings stay in the root's. */
@@ -348,6 +356,7 @@ export async function createWorkspacePiSession(
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
     ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
+    ...(input.knowledgeStep === undefined ? {} : { knowledgeStep: input.knowledgeStep }),
     ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
@@ -384,6 +393,7 @@ export async function openRegisteredWorkspacePiSession(
     contextMcp?: ContextMcpSession;
     /** As for `createWorkspacePiSession`. */
     answerTools?: readonly ToolDefinition[];
+    knowledgeStep?: KnowledgeStep;
     compaction?: SessionCompactionOptions;
     /** As for `createWorkspacePiSession`. */
     contextFilesAt?: "working-tree" | "base-commit";
@@ -436,6 +446,7 @@ export async function openRegisteredWorkspacePiSession(
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
     ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
+    ...(input.knowledgeStep === undefined ? {} : { knowledgeStep: input.knowledgeStep }),
     ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
@@ -574,7 +585,10 @@ async function createDefaultSession(
     assertAnswerToolsAllowed(input);
     const sourceTools = input.contextTools ?? [];
     const answerTools = input.answerTools ?? [];
-    const runTools = [...(input.agentRun?.tools ?? []), ...sourceTools, ...answerTools];
+    // Lead 4 L4-AK2: the knowledge look-up and report, for a coding or reading step (never an agent step) the broker sent a pull set for; the step itself decides whether it offers any.
+    const knowledgeTools = input.agentRun === undefined && input.knowledgeStep !== undefined ? knowledgeStepTools(input.knowledgeStep) : [];
+    if (input.agentRun === undefined && input.knowledgeSession !== undefined) input.knowledgeStep?.attachRules((located) => input.knowledgeSession!.rulesMatching(located));
+    const runTools = [...(input.agentRun?.tools ?? []), ...sourceTools, ...answerTools, ...knowledgeTools];
     const clash = runTools.find((tool, index) => RESERVED_TOOL_NAMES.has(tool.name) || runTools.findIndex(({ name }) => name === tool.name) !== index);
     if (clash !== undefined) throw agentXError("CONFIG_INVALID", `an agent step cannot have two tools named ${clash.name}, or one named like a file tool, the shell or read_skill`);
     const knowledge = input.agentRun === undefined ? input.knowledgeSession : undefined;

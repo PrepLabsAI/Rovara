@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import {
   IMPLICIT_COMPANY_ID, codeRepositoriesOf, companyScoped, orgProjectCatalogKey,
-  type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type LearnedContext, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
+  type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type KnowledgeContext, type LearnedContext, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
 } from "@agentx/contracts";
 import type { ModelProviderBook } from "../model-proxy/types.js";
 import type { LocalModelChoice } from "../model-choice.js";
@@ -37,6 +37,7 @@ import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
 import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
+import type { KnowledgeSources } from "../../lessons/knowledge-brief.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources } from "./lessons-sources.js";
@@ -49,6 +50,8 @@ import type { Lesson } from "../../lessons/types.js";
 export { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
 
 export interface LocalLessonsOptions {
+  /** Where the knowledge briefing's measured facts and skill names come from (lead 4 L4-AK2). Absent: the briefing carries lessons and the look-up only. */
+  knowledge?: KnowledgeSources | undefined;
   flow: TaskFlowDeps;
   registry: RegistryView;
   companyId?: OrgId;
@@ -96,7 +99,7 @@ export interface LocalLessons {
   /** One local coding tools switch from the lessons page: the project's own, or the company's "lessons stay in Rovara". Audited before it is made. */
   localToolsSwitch(input: { scope: "project"; project: string; enabled: boolean } | { scope: "company"; stays: boolean }): Promise<LocalActionResult>;
   /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
-  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }): Promise<{ learnedContext?: LearnedContext }>;
+  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
   /** What the callbacks tell after a batch of a worker's events: the load report of a step, applied to the manifest its dispatch recorded. Never throws. */
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
   /** The "Lessons used" section of a task's pull request description. `undefined` for no section. Never throws. */
@@ -169,6 +172,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   const host = createLessonsHost({
     flow, runtime, companyId, blobs: options.blobs, queues: registry.require("queue"), enabled, sources: { source: sources.source, rows: sources.rows },
+    ...(options.knowledge === undefined ? {} : { knowledge: options.knowledge }),
     visibility: async (project): Promise<RepositoryVisibility> => {
       const found = await repositories.ofProject(project);
       if (found.length === 0) return "unknown";

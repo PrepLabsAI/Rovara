@@ -11,8 +11,8 @@ import { markLessonsUnderQuestion } from "./revert-question.js";
 // Nothing here makes a model call by itself: the reflection worker does, through the runtime's model, which the library gates on the switch.
 import { randomUUID } from "node:crypto";
 import {
-  LEARNED_CONTEXT_FEATURE, LESSONS_WORKER_DEADLINE_SECONDS, codeRepositoriesOf, companyScoped, learnedLoadReportOfProgress,
-  type LearnedContext, type ObjectStorage, type OrgId, type QueueService,
+  KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, LESSONS_WORKER_DEADLINE_SECONDS, codeRepositoriesOf, companyScoped, knowledgeUseReportOfProgress, learnedLoadReportOfProgress,
+  type KnowledgeContext, type LearnedContext, type ObjectStorage, type OrgId, type QueueService,
 } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 
@@ -25,7 +25,10 @@ import type { LessonsUsedSection } from "../core/proof/pull-request-body.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { applyLoadReport } from "./counters.js";
 import { logTaskCorrections } from "./correction-log.js";
-import { learnedContextForDispatch } from "./load.js";
+import type { Lesson } from "./types.js";
+import { PUSH_FIT_FLOOR, learnedContextForDispatch, lessonsAndPickedForDispatch, loadPullForStage } from "./load.js";
+import { buildKnowledgeContext, deliveryRecordOf, pathsNamedIn, type KnowledgeSources } from "./knowledge-brief.js";
+import { recordKnowledgeUseReport } from "./knowledge-use.js";
 import { modeAllows, resolveLearning } from "./policy.js";
 import type { LessonsRuntime } from "./runtime.js";
 import { documentReflectClaims } from "./reflect-claims.js";
@@ -54,7 +57,11 @@ const USE_RECORD_KEEP_SECONDS = LESSON_USE_KEEP_SECONDS;
 const INTENT_REQUEST_CHARS = 600;
 
 /** The workflow modes that carry lessons, and the lesson stage each is. Every other mode (the checks, a publication) carries none. */
-const STAGES: Readonly<Record<string, "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "REVIEW">> = { UNDERSTAND: "UNDERSTAND", PLAN: "PLAN", IMPLEMENT: "IMPLEMENT", REVIEW: "REVIEW" };
+const STAGES: Readonly<Record<string, "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "PLAN_CRITIQUE" | "REVIEW">> = { UNDERSTAND: "UNDERSTAND", PLAN: "PLAN", IMPLEMENT: "IMPLEMENT", PLAN_CRITIQUE: "PLAN_CRITIQUE", REVIEW: "REVIEW" };
+/** The longest a step's dispatch waits for the measured facts or the look-up: past it the step goes without them (the lessons are never held up by them). */
+const KNOWLEDGE_EXTRAS_MS = 900;
+/** The correction text of a fix round is used only to rank lessons: this many characters of it. */
+const FIX_TEXT_CHARS = 2_000;
 
 export interface LessonsHostInput {
   flow: TaskFlowDeps;
@@ -64,6 +71,8 @@ export interface LessonsHostInput {
   queues: QueueService;
   /** Whether lessons are on for this company now (read at every ask). */
   enabled: () => boolean;
+  /** Lead 4 L4-AK2: where measured facts and skill names come from, when this install has them (the base's known-flaky list). Absent: the briefing carries lessons and the look-up only. */
+  knowledge?: KnowledgeSources | undefined;
   /** What the reflector reads of an ended task (its record, the people's words, its outcome rows). */
   sources: { source: TaskLearningDeps["source"]; rows: OutcomeRowReader };
   /** Whether the repositories a pull request of the project is in are public, private or unknown (for which lessons a description may name). */
@@ -89,7 +98,7 @@ export interface LessonsHostInput {
 export interface RevertedChange { via: string; files: readonly string[] | undefined }
 
 export interface LessonsHost {
-  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }): Promise<{ learnedContext?: LearnedContext }>;
+  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
   usedInPullRequest(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSection | undefined>;
   /** The numbered list written into a pull request's description (a comment's number refers to it). */
@@ -143,9 +152,20 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
   }
 
-  async function learnedFor(request: Parameters<LessonsHost["learnedFor"]>[0]): Promise<{ learnedContext?: LearnedContext }> {
+  /** An answer or "undefined" when the time passes: the extras never hold up the lessons. */
+  const within = async <T>(work: Promise<T>, ms: number): Promise<T | undefined> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { return await Promise.race([work.catch(() => undefined), new Promise<undefined>((resolve) => { timer = setTimeout(() => { resolve(undefined); }, ms); timer.unref?.(); })]); }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+  };
+
+  async function learnedFor(request: Parameters<LessonsHost["learnedFor"]>[0]): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }> {
     const stage = request.workflowMode === undefined || !Object.hasOwn(STAGES, request.workflowMode) ? undefined : STAGES[request.workflowMode];
     if (stage === undefined || !enabled() || !request.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
+    // The knowledge briefing rides only to a worker that lists its feature; an older worker is sent the lessons alone.
+    const briefing = request.features.includes(KNOWLEDGE_CONTEXT_FEATURE);
+    // The plan check's lessons and the fix round's picking by the correction are part of the briefing: an older worker is sent exactly what it always was.
+    if (stage === "PLAN_CRITIQUE" && !briefing) return {};
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const pointer = fromDocument<TaskPointerRecord>(await flow.store.get((await workspaceKeys(flow, request.workspaceId)).taskPointerKey()));
@@ -159,22 +179,50 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
         const project = await flow.projects.revision(task.project, task.startingRevision);
         const repos = project === undefined ? [] : codeRepositoriesOf(project.definition).map((repository) => repository.name);
         const requestText = (task as { requestText?: string }).requestText ?? "";
-        const intent = [task.title, requestText.slice(0, INTENT_REQUEST_CHARS)].filter((part) => part.trim() !== "").join("\n");
-        const loaded = await learnedContextForDispatch(runtime.load, {
+        // A fix round picks again by the correction: its words and the files it names come first, then the task's own (ranking only; none of it is stored or shown).
+        const fixText = request.fix === undefined || !briefing ? "" : request.fix.text.slice(0, FIX_TEXT_CHARS);
+        const intent = [...(fixText.trim() === "" ? [] : [fixText]), task.title, requestText.slice(0, INTENT_REQUEST_CHARS)].filter((part) => part.trim() !== "").join("\n");
+        const files = [...new Set([...pathsNamedIn(fixText), ...(plan?.files ?? [])])].slice(0, 50);
+        const loadRequest = {
           workspaceId: companyId, project: task.project, taskId: task.taskId, stage, round, intent, ...(plan === undefined || plan.summary === "" ? {} : { planSummary: plan.summary }),
-          repos, files: plan?.files ?? [], languages: [], taskAudience: { kind: "shared" }, wanted: () => !abandoned,
-        }, [LEARNED_CONTEXT_FEATURE]);
-        if (loaded.learnedContext === undefined || abandoned) return {};
-        // What this dispatch loaded, so the worker's report is applied to this stage's manifest only; and, for the lessons page, which tasks used which lessons.
-        await flow.store.put({ item: { pk: companyScoped(companyId, "LESSON_LOAD"), sk: request.operationId, entityType: "LESSON_LOAD_REF", taskId: task.taskId, project: task.project, stage, round, ...ttl(LOAD_RECORD_KEEP_SECONDS) } });
-        for (const lesson of loaded.learnedContext.lessons) {
+          repos, files, languages: [] as string[], taskAudience: { kind: "shared" as const }, wanted: () => !abandoned,
+          // The fit floor goes with the briefing: a worker that takes it gets the sharper push; an older one is sent exactly what it always was.
+          ...(briefing ? { fitFloor: PUSH_FIT_FLOOR } : {}),
+        };
+        // The look-up's lessons, the measured facts and the skill names are asked AT THE SAME TIME as the lessons, each on a short clock of its own, so they never add to the lessons' wait: a slow one is left out and the lessons still go.
+        const parts = KNOWLEDGE_STAGE_PARTS[stage];
+        const extra = { companyId, project: task.project, stage, files, repos };
+        const extras = briefing ? Promise.all([
+          parts.pull ? within(loadPullForStage(runtime.load, { workspaceId: companyId, project: task.project, taskId: task.taskId, stage, intent, ...(plan === undefined || plan.summary === "" ? {} : { planSummary: plan.summary }), repos, files, languages: [] }), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
+          parts.facts && input.knowledge?.facts !== undefined ? within(input.knowledge.facts(extra), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
+          parts.skills && input.knowledge?.skills !== undefined ? within(input.knowledge.skills(extra), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
+        ]) : undefined;
+        const loaded = briefing ? await lessonsAndPickedForDispatch(runtime.load, loadRequest, [LEARNED_CONTEXT_FEATURE]) : await learnedContextForDispatch(runtime.load, loadRequest, [LEARNED_CONTEXT_FEATURE]);
+        if (abandoned) return {};
+        let knowledgeContext: KnowledgeContext | undefined;
+        if (extras !== undefined) {
+          const [pull, facts, skills] = await extras;
           if (abandoned) return {};
-          await flow.store.put({ item: { pk: companyScoped(companyId, `LESSON_USE#${task.project}#${lesson.id}`), sk: task.taskId, entityType: "LESSON_USE", taskId: task.taskId, title: task.title.slice(0, 200), at: now(), ...ttl(USE_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
+          knowledgeContext = buildKnowledgeContext({ stage, pushed: (loaded as { picked?: Lesson[] }).picked ?? [], pull: pull?.picked, pullLeftOut: pull?.leftOut, facts, skills });
         }
-        return loaded;
+        if (loaded.learnedContext === undefined && knowledgeContext === undefined) return {};
+        // What this dispatch loaded, so the worker's report is applied to this stage's manifest only; and, for the lessons page, which tasks used which lessons.
+        if (loaded.learnedContext !== undefined) {
+          await flow.store.put({ item: { pk: companyScoped(companyId, "LESSON_LOAD"), sk: request.operationId, entityType: "LESSON_LOAD_REF", taskId: task.taskId, project: task.project, stage, round, ...ttl(LOAD_RECORD_KEEP_SECONDS) } });
+          for (const lesson of loaded.learnedContext.lessons) {
+            if (abandoned) return {};
+            await flow.store.put({ item: { pk: companyScoped(companyId, `LESSON_USE#${task.project}#${lesson.id}`), sk: task.taskId, entityType: "LESSON_USE", taskId: task.taskId, title: task.title.slice(0, 200), at: now(), ...ttl(USE_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
+          }
+        }
+        // The ids this delivery gave (never text), so the worker's use report can only speak about this operation's own delivery.
+        if (knowledgeContext !== undefined && !abandoned) {
+          const record = deliveryRecordOf({ taskId: task.taskId, project: task.project, learnedLessonIds: (loaded.learnedContext?.lessons ?? []).map((lesson) => lesson.id), knowledge: knowledgeContext });
+          await flow.store.put({ item: { pk: companyScoped(companyId, "KNOWLEDGE_GIVEN"), sk: request.operationId, entityType: "KNOWLEDGE_GIVEN", ...record, ...ttl(LOAD_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
+        }
+        return { ...(loaded.learnedContext === undefined ? {} : { learnedContext: loaded.learnedContext }), ...(knowledgeContext === undefined ? {} : { knowledgeContext }) };
       })();
-      const result = await Promise.race([run, new Promise<{ learnedContext?: LearnedContext }>((resolve) => { timer = setTimeout(() => { abandoned = true; resolve({}); }, LESSON_LOAD_DEADLINE_MS); timer.unref?.(); })]);
-      return result.learnedContext === undefined ? {} : { learnedContext: result.learnedContext };
+      const result = await Promise.race([run, new Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>((resolve) => { timer = setTimeout(() => { abandoned = true; resolve({}); }, LESSON_LOAD_DEADLINE_MS); timer.unref?.(); })]);
+      return { ...(result.learnedContext === undefined ? {} : { learnedContext: result.learnedContext }), ...(result.knowledgeContext === undefined ? {} : { knowledgeContext: result.knowledgeContext }) };
     } catch (error) {
       log("load_failed", { error: error instanceof Error ? error.name : "unknown" });
       return {};
@@ -186,7 +234,12 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   async function onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void> {
     if (!enabled()) return;
     try {
-      const reports = events.slice(0, 500).flatMap((event) => (event.type === "progress" ? [learnedLoadReportOfProgress(event.payload)] : [])).flatMap((report) => (report === undefined ? [] : [report]));
+      const slice = events.slice(0, 500);
+      // Lead 4 L4-AK2: the worker's use report (ids only) is checked against what this operation was delivered and kept as the operation's latest. Information only; it moves no counter yet (the 1/k credit is its own lane).
+      const useReports = slice.flatMap((event) => (event.type === "progress" ? [knowledgeUseReportOfProgress(event.payload)] : [])).flatMap((report) => (report === undefined ? [] : [report]));
+      const lastUse = useReports.at(-1);
+      if (lastUse !== undefined) await recordKnowledgeUseReport({ store: flow.store, companyId, operationId: operation.id, report: lastUse, now, ttlSeconds: USE_RECORD_KEEP_SECONDS, ttl }).catch(() => undefined);
+      const reports = slice.flatMap((event) => (event.type === "progress" ? [learnedLoadReportOfProgress(event.payload)] : [])).flatMap((report) => (report === undefined ? [] : [report]));
       if (reports.length === 0) return;
       const ref = await flow.store.get({ pk: companyScoped(companyId, "LESSON_LOAD"), sk: operation.id });
       if (ref === undefined || typeof ref["taskId"] !== "string" || typeof ref["project"] !== "string" || typeof ref["stage"] !== "string" || typeof ref["round"] !== "number") return;

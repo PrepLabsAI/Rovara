@@ -1,7 +1,7 @@
 // The loader. At a stage's dispatch it picks the lessons that apply and returns the `learnedContext` payload for the worker
 // and the manifest that records what was chosen. It never blocks a task: any failure loads nothing. The task flow's dispatch asks for it through `TaskFlowDeps.learned`.
 import {
-  LEARNED_CONTEXT_FEATURE, LEARNED_CONTEXT_MAX_BYTES, LEARNED_CONTEXT_MAX_LESSONS, cleanLessonText, type CodeCitation, type LearnedContext, type LearnedLesson, type LessonStage,
+  KNOWLEDGE_PULL_MAX_UNITS, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, LEARNED_CONTEXT_MAX_BYTES, LEARNED_CONTEXT_MAX_LESSONS, cleanLessonText, type CodeCitation, type LearnedContext, type LearnedLesson, type LessonStage,
 } from "@agentx/contracts";
 import { globToRegExp } from "./guards.js";
 import { safeScopeLabel } from "./render.js";
@@ -15,10 +15,18 @@ import { createLessonLiveReader, lessonTaskRefs, type LessonLiveReader } from ".
 import { readVisible, readVisibleRanked } from "./read-visible.js";
 import { memberView, type MemberOf, type MemberResolver } from "./members.js";
 import { MEASURE_LEFT_OUT, type FitSample, type MeasureSink } from "./measure.js";
+import { pullable } from "./knowledge-brief.js";
 import { normId, type IdentitySet, type Lesson } from "./types.js";
 
 export const LOAD_MAX_LESSONS = LEARNED_CONTEXT_MAX_LESSONS;
 export const LOAD_MAX_BYTES = LEARNED_CONTEXT_MAX_BYTES;
+/**
+ * The fit floor of the push (design 3.3): a lesson is a candidate when its path globs match a path the step touches, or its fused fit to the task text passes this floor. A lesson with no scope, or whose globs match
+ * nothing in play, must pass it, so a team of 40 lessons does not send the same five to every task. The start value of the research doc; measured numbers replace it.
+ */
+export const PUSH_FIT_FLOOR = 0.35;
+/** The byte budget given to the look-up's selection: the unit limit decides, and `pullUnitsOf` enforces the contract's own byte limit on the units themselves. */
+const PULL_SELECT_BYTES = 256 * 1024;
 const DAY = 86_400_000;
 /** The reviewer's list of what earlier stages loaded is kept short (about 1 KB of titles), so it cannot crowd the lessons budget. */
 const PRIOR_LOADED_MAX = 12;
@@ -35,13 +43,19 @@ export interface LoadRequest {
   intent: string; planSummary?: string;
   repos: readonly string[]; files: readonly string[]; languages: readonly string[];
   taskAudience: TaskAudience;
+  /** The fit floor of the push (`PUSH_FIT_FLOOR`), for a step whose worker takes the knowledge briefing. Absent: no floor, as before (an older worker is sent exactly the lessons it always was). */
+  fitFloor?: number;
   /** Asked just before the load record is written: false when the dispatch stopped waiting (its deadline passed), so a load nobody received is never recorded as used. */
   wanted?: () => boolean;
   /** Only an eval-batch dispatch may ask for `off`; the broker route refuses it from production (task). */
   memory?: { mode: "off" | "live" } | { mode: "snapshot"; snapshotId: string; /** EXACTLY these lessons (the snapshot's, at its versions): the live set is never read. The caller (a replay copy's dispatch) resolved them. */ lessons: readonly Lesson[] };
 }
 export type LoadSkip = "mode" | "stage" | "memory_off" | "index_unreachable" | "no_lessons" | "access_unavailable" | "members_unavailable" | "abandoned";
-export interface LoadResult { context?: LearnedContext; manifest: LoadManifest; skipped?: LoadSkip }
+export interface LoadResult {
+  context?: LearnedContext; manifest: LoadManifest; skipped?: LoadSkip;
+  /** The lessons chosen for the push, in order (the same as `context.lessons`, with their scope). */
+  picked?: Lesson[];
+}
 
 export interface LoadDeps extends LessonDeps {
   store: LessonStore; settings: LearningSettingsReader;
@@ -144,6 +158,8 @@ export interface SelectInput {
   active: readonly Lesson[];
   intent: string; planSummary?: string; repos: readonly string[]; files: readonly string[]; languages: readonly string[];
   reader: SelectReader; where: string; budget: LoadBudget;
+  /** The fit floor: a lesson whose globs match no touched path must reach this fused fit to the task text. Absent: no floor (the local-tools read, replay snapshots). */
+  fitFloor?: number;
   /** A further cheap, caller-owned filter of the lessons that fit the stage and scope, before any are ranked or read (the local-tools filters). It may read; a lesson it drops is never read further. */
   prefilter?: (eligible: readonly Lesson[]) => Promise<readonly Lesson[]>;
 }
@@ -200,6 +216,7 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
   for (const lesson of eligible) {
     const match = scopeMatch(lesson, scope);
     const sim = similarity.get(lesson.id) ?? 0;
+    if (input.fitFloor !== undefined && !match.byPath && sim < input.fitFloor) continue;
     const recency = Math.exp(-Math.max(0, now - (lesson.lastValidatedAt ?? lesson.updatedAt)) / (90 * DAY));
     const score = 0.6 * sim + 0.3 * wilsonLower(lesson.counters.helpful, lesson.counters.loaded) + 0.1 * recency;
     scored.push({ lesson, score, fit: sim, why: match.byPath ? "path" : sim >= 0.6 ? "similar" : "scope" });
@@ -284,6 +301,8 @@ export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest):
     key, stage, resolved, active, intent: request.intent, ...(request.planSummary === undefined ? {} : { planSummary: request.planSummary }),
     repos: request.repos, files: request.files, languages: request.languages, reader: { running: { taskId: request.taskId } }, where: "load",
     budget: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }),
+    // The fit floor is asked for by the caller (the knowledge briefing's steps); a replay copy's frozen snapshot is delivered exactly as chosen, so the floor applies to the live set only.
+    ...(snapshot === undefined && request.fitFloor !== undefined ? { fitFloor: request.fitFloor } : {}),
   });
   if (!selected.ok) return empty(selected.skipped, setVersion);
   const { chosen, entries, bytes, live, viewer, log } = selected;
@@ -323,7 +342,7 @@ export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest):
   }
   // `loaded` is counted when the worker reports the lesson reached the prompt (applyLoadReport), not here: a lesson the worker dropped was never loaded.
   if (chosen.length === 0 && priorLoaded === undefined) return { manifest, skipped: "no_lessons" };
-  return { manifest, context: { v: 1, setVersion, stage, lessons: chosen, ...(priorLoaded === undefined ? {} : { priorLoaded }) } };
+  return { manifest, picked: selected.picked, context: { v: 1, setVersion, stage, lessons: chosen, ...(priorLoaded === undefined ? {} : { priorLoaded }) } };
 }
 
 /**
@@ -340,5 +359,50 @@ export async function learnedContextForDispatch(deps: LoadDeps, request: LoadReq
   } catch {
     deps.metrics?.count("learning_load_skipped", { reason: "error" });
     return {};
+  }
+}
+
+/**
+ * The same call for the knowledge briefing: the loaded context AND the lessons chosen (with their scope, for the worker's area check). Any failure loads nothing. Kept apart from `learnedContextForDispatch` so every other caller
+ * keeps its exact answer.
+ */
+export async function lessonsAndPickedForDispatch(deps: LoadDeps, request: LoadRequest, workerFeatures: readonly string[]): Promise<{ learnedContext?: LearnedContext; picked?: Lesson[] }> {
+  if (!workerFeatures.includes(LEARNED_CONTEXT_FEATURE)) return {};
+  try {
+    const result = await loadLessonsForStage(deps, request);
+    return { ...(result.context === undefined ? {} : { learnedContext: result.context }), ...(result.picked === undefined ? {} : { picked: result.picked }) };
+  } catch {
+    deps.metrics?.count("learning_load_skipped", { reason: "error" });
+    return {};
+  }
+}
+
+/**
+ * Lead 4 L4-AK2: the look-up's lessons for a step (the pull set): approved, visible to the running task's audience, scoped, stable or person-approved, ranked, up to `KNOWLEDGE_PULL_MAX_UNITS`, through the SAME read path as the push
+ * (`selectLessons`). Reads and writes nothing else; undefined when learning does not load, the stage may not look up, or anything cannot be read. `leftOut` counts eligible lessons the look-up could not hold.
+ */
+export async function loadPullForStage(deps: LoadDeps, request: Pick<LoadRequest, "workspaceId" | "project" | "taskId" | "intent" | "planSummary" | "repos" | "files" | "languages"> & { stage: LessonStage }): Promise<{ picked: Lesson[]; leftOut: number } | undefined> {
+  if (!KNOWLEDGE_STAGE_PARTS[request.stage].pull) return undefined;
+  try {
+    const key: ScopeKey = { workspaceId: request.workspaceId, project: request.project };
+    const now = deps.now();
+    const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
+    if (!modeAllows(resolved.mode, "load")) return undefined;
+    const active = (await deps.store.list(key, { statuses: ["active"] })).filter((l) => l.expiresAt > now && !hasStaleCitation(l));
+    const wider = await selectLessons(deps, {
+      key, stage: request.stage, resolved, active, intent: request.intent, ...(request.planSummary === undefined ? {} : { planSummary: request.planSummary }),
+      // No files: the look-up holds every scoped lesson of the task's repositories, not only those whose globs match the files the plan names (the agent may look elsewhere); the ranking still reads the task text.
+      repos: request.repos, files: [], languages: request.languages, reader: { running: { taskId: request.taskId } }, where: "load",
+      budget: { lessons: KNOWLEDGE_PULL_MAX_UNITS, bytes: PULL_SELECT_BYTES }, prefilter: async (eligible) => eligible.filter(pullable),
+    });
+    if (!wider.ok) return undefined;
+    // The last line before anything is handed on: what was picked goes through the one read path again, for the same reader (so no task is read twice). It can only remove a lesson.
+    const allowed = new Set((await readVisible({ access: deps.access, key, viewer: wider.viewer, live: wider.live, lessons: wider.picked, where: "load", log: wider.log })).map((lesson) => lesson.id));
+    const picked = wider.picked.filter((lesson) => allowed.has(lesson.id));
+    const candidates = active.filter((lesson) => stageAllows(lesson, request.stage) && pullable(lesson) && scopeMatch(lesson, { repos: request.repos, files: [], languages: request.languages }).matches).length;
+    return { picked, leftOut: Math.max(0, candidates - picked.length) };
+  } catch {
+    deps.metrics?.count("learning_load_skipped", { reason: "error" });
+    return undefined;
   }
 }

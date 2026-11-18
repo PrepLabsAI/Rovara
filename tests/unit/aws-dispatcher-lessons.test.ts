@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LEARNED_CONTEXT_FEATURE, orgProjectCatalogKey, projectRevisionKey, lessonKey, lessonSetKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, orgProjectCatalogKey, projectRevisionKey, lessonKey, lessonSetKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { createDispatcherLearned, DISPATCHER_LESSONS_UNAVAILABLE, DISPATCHER_LESSONS_LIMITS } from "../../packages/broker/src/aws/worker-machines/dispatcher-lessons.js";
 import { hostedDispatcherFlow } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -218,5 +218,66 @@ describe("read-only dispatcher lessons", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(get).not.toHaveBeenCalled();
     for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe("read-only dispatcher lessons: the knowledge briefing (lead 4 L4-AK2)", () => {
+  const BOTH = { ...request, features: [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE] };
+  async function scopedWorld(companyId = A) {
+    const w = await world(companyId);
+    for (const company of [A, B]) {
+      const key = lessonKey(company, "payments", company === A ? "les_aaaa1111" : "les_bbbb1111");
+      const head = (await w.store.get(key))!;
+      await w.store.put({ item: { ...head, title: company === A ? "Retry network calls" : "B private advice", body: company === A ? "Retry network calls with withRetry." : "Only B knows this.", scope: { repos: ["demo"], paths: ["src/**"] } } });
+      await w.store.put({ item: { ...lessonSetKey(company, "payments"), setVersion: 1, members: { [company === A ? "les_aaaa1111" : "les_bbbb1111"]: 1 } } });
+    }
+    for (const write of w.writes) write.mockClear();
+    return w;
+  }
+
+  it("gives a worker that lists the feature the look-up of THIS company's project, writes nothing, and never another company's lesson", async () => {
+    for (const company of [A, B]) {
+      const w = await scopedWorld(company);
+      const answer = await w.learned(BOTH);
+      expect(answer.knowledgeContext?.stage).toBe("PLAN");
+      expect(answer.knowledgeContext?.pull?.units.map((u) => u.id)).toEqual([company === A ? "les_aaaa1111" : "les_bbbb1111"]);
+      expect(JSON.stringify(answer)).not.toContain(company === A ? "B private advice" : "Retry network calls");
+      for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a lesson with no scope is pushed when it fits but is not in the look-up", async () => {
+    const w = await scopedWorld();
+    const key = lessonKey(A, "payments", "les_aaaa1111");
+    await w.store.put({ item: { ...(await w.store.get(key))!, scope: {} } });
+    const answer = await w.learned(BOTH);
+    expect(answer.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_aaaa1111"]);
+    expect(answer.knowledgeContext?.pull).toBeUndefined();
+  });
+
+  it("a worker without the feature is sent exactly the lessons it always was", async () => {
+    const w = await scopedWorld();
+    const answer = await w.learned(request);
+    expect(answer.knowledgeContext).toBeUndefined();
+    expect(answer.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_aaaa1111"]);
+  });
+
+  it("a look-up that has no time left is left out and the lessons still go (it has a clock of its own and leaves the dispatch deadline its margin)", async () => {
+    const w = await scopedWorld();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // The lessons' own reads take 2.3 s of the 2.5 s: past the look-up's start limit (the deadline less its margin).
+    const send = w.send.getMockImplementation()!;
+    w.send.mockImplementationOnce(async (command) => { vi.setSystemTime(Date.now() + 2_300); return send(command); });
+    const answer = await w.learned(BOTH);
+    expect(answer.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_aaaa1111"]);
+    expect(answer.knowledgeContext).toBeUndefined();
+  });
+
+  it("the plan check mode is a lesson mode (a fixed set, no look-up)", async () => {
+    const w = await scopedWorld();
+    const answer = await w.learned({ ...BOTH, workflowMode: "PLAN_CRITIQUE" });
+    expect(answer.knowledgeContext).toBeUndefined();
+    // An older worker (no knowledge feature) is not sent the plan check's lessons: it gets exactly what it always did.
+    expect(await w.learned({ ...request, workflowMode: "PLAN_CRITIQUE" })).toEqual({});
   });
 });
