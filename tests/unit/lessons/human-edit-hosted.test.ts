@@ -16,6 +16,8 @@ import { humanEditRowKey } from "../../../packages/broker/src/lessons/human-edit
 import { reflectQueueOf } from "../../../packages/broker/src/lessons/reflect-queue.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../../support/core-host-fakes.js";
 import { ScriptedModel, Spend, candidateJson, reply } from "./lesson-helpers.js";
+import { createHostedIdentity } from "../../../packages/broker/src/core-host/hosted-modules.js";
+import { githubLinkReaderOver, linkGithubAccount, unlinkGithubAccount } from "../../../packages/broker/src/core/people/github-links.js";
 
 afterEach(() => setLearnedLessonsGate(() => true));
 
@@ -266,5 +268,54 @@ describe("what is ignored or refused", () => {
       expect(await queued(s.fake), mode).toEqual([]);
       expect(await s.fake.store.get(humanEditRowKey(A, s.a.taskId, head)), mode).toBeUndefined();
     }
+  });
+});
+
+describe("the real hosted identity point with linked GitHub accounts (L4-GH): the producer's author proof places a linked member and skips an unlinked one", () => {
+  const ROLES: Record<string, string> = { "member-rae": A, "member-kim": A, "member-lou": B };
+  /** The stock hosted identity point over the world's own store, so a link written through the link module is what the lessons' `personOf` reads. */
+  const hosted = (store: () => FakeWorld["store"]) => createHostedIdentity({
+    membershipOf: async (personId) => (ROLES[personId] === undefined ? undefined : { companyId: ROLES[personId], role: "member" }),
+    displayNameOf: async (personId) => personId,
+    githubLinks: githubLinkReaderOver({ get: (key) => store().get(key) }),
+  });
+  async function linked(over: { people?: { roster?: readonly string[]; erased?: readonly string[] } } = {}) {
+    const held: { world?: Setup } = {};
+    const s = await setup({ ...over, identity: hosted(() => held.world!.fake.store) });
+    held.world = s;
+    const link = (companyId: string, githubUserId: string, personId: string) => linkGithubAccount(s.fake.store, { companyId, githubUserId, login: `u${githubUserId}`, personId, linkedAt: "2026-11-17T10:00:00.000Z" });
+    return { s, link };
+  }
+  const run = async (s: Setup, identityOf: CommitIdentity) => {
+    await s.a.lessons.host.noteHumanEdit(s.push(personPush(s, identityOf)));
+    for (const message of await queued(s.fake)) await s.a.lessons.host.reflectOne(JSON.stringify(message));
+  };
+
+  it("a push by a member who linked their GitHub account is learned from; the same push by an unlinked author calls no model", async () => {
+    const unlinked = await linked();
+    await run(unlinked.s, personRae);
+    expect(unlinked.s.model.calls).toEqual([]);
+    const { s, link } = await linked();
+    expect(await link(A, "1001", "member-rae")).toBe("linked");
+    await run(s, personRae);
+    expect(s.model.calls).toHaveLength(1);
+    expect(JSON.stringify(s.model.calls[0])).toContain("withRetry");
+  });
+  it("an account linked to a member of ANOTHER company, or linked then unlinked, places nobody in this company", async () => {
+    const other = await linked();
+    expect(await other.link(B, "1001", "member-lou")).toBe("linked");
+    await run(other.s, personRae);
+    expect(other.s.model.calls).toEqual([]);
+    const gone = await linked();
+    await gone.link(A, "1001", "member-rae");
+    await unlinkGithubAccount(gone.s.fake.store, A, "member-rae");
+    await run(gone.s, personRae);
+    expect(gone.s.model.calls).toEqual([]);
+  });
+  it("a link whose member left the company (no membership now) places nobody", async () => {
+    const left = await linked();
+    await left.link(A, "1001", "member-gone");
+    await run(left.s, personRae);
+    expect(left.s.model.calls).toEqual([]);
   });
 });

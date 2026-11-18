@@ -57,16 +57,18 @@ async function boundedJson(response: Response): Promise<unknown> {
   } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 }
 
+type UserRead = (path: string) => Promise<{ status: number; body?: unknown }>;
+
 /**
- * The installations of this App the person behind `code` controls, and who they are on GitHub. Throws UserAuthorizationRefused for anything else:
- * a bad or used code, a GitHub failure, an answer that does not read, more than the bounds allow, the deadline passed.
+ * Exchanges a user authorization code for a user access token and hands `work` a bounded reader that uses it. The token lives only inside this call (dropped in `finally`); every request is
+ * bounded by the one total deadline. Throws UserAuthorizationRefused for anything `work` throws (nothing GitHub said and no input is carried).
  */
-export async function userControlledInstallations(input: UserControlInput): Promise<{ user: { id: number; login: string }; installations: ControlledInstallation[] }> {
+async function withUserToken<T>(input: { fetch: typeof fetch; clientId: string; clientSecret: string; code: string; now?: (() => number) | undefined }, work: (read: UserRead) => Promise<T>): Promise<T> {
   const now = input.now ?? Date.now;
   const started = now();
   const timeLeft = () => { const left = USER_AUTHORIZATION_LIMITS.totalMs - (now() - started); return left > 0 ? Math.min(left, USER_AUTHORIZATION_LIMITS.requestMs) : refuse(); };
   try {
-    if (!CODE.test(input.code) || !/^[0-9]{1,20}$/.test(input.appId)) refuse();
+    if (!CODE.test(input.code)) refuse();
     const exchange = await input.fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded", "user-agent": "agentx-control-plane" },
@@ -77,7 +79,7 @@ export async function userControlledInstallations(input: UserControlInput): Prom
     const granted = record(await boundedJson(exchange));
     let token = typeof granted.access_token === "string" && /^[A-Za-z0-9_]{20,255}$/.test(granted.access_token) && granted.error === undefined ? granted.access_token : refuse();
     try {
-      const read = async (path: string): Promise<{ status: number; body?: unknown }> => {
+      const read: UserRead = async (path) => {
         const response = await input.fetch(`https://api.github.com${path}`, {
           headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "user-agent": "agentx-control-plane", "x-github-api-version": "2022-11-28" },
           signal: AbortSignal.timeout(timeLeft()), redirect: "error",
@@ -86,8 +88,30 @@ export async function userControlledInstallations(input: UserControlInput): Prom
         if (!response.ok) refuse();
         return { status: response.status, body: await boundedJson(response) };
       };
-      const me = record((await read("/user")).body);
-      const user = { id: positive(me.id), login: typeof me.login === "string" && GITHUB_LOGIN.test(me.login) ? me.login : refuse() };
+      return await work(read);
+    } finally { token = ""; }
+  } catch { throw new UserAuthorizationRefused(); }
+}
+
+const userOf = (me: Record<string, unknown>): { id: number; login: string } => ({ id: positive(me.id), login: typeof me.login === "string" && GITHUB_LOGIN.test(me.login) ? me.login : refuse() });
+
+/**
+ * L4-GH: who the person behind a user authorization `code` is on GitHub (GitHub's numeric user id and login): the code is exchanged, `GET /user` is read, the token is dropped. Nothing else is read
+ * (no installations, no organizations). Throws UserAuthorizationRefused for a bad or used code, a GitHub failure, an answer that does not read, or the deadline passed.
+ */
+export async function githubUserOfCode(input: { fetch: typeof fetch; clientId: string; clientSecret: string; code: string; now?: () => number }): Promise<{ id: number; login: string }> {
+  return withUserToken(input, async (read) => userOf(record((await read("/user")).body)));
+}
+
+/**
+ * The installations of this App the person behind `code` controls, and who they are on GitHub. Throws UserAuthorizationRefused for anything else:
+ * a bad or used code, a GitHub failure, an answer that does not read, more than the bounds allow, the deadline passed.
+ */
+export async function userControlledInstallations(input: UserControlInput): Promise<{ user: { id: number; login: string }; installations: ControlledInstallation[] }> {
+  try {
+    if (!/^[0-9]{1,20}$/.test(input.appId)) refuse();
+    return await withUserToken(input, async (read) => {
+      const user = userOf(record((await read("/user")).body));
       const listed = record((await read(`/user/installations?per_page=${USER_AUTHORIZATION_LIMITS.installations}&page=1`)).body);
       const total = Number.isSafeInteger(listed.total_count) && (listed.total_count as number) >= 0 ? listed.total_count as number : refuse();
       const rows = Array.isArray(listed.installations) ? listed.installations : refuse();
@@ -133,6 +157,6 @@ export async function userControlledInstallations(input: UserControlInput): Prom
         .filter((row) => row.accountType === "User" ? row.accountId === user.id : admin.get(row.accountLogin.toLowerCase()) === true)
         .map(({ installationId, accountLogin, accountType, suspended }) => ({ installationId, accountLogin, accountType, suspended }));
       return { user, installations };
-    } finally { token = ""; }
+    });
   } catch { throw new UserAuthorizationRefused(); }
 }

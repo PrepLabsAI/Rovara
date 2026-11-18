@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DocumentStoreError, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { githubAccountKey, githubAuditPk, githubLinkOf, githubPersonKey, linkGithubAccount, unlinkGithubAccount } from "../../packages/broker/src/core/people/github-links.js";
 import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 import { workspaceKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -484,6 +485,23 @@ describe("company purge: what goes and what stays", () => {
     expect(state).toMatchObject({ status: "done", counts: { tombstoned: 1, partitions: 2, refused: 0, conflicting: 1 } });
     // 6 company rows, 3 task rows, 2 workspace rows, 1 accepted request, 1 task-list row, 3 install-wide list rows, 1 row naming the task.
     expect(state!.counts.deleted).toBe(17);
+  });
+
+  it("removes the company's GitHub account links and their audit rows with it, and leaves the other company's links alone (L4-GH)", async () => {
+    const w = world();
+    const at = "2026-11-17T10:00:00.000Z";
+    for (const [company, person, id] of [[A, "dev_a", "7"], [B, "dev_b", "7"]] as const) {
+      expect(await linkGithubAccount(w.store, { companyId: company, githubUserId: id, login: "same-login", personId: person, linkedAt: at, audit: { at, actor: person } })).toBe("linked");
+    }
+    // A removed link leaves its audit row in A too.
+    expect(await linkGithubAccount(w.store, { companyId: A, githubUserId: "8", login: "other", personId: "dev_a2", linkedAt: at, audit: { at, actor: "dev_a2" } })).toBe("linked");
+    expect(await unlinkGithubAccount(w.store, A, "dev_a2", { audit: { at, actor: "dev_a2" } })).toBe(true);
+    await scheduledAndDue(w);
+    await purgeToEnd(w, A);
+    for (const key of [githubAccountKey(A, "7"), githubPersonKey(A, "dev_a")]) expect(await w.store.get(key)).toBeUndefined();
+    expect((await w.store.query({ pk: githubAuditPk(A) })).items).toEqual([]);
+    expect(await githubLinkOf(w.store, B, "dev_b")).toMatchObject({ accountId: "7" });
+    expect((await w.store.query({ pk: githubAuditPk(B) })).items).toHaveLength(1);
   });
 
   it("a retry of a tombstoned audit event is refused, never restores its content", async () => {

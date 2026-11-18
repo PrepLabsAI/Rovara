@@ -37,6 +37,7 @@ import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
 import { createHostedApprovers, stepUpApprovalKeyOf } from "./hosted-approvers.js";
+import { GITHUB_LINK_PROVIDER, githubLinkReaderOver, type GithubLinkReader } from "../core/people/github-links.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
 /** The identity adapter's name on a deployed install: the principals it names were signed in by Code's own sign-in. */
@@ -471,26 +472,48 @@ export interface HostedIdentityOptions {
   membershipOf: MembershipOf;
   /** The person's display name (the sign-in record). Undefined: the person is not known. */
   displayNameOf: (personId: string) => Promise<string | undefined>;
+  /**
+   * L4-GH: the GitHub accounts members linked to themselves (core/people/github-links.ts). With it, the identity point links code host accounts to people (`externalAccounts`): it resolves
+   * `{ provider: "github", tenant: "" }` accounts under the asking company and a person's own account (`accountsOf`). Absent: it links none (as before).
+   */
+  githubLinks?: GithubLinkReader;
 }
 
 /** The deployed identity point: names a member of a company; authenticates nothing (Code's sign-in does). */
 export function createHostedIdentity(options: HostedIdentityOptions): IdentityProvider {
+  const links = options.githubLinks;
+  async function getPrincipal(companyId: string, personId: string): Promise<Principal | undefined> {
+    if (typeof personId !== "string" || personId === "" || !OrgIdSchema.safeParse(companyId).success) return undefined;
+    const membership = await options.membershipOf(personId);
+    if (membership === undefined || membership.companyId !== companyId || !OrgRoleSchema.safeParse(membership.role).success) return undefined;
+    const displayName = await options.displayNameOf(personId);
+    if (displayName === undefined) return undefined;
+    return { companyId, personId, displayName, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
+  }
   return {
-    capabilities: { interactiveSignIn: false, externalAccounts: false },
+    capabilities: { interactiveSignIn: false, externalAccounts: links !== undefined },
     async authenticate() {
       return { ok: false, reason: "refused" };
     },
-    async resolveExternalAccount() {
-      return undefined;
+    // L4-GH: a GitHub account is a member only through a link row under THIS company, and the person is then read live in this company (a removed member, or one now in another company, is nobody).
+    async resolveExternalAccount(companyId, account) {
+      if (links === undefined || account.provider !== GITHUB_LINK_PROVIDER || account.tenant !== "") return undefined;
+      const company = OrgIdSchema.safeParse(companyId);
+      if (!company.success) return undefined;
+      const personId = await links.personOf(company.data, account.accountId);
+      if (personId === undefined) return undefined;
+      const person = await getPrincipal(company.data, personId);
+      return person !== undefined && person.companyId === company.data && person.personId === personId ? person : undefined;
     },
-    async getPrincipal(companyId, personId): Promise<Principal | undefined> {
-      if (typeof personId !== "string" || personId === "" || !OrgIdSchema.safeParse(companyId).success) return undefined;
-      const membership = await options.membershipOf(personId);
-      if (membership === undefined || membership.companyId !== companyId || !OrgRoleSchema.safeParse(membership.role).success) return undefined;
-      const displayName = await options.displayNameOf(personId);
-      if (displayName === undefined) return undefined;
-      return { companyId, personId, displayName, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
-    },
+    getPrincipal,
+    ...(links === undefined ? {} : {
+      async accountsOf(companyId: string, personId: string) {
+        const company = OrgIdSchema.safeParse(companyId);
+        if (!company.success || await getPrincipal(company.data, personId) === undefined) return [];
+        const accountId = await links.accountOf(company.data, personId);
+        return accountId === undefined ? [] : [{ provider: GITHUB_LINK_PROVIDER, tenant: "", accountId }];
+      },
+    }),
   };
 }
 
@@ -526,7 +549,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
         return createHostedAdmission({ settings: read.settings, store, ledger, now: context.now, ...(inputs.runStopWired === true ? { runStopWired: true } : {}), ...(inputs.projectTaskCap === undefined ? {} : { projectTaskCap: inputs.projectTaskCap }) });
       },
     }),
-    coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: OWNER, create: () => createHostedIdentity(inputs.identity) }),
+    coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: OWNER, create: (_context, registry) => createHostedIdentity({ ...inputs.identity, githubLinks: githubLinkReaderOver(registry.require("storage")) }) }),
     coreAdapter({
       point: "approvers", name: "hosted-step-up", owner: "switch-on lane L2a",
       create: (context, registry) => createHostedApprovers({

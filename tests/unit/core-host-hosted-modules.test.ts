@@ -10,6 +10,7 @@ import {
 } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry } from "../../packages/broker/src/core-host/registry.js";
 import { costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
+import { githubLinkReaderOver, linkGithubAccount } from "../../packages/broker/src/core/people/github-links.js";
 import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
@@ -193,6 +194,72 @@ describe("the deployed identity point", () => {
   it("authenticates no credential and resolves no outside account (Code's sign-in does that)", async () => {
     expect(await identity.authenticate({ scheme: "bearer", value: "anything" })).toEqual({ ok: false, reason: "refused" });
     expect(await identity.resolveExternalAccount(ORG, { provider: "slack", tenant: "T", accountId: "U" })).toBeUndefined();
+  });
+});
+
+describe("the deployed identity point with linked GitHub accounts (L4-GH)", () => {
+  const PEOPLE: Record<string, OrgId> = { "dev-a": ORG, "dev-b": ORG, "dev-o": OTHER };
+  const identityOver = (store: MemoryDocumentStore) => createHostedIdentity({
+    membershipOf: async (personId) => (PEOPLE[personId] === undefined ? undefined : { companyId: PEOPLE[personId], role: "member" }),
+    displayNameOf: async (personId) => (PEOPLE[personId] === undefined ? undefined : personId),
+    githubLinks: githubLinkReaderOver(store),
+  });
+  const link = (store: MemoryDocumentStore, companyId: string, githubUserId: string, personId: string) => linkGithubAccount(store, { companyId, githubUserId, login: `login${githubUserId}`, personId, linkedAt: NOW.toISOString() });
+  const github = (accountId: string, tenant = "") => ({ provider: "github", tenant, accountId });
+
+  it("links code host accounts only when it is given the links (the capability follows)", () => {
+    expect(createHostedIdentity({ membershipOf: async () => undefined, displayNameOf: async () => undefined }).capabilities.externalAccounts).toBe(false);
+    const store = new MemoryDocumentStore();
+    const identity = identityOver(store);
+    expect(identity.capabilities.externalAccounts).toBe(true);
+    expect(typeof identity.accountsOf).toBe("function");
+  });
+
+  it("resolves a linked GitHub account to its member of the asking company, and to nobody else", async () => {
+    const store = new MemoryDocumentStore();
+    await link(store, ORG, "7", "dev-a");
+    const identity = identityOver(store);
+    expect((await identity.resolveExternalAccount(ORG, github("7")))?.personId).toBe("dev-a");
+    expect(await identity.resolveExternalAccount(ORG, github("8"))).toBeUndefined();
+    // Another company asking for the same account: nobody (its own partition is empty).
+    expect(await identity.resolveExternalAccount(OTHER, github("7"))).toBeUndefined();
+    // Another provider, or a tenant: nobody.
+    expect(await identity.resolveExternalAccount(ORG, { provider: "gitlab", tenant: "", accountId: "7" })).toBeUndefined();
+    expect(await identity.resolveExternalAccount(ORG, github("7", "some-org"))).toBeUndefined();
+    expect(await identity.resolveExternalAccount("not-a-company", github("7"))).toBeUndefined();
+  });
+
+  it("reads the person live: a member who left, moved to another company, or has no name is nobody", async () => {
+    const store = new MemoryDocumentStore();
+    await link(store, ORG, "7", "dev-a");
+    await link(store, ORG, "9", "dev-o");
+    await link(store, ORG, "10", "dev-gone");
+    const identity = identityOver(store);
+    // dev-o is a member of OTHER now, though the link row sits under ORG.
+    expect(await identity.resolveExternalAccount(ORG, github("9"))).toBeUndefined();
+    expect(await identity.resolveExternalAccount(ORG, github("10"))).toBeUndefined();
+    expect(await identity.accountsOf!(ORG, "dev-o")).toEqual([]);
+    expect(await identity.accountsOf!(ORG, "dev-gone")).toEqual([]);
+  });
+
+  it("lists a person's own account, in their company only", async () => {
+    const store = new MemoryDocumentStore();
+    await link(store, ORG, "7", "dev-a");
+    const identity = identityOver(store);
+    expect(await identity.accountsOf!(ORG, "dev-a")).toEqual([github("7")]);
+    expect(await identity.accountsOf!(ORG, "dev-b")).toEqual([]);
+    expect(await identity.accountsOf!(OTHER, "dev-a")).toEqual([]);
+  });
+
+  it("the identity module reads the links from the registry's own storage (no input needed)", async () => {
+    const store = new MemoryDocumentStore();
+    const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: ORG }, identity: { membershipOf: async (id) => (id === "dev-a" ? { companyId: ORG, role: "member" } : undefined), displayNameOf: async (id) => id } });
+    const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), ...modules], context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [] });
+    const identity = registry.require("identity");
+    expect(identity.capabilities.externalAccounts).toBe(true);
+    expect(await identity.resolveExternalAccount(ORG, github("7"))).toBeUndefined();
+    await link(store, ORG, "7", "dev-a");
+    expect((await identity.resolveExternalAccount(ORG, github("7")))?.personId).toBe("dev-a");
   });
 });
 

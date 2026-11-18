@@ -4,7 +4,8 @@
 //   1. The receipt and the audit record, in ONE transaction: the receipt row (`ORG#<company>#PERSON_ERASED#<person>`, written once, so a repeat keeps the first time and records nothing again), the
 //      `person.erased` event through the audit sink's `stage`, and the pending walk of the person's evidence (only absent fields are set, so a saved cursor is never overwritten). The erase is recorded or it
 //      does not happen: a sink that stages nothing still writes the receipt, a transaction that fails writes nothing.
-//   2. The person's chat links in this company (both rows of each link; the actor row only while it still names this person), their notification settings and their last-sent row.
+//   2. The person's chat links in this company (both rows of each link; the actor row only while it still names this person), their notification settings and their last-sent row, and their GitHub account link
+//      (L4-GH: both rows; the account row only while it still names this person).
 //   3. The learning data (`eraseLearning`, REQUIRED: a wiring that forgets it fails, it never reads as "nothing to erase").
 //   3b. The project wiki (`eraseWiki`, REQUIRED the same way; lead 4 W2, wiki review fix 7): the person's notes and saved answer records go, their "Mark wrong" reasons are removed.
 //   4. The evidence of the person's tasks in this company: the person's task index (`DEVELOPER#<person>` / `TASK#...`, the tasks they started) -> each task's record -> its owner key and workspace ->
@@ -29,6 +30,7 @@ import { evidencePrefixesOf } from "../proof/evidence-erase.js";
 import { taskKey } from "../../developer/task-records.js";
 import { rowInCompany } from "../../developer/company-rows.js";
 import { prefsKey } from "../notify/prefs.js";
+import { unlinkGithubAccount } from "./github-links.js";
 import { notifySentKey } from "../notify/attention.js"; import { eraseInboxRows } from "../notify/inbox-rows.js";
 
 /** A person id as a key part: letters, digits, `_`, `.` and `-`, never `#`, `|`, a space or a newline. */
@@ -169,6 +171,7 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
     // Their notification settings (contact targets, time zone, unsubscribe) and what was last sent to them, in this company.
     await deps.store.delete({ key: prefsKey(companyId, personId) });
     await deps.store.delete({ key: notifySentKey(companyId, personId) }); await eraseInboxRows(deps.store, companyId, personId);
+    await unlinkGithubAccount(deps.store, companyId, personId);
   } catch (error) {
     log({ event: "person_erase.links_failed", level: "error", error: errorName(error) });
     throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their chat links or notification settings could not be removed just now. Send the same request again.");

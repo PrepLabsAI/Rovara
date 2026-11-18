@@ -17,6 +17,7 @@ import { VersionedBucket } from "../support/versioned-bucket.js";
 import { prefsKey } from "../../packages/broker/src/core/notify/prefs.js";
 import { notifySentKey } from "../../packages/broker/src/core/notify/attention.js";
 import { inboxKey, inboxPartition, inboxRow } from "../../packages/broker/src/core/notify/inbox-rows.js";
+import { githubLinkOf, linkGithubAccount, linkedGithubPerson } from "../../packages/broker/src/core/people/github-links.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -180,6 +181,22 @@ describe("person erase: what it removes", () => {
     expect(await w.store.get(orgChannelLinkKey(A, { channel: "teams", tenant: "tenant1", userId: "U2" }))).toMatchObject({ developerId: OTHER });
     expect(await w.store.get(orgDeveloperChannelLinkKey(A, MALLORY, { channel: "teams", tenant: "tenant1", userId: "U1" }))).toBeUndefined();
     expect(await w.store.get(orgChannelLinkKey(B, { channel: "teams", tenant: "tenant1", userId: "U3" }))).toMatchObject({ developerId: MALLORY });
+  });
+
+  it("removes the person's GitHub account link in this company (both rows), but not another person's, nor the same person's link in another company (L4-GH)", async () => {
+    const w = world();
+    const at = "2026-11-17T10:00:00.000Z";
+    await linkGithubAccount(w.store, { companyId: A, githubUserId: "7", login: "mallory", personId: MALLORY, linkedAt: at });
+    await linkGithubAccount(w.store, { companyId: A, githubUserId: "8", login: "other", personId: OTHER, linkedAt: at });
+    await linkGithubAccount(w.store, { companyId: B, githubUserId: "7", login: "mallory", personId: MALLORY, linkedAt: at });
+    await erase(w);
+    expect(await githubLinkOf(w.store, A, MALLORY)).toBeUndefined();
+    expect(await linkedGithubPerson(w.store, A, "7")).toBeUndefined();
+    expect(await w.store.get({ pk: `ORG#${A}#GITHUB_ACCOUNT_OF`, sk: `PERSON#${MALLORY}` })).toBeUndefined();
+    expect(await githubLinkOf(w.store, A, OTHER)).toMatchObject({ accountId: "8" });
+    expect(await githubLinkOf(w.store, B, MALLORY)).toMatchObject({ accountId: "7" });
+    // The erase is repeatable with the link already gone.
+    await expect(erase(w)).resolves.toMatchObject({ alreadyErased: true });
   });
 
   it("asks the learning erase for this company and person", async () => {
