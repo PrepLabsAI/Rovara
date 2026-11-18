@@ -10,7 +10,7 @@ import {
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
-  EVAL_PLAN_DELIVERY_ACTION, EVAL_ROUND_FEATURE,
+  EVAL_PLAN_DELIVERY_ACTION, EVAL_ROUND_FEATURE, ROVARA_SKILLS_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
@@ -332,6 +332,8 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   if (spec.kind === "task" && deps.learned !== undefined) {
     const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features }).catch(() => undefined);
     if (learned?.learnedContext !== undefined) payload = { ...payload, learnedContext: learned.learnedContext };
+    // Rovara skills (L4-AK3): only for a worker that lists the feature (the loader asks for it by the same list), never replacing a payload field a step already has.
+    if (learned?.rovaraSkills !== undefined && learned.rovaraSkills.length > 0 && features.includes(ROVARA_SKILLS_FEATURE)) payload = { ...payload, rovaraSkills: learned.rovaraSkills };
   }
   // The project's wiki, when its switch is on (lead 4 A1): built now from the task's own project, for a worker that lists the feature; none otherwise.
   const wikiContext = await wikiContextForStep(deps, workspace, operation, features);
@@ -410,9 +412,9 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     return slim.success ? slim.data : parsed.data;
   }
   // Lessons and the wiki never block a step: a learned or wiki context the worker's schema does not take is dropped, and the step is built without it.
-  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined) {
-    const { learnedContext: _dropped, wikiContext: _droppedWiki, ...withoutMemory } = draft.payload;
-    void _dropped; void _droppedWiki;
+  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined || draft.payload["rovaraSkills"] !== undefined) {
+    const { learnedContext: _dropped, wikiContext: _droppedWiki, rovaraSkills: _droppedSkills, ...withoutMemory } = draft.payload;
+    void _dropped; void _droppedWiki; void _droppedSkills;
     const retried = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutMemory });
     if (retried.success) return retried.data;
   }

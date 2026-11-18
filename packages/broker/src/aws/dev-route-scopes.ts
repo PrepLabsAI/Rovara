@@ -130,6 +130,12 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire-request", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
+  // L4-AK3: Rovara skills (core-host/lessons-api.ts): list, "Make this a skill?", edit, the two approvals and retire. Full access only; live membership, the project's roster and the approver directory still decide.
+  { method: "GET", path: "/v1/dev/projects/{project}/skills", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/skill", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{project}/skills/{skill}", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/skills/{skill}/approve", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/skills/{skill}/retire", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
   // The Home number "Corrections you had to repeat" (core-host/lessons-repeats-api.ts): one project (its roster), or the company (owners and admins). Full access only, live membership.

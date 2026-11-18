@@ -16,6 +16,7 @@ import { nextVersion, type ScopeKey } from "./store.js";
 import { classifyTier, type TierContext } from "./tier.js";
 import { TRIAL_APPROVER, trialBlockers, type TrialContext } from "./trial.js";
 import { sameSource, type Lesson } from "./types.js";
+import { proposalSightings, proposedByOf } from "./proposal-mark.js";
 
 export interface ProcessDeps extends CurateDeps {
   verifier: CitationVerifier; facts: CodeFacts; settings: LearningSettingsReader;
@@ -49,6 +50,8 @@ export function earnedAttention(lesson: Lesson, tier: Lesson["tier"], reasons: r
   if (reasons.includes("capability_request")) return true;
   if (new Set(lesson.provenance.supportTasks).size >= 2) return true;
   if (lesson.provenance.supportTasks.length >= 1 && lesson.provenance.memberSignal) return true;
+  // A team suggestion (a tool outside Rovara, or an agent) is a weak source: it waits as a candidate until a second, independent sighting (two tasks, two people, or one of each). It never gets by on a single one.
+  if (proposedByOf(lesson) !== undefined && proposalSightings(lesson) >= 2) return true;
   return tier === 0 && isCorroborated(lesson.provenance);
 }
 

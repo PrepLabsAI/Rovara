@@ -15,7 +15,7 @@
 // Lessons that are repo-file eligible live in the merged `.rovara/lessons.md` (decision 50a). A tool that reads that file asks with `skipRepoFile` and gets only the lessons NOT already merged into that repository's file;
 // without it the lessons in the file are returned and marked `inRepoFile`, so a tool that reads both can drop the duplicates. A failed read of the file's state leaves the lesson in (a repeat is harmless; a gap is not).
 
-import { LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse } from "@agentx/contracts";
+import { KNOWLEDGE_STAYS_SENTENCE, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse } from "@agentx/contracts";
 import { hasStaleCitation, selectLessons, type LoadDeps } from "./load.js";
 import { learnedLessonsSwitchOn, modeAllows, resolveLearning, resolveLoadBudget, type LearningSettingsReader, type LoadBudget } from "./policy.js";
 import { mayNameInRepository, projectRepoScopesOf } from "./project-repo-audience.js";
@@ -41,9 +41,11 @@ export const LOCAL_OFF_REASONS = ["install_switch", "company_stays", "learning_o
 export type LocalOffReason = (typeof LOCAL_OFF_REASONS)[number];
 export const LOCAL_OFF_MESSAGES: Readonly<Record<LocalOffReason, string>> = {
   install_switch: "Lessons are switched off for this Rovara installation, so there are no lessons to give.",
-  company_stays: "Your company keeps lessons inside Rovara, so local coding tools get none.",
+  // The company's switch, one fixed sentence in every MCP knowledge tool (owner decision 2026-11-17).
+  company_stays: KNOWLEDGE_STAYS_SENTENCE,
   learning_off: "Lessons are off for this project, so there are no lessons to give.",
-  regulated: "This project is on the Regulated preset, so local coding tools get no lessons.",
+  // The Regulated preset turns "Knowledge stays in Rovara" on by default, so it says the same sentence (the reason code still tells a settings screen why).
+  regulated: KNOWLEDGE_STAYS_SENTENCE,
   project_setting: "Local coding tools are switched off for this project's lessons.",
 };
 /** What a tool says when Rovara cannot answer (the CLI and the MCP tool print this, and carry on). */
@@ -170,6 +172,37 @@ export async function lessonsForLocalTool(deps: LocalLessonsDeps, input: LocalLe
   return { kind: "answer", answer: { status: "ok", message: "", project: input.project, ...(repo === undefined ? {} : { repo: normalizeRemote(input.remote!)! }), lessons, markdown, complete: selected.complete } };
 }
 
+/** The project repository a tool's git remote names, proved against the project's own registered repositories: `undefined` when no remote was given, `"unknown_repo"` when it is not one of theirs (never a guess). Throws `LocalLessonsUnavailable` when the repositories cannot be read. */
+export async function proveLocalRepo(deps: Pick<LocalLessonsDeps, "access">, key: ScopeKey, remoteText: string | undefined): Promise<{ name: string; place?: string | undefined } | undefined | "unknown_repo"> {
+  if (remoteText === undefined) return undefined;
+  const remote = normalizeRemote(remoteText);
+  if (remote === undefined) return "unknown_repo";
+  const port = projectRepoScopesOf(deps.access.taskVisibility);
+  const org = OrgIdSchema.safeParse(key.workspaceId);
+  if (port?.byRemote === undefined || !org.success) throw new LocalLessonsUnavailable("repositories");
+  let repo: { name: string; place?: string | undefined } | undefined;
+  try { repo = await port.byRemote(org.data, key.project, remote); } catch { throw new LocalLessonsUnavailable("repositories"); }
+  return repo === undefined ? "unknown_repo" : repo;
+}
+
+/**
+ * The one gate every MCP knowledge tool passes (answers, the table of contents and a suggestion): the install's lessons switch, the company's "Knowledge stays in Rovara" (owner or admin; off by default, and ON under the
+ * Regulated preset), learning Off for the project, and the project's own setting. The first that holds is the reason, and the answer is that reason's fixed sentence (`LOCAL_OFF_MESSAGES`; the company's is one sentence for
+ * every tool). Rovara's own agents never pass through here: the switch is about tools outside Rovara. Throws `LocalLessonsUnavailable` when a setting cannot be read (the caller fails closed).
+ */
+export async function localToolsGate(deps: Pick<LocalLessonsDeps, "localTools" | "settings">, key: ScopeKey): Promise<{ kind: "off"; reason: LocalOffReason } | { kind: "on"; resolved: Awaited<ReturnType<typeof resolveLearning>> }> {
+  // Decision 47: the install's lessons switch is off, so no lesson and no setting is read at all.
+  if (!learnedLessonsSwitchOn()) return { kind: "off", reason: "install_switch" };
+  let local: Awaited<ReturnType<LocalToolsSettingsReader["read"]>>;
+  try { local = await deps.localTools.read(key.workspaceId, key.project); } catch { throw new LocalLessonsUnavailable("settings"); }
+  if (local.companyStays) return { kind: "off", reason: "company_stays" };
+  const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
+  if (!modeAllows(resolved.chosenMode, "load")) return { kind: "off", reason: "learning_off" };
+  if (resolved.preset === "regulated") return { kind: "off", reason: "regulated" };
+  if (local.projectOn === false) return { kind: "off", reason: "project_setting" };
+  return { kind: "on", resolved };
+}
+
 /** What the shared read found: the picked lessons (each checked again as for nobody in particular), or why there is nothing to give. */
 type Selected =
   | { kind: "unknown_repo" } | { kind: "off"; reason: LocalOffReason }
@@ -185,27 +218,14 @@ async function selectForLocalTool(deps: LocalLessonsDeps, input: LocalLessonsInp
   const key: ScopeKey = { workspaceId: input.orgId, project: input.project };
   // The repository is proved FIRST (it reads only the project's own definition): an address that is not one of this project's repositories is "no such repository" whatever is switched off, so a client that asks every project
   // meets another project's "off" never, and only the project that holds the repository can say "off".
-  // Which repository: the remote is proved against the project's registered repositories; one that is not theirs is "no such repository", with nothing else said.
-  let repo: { name: string; place?: string | undefined } | undefined;
-  if (input.remote !== undefined) {
-    const remote = normalizeRemote(input.remote);
-    if (remote === undefined) return { kind: "unknown_repo" };
-    const port = projectRepoScopesOf(deps.access.taskVisibility);
-    const org = OrgIdSchema.safeParse(key.workspaceId);
-    if (port?.byRemote === undefined || !org.success) throw new LocalLessonsUnavailable("repositories");
-    try { repo = await port.byRemote(org.data, key.project, remote); } catch { throw new LocalLessonsUnavailable("repositories"); }
-    if (repo === undefined) return { kind: "unknown_repo" };
-  }
+  const proved = await proveLocalRepo(deps, key, input.remote);
+  if (proved === "unknown_repo") return { kind: "unknown_repo" };
+  const repo = proved;
 
-  // Decision 47: the install's lessons switch is off, so no lesson and no setting is read at all.
-  if (!learnedLessonsSwitchOn()) return { kind: "off", reason: "install_switch" };
-  let local: Awaited<ReturnType<LocalToolsSettingsReader["read"]>>;
-  try { local = await deps.localTools.read(key.workspaceId, key.project); } catch { throw new LocalLessonsUnavailable("settings"); }
-  if (local.companyStays) return { kind: "off", reason: "company_stays" };
-  const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
-  if (!modeAllows(resolved.chosenMode, "load")) return { kind: "off", reason: "learning_off" };
-  if (resolved.preset === "regulated") return { kind: "off", reason: "regulated" };
-  if (local.projectOn === false) return { kind: "off", reason: "project_setting" };
+  // The switches (`localToolsGate`: decision 47's install switch, the company's "Knowledge stays in Rovara", learning Off, the Regulated preset, the project's own setting).
+  const gate = await localToolsGate(deps, key);
+  if (gate.kind === "off") return { kind: "off", reason: gate.reason };
+  const resolved = gate.resolved;
 
   let active: Lesson[];
   try {

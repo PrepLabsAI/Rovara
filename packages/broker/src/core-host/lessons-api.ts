@@ -14,6 +14,11 @@
 //   GET  /v1/dev/projects/{project}/lessons/mode                                                             the project's learning mode
 //   PUT  /v1/dev/projects/{project}/lessons/mode                        { mode: off | suggest | auto }       a project admin (maintainer) or a company owner or admin only
 //   POST /v1/dev/projects/{project}/lessons/mode/trial-offer            { decision: accept | not_now }       the earned-trust offer (`lessons/earned-trust.ts`): who may change the mode answers it
+//   GET  /v1/dev/projects/{project}/skills                                                                   the project's Rovara skills (L4-AK3): the newest version of each, who approved it (a count and whether you did), the long-skill note
+//   POST /v1/dev/projects/{project}/lessons/{lessonId}/skill            { name? }                            "Make this a skill?": a person who decides drafts a skill from a PROVEN procedure lesson (made by code, no model)
+//   PUT  /v1/dev/projects/{project}/skills/{name}                       { expectedVersion, description, when, steps, doneWhen?, why? }   an edit is a NEW version with no approvals (the live version stays live)
+//   POST /v1/dev/projects/{project}/skills/{name}/approve               { version }                          one of the TWO different people a version needs before it is used
+//   POST /v1/dev/projects/{project}/skills/{name}/retire                {}                                   a person who decides takes a skill out of use at once
 //   GET  /v1/dev/projects/{project}/lessons/weekly-summary                                                   whether the weekly lessons summary goes to the chats (`lessons/digest-notice.ts`; off by default)
 //   PUT  /v1/dev/projects/{project}/lessons/weekly-summary              { on: boolean }                      who may set the mode sets it; audited before the write
 //
@@ -28,9 +33,10 @@
 //     the write for the mode and a retire request (no record, no change).
 //   - A person's erased words never come back: reasons are fixed words, people are named live (an erased person is "a former member"), and an erased person's retire request is never listed.
 //   - Refusals are fixed words; nothing a caller sent is echoed.
-import { AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, agentXError, companyScoped, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
+import { AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, ROVARA_SKILL_DESCRIPTION_MAX, ROVARA_SKILL_NAME, agentXError, companyScoped, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
 import { z } from "zod";
 import { approveLesson, rejectLesson, retireByPerson, type ApprovalFailure } from "../lessons/approve.js";
+import { SKILL_STEPS_MAX, approveSkill, draftSkillFromLesson, editSkill, listSkills, retireSkill, type SkillDeps } from "../lessons/skills.js";
 import { recordFeedback } from "../lessons/counters.js";
 import { writeLearningMode, writeLearningModeFromSuggest } from "../lessons/document-settings.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -46,7 +52,7 @@ import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request|skill))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
@@ -91,6 +97,12 @@ const DecisionsBody = z.object({ decisions: z.array(DecisionSchema).min(1).max(D
 const RejectBody = z.object({ version: z.number().int().min(1).max(1_000_000), reason: z.enum(REJECT_REASONS) }).strict();
 const RetireBody = z.object({ reason: z.enum(RETIRE_REASONS) }).strict();
 const EmptyBody = z.object({}).strict();
+const SkillDraftBody = z.object({ name: z.string().regex(ROVARA_SKILL_NAME).optional() }).strict();
+const SkillEditBody = z.object({
+  expectedVersion: z.number().int().min(1).max(1_000_000), description: z.string().trim().min(1).max(ROVARA_SKILL_DESCRIPTION_MAX), when: z.string().trim().min(1).max(2_000),
+  steps: z.array(z.string().trim().min(1).max(4_000)).min(1).max(SKILL_STEPS_MAX), doneWhen: z.string().max(2_000).optional(), why: z.string().max(2_000).optional(),
+}).strict();
+const SkillApproveBody = z.object({ version: z.number().int().min(1).max(1_000_000) }).strict();
 const ModeBody = z.object({ mode: z.enum(LESSON_API_MODES) }).strict();
 const TrialOfferBody = z.object({ decision: z.enum(["accept", "not_now"]) }).strict();
 const WeeklySummaryBody = z.object({ on: z.boolean() }).strict();
@@ -185,6 +197,29 @@ function refusalOf(code: ApprovalFailure): AgentXError {
   }
 }
 
+/** The words a skill refusal is answered with: fixed, and never the cause or anything the caller sent. */
+export function skillRefusalOf(code: string): AgentXError {
+  switch (code) {
+    case "not_found": return notFound("That skill or lesson is no longer there.");
+    case "not_proven": return agentXError("FORBIDDEN", "That lesson has not proved itself yet, so it cannot become a skill.");
+    case "not_eligible": return agentXError("FORBIDDEN", "Only a maintainer of this project, or an admin, can decide skills.");
+    case "eligibility_unavailable": return agentXError("RUNTIME_UNAVAILABLE", "Rovara could not tell who may decide this. Try again.");
+    case "already_a_skill": return agentXError("IDEMPOTENCY_CONFLICT", "A skill was already made from this lesson.");
+    case "not_project_wide": return agentXError("FORBIDDEN", "That lesson came from a place only some people can read, so it cannot become the project's skill.");
+    case "bad_name": return agentXError("CONFIG_INVALID", "That skill name cannot be used. Use lowercase letters, digits and hyphens, and a name no other skill has.");
+    case "too_large": return agentXError("CONFIG_INVALID", "That skill is too long. A skill is at most 32 KB.");
+    case "too_many_steps": return agentXError("CONFIG_INVALID", "A skill has at most 12 steps.");
+    case "empty": return agentXError("CONFIG_INVALID", "A skill needs at least one step.");
+    case "execution_line": return agentXError("CONFIG_INVALID", "A skill is text only: it cannot hold a command line to run or a list of tools.");
+    case "conflict": case "not_newest": return agentXError("IDEMPOTENCY_CONFLICT", "This skill changed since you read it. Read it again and decide again.");
+    case "already_live": return agentXError("IDEMPOTENCY_CONFLICT", "That version is already in use.");
+    case "already_approved": return agentXError("IDEMPOTENCY_CONFLICT", "You already approved this version.");
+    case "retired": return agentXError("IDEMPOTENCY_CONFLICT", "That skill was retired.");
+    case "audit_unavailable": return agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+    default: return agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
+  }
+}
+
 export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   const log = (event: string, fields: Record<string, unknown> = {}): void => options.log?.({ component: "lessons-api", event, ...fields });
 
@@ -202,10 +237,13 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   async function answer(request: LessonsApiRequest, caller: LessonsApiCaller): Promise<unknown> {
     const match = LESSONS_API.exec(request.path);
     if (match === null) throw notFound(ROUTE_NOT_FOUND);
-    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson] = match;
+    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson, rawSkill, skillAction] = match;
     const method = request.method;
-    const route = rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
+    // The skills paths (`skills`, `skills/{name}`, `skills/{name}/approve|retire`) and the lesson's `skill` action are the skill routes.
+    const skillsPath = /^\/v1\/dev\/projects\/[^/]+\/skills(?:\/|$)/u.test(request.path);
+    const route = skillsPath ? (rawSkill === undefined ? "skills" : skillAction === undefined ? "skill-edit" : `skill-${skillAction}`)
+      : rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
+    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
     if (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
@@ -261,6 +299,45 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       return { project, taskId, lessonId, marked: "not_helpful" };
     }
     if (!onRoster) throw notFound(NO_SUCH_PROJECT);
+
+    // Rovara skills (L4-AK3). Reads need the roster; every write is a person who decides (the library asks the approver directory now), never a script token (refused above), and is audited by the library before it is made.
+    if (route === "skills" || route === "skill" || route.startsWith("skill-")) {
+      const skillDeps: SkillDeps = { documents: runtime.documents, lessons: runtime.store, directory: runtime.directory, audit: runtime.audit, access: runtime.access, now: options.now, vectors: runtime.vectors };
+      let skillName: string | undefined;
+      if (rawSkill !== undefined) skillName = rawSkill;
+      if (route === "skills") {
+        let skills: Awaited<ReturnType<typeof listSkills>>;
+        try { skills = await listSkills(runtime, where); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+        return { project, skills: skills.map(({ approvers, ...rest }) => ({ ...rest, approvedByYou: approvers.some((id) => id.normalize("NFC").trim().toLowerCase() === personId.normalize("NFC").trim().toLowerCase()) })) };
+      }
+      if (route === "skill") {
+        const body = bodyOf(SkillDraftBody, request.body, "a skill draft takes an optional name (lowercase letters, digits and hyphens)");
+        let lessonId: string;
+        try { lessonId = decodeURIComponent(rawLesson!); } catch { throw notFound(NO_SUCH_LESSON); }
+        if (!LESSON_ID.test(lessonId)) throw notFound(NO_SUCH_LESSON);
+        const made = await draftSkillFromLesson(skillDeps, where, { lessonId, by: personId, name: body.name });
+        if (!made.ok) throw skillRefusalOf(made.code);
+        log("skill_drafted", { companyId });
+        return { project, name: made.name, version: made.version, ...(made.note === undefined ? {} : { note: made.note }) };
+      }
+      if (skillName === undefined) throw notFound(ROUTE_NOT_FOUND);
+      if (route === "skill-edit") {
+        const body = bodyOf(SkillEditBody, request.body, "a skill edit takes expectedVersion, description, when, steps (1 to 12), and optionally doneWhen and why");
+        const done = await editSkill(skillDeps, where, { name: skillName, by: personId, expectedVersion: body.expectedVersion, form: { description: body.description, when: body.when, steps: body.steps, doneWhen: body.doneWhen, why: body.why } });
+        if (!done.ok) throw skillRefusalOf(done.code);
+        return { project, name: skillName, version: done.version, ...(done.note === undefined ? {} : { note: done.note }) };
+      }
+      if (route === "skill-approve") {
+        const body = bodyOf(SkillApproveBody, request.body, "an approval takes the version you read");
+        const done = await approveSkill(skillDeps, where, { name: skillName, version: body.version, by: personId });
+        if (!done.ok) throw skillRefusalOf(done.code);
+        return { project, name: skillName, version: body.version, approvals: done.approvals, live: done.live };
+      }
+      bodyOf(EmptyBody, request.body, "retiring a skill takes no fields");
+      const retired = await retireSkill(skillDeps, where, { name: skillName, by: personId });
+      if (!retired.ok) throw skillRefusalOf(retired.code);
+      return { project, name: skillName, retired: true };
+    }
 
     if (route === "list") {
       const query = PageQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));

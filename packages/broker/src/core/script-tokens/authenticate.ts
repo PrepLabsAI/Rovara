@@ -35,6 +35,9 @@ const LESSONS_READ = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/l
 /** The table of contents of a project's team knowledge (names and counts, no text): the same permission as the lessons read, so one "Team knowledge" permission covers both. */
 const KNOWLEDGE_AREAS_READ = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/knowledge\/areas$/u;
 
+/** A team SUGGESTION from a tool (L4-AK3): the one write a "Team knowledge" token may make. It only adds a weak-source lesson that waits for a second sighting and then for a person; it never changes anything live. */
+const KNOWLEDGE_PROPOSE_WRITE = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/knowledge\/propose$/u;
+
 /** What one allowed request is: the permission it needs and how its project is found. */
 export type AllowedRoute =
   | { permission: "start"; project: "body" }
@@ -49,7 +52,7 @@ export function scriptTokenRoute(method: string, pathname: string): AllowedRoute
     if (method === "GET") return { permission: "read", project: "query" };
     return undefined;
   }
-  const lessons = method === "POST" ? (LESSONS_READ.exec(pathname) ?? KNOWLEDGE_AREAS_READ.exec(pathname)) : null;
+  const lessons = method === "POST" ? (LESSONS_READ.exec(pathname) ?? KNOWLEDGE_AREAS_READ.exec(pathname) ?? KNOWLEDGE_PROPOSE_WRITE.exec(pathname)) : null;
   if (lessons !== null) return { permission: "lessons", project: "path", name: lessons[1]! };
   const read = method === "GET" ? TASK_READ.exec(pathname) : null;
   return read === null ? undefined : { permission: "read", project: "task", taskId: read[1]! };

@@ -132,12 +132,15 @@ describe("the token format and the closed list", () => {
     // Team knowledge is one permission, `lessons` (shown as "Team knowledge"): the answer read and the table of contents, each by POST, with the project in the path.
     expect(scriptTokenRoute("POST", "/v1/dev/projects/payments/lessons")).toEqual({ permission: "lessons", project: "path", name: "payments" });
     expect(scriptTokenRoute("POST", "/v1/dev/projects/payments/knowledge/areas")).toEqual({ permission: "lessons", project: "path", name: "payments" });
+    // A team SUGGESTION (L4-AK3) is the one write a Team knowledge token may make; it needs the same permission and a project in the path.
+    expect(scriptTokenRoute("POST", "/v1/dev/projects/payments/knowledge/propose")).toEqual({ permission: "lessons", project: "path", name: "payments" });
     for (const [method, path] of [
       ["POST", `/v1/dev/tasks/${task}/workflow/decision`], ["POST", `/v1/dev/tasks/${task}/close`], ["POST", `/v1/dev/tasks/${task}/cancel`], ["POST", `/v1/dev/tasks/${task}/continue`],
       ["GET", `/v1/dev/tasks/${task}/plan`], ["POST", `/v1/dev/tasks/${task}/workflow/retry`], ["GET", "/v1/dev/projects"], ["POST", "/v1/admin/projects"], ["GET", "/v1/app/sessions"],
       ["POST", "/v1/local/pages/open"], ["GET", "/v1/local/status"], ["GET", "/v1/app/script-tokens"], ["POST", "/v1/app/script-tokens"], ["POST", "/v1/app/script-tokens/stk_x/revoke"], ["DELETE", "/v1/dev/tasks"],
       ["GET", `/v1/dev/tasks/${task}/../projects`], ["GET", `/v1/dev/tasks/${task}/x`], ["GET", "/v1/internal/model-access"],
       ["GET", "/v1/dev/projects/payments/knowledge/areas"], ["POST", "/v1/dev/projects/payments/knowledge"], ["POST", "/v1/dev/projects/payments/knowledge/areas/x"], ["POST", "/v1/dev/projects/payments/knowledge/all"],
+      ["GET", "/v1/dev/projects/payments/knowledge/propose"], ["POST", "/v1/dev/projects/payments/knowledge/propose/x"], ["POST", "/v1/dev/projects/payments/knowledge/proposals"], ["PUT", "/v1/dev/projects/payments/knowledge/propose"],
     ] as const) expect(scriptTokenRoute(method, path), `${method} ${path}`).toBeUndefined();
   });
 

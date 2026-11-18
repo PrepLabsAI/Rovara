@@ -1,13 +1,14 @@
-// Team knowledge for the developer's own AI tools (owner decisions 2026-11-17), read-only and small. Three tools, all against the broker's team knowledge routes, so the broker's rules decide what is shown (approved and live units
+// Team knowledge for the developer's own AI tools (owner decisions 2026-11-17), read-only and small, plus ONE write: `team_propose`, a suggestion that only a person can turn into team knowledge (L4-AK3). Four tools, all against the broker's team knowledge routes, so the broker's rules decide what is shown (approved and live units
 // only, only what the whole project may read, none that names a person, nothing for a repository that is not the project's):
 //   team_knowledge        the briefing for a change: the task in a line, the files, the stage
 //   team_knowledge_for    what the team knows about one file or folder, or about some words
 //   team_knowledge_areas  the table of contents: a tree project > repository > top folder with how many units of each kind, names and numbers only
+//   team_propose          a SUGGESTION for the team's weekly review (never applied by itself; a person decides); the company's "Knowledge stays in Rovara" switch answers one fixed sentence in every one of these tools
 // Every tool takes an optional `project` and `repo`. A repo is a git remote; left out it is read from the checkout this server runs in (`context.checkoutRemote`), and a project left out is found as the project that holds that
 // repository (`resolveProject`). There is no tool that lists everything, and no input that asks for it. Each call counts toward the person's day (300) at the broker. Skills are not served: this install has no skill rows.
 import { z } from "zod";
 import {
-  LOCAL_LESSONS_FILES_MAX, LOCAL_LESSONS_AMBIGUOUS_LINE, LOCAL_LESSONS_NOT_FOUND_LINE, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_NO_PROJECT_LINE, LOCAL_LESSONS_PROJECTS_MAX, LOCAL_LESSONS_TASK_MAX,
+  KNOWLEDGE_PROPOSAL_TYPES, LOCAL_LESSONS_FILES_MAX, LOCAL_LESSONS_AMBIGUOUS_LINE, LOCAL_LESSONS_NOT_FOUND_LINE, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_NO_PROJECT_LINE, LOCAL_LESSONS_PROJECTS_MAX, LOCAL_LESSONS_TASK_MAX,
   LOCAL_LESSONS_UNAVAILABLE_LINE, withNotesLine, withoutCredentials,
 } from "@agentx/contracts";
 import { ToolError, plainText } from "./errors.js";
@@ -67,11 +68,11 @@ const unitOf = (unit: { id: string; advice: string; why?: string | undefined; ci
 });
 
 /** A failed read says the fixed unavailable line and carries on; every other refusal (sign-in, the day's limit, bad input) is the tool's own error. */
-async function orUnavailable(run: () => Promise<{ structured: Record<string, unknown>; text: string }>): Promise<{ structured: Record<string, unknown>; text: string }> {
+async function orUnavailable(run: () => Promise<{ structured: Record<string, unknown>; text: string }>, lost: Record<string, unknown> = { status: "none", units: [], notice: LOCAL_LESSONS_NOTES_LINE }): Promise<{ structured: Record<string, unknown>; text: string }> {
   try {
     return await run();
   } catch (error) {
-    if (error instanceof ToolError && error.code === "CONTROL_PLANE_UNAVAILABLE") return { structured: { status: "none", units: [], notice: LOCAL_LESSONS_NOTES_LINE }, text: LOCAL_LESSONS_UNAVAILABLE_LINE };
+    if (error instanceof ToolError && error.code === "CONTROL_PLANE_UNAVAILABLE") return { structured: lost, text: LOCAL_LESSONS_UNAVAILABLE_LINE };
     throw error;
   }
 }
@@ -144,5 +145,50 @@ export const KNOWLEDGE_TOOLS: readonly ToolDefinition[] = [
       const text = [`Team knowledge in project ${project} (names and counts only):`, ...(lines.length === 0 ? ["Nothing is served for this project yet."] : lines), ...(response.more > 0 ? [`${String(response.more)} more folders not shown.`] : []), FRAME].join("\n");
       return { structured: { status: "ok", project, repos, more: response.more, notice: LOCAL_LESSONS_NOTES_LINE }, text };
     }),
+  },
+  {
+    name: "team_propose",
+    title: "Suggest something for the team to learn",
+    description: `Sends ONE suggestion to your team's weekly review: a short piece of advice about this code that you learned in this session and that the team's other people and tools would benefit from (a convention, a pitfall, a procedure). It is only a suggestion: it is not used by anyone until the team has seen it twice and a person approves it. Write one imperative sentence (8 to 80 characters) in advice, and optionally why (the reason) and when (where it applies). Do not suggest commands, links, secrets, access or tool changes, or anything about a person; such suggestions are refused. A person can send at most 10 suggestions a day. Do not suggest what a note already says: ask team_knowledge_for first. ${FRAME}`,
+    inputSchema: {
+      advice: z.string().min(8).max(80).describe("one imperative sentence of advice, 8 to 80 characters"),
+      why: z.string().max(160).optional().describe("the reason, at most 160 characters"),
+      when: z.string().max(200).optional().describe("where or when it applies, at most 200 characters"),
+      type: z.enum(KNOWLEDGE_PROPOSAL_TYPES).optional().describe("convention, pitfall, procedure, preference or fact; convention by default"),
+      paths: z.array(z.string().min(1).max(200)).max(5).optional().describe("up to 5 file or folder patterns it is about, relative to the repository"),
+      project: projectInput, repo: repoInput,
+    },
+    outputSchema: {
+      status: z.enum(["received", "off", "refused", "none"]).describe("received: sent to the weekly review; off: team knowledge stays in Rovara here; refused: not taken, the words say why; none: the project or repository could not be found"),
+      message: z.string().describe("one fixed sentence"),
+    },
+    handler: (context, input) => orUnavailable(async () => {
+      const body = {
+        advice: input.advice as string,
+        ...(input.why === undefined ? {} : { why: input.why as string }), ...(input.when === undefined ? {} : { when: input.when as string }),
+        ...(input.type === undefined ? {} : { type: input.type as (typeof KNOWLEDGE_PROPOSAL_TYPES)[number] }), ...(input.paths === undefined ? {} : { paths: input.paths as string[] }),
+      };
+      const given = input as { project?: string; repo?: string };
+      const asked = (project: string, repo: string | undefined) => context.client.knowledgePropose(project, { ...body, ...(repo === undefined ? {} : { repo }) });
+      let sent: Awaited<ReturnType<typeof asked>>;
+      if (given.project !== undefined) {
+        // A project that is named is asked at once (no read first). The repository is the one named, else the checkout's; a checkout's remote that is not the project's is dropped and the suggestion goes with no repository.
+        const named = given.repo === undefined ? undefined : withoutCredentials(given.repo);
+        const inferred = named !== undefined ? undefined : await context.checkoutRemote?.().then((remote) => (remote === undefined ? undefined : withoutCredentials(remote)), () => undefined);
+        sent = await asked(given.project, named ?? inferred);
+        if (sent.kind === "not_found" && inferred !== undefined) sent = await asked(given.project, undefined);
+      } else {
+        // A project that is not named is found with a READ of the table of contents (never by posting to each project in turn: a suggestion is written once, to the one project that holds the repository).
+        const found = await resolveProject(context, given, (project, repo) => context.client.knowledgeAreas(project, repo === undefined ? {} : { repo }));
+        if (found.kind === "line") return { structured: { status: "none", message: found.line }, text: found.line };
+        if (found.response.status === "off") { const message = plainText(found.response.message, ""); return { structured: { status: "off", message }, text: message }; }
+        sent = await asked(found.project, found.repo);
+      }
+      if (sent.kind === "not_found") return { structured: { status: "none", message: LOCAL_LESSONS_NOT_FOUND_LINE }, text: LOCAL_LESSONS_NOT_FOUND_LINE };
+      const message = plainText(sent.response.message, LOCAL_LESSONS_UNAVAILABLE_LINE);
+      // A status this version does not know is told as not taken (a client never claims a suggestion was received when it cannot tell).
+      const status = sent.response.status === "received" || sent.response.status === "off" ? sent.response.status : "refused";
+      return { structured: { status, message }, text: message };
+    }, { status: "none", message: LOCAL_LESSONS_UNAVAILABLE_LINE }),
   },
 ];
