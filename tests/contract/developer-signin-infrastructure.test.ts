@@ -1764,6 +1764,22 @@ const dispatcherHookSignerTuples: AccessTuple[] = [
   ["role:DispatcherServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
   ["role:DispatcherServiceRole","Allow","kms:Sign","key:DeveloperSignInPolicyHookKey","{\"StringEquals\":{\"kms:MessageType\":[\"RAW\"],\"kms:SigningAlgorithm\":[\"RSASSA_PKCS1_V1_5_SHA_256\"]}}"],
 ];
+/**
+ * L4-SQS (journey audit B3c; IAM-reviewed in briefs/lead4/l4-sqs/REVIEW-1.md and REVIEW-2.md): the lessons reflection queue and its dead letters (infra/lib/core-engine.ts), granted on the queues' own
+ * resource policies to the broker role alone. EXACTLY eight new tuples, written out: the TLS-only Deny on each queue, the broker's five actions on the queue (the producers' SendMessage, the pass's
+ * Receive, Delete and ChangeVisibility, the adapter's GetQueueAttributes) and GetQueueAttributes alone on the dead letters (the adapter reads their ARN and kind when it opens the queue). Nothing for the
+ * dispatcher or any other role, and no other tuple changes. BrokerServiceRole's semantic results change only on these two queue ARNs and these six actions (the second test below proves it).
+ */
+const lessonsReflectTuples: AccessTuple[] = [
+  ["*","Deny","sqs:*","queue:CoreEngineJobsLessonsReflectDeadLetterQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:CoreEngineJobsLessonsReflectQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsLessonsReflectDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+];
 const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
@@ -1771,7 +1787,7 @@ const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...
   // L4-IAMR (DEC 254zzz26): the dispatcher's company-bound artifact reader reads the artifacts bucket's private/* and workspaces/* (GetObject only; pinned with its widening mutants in dispatcher-artifacts-read.test.ts).
   ["role:DispatcherServiceRole", "Allow", "s3:GetObject", "bucket:Artifacts/private/*", "{}"] as AccessTuple,
   ["role:DispatcherServiceRole", "Allow", "s3:GetObject", "bucket:Artifacts/workspaces/*", "{}"] as AccessTuple,
-].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple)) && !dispatcherHookSignerReplaced.has(JSON.stringify(tuple))).concat(envRoom2Added, dispatcherHookSignerTuples).sort(byText);
+].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple)) && !dispatcherHookSignerReplaced.has(JSON.stringify(tuple))).concat(envRoom2Added, dispatcherHookSignerTuples, lessonsReflectTuples).sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {
@@ -1796,6 +1812,34 @@ describe("broker IAM headroom", () => {
       }
       expect(afterResults, role).toEqual(beforeResults);
     }
+  }, 120_000);
+
+  // L4-SQS: what the eight reflection tuples change, and nothing else. Against the same tuples without them, for EVERY role (an unknown role too), action, resource, condition and sibling the probe
+  // answers the same, except for the broker role on exactly the two reflection queue ARNs and exactly its six actions on them (and the TLS-only Deny, which only removes access on a plain-HTTP
+  // request, so it cannot show in a secure-transport probe).
+  it("L4-SQS: the reflection tuples change BrokerServiceRole's results on the two reflection queues and those six actions only; no other role, resource or action moves", () => {
+    const without = pinnedTuples.filter((tuple) => !lessonsReflectTuples.some((own) => JSON.stringify(own) === JSON.stringify(tuple)));
+    expect(pinnedTuples.length - without.length).toBe(8);
+    const reflectResources = new Set(["queue:CoreEngineJobsLessonsReflectQueue", "queue:CoreEngineJobsLessonsReflectDeadLetterQueue"]);
+    const sixActions = new Set(["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]);
+    const roles = [...new Set(pinnedTuples.map(([p]) => p).filter((p) => p !== "*")), "role:agentx-other-env"];
+    const actions = [...new Set(pinnedTuples.map(([, , a]) => a).concat(["sqs:PurgeQueue", "sqs:SetQueueAttributes", "sqs:DeleteQueue", "sqs:AddPermission", "sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "s3:GetObject"]))];
+    const resources = [...new Set(pinnedTuples.map(([, , , r]) => r).concat([...reflectResources], ["queue:Sibling", "queue:CoreEngineJobsQueue", "queue:CoreEngineJobsDeadLetterQueue"]))];
+    const moved: string[] = [];
+    for (const role of roles) {
+      const b = without.filter(([p]) => p === role || p === "*");
+      const a = pinnedTuples.filter(([p]) => p === role || p === "*");
+      for (const action of actions) for (const resource of resources) {
+        const context = { "aws:SecureTransport": ["true"] };
+        const before = probe(b, role, action, resource, context);
+        const after = probe(a, role, action, resource, context);
+        if (before !== after) moved.push(`${role} ${action} ${resource} ${String(before)}->${String(after)}`);
+        // The plain-HTTP request: every SQS action on a reflection queue is denied, for every role.
+        if (reflectResources.has(resource) && action.startsWith("sqs:")) expect(probe(a, role, action, resource, { "aws:SecureTransport": ["false"] }), `${role} ${action} ${resource} over HTTP`).toBe(false);
+      }
+    }
+    const expected = [...reflectResources].flatMap((resource) => [...sixActions].filter((action) => resource.endsWith("DeadLetterQueue") ? action === "sqs:GetQueueAttributes" : true).map((action) => `role:BrokerServiceRole ${action} ${resource} false->true`)).sort();
+    expect(moved.sort()).toEqual(expected);
   }, 120_000);
 
   it("moves each exact grant to a broker-only resource policy with no duplicate identity grant", () => {

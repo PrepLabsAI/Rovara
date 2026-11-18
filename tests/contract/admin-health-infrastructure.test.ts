@@ -86,7 +86,14 @@ describe("the health route's grants (A13)", () => {
     expect(brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes")).toEqual([]);
     const brokerRole = Object.keys(named.findResources("AWS::IAM::Role")).find((id) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id))!;
     const policies = Object.values(named.findResources("AWS::SQS::QueuePolicy")) as Array<{ Properties: { PolicyDocument: { Statement: Array<Statement & { Effect: string; Principal: unknown }> } } }>;
-    const queues = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement).filter((s) => s.Action === "sqs:GetQueueAttributes");
+    const attributeReads = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement).filter((s) => s.Action === "sqs:GetQueueAttributes");
+    // L4-SQS: a sixth is not a health read: the lessons reflection queue's dead letters, whose attributes the queue adapter reads when it opens the queue (tests/contract/core-lessons-reflect-queue.test.ts
+    // pins it exactly: broker only, GetQueueAttributes only). The health route's own five are the rest, and the reflection dead letters are not in its list.
+    const reflect = attributeReads.filter((s) => (s as { Sid?: string }).Sid === "BrokerReadsLessonsReflectDeadLetterAttributes");
+    expect(reflect).toHaveLength(1);
+    expect(reflect[0]!.Principal).toEqual({ AWS: { "Fn::GetAtt": [brokerRole, "Arn"] } });
+    const queues = attributeReads.filter((s) => !reflect.includes(s));
+    expect(attributeReads).toHaveLength(6);
     expect(queues).toHaveLength(5);
     for (const statement of queues) {
       expect(statement.Effect).toBe("Allow");
@@ -102,6 +109,7 @@ describe("the health route's grants (A13)", () => {
     for (const id of queueIds) expect(resources.filter((resource) => id.test(resource["Fn::GetAtt"]?.[0] ?? ""))).toHaveLength(1);
     const listed = JSON.stringify(brokerEnvironment(named).HEALTH_DEAD_LETTER_QUEUES);
     for (const queue of ["DispatchDeadLetterQueue", "SlackRequestDeadLetterQueue", "NoticeDeadLetterQueue", "StreamFailureQueue", "ChannelApiEventDeadLetters"]) expect(listed).toContain(queue);
+    expect(listed).not.toContain("LessonsReflect");
   });
 
   it("expires index items by TTL on indexExpiresAt in a named environment, and tells the reconciler so (A6, Q5)", () => {
