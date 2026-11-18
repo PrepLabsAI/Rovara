@@ -1,3 +1,4 @@
+import { setupPullRequestLineOf } from "../setup-agent/recheck-rows.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L12: the files the checked code changes, for the pull request's description and the risk it shows.
 //
@@ -197,6 +198,8 @@ export interface DescriptionInputs {
   browserLines: readonly string[];
   /** L4-SC (#916): one line per mock the plan approved for this task (task-only, made by Rovara, not yet the project's setup). */
   setupLines: readonly string[];
+  /** L4-U5: the one line about the setup when it was re-checked for this task (none when there was no drift). */
+  setupLine: string | undefined;
 }
 
 /**
@@ -216,13 +219,16 @@ export async function descriptionInputsOf(deps: TaskFlowDeps, task: TaskRecord, 
   // TE-H1: what the browser evidence run showed for exactly this code, as fixed text lines (none on an install without it, or for a run that took none).
   const browserLines: readonly string[] = await deps.browserEvidence?.linesOf(task, candidateDigest).catch((): readonly string[] => []) ?? [];
   const setupLines = mockPrLines(plan?.setupChanges);
-  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines };
+  // L4-U5: the one line about the setup when it was re-checked for this task (none when there was no drift).
+  const setupLine = await setupPullRequestLineOf(deps, task.project, task.taskId).catch(() => undefined);
+  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines, setupLine };
 }
 
 /** The description's context for one repository: the inputs, plus what depends on the repository (its changed files, the order lines, the lessons its readers may read). */
 export function descriptionContextOf(inputs: DescriptionInputs, own: { changedFiles?: ChangedFilesRead | undefined; mergeOrderLines: readonly string[]; lessonsUsed: LessonsUsedSection | undefined }): PullRequestBodyContext {
-  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines } = inputs;
+  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines, setupLine } = inputs;
   return {
+    ...(setupLine === undefined ? {} : { setupLine }),
     ...(setupLines.length === 0 ? {} : { setupLines }),
     ...(own.changedFiles === undefined ? {} : { changedFiles: own.changedFiles }),
     ...(own.mergeOrderLines.length === 0 ? {} : { mergeOrderLines: own.mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }),

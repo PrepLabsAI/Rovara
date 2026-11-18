@@ -32,8 +32,8 @@ it("passes the runtime's checked CI reader into the company service builder", ()
   const flow = { deps: { companyId: A, store: { get: async () => undefined }, admission: {} } } as never;
   const ciMode = vi.fn(async () => "their_ci_watch" as const);
   runtime.services!(flow, { ciMode });
-  // Batch 14: the wiring also carries the upkeep notice's live read (#959) next to the CI reader.
-  expect(services).toHaveBeenCalledWith(A, flow, expect.anything(), expect.objectContaining({ ciMode }));
+  // Batch 14: the wiring also carries the upkeep notice's live read (#959) next to the CI reader; L4-U5 adds the setup notice's live read beside it.
+  expect(services).toHaveBeenCalledWith(A, flow, expect.anything(), expect.objectContaining({ ciMode, upkeep: expect.objectContaining({ administers: expect.any(Function) as unknown, setupRead: expect.any(Function) as unknown }) as unknown }));
 });
 
 it("preserves an explicitly malformed CI reporting input for the runtime to refuse", () => {

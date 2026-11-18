@@ -14,6 +14,7 @@ import {
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
+import { inertSetupStep, recheckRowKey, repairNoticeKey, setupRepairCardOf } from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
 
 const OTHER = "org_corehost00000000000b";
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
@@ -209,7 +210,53 @@ describe("hosted Re-check setup: who may do what", () => {
     expect(await call(post(CHECK, { requestId: randomUUID() }), caller)).toMatchObject({ status: 202 });
     const runtime = await app.runtimeFor(FAKE_COMPANY);
     const latest = (await runtime.flow.deps.projects.latest("payments"))!;
-    expect((await call(get(CHECK), caller)).body).toEqual(JSON.parse(JSON.stringify(await setupStateOf(runtime.flow.deps, "payments", latest.definition))));
+    expect((await call(get(CHECK), caller)).body).toEqual(JSON.parse(JSON.stringify({ ...(await setupStateOf(runtime.flow.deps, "payments", latest.definition)), canManage: true })));
     void world;
+  });
+});
+
+// L4-U5: the same read carries who may act and, while the setup is broken, the "Setup needs repair" card in the words every surface shares.
+describe("hosted Re-check setup: the repair card on the read (L4-U5)", () => {
+  const STEP = "setup: npm ci - setup step 0 (npm ci) failed: exit 1";
+  const KEY = "a".repeat(48);
+  /** The rows a settled "broken" re-check leaves: the re-check, the project's own mark of its failed check, and the one admin card. */
+  async function broken(world: FakeWorld, companyId: string, project = "payments"): Promise<void> {
+    const check = { workspaceId: "ws-1", revision: 1, startedAt: "2026-11-17T09:00:00.000Z", startedBy: "system" };
+    await world.store.put({ item: { ...projectMetaKey(companyId, project), entityType: "PROJECT_META", setupCheck: check } });
+    await world.store.put({ item: { ...recheckRowKey(companyId, project, KEY), entityType: "SETUP_RECHECK", orgId: companyId, project, key: KEY, setupRevision: 1, commits: { demo: "c1" }, classes: ["lockfile"], state: "broken", attempt: 2, check, startedAt: check.startedAt, failedStep: STEP } });
+    await world.store.put({ item: { ...repairNoticeKey(companyId, project), entityType: "SETUP_REPAIR_NOTICE", orgId: companyId, project, key: KEY, failedStep: STEP, classes: ["lockfile"], at: "2026-11-17T09:05:00.000Z" } });
+  }
+
+  it("a manager reads the card with the one action that fits; a reader reads the same words and no action; nobody else reads anything", async () => {
+    const { world, person, call } = await setupWorld();
+    await broken(world, FAKE_COMPANY);
+    const owner = await call(get(CHECK), person("p-owner", FAKE_COMPANY, "owner"));
+    expect(owner.status).toBe(200);
+    expect(owner.body).toMatchObject({ canManage: true, repair: { title: "Setup needs repair", changed: "dependency files", fixReady: false, at: "2026-11-17T09:05:00.000Z", actions: [{ id: "fix_setup", label: "Fix setup" }] } });
+    const card = (owner.body["repair"] as { body: string }).body;
+    expect(card).toBe(setupRepairCardOf(inertSetupStep(STEP)).body);
+    expect(card).not.toMatch(/\$|AI\b/u);
+    const reader = await call(get(CHECK), person("p-dev", FAKE_COMPANY, "member", "developer"));
+    expect(reader.body).toMatchObject({ canManage: false, repair: { title: "Setup needs repair", actions: [] } });
+    expect((reader.body["repair"] as { body: string }).body).toBe(card);
+    expect((await call(get(CHECK), person("p-nobody", FAKE_COMPANY, "member"))).status).toBe(404);
+  });
+
+  it("no card while the setup works, and none for a break that a newer setup ended; another company's project of the same name never shows this card", async () => {
+    const works = await setupWorld();
+    const answer = await works.call(get(CHECK), works.person("p-owner", FAKE_COMPANY, "owner"));
+    expect(answer.body["canManage"]).toBe(true);
+    expect(answer.body["repair"]).toBeUndefined();
+    const mine = await setupWorld();
+    await broken(mine.world, FAKE_COMPANY);
+    // Company B has its own project "payments" and no break: it reads no card, whatever company A has.
+    const other = mine.person("o-owner", OTHER, "owner");
+    const theirs = await mine.call(get(CHECK), other);
+    expect(theirs.status).toBe(200);
+    expect(theirs.body["repair"]).toBeUndefined();
+    // A newer setup revision ends the break.
+    await mine.world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 2), entityType: "PROJECT", definition: JSON.parse(JSON.stringify({ ...project("payments"), revision: 2 })) as JsonValue } });
+    await mine.world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 2 } });
+    expect((await mine.call(get(CHECK), mine.person("p-owner", FAKE_COMPANY, "owner"))).body["repair"]).toBeUndefined();
   });
 });

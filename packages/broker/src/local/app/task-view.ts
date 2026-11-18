@@ -31,6 +31,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     ...(view.closing ? { closing: true } : {}), createdAt: task.createdAt, updatedAt: task.updatedAt, events: [],
     ...(workflow === undefined ? {} : { workflow: { ...workflow, ...(planContent === undefined ? {} : { planContent }) } }),
     ...(view.failure === undefined ? {} : { failure: view.failure }),
+    ...(view.setupRecheck === undefined ? {} : { setupRecheck: view.setupRecheck }),
     ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
     // What the run is expected to cost (kept with the plan), for the tools and the CLI.
     ...(task.runEstimate === undefined ? {} : { runEstimate: task.runEstimate }),

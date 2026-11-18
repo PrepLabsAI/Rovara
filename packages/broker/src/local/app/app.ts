@@ -120,7 +120,7 @@ import { createChannelSink } from "../../core/channel/sink.js";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
-import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
+import { channelThreadHandler, planCardPosted, setupPausedPosted, threadFollows } from "../../core/channel/thread-notices.js";
 import { taskLogThreadMirror } from "../../core/channel/log-mirror.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 
@@ -589,6 +589,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     store, registry, now: clock, footer: ATTENTION_FOOTER, log,
     doneToldInThread: () => registry.names("channel").length > 0 && channelMilestonesOn(),
     planCarded: planCardPosted({ store, now: () => clock().getTime() }),
+    setupPausedTold: setupPausedPosted({ store }),
     // The install's one owner is its admin: they are told the admin notices (an unusual amount of team knowledge read by a tool).
     adminNotice: async (_org, developerId) => developerId === owner.personId,
   });

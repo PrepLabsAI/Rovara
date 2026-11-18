@@ -12,6 +12,7 @@ import { createSystemStarter, type SystemStartResult } from "../core/system-runs
 import { runUpkeepNightPass } from "../core/system-runs/night-pass.js";
 import { systemRunRequestId } from "../core/system-runs/starter.js";
 import { commitsOf, readCurrentSetupFiles } from "../core/setup-agent/snapshot.js";
+import { adoptNightlyBreak, advanceCurrentRecheck } from "../core/setup-agent/recheck.js";
 import { upkeepIsOn } from "../core/upkeep/settings.js";
 import { runUpkeepNight, type UpkeepNightDeps } from "../core/upkeep/night.js";
 import { readUpkeepCap, type UpkeepCapReader } from "../core/upkeep/cap.js";
@@ -148,7 +149,7 @@ export function createHostedSystemRuns(options: HostedSystemRunsOptions): Hosted
     return runUpkeepNight(nightDeps, { project });
   };
   const service: CoreService = {
-    pass: async ({ budgetMs }) => ({ ...(await runUpkeepNightPass({ store, companyId, now, enabled, projects: () => companyProjects(store, companyId), night, log }, { budgetMs })) }),
+    pass: async ({ budgetMs }) => ({ ...(await runUpkeepNightPass({ store, companyId, now, enabled, projects: () => companyProjects(store, companyId), night, settle: async (project) => { await adoptNightlyBreak(deps, project); await advanceCurrentRecheck(deps, project); }, log }, { budgetMs })) }),
   };
   return { starter, service };
 }

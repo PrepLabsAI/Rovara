@@ -40,6 +40,27 @@ export async function putInboxRow(
   }
 }
 
+// L4-U5b: the project notices (`upkeep_paused`, `setup_broken`): about a PROJECT, not a session, so a person who is told by neither chat nor email still finds them. They sit in the same per-person partition under a sort key that
+// starts `PROJECT#` (no session id looks like that, so the session inbox above never reads one, and the person erase that walks the partition removes them too). The row names the notice's subject id (which holds the
+// project, and the month and reason or the re-check), and is checked again against the project at every read (`project-notices.ts`): it shows only while the person still administers the project.
+export const PROJECT_NOTICE_KINDS = ["upkeep_paused", "setup_broken"] as const;
+export type ProjectNoticeKind = (typeof PROJECT_NOTICE_KINDS)[number];
+export const isProjectNoticeKind = (value: unknown): value is ProjectNoticeKind => typeof value === "string" && (PROJECT_NOTICE_KINDS as readonly string[]).includes(value);
+export const PROJECT_NOTICE_PREFIX = "PROJECT#";
+export const projectNoticeKey = (orgId: string, developerId: string, subjectId: string, kind: ProjectNoticeKind) => ({ pk: inboxPartition(orgId, developerId), sk: `${PROJECT_NOTICE_PREFIX}${subjectId}#${kind}` });
+
+/** The row for one person's project notice, with the queue's own expiry attribute so the store deletes it after `INBOX_KEEP_SECONDS`. */
+export function projectNoticeRow(input: { orgId: string; developerId: string; subjectId: string; kind: ProjectNoticeKind; at: string; nowMs: number }, ttlAttribute: string): StoredDocument {
+  const parsed = Date.parse(input.at);
+  const expiresAtSec = Math.floor(input.nowMs / 1000) + INBOX_KEEP_SECONDS;
+  const row: StoredDocument = {
+    ...projectNoticeKey(input.orgId, input.developerId, input.subjectId, input.kind), entityType: "NOTIFY_INBOX_PROJECT", orgId: input.orgId, developerId: input.developerId, subjectId: input.subjectId, kind: input.kind,
+    at: input.at, atMs: Number.isFinite(parsed) ? parsed : input.nowMs, expiresAtSec,
+  };
+  row[ttlAttribute] = expiresAtSec;
+  return row;
+}
+
 /** The id a client names a row by: `<session>.<kind>.<atMs>`. It names no person, and `atMs` keeps a read mark off a row that changed since it was shown. */
 export const inboxIdOf = (row: { sessionId: string; kind: string; atMs: number }): string => `${row.sessionId}.${row.kind}.${String(row.atMs)}`;
 

@@ -199,7 +199,7 @@ export function layoutBlockLines(input: LayoutInput, level: number): { verdict: 
   })();
   const checksBody = [...resultLine, ...testingTableLines(rows, tableLevel), ...(input.checksExtra.length === 0 ? [] : ["", ...input.checksExtra]), ...(render === undefined || render.checksEvidence.length === 0 ? [] : ["", ...render.checksEvidence.map((line) => `- ${line}`)]), ...(evidenceOpen.length === 0 ? [] : ["", ...evidenceOpen])];
   // Test setup
-  const setupLines = render === undefined ? [] : render.setupEvidence.map((line) => `- ${line}`);
+  const setupLines = [...(context.setupLine === undefined ? [] : [`- ${inertLine(context.setupLine, 300)}`]), ...(render === undefined ? [] : render.setupEvidence.map((line) => `- ${line}`))];
   const setupNotTested = render !== undefined && render.notTested.length > 0 && !hasRequirements ? ["", "What wasn't tested:", ...render.notTested] : [];
   const setupBody = setupLines.length + setupNotTested.length === 0 ? ["No test setup details were recorded for this code."] : [...setupLines, ...setupNotTested];
   // Reviews

@@ -27,7 +27,7 @@ import { overwriteRow, putRow } from "../automation/kit.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { iso, log } from "../task-flow/support.js";
 import { classifyNightlyHealth, type NightlyHealth } from "../test-env/nightly-health.js";
-import { buildSetupCheck, relayCheck, setupStateOf, setupStateOfCheck, type SetupCheckMark, type SetupState } from "./check.js";
+import { buildSetupCheck, relayCheck, setupCheckRecordKey, setupStateOf, setupStateOfCheck, type SetupCheckMark, type SetupState } from "./check.js";
 import {
   driftTaskKey, isRow, recheckCurrentKey, recheckRowKey, repairNoticeKey, setupBrokenTaskWords, setupRepairCardOf,
   type DriftTaskRow, type RecheckRow, type RecheckState, type RepairNoticeRow, type SetupRepairCard,
@@ -202,7 +202,7 @@ export async function advanceCurrentRecheck(deps: TaskFlowDeps, project: string)
 export async function advanceRecheck(deps: TaskFlowDeps, project: string, key: string): Promise<RecheckRow | undefined> {
   const row = await readRecheck(deps, project, key);
   if (row === undefined) return row;
-  if (row.state === "broken") { await markProjectBroken(deps, project, row); return row; }
+  if (row.state === "broken") { await markProjectBroken(deps, project, row); await tellAdmins(deps, project, row); return row; }
   if (row.state !== "running") return row;
   const orgId = deps.companyId;
   const revision = await deps.projects.revision(project, row.setupRevision);
@@ -237,6 +237,7 @@ export async function advanceRecheck(deps: TaskFlowDeps, project: string, key: s
     const done = await settled("broken", await brokenItems(deps, project, row, failedStep), failedStep);
     if (done?.state === "broken") {
       await markProjectBroken(deps, project, done);
+      await tellAdmins(deps, project, done);
       // L4-RD: the host's repair draft hears about it (idempotent: one per failure), and a fault in it never reaches the re-check.
       await (async () => deps.afterSetupBroken?.(project, done.key))().catch((error: unknown) => log(deps, { event: "setup_drift.repair_hook_failed", error: errorName(error) }));
     }
@@ -342,8 +343,64 @@ async function markProjectBroken(deps: TaskFlowDeps, project: string, row: Reche
   }
 }
 
+/**
+ * L4-U5: the project's admins hear of the break ONCE per re-check (the host's notice writes its own marker first, so any number of readers of this break say nothing more). Only while the break still holds (a newer
+ * setup or a person's newer check ended it). Best effort: a fault is logged by kind and never changes the re-check.
+ */
+async function tellAdmins(deps: TaskFlowDeps, project: string, row: RecheckRow): Promise<void> {
+  if (deps.setupBroken === undefined) return;
+  try {
+    if ((await deps.projects.latest(project))?.definition.revision !== row.setupRevision || !(await brokenStillHolds(deps, project, row))) return;
+    await deps.setupBroken({ project, recheckKey: row.key });
+  } catch (error) {
+    log(deps, { event: "setup_drift.admins_not_told", error: errorName(error) });
+  }
+}
+
+/**
+ * L4-U5b: a setup check the project's NIGHT started (`startProjectSetupCheck` as the system owner, not a candidate) that failed at a setup COMMAND is settled by the same machinery as the task-start re-check: it is taken
+ * over as the first attempt of a re-check (key made from the check's own workspace, so one failed check is one re-check however many passes see it), and `advanceRecheck` then does what it always does (one retry for a
+ * machine fault, then "broken": the project's one card and the admins' notice, once, through the same marker). Nothing else is adopted: a person's check (its starter is a person), a candidate's check, a check of an
+ * older revision, a failure that names a clone, a machine or a test command, a check that did not finish, and a project that already has a re-check running. Silent when fine; never throws; reads only this company's rows.
+ */
+export async function adoptNightlyBreak(deps: TaskFlowDeps, project: string): Promise<"adopted" | "none"> {
+  try {
+    const orgId = deps.companyId;
+    if (deps.codeHosts === undefined) return "none";
+    const latest = await deps.projects.latest(project);
+    if (latest === undefined || latest.archived === true) return "none";
+    const mark = (await deps.store.get(projectMetaKey(orgId, project)))?.["setupCheck"] as Partial<SetupCheckMark> | undefined;
+    if (mark === undefined || typeof mark.workspaceId !== "string" || typeof mark.startedAt !== "string" || mark.revision !== latest.definition.revision || mark.startedBy !== systemOwnerIdOf(orgId, project)) return "none";
+    // Only a check that was the project's own (the night's), never a re-check's candidate check (whose break the re-check's own rows already settle).
+    const record = await deps.store.get(setupCheckRecordKey(orgId, mark.workspaceId));
+    if (record === undefined || record["companyId"] !== orgId || record["project"] !== project || record["candidate"] !== false) return "none";
+    const checked: SetupCheckMark = { workspaceId: mark.workspaceId, revision: mark.revision, startedAt: mark.startedAt, startedBy: mark.startedBy };
+    const state = await setupStateOfCheck(deps, checked, latest.definition);
+    if (state.status !== "failed" || classifySetupRecheck(state).class !== "environment") return "none";
+    const key = createHash("sha256").update(canonicalJson({ nightlyCheck: checked.workspaceId })).digest("hex").slice(0, 48);
+    if (await recheckExists(deps, project, key) || await runningRecheckOf(deps, project, latest.definition.revision) !== undefined) return "none";
+    const read = await readCurrentSetupFiles(deps, latest.definition);
+    const commits = read.status === "read" ? commitsOf(read.repositories) : undefined;
+    // No commit to pin means no stable identity for the baseline a pass would move: left for a later pass.
+    if (commits === undefined) return "none";
+    const at = iso(deps);
+    const row: RecheckRow = { entityType: "SETUP_RECHECK", orgId, project, key, setupRevision: latest.definition.revision, commits, classes: [], state: "running", attempt: 1, check: checked, startedAt: checked.startedAt };
+    const written = await deps.store.transact([
+      putRow(recheckRowKey(orgId, project, key), row.entityType, { ...row, ...expiry(deps) }),
+      overwriteRow(recheckCurrentKey(orgId, project), "SETUP_RECHECK_CURRENT", { orgId, project, key, ...expiry(deps) }),
+      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-adopted", orgId, project, key), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 1, classes: [], kind: "setup_check", reason: "nightly" } }),
+    ]);
+    if (!written.applied) return "none";
+    await advanceRecheck(deps, project, key);
+    return "adopted";
+  } catch (error) {
+    log(deps, { event: "setup_drift.nightly_adopt_failed", error: errorName(error) });
+    return "none";
+  }
+}
+
 /** The project's open admin card, when its setup is broken and no newer setup has been approved since. */
-export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "companyId" | "projects">, project: string): Promise<(SetupRepairCard & { classes: SetupDriftClass[]; at: string }) | undefined> {
+export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "companyId" | "projects">, project: string): Promise<(SetupRepairCard & { classes: SetupDriftClass[]; at: string; failedStep: string; key: string }) | undefined> {
   const stored = await deps.store.get(repairNoticeKey(deps.companyId, project));
   if (!isRow(stored, deps.companyId, project, "SETUP_REPAIR_NOTICE")) return undefined;
   const notice = stored as unknown as RepairNoticeRow;
@@ -351,7 +408,7 @@ export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "co
   const latest = await deps.projects.latest(project);
   if (!isRow(recheck, deps.companyId, project, "SETUP_RECHECK") || latest === undefined || (recheck as unknown as RecheckRow).setupRevision !== latest.definition.revision) return undefined;
   if (!(await brokenStillHolds(deps, project, recheck as unknown as RecheckRow))) return undefined;
-  return { ...setupRepairCardOf(notice.failedStep), classes: notice.classes, at: notice.at };
+  return { ...setupRepairCardOf(notice.failedStep), classes: notice.classes, at: notice.at, failedStep: notice.failedStep, key: notice.key };
 }
 
 // ---- the wait before Build

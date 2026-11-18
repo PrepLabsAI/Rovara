@@ -225,6 +225,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/inbox/read", requires: "tasks:read" },
   // The signed link of an attention email stops those emails for the signed-in person it names (it changes their own notification setting, not a task read): full access only.
   { method: "POST", path: "/v1/app/notify/unsubscribe", requires: "full" },
+  { method: "GET", path: "/v1/app/inbox/project-notices", requires: "full" },
   // Acting on a session's task (each also needs the person's session level).
   { method: "POST", path: "/v1/app/sessions/{sessionId}/stop", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/retry", requires: "tasks:act" },
