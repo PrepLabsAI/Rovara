@@ -7,7 +7,7 @@
 //
 // Who decides as the task's owner is the host's rule: `workflowSubject` carries it (`ownerProvider`, `collaboratorsMayDecide`, `actorFor`); the defaults are one owner who decides everything. A host adds its own
 // kinds of decision (a test environment, a setup run) with `subjects`.
-import { WorkflowArtifactSchema, type Approvers, type AuditSink, type DocumentStore, type IdentityProvider, type ObjectStorage } from "@agentx/contracts";
+import { WorkflowArtifactSchema, type Approvers, type AuditSink, type DocumentStore, type IdentityProvider, type ObjectStorage, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createDecisionGate, type DecisionGate, type DecisionGatePolicy, type DecisionSubject } from "../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../core/decisions/local-actions.js";
@@ -19,6 +19,7 @@ import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { planFeedbackKey } from "../core/task-flow/stage-machine.js";
 import { breakdownForApproval } from "../core/work-breakdown/plan-graph.js";
 import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
+import { TRANSACTION_ITEMS_MAX, flowWorkEventItems } from "../core/work-events/flow-events.js";
 
 export interface DecisionServiceOptions {
   flow: TaskFlowDeps;
@@ -45,6 +46,26 @@ export interface DecisionService {
 
 export function createDecisionService(options: DecisionServiceOptions): DecisionService {
   const { flow, blobs, store } = options;
+  // The decision's own steps (coding starts, the design's approval record), as they were before work events.
+  const decided = ({ taskId, before, after, attempt, at, approver, risk }: Pick<Parameters<NonNullable<WorkflowSubjectOptions["onDecided"]>>[0], "taskId" | "before" | "after" | "attempt" | "at" | "approver" | "risk">): readonly TransactItem[] => {
+    // The plan was approved: coding starts with no one asking, as a row like every automatic step.
+    if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [dispatchRowItem(flow, taskId, after.revision, "IMPLEMENT", at)];
+    if (after.stage !== "PLAN" || after.state !== "READY" || before.stage === "PLAN") return [];
+    // An approved design leaves its approval record under its digest (who, at what tier, the blockers and the reason) for the pull request's Proof section.
+    const approval = designApprovalRecordItems({ taskId, before, after, attempt, approverId: approver.personId, approverLabel: approver.displayName ?? approver.personId, risk, at });
+    if (approval.length > 0) return [...approval, dispatchRowItem(flow, taskId, after.revision, "PLAN", at)];
+    const text = (attempt.reason ?? "").trim();
+    return [
+      ...(text === "" ? [] : [{ kind: "put" as const, item: { ...planFeedbackKey(taskId, after.revision), entityType: "PLAN_FEEDBACK", text, createdAt: at } }]),
+      dispatchRowItem(flow, taskId, after.revision, "PLAN", at),
+    ];
+  };
+  // Slice A4: a decision is a workflow change like any other, so its work events (the wait that ended, the send-back it is) join its transaction, when the flow writes them.
+  const withWorkEvents = (task: Record<string, unknown>, before: WorkflowSnapshot, after: WorkflowSnapshot, own: readonly TransactItem[]): readonly TransactItem[] => {
+    const project = typeof task["project"] === "string" ? task["project"] : undefined;
+    if (project === undefined) return own;
+    return [...own, ...flowWorkEventItems({ enabled: flow.workEvents, orgId: flow.companyId, project, before, after, room: TRANSACTION_ITEMS_MAX / 2 - own.length })];
+  };
   const workflowSubject = createWorkflowDocumentSubject({
     store,
     ...(options.workflowSubject ?? {}),
@@ -67,19 +88,7 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
     breakdown: ({ task, workflow, artifactDigest }) => breakdownForApproval(flow, { taskId: String(task["taskId"]), project: String(task["project"]), startingRevision: Number(task["startingRevision"]) }, workflow, artifactDigest),
     // A design with an open blocker is approved only with a one-line reason.
     checkDecision: ({ workflow, attempt }) => checkDesignApproval(workflow, attempt),
-    onDecided: ({ taskId, before, after, attempt, at, approver, risk }) => {
-      // The plan was approved: coding starts with no one asking, as a row like every automatic step.
-      if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [dispatchRowItem(flow, taskId, after.revision, "IMPLEMENT", at)];
-      if (after.stage !== "PLAN" || after.state !== "READY" || before.stage === "PLAN") return [];
-      // An approved design leaves its approval record under its digest (who, at what tier, the blockers and the reason) for the pull request's Proof section.
-      const approval = designApprovalRecordItems({ taskId, before, after, attempt, approverId: approver.personId, approverLabel: approver.displayName ?? approver.personId, risk, at });
-      if (approval.length > 0) return [...approval, dispatchRowItem(flow, taskId, after.revision, "PLAN", at)];
-      const text = (attempt.reason ?? "").trim();
-      return [
-        ...(text === "" ? [] : [{ kind: "put" as const, item: { ...planFeedbackKey(taskId, after.revision), entityType: "PLAN_FEEDBACK", text, createdAt: at } }]),
-        dispatchRowItem(flow, taskId, after.revision, "PLAN", at),
-      ];
-    },
+    onDecided: ({ taskId, task, before, after, attempt, at, approver, risk }) => withWorkEvents(task, before, after, decided({ taskId, before, after, attempt, at, approver, risk })),
   });
   const innerGate = createDecisionGate({
     store, approvers: options.approvers, audit: options.audit, subjects: [...(options.subjects ?? []), workflowSubject],

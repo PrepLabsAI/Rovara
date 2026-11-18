@@ -187,6 +187,8 @@ export interface MergeTrackingDependencies {
   log?(event: string, fields: Record<string, unknown>): void;
   /** The write of the task's next workflow snapshot, guarded by the revision read. The task-flow lane owns the record, so it can say how it is written; the default is `workflowUpdateItem`. */
   workflowWrite?(taskId: string, next: WorkflowSnapshot, expectedRevision: number): TransactItem;
+  /** Slice A4: the work events of a workflow change this pass makes (a fix started, the pull request closed), for the same transaction. Absent: none. Never throws into the pass (the service gives `flowWorkEventItems`, which never throws). */
+  workEvents?(task: { taskId: string; orgId: OrgId; project: string }, before: WorkflowSnapshot, after: WorkflowSnapshot, room: number): TransactItem[];
   /** Turns a decider's dispatch request into the row the task-flow core runs (default: its `dispatchRowItem`). */
   dispatchRow?(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem;
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
@@ -913,6 +915,8 @@ async function trackOne(
         at: stamp, text: merged.headByRovara ? PUSH_WAS_MINE_MESSAGE : SOMEONE_ELSE_PUSHED_MESSAGE,
       }));
     }
+    // Slice A4: the work events of the workflow change, appended LAST so the room they are given is what is really left in the transaction (an event is never the reason a pass is refused).
+    if (action !== undefined) { try { items.push(...(deps.workEvents?.(task, task.workflow, action.workflow, 100 - items.length) ?? [])); } catch { /* an event is never the reason a pass fails */ } }
     // A write that lost a race (the version, the workflow's revision) is a failed condition, not a fault: read again and try again.
     const committed = await deps.store.transact(items).catch((error: unknown) => {
       // A transaction that lost its race with another writer after the store's own retries is the same as a failed condition.

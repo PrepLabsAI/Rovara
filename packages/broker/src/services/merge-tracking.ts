@@ -18,7 +18,7 @@
 // Nothing here names a provider; the code host is whatever the repository's record names, and a host that cannot read a merge (`mergeObservation`) is simply never seen merged.
 import {
   IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped, blockWorkflow, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, when,
-  type OrgId, type ReadBudget, type RegistryView, type TransactItem,
+  type OrgId, type ReadBudget, type RegistryView, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { SWEEP_INTERVAL_MS, type MergeRecoveryResult } from "../core/merge/budget.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
@@ -44,6 +44,7 @@ import { readTask } from "../core/task-flow/reads.js";
 import { announceTaskEnd, completedByMerge } from "../core/task-flow/task-end.js";
 import { recordedHeadOf } from "../core/build-step/head-check.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
+import { flowWorkEventItems } from "../core/work-events/flow-events.js";
 
 /** The first wait after a pass, and the wait the quiet rows grow to. */
 export const TRACKING_POLL_MS = TRACKING_GATE_SECONDS * 1_000;
@@ -209,6 +210,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
     readyHold: (task, current) => scopeHoldOf(flow, task, current),
     ...(options.repositoryEdges === undefined ? {} : { repositoryEdges: options.repositoryEdges }),
+    // Slice A4: a change this pass makes to the workflow writes its work events in the same transaction, when the flow writes them (the same switch as the flow's own).
+    ...(flow.workEvents === true ? { workEvents: (task: { taskId: string; orgId: OrgId; project: string }, before: WorkflowSnapshot, after: WorkflowSnapshot, room: number) => flowWorkEventItems({ enabled: true, orgId: task.orgId, project: task.project, before, after, room }) } : {}),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 

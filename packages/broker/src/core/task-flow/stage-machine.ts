@@ -54,7 +54,7 @@ import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
-import { workflowWriteOps } from "./flow-guard.js";
+import { workflowWriteOps } from "./flow-guard.js"; import { TRANSACTION_ITEMS_MAX, flowWorkEventItems } from "../work-events/flow-events.js";
 import { UNDERSTAND_SKIPS, afterUnderstand, restoredForPlanning, smallPlanRoute, toFull } from "./stage-selection.js";
 import { isExplicitPath } from "../../rovara-code/explicit-path.js";
 import type { StepOutcome } from "./outcome.js";
@@ -199,6 +199,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     ...(permitted.items ?? []),
     ...(input.extra ?? []),
   ];
+  // The work events of the step's own transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
+  if (input.workflow !== undefined) items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: input.workflow.current, after: input.workflow.next, room: TRANSACTION_ITEMS_MAX - items.length }));
   const applied = await deps.store.transact(items);
   if (applied.applied) {
     // Handed to its queue now; a relay from a timer does it too if this one is lost, so a failure here never fails the step.
@@ -236,13 +238,16 @@ export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next:
   const current = task.workflow;
   if (current === undefined) return false;
   const write = workflowWriteOps(current, next, { ownsFlow: true });
-  const result = await deps.store.transact([
+  const items: TransactItem[] = [
     {
       kind: "update", key: taskKey(task.taskId), ops: [...write.ops, ...taskOps, change.set("updatedAt", iso(deps))],
       condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision), ...write.guard),
     },
     ...extra,
-  ]);
+  ];
+  // The work events of this transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
+  items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: current, after: next, room: TRANSACTION_ITEMS_MAX - items.length }));
+  const result = await deps.store.transact(items);
   return result.applied;
 }
 

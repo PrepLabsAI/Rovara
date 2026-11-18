@@ -126,6 +126,8 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     now: options.now,
     log: options.log,
     startExtras,
+    // The work events of the cost report's wait split and send-backs (slice A4, `core/work-events/flow-events.ts`): on for every core runtime unless the deployment turns them off.
+    workEvents: options.flowOptions?.workEvents !== false,
   });
   // The company's in-use mark is written before its first core start (off the start's transaction), so the root's jobs always find every company that holds core tasks.
   const flow: TaskFlow = {

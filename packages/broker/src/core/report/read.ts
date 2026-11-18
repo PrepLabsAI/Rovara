@@ -17,6 +17,7 @@ import { decodeCursor, encodeCursor, filterDigest } from "../company-read-cursor
 import { costPartition, taskCostFromTotal } from "../cost/ledger.js";
 import { loadFeatures, resolveFeature, taskFeatureOf, type FeatureRecord, type TaskFeatureRecord } from "./feature-store.js";
 import { foldTask, milestoneFactsOf, settles, storedRowOf, type StoredReportRow, type TaskFacts } from "./task-row.js";
+import { readTaskTimes } from "./times.js";
 
 const GET_MANY = 100;
 const MILESTONE_ROWS = 50;
@@ -66,14 +67,18 @@ async function foldRows(store: ReportReadStore, companyId: OrgId, rows: readonly
   }
   for (let at = 0; at < todo.length; at += MILESTONE_PARALLEL) {
     await Promise.all(todo.slice(at, at + MILESTONE_PARALLEL).map(async ({ row, meta }) => {
-      const facts = foldTask(meta, milestoneFactsOf(await milestoneRowsOf(store, row.taskId), companyId, row.taskId));
+      const base = foldTask(meta, milestoneFactsOf(await milestoneRowsOf(store, row.taskId), companyId, row.taskId));
+      // Slice A4: the time split and send-backs, from the task's own work events (absent when they do not cover it from its start).
+      const events = await readTaskTimes(store, { taskId: row.taskId, project: row.project, orgId: companyId }, row.startedAt, base.endedAt, now);
+      counters.skipped += events.skipped;
+      const facts: TaskFacts = events.times === undefined ? base : { ...base, times: events.times };
       folded.set(row.taskId, facts);
       await settleRow(store, row, facts, now);
     }));
   }
   const out: Folded[] = [];
   for (const row of rows) {
-    if (row.settledAt !== undefined) out.push({ row, facts: { state: row.state, ...(row.path === undefined ? {} : { path: row.path }), ...(row.firstPrAt === undefined ? {} : { firstPrAt: row.firstPrAt }), ...(row.endedAt === undefined ? {} : { endedAt: row.endedAt }), prsOpened: row.prsOpened, prsMerged: row.prsMerged, prLinks: row.prLinks } });
+    if (row.settledAt !== undefined) out.push({ row, facts: { state: row.state, ...(row.path === undefined ? {} : { path: row.path }), ...(row.firstPrAt === undefined ? {} : { firstPrAt: row.firstPrAt }), ...(row.endedAt === undefined ? {} : { endedAt: row.endedAt }), prsOpened: row.prsOpened, prsMerged: row.prsMerged, prLinks: row.prLinks, ...(row.times === undefined ? {} : { times: row.times }) } });
     else if (folded.has(row.taskId)) out.push({ row, facts: folded.get(row.taskId)! });
   }
   return out;
@@ -91,7 +96,7 @@ async function settleRow(store: Pick<DocumentStore, "update">, row: StoredReport
       key: row.key,
       ops: [
         change.set("state", facts.state), optional("path", facts.path), optional("firstPrAt", facts.firstPrAt), optional("endedAt", facts.endedAt), change.set("prsOpened", facts.prsOpened), change.set("prsMerged", facts.prsMerged),
-        change.set("prLinks", facts.prLinks), ...(settled ? [change.set("settledAt", new Date(now).toISOString())] : []), change.set("version", row.version + 1),
+        change.set("prLinks", facts.prLinks), ...(settled && facts.times !== undefined ? [change.set("times", { ...facts.times })] : []), ...(settled ? [change.set("settledAt", new Date(now).toISOString())] : []), change.set("version", row.version + 1),
       ],
       condition: when.and(when.present(), when.eq("version", row.version), when.notExists("settledAt")),
     });
@@ -203,6 +208,11 @@ export async function readCompanyReportTasks(store: ReportReadStore, companyId: 
           taskId: row.taskId, project: row.project, title: row.title, origin: row.origin, ...(facts.path === undefined ? {} : { path: facts.path }), state: facts.state,
           ...(feature === undefined ? {} : { feature }), startedAt: row.startedAt, ...(facts.firstPrAt === undefined ? {} : { firstPrAt: facts.firstPrAt }), ...(facts.endedAt === undefined ? {} : { endedAt: facts.endedAt }),
           prsOpened: facts.prsOpened, prsMerged: facts.prsMerged, prLinks: facts.prLinks, costMicros: cost.micros, ...(cost.currency === undefined ? {} : { currency: cost.currency }), unpricedCalls: cost.unpriced,
+          // Slice A4: all six numbers or none (absent is "not known", never zero), and `timesComplete` only with them.
+          ...(facts.times === undefined ? {} : {
+            workingMs: facts.times.workingMs, waitingPeopleMs: { decisionsMs: facts.times.decisionsMs, prReviewMs: facts.times.prReviewMs }, waitingSystemMs: facts.times.waitingSystemMs,
+            sendBacksRovara: facts.times.sendBacksRovara, sendBacksPeople: facts.times.sendBacksPeople, timesComplete: true,
+          }),
         });
         if (!built.success) { counters.unreadable += 1; continue; }
         tasks.push({ row: built.data, position: positionOf.get(row.taskId)! });
