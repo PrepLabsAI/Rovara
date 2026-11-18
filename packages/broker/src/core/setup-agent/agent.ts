@@ -18,7 +18,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, when,
+  isBudgetExhaustedMessage, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, when,
   type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunSummary, type SetupVerification, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
@@ -240,7 +240,7 @@ export function resultOf(task: Pick<TaskRecord, "startingRevision" | "preparedBa
   // is `infrastructure`) or says nothing readable is the person's stop; an answer that finished by itself (a proposal, a limit, a code change needed, changed files) stands as the worker said it.
   if (task.setupAgentStop !== undefined && outcome.status === "SUCCEEDED" && (learned.summary === undefined || learned.summary.stop === "infrastructure")) return personStopped(failed, learned);
   if (outcome.status !== "SUCCEEDED") {
-    const stop = outcome.status !== "CANCELLED" && outcome.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE ? "budget_used" : "infrastructure";
+    const stop = outcome.status !== "CANCELLED" && isBudgetExhaustedMessage(outcome.error) ? "budget_used" : "infrastructure";
     return failed(stop, SETUP_AGENT_FAILURES[stop], kept);
   }
   const { proposal, summary } = learned;

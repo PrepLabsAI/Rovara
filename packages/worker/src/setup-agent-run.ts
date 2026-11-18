@@ -16,7 +16,7 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  AgentXError, isBudgetExhaustedMessage, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
   type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
@@ -256,7 +256,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
         // L4-SR2: the gateway's upkeep cap refused a call of an unattended repair draft (HTTP 422 `upkeep_paused`, read from its fixed sentence). The run ends and says why; the broker only takes the word from an unattended draft.
         const paused = upkeepPauseReasonOfText(outcome?.errorMessage) ?? upkeepPauseReasonOfText(failure?.message);
         if (paused !== undefined) { upkeepPause ??= paused; governor.stop("infrastructure"); void session?.abort().catch(() => undefined); }
-        else if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || failure?.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE) governor.stop("budget_used");
+        else if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || isBudgetExhaustedMessage(failure?.message)) governor.stop("budget_used");
         else if (failure instanceof AgentXError && failure.code === "MODEL_NOT_ALLOWED") governor.stop("infrastructure");
       }
       // The limits are looked at AFTER the turn's tokens were counted, so a turn that crossed the budget is seen at once.

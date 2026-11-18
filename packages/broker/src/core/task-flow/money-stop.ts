@@ -12,7 +12,7 @@
 //
 // Absent `moneyStop` (the laptop, and any install that does not wire it), Stop, close and dispatch are exactly as before.
 import { createHash } from "node:crypto";
-import { AGENTX_PROTOCOL_VERSION, change, when, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PROTOCOL_VERSION, budgetExhaustedWords, change, when, type WorkerInvocation } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { workspaceKeys } from "./workspace-location.js";
@@ -33,11 +33,12 @@ export type SpendStopCode = "task_cap" | "company_day_cap" | "spend_unknown";
 const SPEND_STOP_CODES: ReadonlySet<string> = new Set<SpendStopCode>(["task_cap", "company_day_cap", "spend_unknown"]);
 export const isSpendStopCode = (value: unknown): value is SpendStopCode => typeof value === "string" && SPEND_STOP_CODES.has(value);
 
-/** The fixed words a run stopped at its cap ends with (the task and the day alike: the owner's next move is the same). */
+/** The short words of a task's own stop, where a line is only a reason (a reviewer that did not run for want of room). The run's own end says which limit (`spendStopReason`). */
 export const SPEND_STOP_REASON = "Stopped: this task reached its spending limit";
 /** The fixed words a run stopped because its spend could not be read ends with. */
 export const SPEND_UNKNOWN_STOP_REASON = "Stopped: this task's spending could not be worked out";
-export const spendStopReason = (code: SpendStopCode): string => (code === "spend_unknown" ? SPEND_UNKNOWN_STOP_REASON : SPEND_STOP_REASON);
+/** The fixed words a run's end carries: the limit it reached (the task's own, or the company's day) and what to do (lead 4 TA12), or that its spend could not be read. */
+export const spendStopReason = (code: SpendStopCode): string => (code === "spend_unknown" ? SPEND_UNKNOWN_STOP_REASON : budgetExhaustedWords(code === "company_day_cap" ? "company_day" : "task"));
 
 export interface MoneyStop {
   /** How long a Stop waits for the worker's end. Default `USAGE_FLUSH_WAIT_MS`. */
