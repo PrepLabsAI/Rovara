@@ -82,8 +82,8 @@ describe("knowledge_propose: only for the modes that work on the code", () => {
     expect(told).toEqual([PROPOSE_SENT_TEXT]);
     expect(proposalsSent(build.events)).toEqual([{ advice: "Keep jobs idempotent", why: "Retries run twice." }]);
     for (const mode of ["REVIEW", "PLAN_CRITIQUE", "SETUP_DRAFT"]) expect((await step(mode)).inputs.every((input) => input.proposeTool === undefined), mode).toBe(true);
-    // A step with no mode is a build step (the older default).
-    expect((await step(undefined)).inputs[0]!.proposeTool?.name).toBe("knowledge_propose");
+    // A step with no stated mode is given neither the tool nor Rovara skills (only the modes named are).
+    expect((await step(undefined)).inputs.every((input) => input.proposeTool === undefined)).toBe(true);
   });
 });
 
@@ -129,6 +129,9 @@ describe("Rovara skills in a step", () => {
     expect(rovaraSkillFiles(payload, "IMPLEMENT")).toHaveLength(1);
     for (const mode of ["UNDERSTAND", "REVIEW", "PLAN_CRITIQUE", "SETUP_DRAFT", undefined]) expect(rovaraSkillFiles(payload, mode), String(mode)).toEqual([]);
     expect(rovaraSkillFiles(undefined, "PLAN")).toEqual([]);
+    // A description is cleaned again here (hidden characters out, one line).
+    const cleaned = rovaraSkillFiles([{ ...skillFile("ship-it"), description: "Ship\u200b it\nfast" }], "PLAN");
+    expect(cleaned[0]!.description).toBe("Ship it fast");
   });
   it("a payload that does not parse is dropped whole: too many, two with one name, over 32 KB, an unknown field", () => {
     expect(rovaraSkillFiles(Array.from({ length: 9 }, (_, n) => skillFile(`s-${String(n)}`)), "PLAN")).toEqual([]);

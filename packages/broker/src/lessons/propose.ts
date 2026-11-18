@@ -106,7 +106,10 @@ export async function proposeKnowledge(deps: ProposeDeps, input: ProposeInput): 
   if (!await requireAudit(deps.process.audit, { action: "lesson.knowledge_proposed", workspaceId: key.workspaceId, project: key.project, ...(proposer.kind === "tool" ? { actor: proposer.personId } : {}), facts: { by, type: draft.type } })) return refused("unavailable");
   try {
     // No judge and no embedder: a suggestion makes no model call. The ordered word test alone decides whether it is a copy of something.
-    const curateDeps: ProcessDeps = { ...deps.process, noJudge: true, embedder: undefined };
+    // No alerts either: a suggestion that contradicts a lesson is a candidate until its second sighting, and an alert would tell the admins about a card nobody sees yet.
+    const { alerts: _alerts, ...withoutAlerts } = deps.process;
+    void _alerts;
+    const curateDeps: ProcessDeps = { ...withoutAlerts, noJudge: true, embedder: undefined };
     const outcome = await curateDraft(curateDeps, key, draft);
     if (outcome.outcome === "dropped") return PROPOSE_RECEIVED;
     // Never applied by itself, whatever the settings say: a person decides (and a suggestion folded into an existing lesson keeps that lesson's own state).

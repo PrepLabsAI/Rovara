@@ -1010,8 +1010,8 @@ async function runTask(
   };
   // Lead 4 L4-AK3: `knowledge_propose`, for the modes that work on the code only. A suggestion goes to the broker as progress (it checks, counts and limits it again); the tool says nothing about whether it was kept.
   // The project's Rovara skills for this step (digest-checked, execution lines removed; plan and build only), offered through `read_skill` after the step's own and the meta repo's.
-  const rovaraSkills = rovaraSkillFiles(invocation.payload.rovaraSkills, payloadMode ?? "IMPLEMENT");
-  const knowledgePropose = createKnowledgePropose({ mode: payloadMode ?? "IMPLEMENT", emit: (proposal) => { void emit("progress", { [KNOWLEDGE_PROPOSALS_FIELD]: [proposal] }).catch(() => undefined); } });
+  const rovaraSkills = rovaraSkillFiles(invocation.payload.rovaraSkills, payloadMode);
+  const knowledgePropose = createKnowledgePropose({ mode: payloadMode, emit: (proposal) => { void emit("progress", { [KNOWLEDGE_PROPOSALS_FIELD]: [proposal] }).catch(() => undefined); } });
   let session: PiSessionHandle;
   if (registered) {
     session = await openRegisteredWorkspacePiSession(

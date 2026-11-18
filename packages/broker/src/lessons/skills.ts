@@ -314,7 +314,10 @@ export async function approveSkill(deps: SkillDeps, key: ScopeKey, input: { name
   if (head.currentVersion !== input.version) return { ok: false, code: "not_newest" };
   if (head.activeVersion === input.version) return { ok: false, code: "already_live" };
   if (version.approvals.some((entry) => sameId(entry.by, input.by))) return { ok: false, code: "already_approved" };
-  const approvals = [...version.approvals, { by: input.by, at: deps.now() }];
+  // An approval counts only while its giver may still decide (as for a lesson's): one who has left the project, lost the role or been erased is not one of the two.
+  const group = await deps.directory.eligibility(key.workspaceId, key.project, { approverId: input.by }).catch(() => undefined);
+  if (group === undefined || !group.complete) return { ok: false, code: "eligibility_unavailable" };
+  const approvals = [...version.approvals.filter((entry) => idIn(group.eligibleIds, entry.by)), { by: input.by, at: deps.now() }];
   const live = approvals.length >= ROVARA_SKILL_APPROVERS_REQUIRED;
   if (!await requireAudit(deps.audit, { action: "lesson.skill_approved", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: input.version, approvals: approvals.length } })) return { ok: false, code: "audit_unavailable" };
   if (live && !await requireAudit(deps.audit, { action: "lesson.skill_activated", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: input.version, approvals: approvals.length } })) return { ok: false, code: "audit_unavailable" };
@@ -352,9 +355,13 @@ export async function retireSkill(deps: SkillDeps, key: ScopeKey, input: { name:
   if (!await requireAudit(deps.audit, { action: "lesson.skill_retired", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: head.activeVersion ?? head.currentVersion } })) return { ok: false, code: "audit_unavailable" };
   const now = deps.now();
   try {
-    const items: TransactItem[] = [{ kind: "update", key: headKey(key.workspaceId, key.project, input.name), ops: [change.set("retired", true), change.set("updatedAt", now)] }];
-    if (head.activeVersion !== undefined) items.push({ kind: "update", key: setKey(key.workspaceId, key.project), ops: [change.remove(["members", input.name]), change.set("updatedAt", now)] });
-    const written = await deps.documents.transact(items);
+    // The live set's member is removed whether or not this read saw the skill live: a second approval that went live between the read and this write would otherwise leave a retired skill in use. The `set` row is made
+    // first when it is not there (the update needs its parent map).
+    await deps.documents.put({ item: { ...setKey(key.workspaceId, key.project), entityType: "SKILL_SET", members: {}, updatedAt: now }, condition: when.absent() });
+    const written = await deps.documents.transact([
+      { kind: "update", key: headKey(key.workspaceId, key.project, input.name), ops: [change.set("retired", true), change.set("updatedAt", now)] },
+      { kind: "update", key: setKey(key.workspaceId, key.project), ops: [change.remove(["members", input.name]), change.set("updatedAt", now)] },
+    ]);
     if (!written.applied) return { ok: false, code: "conflict" };
   } catch { return { ok: false, code: "unreadable" }; }
   return { ok: true };
@@ -390,6 +397,9 @@ export async function liveSkillsForStep(store: Pick<DocumentStore, "get">, key: 
   const found: RovaraSkillFile[] = [];
   let left = 0;
   for (const [name, versionNumber] of members.sort((a, b) => (options.appliesTo?.(b[0]) ?? 0) - (options.appliesTo?.(a[0]) ?? 0) || a[0].localeCompare(b[0]))) {
+    // The head must still say this version is live and not retired (the `set` row alone could be left behind by a race): a skill the head does not vouch for is not sent.
+    const head = headOf(await store.get(headKey(key.workspaceId, key.project, name)));
+    if (head === undefined || head.retired || head.activeVersion !== versionNumber) { left += 1; continue; }
     const version = versionOf(await store.get(versionKey(key.workspaceId, key.project, name, versionNumber)));
     if (version === undefined || version.name !== name || version.version !== versionNumber || sha256(version.content) !== version.digest || version.approvals.length < ROVARA_SKILL_APPROVERS_REQUIRED || !checkSkillText(version.content).ok) { left += 1; continue; }
     found.push({ name, description: version.description, version: version.version, digest: version.digest, content: version.content });

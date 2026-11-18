@@ -255,6 +255,35 @@ describe("two different people approve a version before it is used", () => {
     expect(await editSkill(w.deps, KEY, { name: "add-a-queue-handler", by: "ann", expectedVersion: 1, form: { description: "Add a queue handler", when: "adding", steps: ["one"] } })).toEqual({ ok: false, code: "audit_unavailable" });
   });
 
+  it("an approval counts only while its giver is still eligible: one who left is not one of the two", async () => {
+    const w = await world();
+    await draftSkillFromLesson(w.deps, KEY, { lessonId: (await proven(w)).id, by: "ann" });
+    expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 1, by: "ann" })).toMatchObject({ ok: true, approvals: 1 });
+    w.eligible.ids = ["bob", "cy"];
+    expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 1, by: "bob" })).toEqual({ ok: true, approvals: 1, live: false });
+    expect(await liveSkillsForStep(w.h.store, KEY)).toEqual({ skills: [], left: 0 });
+    expect((await listSkills(w.deps, KEY))[0]!.approvers).toEqual(["bob"]);
+    expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 1, by: "cy" })).toEqual({ ok: true, approvals: 2, live: true });
+  });
+
+  it("retire wins a race with the second approval: a retired skill is never left in the live set, and the head is checked when a step is sent", async () => {
+    const w = await world();
+    await draftSkillFromLesson(w.deps, KEY, { lessonId: (await proven(w)).id, by: "ann" });
+    await goLive(w, "add-a-queue-handler", 1);
+    const pk = companyScoped(COMPANY as never, "SKILL#payments");
+    // A retire that read the skill before it went live: the head it saw has no live version. The member is removed anyway.
+    const realGet = w.h.store.get.bind(w.h.store);
+    w.h.store.get = async (key) => { const row = await realGet(key); return row !== undefined && key.sk === "head#add-a-queue-handler" ? Object.fromEntries(Object.entries(row).filter(([k]) => k !== "activeVersion")) as typeof row : row; };
+    expect(await retireSkill(w.deps, KEY, { name: "add-a-queue-handler", by: "cy" })).toEqual({ ok: true });
+    w.h.store.get = realGet;
+    expect(((await w.h.store.get({ pk, sk: "set" }))!["members"] as Record<string, number>)["add-a-queue-handler"]).toBeUndefined();
+    expect(await liveSkillsForStep(w.h.store, KEY)).toEqual({ skills: [], left: 0 });
+    // A set row left behind: a retired head or a head that does not say this version is live keeps the skill out.
+    await w.h.store.put({ item: { pk, sk: "set", entityType: "SKILL_SET", members: { "add-a-queue-handler": 1 }, updatedAt: 1 } });
+    expect((await liveSkillsForStep(w.h.store, KEY)).skills).toEqual([]);
+    expect((await liveSkillsForStep(w.h.store, KEY)).left).toBe(1);
+  });
+
   it("a retired skill leaves the live set at once, and cannot be edited or approved; its versions stay", async () => {
     const w = await world();
     await draftSkillFromLesson(w.deps, KEY, { lessonId: (await proven(w)).id, by: "ann" });
@@ -346,6 +375,7 @@ describe("what a step is sent", () => {
     const content = `---\nname: ${name}\ndescription: skill ${name}\n---\n\n## Steps\n1. ${"x".repeat(Math.max(1, bytes - 80))}\n`;
     const pk = companyScoped(COMPANY as never, "SKILL#payments");
     await w.h.store.put({ item: { pk, sk: `v#${name}#000001`, entityType: "SKILL_VERSION", name, version: 1, description: `skill ${name}`, content, digest: over.digest ?? sha(content), bytes: Buffer.byteLength(content, "utf8"), approvals: Array.from({ length: over.approvals ?? 2 }, (_, n) => ({ by: `p${String(n)}`, at: 1 })), createdBy: "ann", createdAt: 1, activatedAt: 2 } });
+    await w.h.store.put({ item: { pk, sk: `head#${name}`, entityType: "SKILL_HEAD", name, currentVersion: 1, activeVersion: 1, fromLessons: [], createdBy: "ann", createdAt: 1, updatedAt: 2 } });
     const set = await w.h.store.get({ pk, sk: "set" });
     await w.h.store.put({ item: { pk, sk: "set", entityType: "SKILL_SET", members: { ...((set?.["members"] as Record<string, number> | undefined) ?? {}), [name]: 1 }, updatedAt: 1 } });
   };

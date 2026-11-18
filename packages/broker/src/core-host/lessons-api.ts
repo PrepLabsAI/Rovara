@@ -237,7 +237,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   async function answer(request: LessonsApiRequest, caller: LessonsApiCaller): Promise<unknown> {
     const match = LESSONS_API.exec(request.path);
     if (match === null) throw notFound(ROUTE_NOT_FOUND);
-    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson, rawSkill, skillAction] = match;
+    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson, , rawSkill, skillAction] = match;
     const method = request.method;
     // The skills paths (`skills`, `skills/{name}`, `skills/{name}/approve|retire`) and the lesson's `skill` action are the skill routes.
     const skillsPath = /^\/v1\/dev\/projects\/[^/]+\/skills(?:\/|$)/u.test(request.path);

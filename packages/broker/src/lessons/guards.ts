@@ -80,8 +80,10 @@ const EXTRA_COMMANDS: readonly RegExp[] = [
   /\b(base64|decoded|decode|decrypt|deobfuscate|untar)\b/iu, /^```/mu,
 ];
 /** Whether a text holds a literal address, script or shell syntax (`LITERAL_COMMANDS`, after the same look-alike and defanging fold), or an encoded blob's usual wrapper. Narrower than `hasCommandOrUrl`: ordinary advice that says "run" or "install" passes. */
+/** A host-like name followed by a slash (`evil.example.co/payload`), unless the "extension" is a code file's (`index.ts/`). */
+const BARE_HOST_PATH = new RegExp(`\\b[a-z0-9-]+\\.(?!(?:${CODE_EXT})\\b)[a-z]{2,24}\\/`, "iu");
 export function hasLiteralExecutable(...texts: readonly string[]): boolean {
-  return texts.map(normaliseForScan).some((text) => LITERAL_COMMANDS.some((pattern) => pattern.test(text)) || /^```/mu.test(text) || /\b(base64|deobfuscate|decrypt)\b/iu.test(text));
+  return texts.map(normaliseForScan).some((text) => LITERAL_COMMANDS.some((pattern) => pattern.test(text)) || BARE_HOST_PATH.test(text) || /\b[a-z0-9-]+\.[a-z]{2,24}:\d{2,5}\b/iu.test(text) || /^```/mu.test(text) || /\b(base64|deobfuscate|decrypt)\b/iu.test(text));
 }
 export function hasCommandOrUrl(...texts: readonly string[]): boolean {
   return texts.map(normaliseForScan).some((text) => COMMANDS.some((pattern) => pattern.test(text)) || EXTRA_COMMANDS.some((pattern) => pattern.test(text)));

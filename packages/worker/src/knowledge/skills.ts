@@ -124,7 +124,7 @@ export function rovaraSkillFiles(raw: unknown, mode: string | undefined): AgentS
     if (sha256(skill.content) !== skill.digest) continue;
     const text = stripSkillExecution(inertContextText(skill.content).text);
     if (text.trim() === "" || Buffer.byteLength(text, "utf8") > SKILL_TEXT_MAX_BYTES) continue;
-    files.push({ name: skill.name, description: skill.description, digest: sha256(text), content: text });
+    files.push({ name: skill.name, description: inertContextText(skill.description).text.replace(/\s*\n\s*/gu, " ").trim() || skill.name, digest: sha256(text), content: text });
   }
   return files;
 }
