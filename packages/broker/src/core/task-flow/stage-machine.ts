@@ -27,6 +27,7 @@ import {
   workflowRequestId,
   type DesignReviewBinding,
   type DocumentKey,
+  type Condition,
   type JsonValue,
   type Operation,
   type PlanDocument,
@@ -232,14 +233,14 @@ export async function acceptStepWithNotes(deps: TaskFlowDeps, input: StepInput):
 }
 
 /** Applies one workflow transition with no operation (a result recorded, a block), fenced on the revision it was computed from. False when the task moved on. */
-export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, extra: readonly TransactItem[] = [], taskOps: readonly ChangeOp[] = []): Promise<boolean> {
+export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, extra: readonly TransactItem[] = [], taskOps: readonly ChangeOp[] = [], taskCondition?: Condition): Promise<boolean> {
   const current = task.workflow;
   if (current === undefined) return false;
   const write = workflowWriteOps(current, next, { ownsFlow: true });
   const result = await deps.store.transact([
     {
       kind: "update", key: taskKey(task.taskId), ops: [...write.ops, ...taskOps, change.set("updatedAt", iso(deps))],
-      condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision), ...write.guard),
+      condition: when.and(when.notExists("closedAt"), ...(taskCondition === undefined ? [] : [taskCondition]), when.eq(["workflow", "revision"], current.revision), ...write.guard),
     },
     ...extra,
   ]);
@@ -301,7 +302,7 @@ export async function planContextOf(deps: Pick<TaskFlowDeps, "artifacts">, workf
 }
 
 /** Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`, on the ports. */
-export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<StepStart> {
+export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind" | "firstEvent">): Promise<StepStart> {
   // Any step after the plan (coding, reviews, the publication, a sync of the branch, Rovara's own fix of a block) is the build step's (lane L10).
   if (!READING_DISPATCH_KINDS.includes(row.kind)) {
     if (deps.buildSteps === undefined) throw agentXError("CONFIG_INVALID", "this install has no steps after the plan");

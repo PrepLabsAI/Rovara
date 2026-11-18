@@ -196,6 +196,8 @@ export interface DispatchRowRecord {
   lastError?: string;
   /** A REPLAN row: what the planner is told on its automatic second run (the plan's problems, or what could not be read), kept on the row. */
   planPrompt?: string;
+  /** Fixed first event for an automatic retry of an exact blocked workflow step. */
+  firstEvent?: string;
   /** A CRITIQUE row: who approved running the design review without a price (the cost hold's "run it anyway"). Only this lets a round start from the hold. */
   costApprovedBy?: string;
   /** An AUTOFIX row: how the block it looks at came about when no finished run wrote it (the run was lost, or its start was tried until the budget ran out). */

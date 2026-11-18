@@ -19,10 +19,11 @@ export const WORKFLOW_DISPATCH_INDEX: IndexDefinition = {
 /** A row nobody resolves is removed by a store with a time-to-live after this long (a backstop). */
 const RETENTION_SECONDS = 7 * 86_400;
 
-export function dispatchRowItem(deps: Pick<TaskFlowDeps, "companyId">, taskId: string, workflowRevision: number, kind: DispatchKind, now: string, dueAt: string = now, cause?: DispatchRowRecord["cause"], planPrompt?: string): Extract<TransactItem, { kind: "put" }> {
+export function dispatchRowItem(deps: Pick<TaskFlowDeps, "companyId">, taskId: string, workflowRevision: number, kind: DispatchKind, now: string, dueAt: string = now, cause?: DispatchRowRecord["cause"], planPrompt?: string, firstEvent?: string): Extract<TransactItem, { kind: "put" }> {
   const key = dispatchRowKey(deps.companyId, taskId, workflowRevision);
   const row: DispatchRowRecord = {
     ...key, entityType: "WORKFLOW_DISPATCH", companyId: deps.companyId, taskId, workflowRevision, kind, createdAt: now, attempts: 0, nextAttemptAt: dueAt, ...(cause === undefined ? {} : { cause }), ...(planPrompt === undefined ? {} : { planPrompt }),
+    ...(firstEvent === undefined ? {} : { firstEvent }),
     dispatchDuePk: dispatchPartition(deps.companyId), dispatchDueSk: `${dueAt}#${key.sk}`,
     indexExpiresAt: Math.floor(Date.parse(now) / 1_000) + RETENTION_SECONDS,
   };

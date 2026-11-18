@@ -25,6 +25,8 @@ import { SETUP_HOST_KIND, approvedHostsOf, forgetApprovedHost, createSetupHostSu
 import type { SetupAgentCallbackDeps } from "../../core/setup-agent/callback.js";
 import { readSetupJournal } from "../../core/setup-agent/journal.js";
 import type { DecisionSubject } from "../../core/decisions/approval-gate.js";
+import { resumeSetupPausedTasks } from "../../core/setup-agent/auto-resume.js";
+import { log as logTaskFlow } from "../../core/task-flow/support.js";
 
 /** The subjects the approval gate must know for the setup agent: a website a run asked for, a project's waiting setup, then independent eval spend. */
 export function setupDecisionSubjects(flow: TaskFlowDeps, sandboxDenied?: (project: string) => readonly string[]): DecisionSubject[] {
@@ -200,6 +202,9 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       credentials: [{ method: input.proof.method, token: input.proof.token, ...(input.proof.claimedAccount === undefined ? {} : { claimedAccount: input.proof.claimedAccount }) }],
       ...(input.decision === "reject" ? { reason: "Not now (setup)" } : {}), details: { via: "PAGE" },
     });
+    if (kind === SETUP_APPLY_KIND && input.decision === "approve" && result.status !== "refused") {
+      void resumeSetupPausedTasks(flow, subjectId, { kind: "approved", revision: input.approval.revision }).catch((error: unknown) => logTaskFlow(flow, { event: "setup_apply.resume_failed", error: error instanceof Error ? error.name : "unknown" }));
+    }
     return localResultOf(result, done);
   };
 
