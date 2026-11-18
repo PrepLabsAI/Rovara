@@ -1,3 +1,4 @@
+import { captureStartQuote } from "../cost/run-usage.js";
 // Lane L6a, task flow core: starting a task (Cloud's `aws/developer-tasks/start.ts`, rewritten onto the W0 ports).
 //
 // One start is one document-store transaction: the workspace, its preparation (an operation and its staged dispatch message), the task, its
@@ -241,6 +242,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
       ...(understandFirst && deps.planCheck !== false ? { program: ROVARA_CODE_PROGRAM } : {}),
     }) } : {}),
   };
+  task.usageStartQuote = await captureStartQuote(deps, task, receivedAt);
   const pointer: TaskPointerRecord = {
     ...taskPointerKey(deps.companyId, workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId,
     requester: { kind: "developer", developerId, provider: principal.provider },

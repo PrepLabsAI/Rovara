@@ -148,7 +148,7 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/channel-links.ts",
       // The Code port lanes' core (packages/broker/src/core, on the document store port). Each file was read for it: every one writes a row that is meant to expire after a named retention, none a durable record.
       // L6b: the notice batch rows (pending and sent), the run cost estimate history and the cost ledger's entry and once-markers, the approval proofs and their used/spent markers, the decision records, and the task sessions' events, requests, messages and ended summaries.
-      "packages/broker/src/core/notify/attention.ts", "packages/broker/src/core/cost/estimate.ts", "packages/broker/src/core/cost/ledger.ts",
+      "packages/broker/src/core/notify/attention.ts", "packages/broker/src/core/cost/estimate.ts", "packages/broker/src/core/cost/ledger.ts", "packages/broker/src/core/cost/run-usage.ts",
       "packages/broker/src/core/decisions/approval-gate.ts", "packages/broker/src/core/decisions/store.ts",
       "packages/broker/src/core/sessions/read.ts", "packages/broker/src/core/sessions/summary.ts", "packages/broker/src/core/sessions/control.ts", "packages/broker/src/core/sessions/store.ts",
       // L6a: the workflow dispatch row (RETENTION_SECONDS) and its record type, the same row broker-shared.ts defines for the AWS broker.

@@ -1,3 +1,4 @@
+import { RunUsageCallSchema, type RunUsageCallV1 } from "./run-usage.js";
 import { z } from "zod";
 import { isKeyedModelProvider } from "./model-providers.js";
 import { ThinkingLevelSchema } from "./models.js";
@@ -7,6 +8,8 @@ export type PiCacheRetention = "short" | "long";
 export type TaskUsageOutcome = "SUCCEEDED" | "FAILED" | "CANCELLED";
 
 export interface TaskUsageTelemetry {
+  /** Optional unit history. Old workers omit it; readers accept it before new workers emit it. */
+  calls?: RunUsageCallV1[];
   schemaVersion: 1;
   outcome: TaskUsageOutcome;
   provider: string;
@@ -28,6 +31,7 @@ export interface TaskUsageTelemetry {
 
 /** The part of Pi's SessionStats usage telemetry reads; SessionStats is assignable to it. */
 export interface UsageStats {
+  calls?: RunUsageCallV1[];
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
   cost: number;
   /** True when every priced usage carried the provider's own billed total (Pi's `cost.totalFromProvider`); absent when unknown. */
@@ -38,6 +42,7 @@ const TokenCount = z.number().int().nonnegative();
 
 export const TaskUsageTelemetrySchema = z.object({
   schemaVersion: z.literal(1),
+  calls: z.array(RunUsageCallSchema).max(2000).optional(),
   outcome: z.enum(["SUCCEEDED", "FAILED", "CANCELLED"]),
   provider: z.string().min(1).max(128),
   modelId: z.string().min(1).max(256),
@@ -69,6 +74,7 @@ export function createTaskUsageTelemetry(
   const inputSideTokens = tokens.input + tokens.cacheRead + tokens.cacheWrite;
   return {
     schemaVersion: 1,
+    ...(stats.calls === undefined ? {} : { calls: stats.calls }),
     outcome,
     provider: model.provider,
     modelId: model.modelId,

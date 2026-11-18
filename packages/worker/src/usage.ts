@@ -38,6 +38,7 @@ export function statsSince<T extends UsageStats>(stats: T, baseline: UsageStats 
   const tokens = (now: number, before: number) => Math.max(0, now - before);
   return {
     ...stats,
+    ...(stats.calls === undefined ? {} : { calls: stats.calls.filter((call) => !baseline.calls?.some((previous) => previous.callId === call.callId)) }),
     tokens: {
       input: tokens(stats.tokens.input, baseline.tokens.input), output: tokens(stats.tokens.output, baseline.tokens.output),
       cacheRead: tokens(stats.tokens.cacheRead, baseline.tokens.cacheRead), cacheWrite: tokens(stats.tokens.cacheWrite, baseline.tokens.cacheWrite),

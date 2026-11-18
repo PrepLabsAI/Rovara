@@ -1,3 +1,4 @@
+import { RunUsageCallSchema, type RunUsageCallV1, type JsonValue } from "@agentx/contracts";
 // The actual cost of a task (lane L6b, inventory B9): what the model calls it made cost, from the Metering seam. Code prices tokens times a price table (Cloud reads the proxy keys' spend); the ledger is the
 // part both need: it records each usage once, keeps the task's running total, and says plainly when a call could not be priced. It decides nothing: no limit, no pause. Whether a run may go on is the Admission seam's.
 //
@@ -22,9 +23,11 @@ export interface TaskCost {
   updatedAt?: string;
 }
 
+/** Internal learning extension; the pinned metering policy port stays unchanged. */
+export type LearningMeterEntry = MeterEntry & { runUsage?: RunUsageCallV1; usageGranularity?: "call" | "session"; runUsageCalls?: RunUsageCallV1[] };
 export interface CostLedger {
   /** Records one usage. Telling it again (the same `entryId` for the same company, under any task) records nothing more and answers the first answer. */
-  recordUsage(entry: MeterEntry): Promise<MeterResult & { counted: boolean }>;
+  recordUsage(entry: LearningMeterEntry): Promise<MeterResult & { counted: boolean }>;
   /** The task's total so far (zero when nothing was recorded). */
   taskCost(companyId: string, taskId: string): Promise<TaskCost>;
   /** What this usage would cost, without recording it. */
@@ -69,8 +72,14 @@ const natural = (value: number): boolean => Number.isSafeInteger(value) && value
 export function createCostLedger(deps: { store: DocumentStore; metering: Metering; now?: () => Date; holds?: LedgerHolds }): CostLedger {
   const now = deps.now ?? (() => new Date());
 
-  async function recordUsage(entry: MeterEntry, attempt = 0): Promise<MeterResult & { counted: boolean }> {
+  async function recordUsage(entry: LearningMeterEntry, attempt = 0): Promise<MeterResult & { counted: boolean }> {
     const tokens = entry.usage.tokens;
+    // Learning metadata must never make an otherwise valid money booking exceed DynamoDB's item limit.
+    const parsedCalls = entry.runUsageCalls?.slice(0, 2000).map((call) => RunUsageCallSchema.safeParse(call));
+    const readableCalls = parsedCalls?.every((call) => call.success) ? parsedCalls.map((call) => call.data) : undefined;
+    const runUsageCalls = readableCalls !== undefined && Buffer.byteLength(JSON.stringify(readableCalls)) <= 128_000 ? readableCalls : undefined;
+    const parsedRunUsage = entry.runUsage === undefined ? undefined : RunUsageCallSchema.safeParse(entry.runUsage);
+    const runUsage = parsedRunUsage?.success === true ? parsedRunUsage.data : undefined;
     if (entry.taskId === undefined || ![tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite].every(natural)) throw new Error("a usage names its task and counts its tokens in whole numbers");
     const partition = costPartition(entry.companyId, entry.taskId);
     const entryKey = { pk: partition, sk: `ENTRY#${entry.entryId}` };
@@ -91,6 +100,9 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
     const adds = result.cost !== null && (currency === undefined || currency === result.cost.currency);
     const entryDoc: StoredDocument = {
       ...entryKey, entityType: "COST_ENTRY", companyId: entry.companyId, taskId: entry.taskId, entryId: entry.entryId, at: entry.at, provider: entry.usage.provider, modelId: entry.usage.modelId,
+      ...(runUsageCalls === undefined ? {} : { runUsageCalls: JSON.parse(JSON.stringify(runUsageCalls)) as JsonValue }),
+      ...(runUsage === undefined ? {} : { runUsage: JSON.parse(JSON.stringify(runUsage)) as JsonValue }),
+      ...(entry.usageGranularity === undefined ? {} : { usageGranularity: entry.usageGranularity }),
       tokensInput: tokens.input, tokensOutput: tokens.output, tokensCacheRead: tokens.cacheRead, tokensCacheWrite: tokens.cacheWrite, source: result.source,
       ...(result.cost === null ? {} : { micros: result.cost.micros, currency: result.cost.currency }), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(at.getTime() / 1000) + ENTRY_KEPT_SECONDS,
     };

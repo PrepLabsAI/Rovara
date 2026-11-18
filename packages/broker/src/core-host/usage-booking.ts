@@ -1,3 +1,5 @@
+import { RunUsageCallSchema } from "@agentx/contracts";
+import type { LearningMeterEntry } from "../core/cost/ledger.js";
 // Usage booking on a deployed install (switch-on lane L8): every model usage a core task's worker reports is booked into the task's cost ledger, as the laptop's model proxy books each call
 // (`meter` in local/app/app.ts). A worker reports one `usage` event per model session (a run, a reviewer, a part of a plan) through the callback layer (services/callbacks.ts `bookUsage`),
 // and the batch is acknowledged only once its usage is booked: a booking that fails fails the batch, the worker sends it again, and the ledger counts each usage once.
@@ -9,7 +11,7 @@
 //
 // `bookUsageReport` is the one entry for any reporter: the worker's events here, and the Cloud gateway's usage report when it lands (it names the task and its own entry id).
 import { createHash } from "node:crypto";
-import { type DocumentStore, type MeterEntry, type Metering, type ModelUsage } from "@agentx/contracts";
+import { type DocumentStore, type Metering, type ModelUsage } from "@agentx/contracts";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { costPartition } from "../core/cost/ledger.js";
 import { createHostedLedger } from "./hosted-modules.js";
@@ -88,7 +90,11 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
 
   async function bookUsageReport(report: UsageReport): Promise<boolean> {
     const read = readUsagePayload(report.payload, { checkpointsBooked: report.checkpointsBooked === true });
-    const entry: MeterEntry = {
+    const payloadCalls = (report.payload as { calls?: unknown } | null)?.calls;
+    const parsedCalls = Array.isArray(payloadCalls) && payloadCalls.length <= 2000 ? payloadCalls.map((call: unknown) => RunUsageCallSchema.safeParse(call)) : undefined;
+    const runUsageCalls = parsedCalls?.every((call) => call.success) ? parsedCalls.map((call) => call.data) : undefined;
+    const entry: LearningMeterEntry = {
+      ...(runUsageCalls === undefined ? {} : { runUsageCalls }),
       companyId: report.companyId, entryId: report.entryId, at: report.at, taskId: report.taskId,
       usage: read?.usage ?? { provider: UNREADABLE_USAGE_PROVIDER, modelId: "unreadable", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
       ...(read?.reportedMicros === undefined ? {} : { reportedCost: { micros: read.reportedMicros, currency: "USD" } }),
