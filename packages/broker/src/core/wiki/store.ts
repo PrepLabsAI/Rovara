@@ -80,7 +80,7 @@ type BodyRowT = z.infer<typeof BodyRow>;
 const NoteRow = z.object({ ...scoped, entityType: z.literal(WIKI_NOTE_ENTITY), note: WikiNoteSchema }).passthrough();
 const FlagRow = z.object({ ...scoped, entityType: z.literal(WIKI_FLAG_ENTITY), flag: WikiFlagSchema }).passthrough();
 const BuildRow = z.object({ ...scoped, entityType: z.literal(WIKI_BUILD_ENTITY), build: WikiBuildRecordSchema }).passthrough();
-const AnswerRow = z.object({ ...scoped, entityType: z.literal(WIKI_ANSWER_ENTITY), answer: WikiAnswerRecordWriteSchema, createdAt: isoTime, expiresAt: z.number().int() }).passthrough();
+const AnswerRow = z.object({ ...scoped, entityType: z.literal(WIKI_ANSWER_ENTITY), answer: WikiAnswerRecordWriteSchema, createdAt: isoTime, expiresAt: z.number().int(), notRight: z.boolean().optional() }).passthrough();
 
 export function createWikiStore(options: WikiStoreOptions): WikiStore {
   const companyId = OrgIdSchema.parse(options.companyId);
@@ -365,7 +365,41 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     const row = readRow(AnswerRow, await store.get(wikiAnswerKey(companyId, name, idOf(answerId))), name);
     // A record past its time may still be in the table until the sweep removes it: it is gone for every reader from that moment.
     if (row === undefined || row.expiresAt * 1000 <= now()) return undefined;
-    return { ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt };
+    return { ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt, ...(row.notRight === true ? { notRight: true } : {}) };
+  }
+
+  async function listAnswers(project: string, scanMax: number): Promise<{ records: WikiAnswerRecord[]; more: boolean }> {
+    const name = projectOf(project);
+    const most = parsed(z.number().int().min(1).max(1_000), scanMax);
+    const records: WikiAnswerRecord[] = [];
+    let seen = 0;
+    let more = false;
+    let cursor: string | undefined;
+    do {
+      const page = await store.query({ pk: wikiPartition(companyId, name), sk: { op: "beginsWith", prefix: WIKI_SK.answer }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+      for (const item of page.items) {
+        const row = readRow(AnswerRow, item, name)!;
+        // An expired row (not yet swept) is gone and does not count toward the bound.
+        if (row.expiresAt * 1000 <= now()) continue;
+        if (seen >= most) { more = true; break; }
+        seen += 1;
+        records.push({ ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt, ...(row.notRight === true ? { notRight: true } : {}) });
+      }
+      cursor = more ? undefined : page.cursor;
+    } while (cursor !== undefined);
+    return { records, more };
+  }
+
+  async function markAnswerNotRight(project: string, answerId: string, personId: string): Promise<"marked" | "already" | undefined> {
+    const name = projectOf(project);
+    const person = parsed(WikiPersonIdSchema, personId);
+    const key = wikiAnswerKey(companyId, name, idOf(answerId));
+    const row = readRow(AnswerRow, await store.get(key), name);
+    // Another person's record and an expired one are "not there".
+    if (row === undefined || row.expiresAt * 1000 <= now() || row.answer.askedBy !== person) return undefined;
+    if (row.notRight === true) return "already";
+    const done = await store.update({ key, ops: [{ op: "set", path: ["notRight"], value: true }], condition: when.eq("expiresAt", row.expiresAt) });
+    return done.applied ? "marked" : undefined;
   }
 
   // Expiry is app-driven (no table TTL): an expired record reads as gone at once, and this bounded sweep deletes expired rows (every answer write runs it; J1 or a scheduled job can too).
@@ -445,5 +479,5 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     };
   }
 
-  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson };
+  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson, listAnswers, markAnswerNotRight };
 }

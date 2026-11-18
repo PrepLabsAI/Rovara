@@ -275,7 +275,8 @@ export const WikiAnswerRecordWriteSchema = z.object({
   pagesRead: z.array(WikiPageIdSchema).max(20),
 }).strict();
 export type WikiAnswerRecordWrite = z.infer<typeof WikiAnswerRecordWriteSchema>;
-export type WikiAnswerRecord = WikiAnswerRecordWrite & { createdAt: string; expiresAt: number };
+/** `notRight`: the asker pressed "Not right" on this answer (J5; the one change a record gets after it is written). */
+export type WikiAnswerRecord = WikiAnswerRecordWrite & { createdAt: string; expiresAt: number; notRight?: boolean };
 
 // ---- Keys: in wiki-keys.ts (the key builders the company inventory reads), re-exported here --------------------------------------------------------------------------------------
 export * from "./wiki-keys.js";
@@ -453,6 +454,13 @@ export interface WikiStore {
   writeAnswer(project: string, record: WikiAnswerRecordWrite): Promise<WikiAnswerRecord>;
   /** An answer record, or undefined when there is none or it has expired. */
   readAnswer(project: string, answerId: string): Promise<WikiAnswerRecord | undefined>;
+  /**
+   * The project's answer records that have not expired, in key order (J5: the gap list is read from them), at most `scanMax` of them; `more` is true when there were more rows than that. Records carry their asker's id:
+   * the caller must never show it.
+   */
+  listAnswers(project: string, scanMax: number): Promise<{ records: WikiAnswerRecord[]; more: boolean }>;
+  /** The asker presses "Not right" (J5): sets the record's `notRight` once. `marked` the first time, `already` after, undefined when there is no such record, it has expired, or it is not this person's. */
+  markAnswerNotRight(project: string, answerId: string, personId: string): Promise<"marked" | "already" | undefined>;
   /** Deletes up to `limit` (default and most `WIKI_ANSWER_SWEEP_MAX`) answer records of the project whose time is past. Answers how many went. */
   expireAnswers(project: string, limit?: number): Promise<number>;
   /** The person-erase step: the person's notes and answer records are deleted and their "Mark wrong" reasons removed, in every given project. */
