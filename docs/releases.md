@@ -89,10 +89,10 @@ directly for that environment name would have produced (FR-012).
 The first release, v0.1.0, shipped on 2026-10-06 from commit `87d28a2d`. Everything below is in
 place; this records what it is, so a change to any piece can be made deliberately.
 
-- **ECR Public repositories.** `agentx-worker` and `agentx-slack` in account `944937319445`
-  (`us-east-1`), under the registry alias `i7z2k3a8`. A shorter alias, `agentx`, is requested and
+- **ECR Public repositories.** `agentx-worker` and `agentx-slack` in the release account (`<release-account-id>`, found in the private release runbook)
+  in `us-east-1`, under the registry alias `i7z2k3a8`. A shorter alias, `agentx`, is requested and
   waiting on AWS's approval; switching to it means changing `AGENTX_ECR_PUBLIC_ALIAS`.
-- **The publish role.** `arn:aws:iam::944937319445:role/agentx-github-release` can push images
+- **The publish role.** `arn:aws:iam::<release-account-id>:role/agentx-github-release` can push images
   only to those two repositories, plus the two sign-in permissions ECR Public requires
   (`ecr-public:GetAuthorizationToken` and `sts:GetServiceBearerToken`). Its trust policy accepts
   GitHub's OIDC token only for this repository's version tags, matched by immutable ID rather than
@@ -162,7 +162,7 @@ place; this records what it is, so a change to any piece can be made deliberatel
   its tag and artifacts are not rewritten. Earlier versions can also be used under MIT under the
   new grant. Third-party components keep their own licenses.
 - **The installer bucket** (one-time setup, before the first release with the Launch in AWS
-  button). `rovara-installer-us-east-1` in account `944937319445`, `us-east-1`: anyone may read its
+  button). `rovara-installer-us-east-1` in the release account (`<release-account-id>`), `us-east-1`: anyone may read its
   objects (the quick-create template, and the setup page's code, which Lambda reads from the
   visitor's own account); only the publish role writes them. The README's button points at it, so
   the name is fixed. From an admin profile in that account:
@@ -171,7 +171,7 @@ place; this records what it is, so a change to any piece can be made deliberatel
   B=rovara-installer-us-east-1
   aws s3api create-bucket --bucket "$B" --region us-east-1
   # Only if the account's own Block Public Access blocks public bucket policies:
-  #   aws s3control get-public-access-block --account-id 944937319445
+  #   aws s3control get-public-access-block --account-id <release-account-id>
   aws s3api put-public-access-block --bucket "$B" --public-access-block-configuration \
     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=false,RestrictPublicBuckets=false
   aws s3api put-bucket-policy --bucket "$B" --policy "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"PublicRead\",\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$B/*\"}]}"
