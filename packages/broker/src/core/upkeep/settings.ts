@@ -88,7 +88,9 @@ export async function setUpkeepEnabled(deps: UpkeepSettingsDeps, input: { person
     try { await deps.record("upkeep_switched", input.project, { requestId: input.requestId, on: input.on, previous: typeof before?.["changedAt"] === "string" ? before["changedAt"] : "none" }); } catch { throw agentXError("AUDIT_UNAVAILABLE", UPKEEP_WORDS.auditUnavailable); }
   }
   const changedAt = new Date(deps.now()).toISOString();
-  await deps.store.put({ item: { ...key, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId } });
+  // The row changes only if it is still the one this act read (a concurrent switch loses and is told to try again; the schedule is then not touched).
+  const written = await deps.store.put({ item: { ...key, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId }, condition: seenRowFence(before) });
+  if (!written.applied) throw agentXError("RUNTIME_UNAVAILABLE", UPKEEP_WORDS.unreadable);
   if (deps.schedule !== undefined) {
     if (input.on) await deps.schedule.put(scope); else await deps.schedule.remove(scope);
   }

@@ -9,6 +9,7 @@
 //   F4 seenRowFence: the no-changedAt branch loses `present()` (only notExists changedAt)                          -> "a row deleted ..."
 //   F5 seenRowFence: the no-changedAt branch loses `notExists(changedAt)` (only present)                           -> "two concurrent writers ..."
 //   F7 seenRowFence: the no-changedAt branch is unconditional (the old bug moved into the helper)                 -> same tests as F1
+//   F8 settings.ts setUpkeepEnabled (the maintainer's plain switch): the put is unconditional / ignores a lost condition  -> the three "plain switch" tests
 //   F6 settings.ts: the consent row's put is unconditional / the settings row's put is unconditional               -> the two "setup step" race tests (each row on its own)
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -16,7 +17,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { SYSTEM_RUNS_WORDS, setSystemRunsConsent, type SystemRunsControlDeps } from "../../packages/broker/src/core/system-runs/consent-control.js";
 import { readSystemRunsConsentRow, seenRowFence, systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { upkeepSettingsKey } from "../../packages/broker/src/core/upkeep/keys.js";
-import { UPKEEP_WORDS, setSystemRunsAndUpkeep, type UpkeepSettingsDeps } from "../../packages/broker/src/core/upkeep/settings.js";
+import { UPKEEP_WORDS, setSystemRunsAndUpkeep, setUpkeepEnabled, type UpkeepSettingsDeps } from "../../packages/broker/src/core/upkeep/settings.js";
 import { COMPANY_A } from "../support/wiki-build-fixtures.js";
 
 const T0 = Date.parse("2026-11-17T12:00:00.000Z");
@@ -162,6 +163,52 @@ describe("the setup step (setSystemRunsAndUpkeep): both rows are fenced", () => 
     const store = new MemoryDocumentStore();
     expect(await setup(setupDeps(store))).toEqual({ changed: true });
     expect(await consentOf(store)).toMatchObject({ enabled: true });
+  });
+});
+
+describe("the maintainer's plain switch (setUpkeepEnabled) is fenced too", () => {
+  const settingsOf = (store: MemoryDocumentStore) => store.get(upkeepSettingsKey({ orgId: COMPANY_A, project: "beacon" }));
+  function plain(store: MemoryDocumentStore, hook: () => Promise<void>, schedule?: string[]): UpkeepSettingsDeps {
+    return {
+      store, companyId: COMPANY_A, now: () => T0, standing: async () => ({ access: "manage" }), record: async () => { await hook(); },
+      ...(schedule === undefined ? {} : { schedule: { put: async () => { schedule.push("put"); }, remove: async () => { schedule.push("remove"); } } }),
+    };
+  }
+  const flip = (deps: UpkeepSettingsDeps, on = true) => setUpkeepEnabled(deps, { personId: PERSON, project: "beacon", requestId: randomUUID(), on, fromPage: true });
+
+  // MUTANT F8: two concurrent switches on a row without changedAt: one wins.
+  it("two concurrent switches on a row without changedAt: exactly one wins, the other is told to try again and touches no schedule", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: projectRow() });
+    const wait = barrier(2);
+    const calls: string[] = [];
+    const results = await Promise.allSettled([flip(plain(store, wait, calls)), flip(plain(store, wait, calls))]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason).toMatchObject(lostSetup);
+    expect(await settingsOf(store)).toMatchObject({ enabled: true, changedAt: new Date(T0).toISOString() });
+    expect(calls).toEqual(["put"]);
+  });
+
+  it("a row whose changedAt moved loses and keeps the other writer's row; two creators of a new row: one wins", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: projectRow({ changedAt: "2026-11-17T10:00:00.000Z" }) });
+    const racing = projectRow({ enabled: false, changedAt: "2026-11-17T11:59:59.000Z", requestId: randomUUID() });
+    await expect(flip(plain(store, async () => { await store.put({ item: racing }); }))).rejects.toMatchObject(lostSetup);
+    expect(await settingsOf(store)).toEqual(racing);
+    const fresh = new MemoryDocumentStore();
+    const wait = barrier(2);
+    const results = await Promise.allSettled([flip(plain(fresh, wait)), flip(plain(fresh, wait))]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  });
+
+  it("a row read without changedAt that gets one before the write loses; with no race the switch works", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: projectRow() });
+    const racing = projectRow({ enabled: true, changedAt: "2026-11-17T11:59:58.000Z", requestId: randomUUID() });
+    await expect(flip(plain(store, async () => { await store.put({ item: racing }); }), false)).rejects.toMatchObject(lostSetup);
+    expect(await settingsOf(store)).toEqual(racing);
+    const calm = new MemoryDocumentStore();
+    expect(await flip(plain(calm, async () => undefined))).toMatchObject({ enabled: true, changed: true });
   });
 });
 
