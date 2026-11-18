@@ -47,7 +47,7 @@ export function plainSetupLink(link: string | undefined): string | undefined {
   } catch { return undefined; }
 }
 /** The check's failing step made safe for a chat or a ticket (it is repository text): no controls, no mention, link or markup characters (`@ < > ` [ ] * _ ~ # | !` and `//`), one line, cut. Plain steps such as `setup step 0 (npm ci) failed: exit 1` are unchanged. */
-export const inertSetupStep = (step: string): string => step.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/:\/\//gu, ": ").replace(/\/\/+/gu, "/").replace(/[@<>`[\]*_~#|!]/gu, "").replace(/\s+/gu, " ").trim().slice(0, 200);
+export const inertSetupStep = (step: string): string => step.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/[@<>`[\]*_~#|!]/gu, "").replace(/:\/\//gu, ": ").replace(/\/\/+/gu, "/").replace(/\s+/gu, " ").trim().slice(0, 200);
 /** What the requester reads in the chat thread and on the ticket when their task paused before Build: the task page's own sentence, then where to go. One message, no buttons, no cost. */
 export const setupPausedMessage = (failedStep: string, setupUrl?: string): string => `${setupBrokenTaskWords(inertSetupStep(failedStep))}\n${setupPageWords(plainSetupLink(setupUrl))}`;
 

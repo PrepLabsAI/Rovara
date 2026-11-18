@@ -122,6 +122,11 @@ describe("the words are one set, safe for a chat, with no cost in them", () => {
     expect(inertSetupStep("x".repeat(500))).toHaveLength(200);
   });
 
+  it("a markup character hidden inside a scheme separator does not rebuild a link", () => {
+    expect(inertSetupStep("x https:/@/evil.test")).not.toContain("//");
+    expect(inertSetupStep("x http:/<!/evil.test")).not.toContain("//");
+  });
+
   it("a link goes into a chat only as a plain https address (no sign-in data, no spaces, no markup)", () => {
     expect(plainSetupLink("https://app.example.test/p/payments/setup")).toBe("https://app.example.test/p/payments/setup");
     for (const bad of ["http://app.example.test/x", "https://user:pw@app.example.test/x", "javascript:alert(1)", "https://app.example.test/a b", "https://app.example.test/<x>", "not a link", undefined]) expect(plainSetupLink(bad as never), String(bad)).toBeUndefined();

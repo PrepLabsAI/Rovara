@@ -18,8 +18,6 @@ import { readTask } from "../task-flow/reads.js";
 import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
 import { setupGateBeforeBuild } from "../setup-agent/recheck.js";
-/** The timeline line and milestone text of the pause: fixed words, never the check's failing step (repository text). */
-const SETUP_PAUSED_TIMELINE = "Paused before Build: the project's setup needs repair.";
 import { acceptStep, acceptStepWithNotes, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { firstGraphInvocation, restartedGraphInvocation, resumeGraphInvocation, workflowWithCurrentGraphOperation } from "../work-breakdown/invocation.js";
@@ -30,6 +28,8 @@ import {
   AUTOMATIC_REVIEW_NOTE, AUTOMATIC_REVIEW_ONLY_NOTE, NO_PUBLISH_NOTE, implementPrompt, ownerConstraintsSection, promptTagId, reviewCheckCommand, reviewPrompt, selectedCheckCommands,
   sendBackPrompt, sendBackProblemsPromptSection,
 } from "./prompts.js";
+/** The timeline line and milestone text of the pause: fixed words, never the check's failing step (repository text). */
+const SETUP_PAUSED_TIMELINE = "Paused before Build: the project's setup needs repair.";
 
 /** A UUID made from text (the workflow's retry record wants one): the same text always gives the same one, so a repeated retry is recognised. */
 export function uuidFrom(text: string): string {
