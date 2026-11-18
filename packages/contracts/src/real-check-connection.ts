@@ -195,7 +195,7 @@ const PlacementSchema = z.discriminatedUnion("scheme", [
   z.object({ scheme: z.literal("oauth_client_credentials"), tokenHost: z.string() }).strict(),
 ]);
 
-const GraphqlPath = z.string().max(100).regex(/^\/[A-Za-z0-9/_-]{0,99}$/u, "a path").refine((path) => !path.endsWith("/") || path === "/", "no trailing slash");
+const GraphqlPath = z.string().max(100).regex(/^\/[A-Za-z0-9/_-]{0,99}$/u, "a path").refine((path) => !path.endsWith("/") && !path.includes("//"), "no trailing slash or empty segment");
 
 /** A vendor's test key: held as a reference only RealCheckEgress can resolve, and placed by a fixed scheme. The operations (`GET /v2/user/videos/{id}`) and GraphQL endpoints it approves are listed; no operations means any GET. */
 export const RealCheckHttpSchema = z
@@ -582,7 +582,9 @@ export function realCheckGrantProblems(grant: RealCheckRunGrant, connection: Rea
   if (grant.approvalDigest !== realCheckApprovalDigest(connection)) found.push("digest");
   if (grant.revocationEpoch !== connection.revocationEpoch) found.push("epoch");
   if (!isRealCheckConnectionUsableAt(connection, at, options)) found.push("status");
-  if (!Number.isFinite(at) || at < Date.parse(grant.issuedAt) || at >= Date.parse(grant.expiresAt)) found.push("grant_time");
+  const issued = Date.parse(grant.issuedAt);
+  const expires = Date.parse(grant.expiresAt);
+  if (!Number.isFinite(at) || !Number.isFinite(issued) || !Number.isFinite(expires) || at < issued || at >= expires) found.push("grant_time");
   return found;
 }
 

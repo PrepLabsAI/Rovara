@@ -24,6 +24,7 @@ import {
   REAL_CHECK_GOOGLE_HOSTS,
   REAL_CHECK_GOOGLE_ROWS,
   REAL_CHECK_LIMIT_DEFAULTS,
+  REAL_CHECK_LIMIT_MAXIMUMS,
   REAL_CHECK_METHOD_OVERRIDE_HEADERS,
   REAL_CHECK_METHOD_OVERRIDE_QUERY_NAMES,
   isGoogleApiHost,
@@ -82,6 +83,14 @@ export type RealCheckVerdict =
   | { allow: false; reason: RealCheckRefusal; operation: string };
 
 const refuse = (reason: RealCheckRefusal, operation: string): RealCheckVerdict => ({ allow: false, reason, operation });
+
+/** The two caps this classifier owns, from the policy or the defaults. A figure that is not a whole number from 1 up to Rovara's maximum is no cap: undefined, and every request is refused. */
+function ownLimits(policy: RealCheckPolicy): { requestBytes: number; bigQueryBytesBilled: number } | undefined {
+  const requestBytes: unknown = policy.limits === undefined ? REAL_CHECK_LIMIT_DEFAULTS.requestBytes : policy.limits.requestBytes;
+  const bigQueryBytesBilled: unknown = policy.limits === undefined ? REAL_CHECK_LIMIT_DEFAULTS.bigQueryBytesBilled : policy.limits.bigQueryBytesBilled;
+  const fine = (value: unknown, max: number): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max;
+  return fine(requestBytes, REAL_CHECK_LIMIT_MAXIMUMS.requestBytes) && fine(bigQueryBytesBilled, REAL_CHECK_LIMIT_MAXIMUMS.bigQueryBytesBilled) ? { requestBytes, bigQueryBytesBilled } : undefined;
+}
 
 // ---- the URL, read strictly
 
@@ -160,9 +169,19 @@ const labelOf = (method: string, host: string | undefined, path: string): string
 
 // ---- plain HTTP
 
+const ACTION_PREFIXES = ["un", "re", "bulk", "batch", "mass"];
+const ACTION_SUFFIXES = ["all", "many", "batch", "bulk", "now"];
+
+/** A word is an action word when it is one, or one with a common prefix or suffix (`unpublish`, `resend`, `deleteall`). Whole words only otherwise: `sender` and `deleted` are reads. */
+function isActionWord(word: string): boolean {
+  if (REAL_CHECK_ACTION_WORDS.has(word)) return true;
+  if (ACTION_PREFIXES.some((prefix) => word.startsWith(prefix) && REAL_CHECK_ACTION_WORDS.has(word.slice(prefix.length)))) return true;
+  return ACTION_SUFFIXES.some((suffix) => word.endsWith(suffix) && REAL_CHECK_ACTION_WORDS.has(word.slice(0, -suffix.length)));
+}
+
 function actionWordIn(text: string): boolean {
   const words = text.replace(/([a-z0-9])([A-Z])/gu, "$1 $2").split(/[^A-Za-z0-9]+/u);
-  return words.some((word) => word !== "" && REAL_CHECK_ACTION_WORDS.has(word.toLowerCase()));
+  return words.some((word) => word !== "" && isActionWord(word.toLowerCase()));
 }
 
 /** A template is `GET /v2/user/videos/{id}`: the method, then literal segments and `{name}` for any one segment. */
@@ -170,7 +189,7 @@ const OPERATION_TEMPLATE = /^(GET|HEAD) (\/(?:[A-Za-z0-9._~-]+|\{[a-z][a-z0-9_]{
 
 /** Whether the text is a valid operation template of the connection. */
 export function isRealCheckOperationTemplate(text: unknown): boolean {
-  return typeof text === "string" && text.length <= 200 && OPERATION_TEMPLATE.test(text);
+  return typeof text === "string" && text.length <= 200 && OPERATION_TEMPLATE.test(text) && !text.split("/").some((segment) => segment === "." || segment === "..");
 }
 
 function operationAllowed(method: string, segments: readonly string[], operations: readonly string[]): boolean {
@@ -192,6 +211,8 @@ function queryProblem(url: ParsedUrl): "write" | undefined {
     if ((lower === "query" || lower === "mutation") && value.length > 0) {
       const verdict = parseGraphqlDocument(value);
       if (!verdict.ok && (verdict.code === "mutation" || verdict.code === "subscription")) return "write";
+      // A document this check cannot read that still names one is refused too: unreadable is not "no mutation".
+      if (!verdict.ok && verdict.code === "unreadable" && /mutation|subscription/iu.test(value)) return "write";
     }
   }
   return undefined;
@@ -204,6 +225,13 @@ function header(headers: RealCheckRequest["headers"], name: string): string | un
   if (headers === undefined) return undefined;
   const key = Object.keys(headers).find((each) => each.toLowerCase() === name);
   return key === undefined ? undefined : headers[key];
+}
+
+/** Whether two header names differ only in case: a forwarder sends one of them and this check read the other, so the request is not read at all. */
+function hasRepeatedHeaderName(headers: RealCheckRequest["headers"]): boolean {
+  if (headers === undefined) return false;
+  const names = Object.keys(headers).map((name) => name.toLowerCase());
+  return new Set(names).size !== names.length;
 }
 
 function classifyGraphql(request: RealCheckRequest, url: ParsedUrl, host: string, operation: string, requestBytes: number): RealCheckVerdict {
@@ -239,10 +267,10 @@ function classifyGraphql(request: RealCheckRequest, url: ParsedUrl, host: string
   return refuse(verdict.code === "mutation" ? "write" : verdict.code === "unreadable" ? "unreadable" : "not_allowed", operation);
 }
 
-function classifyHttp(request: RealCheckRequest, url: ParsedUrl, host: string, policy: RealCheckPolicy): RealCheckVerdict {
+function classifyHttp(request: RealCheckRequest, url: ParsedUrl, host: string, policy: RealCheckPolicy, limits: { requestBytes: number }): RealCheckVerdict {
   const decoded = url.segments.map((segment) => segment.decoded);
   const operation = labelOf(request.method, host, realCheckPathLabel(decoded));
-  const requestBytes = policy.limits?.requestBytes ?? REAL_CHECK_LIMIT_DEFAULTS.requestBytes;
+  const { requestBytes } = limits;
   // An encoded slash is another path to the server: refused here.
   if (decoded.some((segment) => segment.includes("/"))) return refuse("unreadable", operation);
   const path = `/${decoded.join("/")}`;
@@ -310,29 +338,37 @@ const ALT_VALUES = new Set(["json", "media"]);
 const PERMISSION = /^[a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+){1,4}$/u;
 const BYTES_VALUE = /^(?:0|[1-9][0-9]{0,17})$/u;
 
-/** Words of a BigQuery statement, outside strings, comments and quoted names; a `;` is the word ";". Undefined when a string, comment or quoted name is left open. */
-function bigQueryWords(sql: string): string[] | undefined {
+/**
+ * Words of a BigQuery statement, outside strings, comments and quoted names (a `;` is the word ";"), and the statement with its comments dropped and its string literals replaced by `'?'` (quoted names kept).
+ * Undefined when a string, comment or quoted name is left open, and when the text holds a backslash anywhere: BigQuery's raw strings (`r'..'`) take no escapes while its other strings and quoted names do, so a
+ * backslash is read one way here and another by BigQuery (a raw string ending in one closes early there). Refusing it leaves one reading of every quote.
+ */
+function bigQueryWords(sql: string): { words: string[]; cleaned: string } | undefined {
+  if (sql.includes("\\")) return undefined;
   const words: string[] = [];
+  let cleaned = "";
   let i = 0;
   const n = sql.length;
   while (i < n) {
     const ch = sql[i] as string;
     if (ch === "-" && sql[i + 1] === "-") {
       while (i < n && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+      cleaned += " ";
     } else if (ch === "#") {
       while (i < n && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+      cleaned += " ";
     } else if (ch === "/" && sql[i + 1] === "*") {
       const end = sql.indexOf("*/", i + 2);
       if (end === -1) return undefined;
       i = end + 2;
+      cleaned += " ";
     } else if (ch === "'" || ch === '"' || ch === "`") {
       const triple = ch !== "`" && sql.startsWith(ch.repeat(3), i);
       const close = triple ? ch.repeat(3) : ch;
       let j = i + close.length;
       let closed = false;
       while (j < n) {
-        if (sql[j] === "\\" && ch !== "`") j += 2;
-        else if (sql.startsWith(close, j)) {
+        if (sql.startsWith(close, j)) {
           closed = true;
           j += close.length;
           break;
@@ -342,37 +378,72 @@ function bigQueryWords(sql: string): string[] | undefined {
       if (!closed) return undefined;
       // A string or a quoted name stands as one opaque word, so `SELECT 'a' 'b'` cannot hide a keyword next to it.
       words.push("?");
+      cleaned += ch === "`" ? sql.slice(i, j) : "'?'";
       i = j;
     } else if (/[A-Za-z0-9_]/u.test(ch)) {
       let j = i + 1;
       while (j < n && /[A-Za-z0-9_]/u.test(sql[j] as string)) j += 1;
       words.push(sql.slice(i, j).toUpperCase());
+      cleaned += sql.slice(i, j);
       i = j;
     } else {
       if (ch === ";") words.push(";");
+      cleaned += ch;
       i += 1;
     }
   }
-  return words;
+  return { words, cleaned };
+}
+
+/** A dotted name: unquoted words and quoted names joined by dots (`p.d.t`, `\`p-1.d.t\``, `p.\`d\`.t`). */
+const NAME_CHAIN = /(?:`[^`]*`|[A-Za-z0-9_][A-Za-z0-9_-]*)(?:\s*\.\s*(?:`[^`]*`|[A-Za-z0-9_]+))*/gu;
+/** Namespaces of BigQuery's own functions (`SAFE.PARSE_DATE(..)`): the only dotted names that may be called. */
+const BUILTIN_NAMESPACES = new Set(["SAFE", "NET", "KEYS", "AEAD", "HLL_COUNT", "DETERMINISTIC_ENCRYPT"]);
+
+const nameParts = (chain: string): string[] => chain.replace(/\s+/gu, "").match(/`[^`]*`|[^.`]+/gu)?.flatMap((part) => (part.startsWith("`") ? part.slice(1, -1).split(".") : [part])) ?? [];
+
+/**
+ * The project of every table-like name in a BigQuery statement that names one (`project.dataset.table`, quoted or not): the first part of every dotted name of three or more parts. A struct field read
+ * (`t.col.field`) looks the same and is listed too, so a caller that checks them against the connection's project refuses it: fail closed. Undefined when the statement cannot be read.
+ */
+export function bigQueryProjectRefs(sql: unknown): string[] | undefined {
+  if (typeof sql !== "string" || sql.length > 65_536) return undefined;
+  const read = bigQueryWords(sql);
+  if (read === undefined) return undefined;
+  const refs: string[] = [];
+  for (const match of read.cleaned.matchAll(NAME_CHAIN)) {
+    const parts = nameParts(match[0]);
+    if (parts.length >= 3 && /[A-Za-z_]/u.test(parts[0] as string)) refs.push(parts[0] as string);
+    else if (parts.length >= 3 && /^[1-9][0-9]*$/u.test(parts[0] as string)) refs.push(parts[0] as string);
+  }
+  return refs;
 }
 
 /** Whether a BigQuery statement is one plain read: it starts with SELECT or WITH, is not a script, and holds no write, DDL, script or transaction word. */
 export function bigQueryStatementIsRead(sql: unknown): "read" | "write" | "unreadable" {
   if (typeof sql !== "string" || sql.length === 0 || sql.length > 65_536) return "unreadable";
-  const words = bigQueryWords(sql);
-  if (words === undefined) return "unreadable";
+  const read = bigQueryWords(sql);
+  if (read === undefined) return "unreadable";
+  const { words, cleaned } = read;
   while (words.length > 0 && words[words.length - 1] === ";") words.pop();
   const first = words[0];
   if (first !== "SELECT" && first !== "WITH") return "write";
   if (words.includes(";")) return "write";
   const write = new Set<string>(REAL_CHECK_BIGQUERY_WRITE_WORDS);
-  return words.some((word) => write.has(word)) ? "write" : "read";
+  if (words.some((word) => write.has(word))) return "write";
+  // A call to a dotted name that is not one of BigQuery's own namespaces is a user-defined or remote function (it can call out), or ML.* and AI.* (a paid model call).
+  for (const match of cleaned.matchAll(NAME_CHAIN)) {
+    const parts = nameParts(match[0]);
+    const end = (match.index ?? 0) + match[0].length;
+    if (parts.length >= 2 && /^\s*\(/u.test(cleaned.slice(end, end + 40)) && !BUILTIN_NAMESPACES.has((parts[0] as string).toUpperCase())) return "write";
+  }
+  return "read";
 }
 
-function classifyGoogle(request: RealCheckRequest, url: ParsedUrl, host: string, policy: RealCheckPolicy): RealCheckVerdict {
+function classifyGoogle(request: RealCheckRequest, url: ParsedUrl, host: string, policy: RealCheckPolicy, limits: { requestBytes: number; bigQueryBytesBilled: number }): RealCheckVerdict {
   const decoded = url.segments.map((segment) => segment.decoded);
   const operation = labelOf(request.method, host, realCheckPathLabel(decoded));
-  const requestBytes = policy.limits?.requestBytes ?? REAL_CHECK_LIMIT_DEFAULTS.requestBytes;
+  const { requestBytes } = limits;
   const { method } = request;
   if (method === "PUT" || method === "PATCH" || method === "DELETE") return refuse("write", operation);
   if (method !== "GET" && method !== "HEAD" && method !== "POST") return refuse("not_allowed", operation);
@@ -420,12 +491,11 @@ function classifyGoogle(request: RealCheckRequest, url: ParsedUrl, host: string,
     if (!Array.isArray(permissions) || permissions.length === 0 || permissions.length > 100 || !permissions.every((each) => typeof each === "string" && PERMISSION.test(each))) return refuse("unreadable", label);
     return { allow: true, protocol: "google", method: "POST", host, operation: label };
   }
-  if (row.kind === "dry_run_query") return classifyBigQueryQuery(members, label, host, policy);
+  if (row.kind === "dry_run_query") return classifyBigQueryQuery(members, label, host, policy, limits.bigQueryBytesBilled);
   return { allow: true, protocol: "google", method: "POST", host, operation: label };
 }
 
-function classifyBigQueryQuery(members: Record<string, unknown>, label: string, host: string, policy: RealCheckPolicy): RealCheckVerdict {
-  const cap = policy.limits?.bigQueryBytesBilled ?? REAL_CHECK_LIMIT_DEFAULTS.bigQueryBytesBilled;
+function classifyBigQueryQuery(members: Record<string, unknown>, label: string, host: string, policy: RealCheckPolicy, cap: number): RealCheckVerdict {
   const statement = bigQueryStatementIsRead(members.query);
   if (statement !== "read") return refuse(statement === "write" ? "write" : "unreadable", label);
   if (members.dryRun !== undefined && typeof members.dryRun !== "boolean") return refuse("unreadable", label);
@@ -436,12 +506,17 @@ function classifyBigQueryQuery(members: Record<string, unknown>, label: string, 
     const projectId = (dataset as Record<string, unknown>).projectId;
     if (projectId !== undefined && (typeof projectId !== "string" || !(policy.gcpProjects ?? []).includes(projectId))) return refuse("not_allowed", label);
   }
+  // A table of another project (`p.d.t`), or one on the production list, is not this connection's: only its own project's tables are read.
+  const refs = bigQueryProjectRefs(members.query) ?? [];
+  const denied = policy.prodDeny?.gcpProjects ?? [];
+  if (refs.some((ref) => denied.some((entry) => entry.toLowerCase() === ref.toLowerCase()))) return refuse("prod", label);
+  if (refs.some((ref) => !(policy.gcpProjects ?? []).includes(ref))) return refuse("not_allowed", label);
   // The forced cap: the request's own figure when it has one and it is lower, else the connection's cap. A figure that is not a plain whole number is not read.
   let requested = cap;
   const given = members.maximumBytesBilled;
   if (given !== undefined) {
     const text = typeof given === "number" && Number.isSafeInteger(given) && given >= 0 ? String(given) : given;
-    if (typeof text !== "string" || !BYTES_VALUE.test(text)) return refuse("unreadable", label);
+    if (typeof text !== "string" || !BYTES_VALUE.test(text) || Number(text) < 1) return refuse("unreadable", label);
     requested = Math.min(Number(text), cap);
   }
   const maximumBytesBilled = String(requested);
@@ -477,7 +552,11 @@ export function classifyRealCheckRequest(request: RealCheckRequest, policy: Real
   if (deny === undefined || (prodDenyIsEmpty(deny) && (deny.gcpProjects ?? []).length === 0)) return refuse("prod", label);
   if (prodDenyMatchesHost(deny, host) || testAccountHostProblems([host]).length > 0) return refuse("prod", label);
   if (hostProblem(host) !== undefined || !policy.hosts.some((allowed) => allowed === host)) return refuse("host_not_allowed", label);
+  if (hasRepeatedHeaderName(request.headers)) return refuse("unreadable", label);
   if (hasMethodOverrideHeader(request.headers)) return refuse("write", label);
-  if (isGoogleApiHost(host)) return classifyGoogle(request, url, host, policy);
-  return classifyHttp(request, url, host, policy);
+  // A cap that is not a plain number is not a cap: nothing is read under it.
+  const limits = ownLimits(policy);
+  if (limits === undefined) return refuse("unreadable", label);
+  if (isGoogleApiHost(host)) return classifyGoogle(request, url, host, policy, limits);
+  return classifyHttp(request, url, host, policy, limits);
 }

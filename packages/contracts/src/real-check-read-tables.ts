@@ -156,7 +156,7 @@ export function isGoogleApiHost(host: string): boolean {
 
 /** Words that make a BigQuery statement not a plain read when they appear anywhere outside a string, a comment or a quoted name. A script (a second statement) is refused by the classifier on its own. */
 export const REAL_CHECK_BIGQUERY_WRITE_WORDS = [
-  "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER", "TRUNCATE", "EXPORT", "LOAD", "CALL", "EXECUTE", "BEGIN", "DECLARE", "SET", "GRANT", "REVOKE", "ASSERT", "COMMIT", "ROLLBACK", "TRANSACTION",
+  "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER", "TRUNCATE", "EXPORT", "LOAD", "CALL", "EXECUTE", "BEGIN", "DECLARE", "SET", "GRANT", "REVOKE", "ASSERT", "COMMIT", "ROLLBACK", "TRANSACTION", "EXTERNAL_QUERY", "VECTOR_SEARCH",
 ] as const;
 
 // ---- AWS (4.3 row 4; the signer itself is phase B)

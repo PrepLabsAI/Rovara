@@ -1,7 +1,7 @@
 // Real check RC2 (contract): the operation classifier. Every write shape is refused (one test per kind of write), a read of each protocol passes, production and model hosts are refused, and the caps the classifier
 // owns (request size, the BigQuery bytes cap) are enforced. No network and no credential: the classifier only reads a request.
 import { describe, expect, it } from "vitest";
-import { classifyRealCheckRequest, bigQueryStatementIsRead, realCheckPathLabel, isRealCheckOperationTemplate, type RealCheckPolicy, type RealCheckRequest, type RealCheckVerdict } from "../../packages/contracts/src/real-check-classifier.js";
+import { classifyRealCheckRequest, bigQueryProjectRefs, bigQueryStatementIsRead, realCheckPathLabel, isRealCheckOperationTemplate, type RealCheckPolicy, type RealCheckRequest, type RealCheckVerdict } from "../../packages/contracts/src/real-check-classifier.js";
 import { REAL_CHECK_GOOGLE_ROWS, REAL_CHECK_LIMIT_DEFAULTS } from "../../packages/contracts/src/real-check-read-tables.js";
 
 const VENDOR = "sandbox.vendor-test.example.com";
@@ -69,7 +69,11 @@ describe("plain HTTP: every write shape is refused", () => {
       "/v2/orders%3Acancel", "/v2/orders/capture", "/v2/jobs/run", "/v2/keys/revoke", "/v2/tokens/rotate", "/v2/thing.delete", "/v2/export",
     ]) expect(reason(run("GET", http(path))), path).toBe("write");
     // Whole words only: a name that merely contains one is a read.
-    for (const path of ["/v2/sender", "/v2/deleted-items", "/v2/runs/5", "/v2/updates", "/v2/publisher", "/v2/products/1"]) expect(reason(run("GET", http(path))), path).toBe("allowed");
+    for (const path of ["/v2/sender", "/v2/deleted-items", "/v2/runs/5", "/v2/updates", "/v2/publisher", "/v2/products/1", "/v2/reports", "/v2/unread", "/v2/resources", "/v2/allitems"]) expect(reason(run("GET", http(path))), path).toBe("allowed");
+  });
+
+  it("an action word with a common prefix or suffix is a write: unpublish, resend, deleteall, bulk-delete", () => {
+    for (const path of ["/v1/posts/1/unpublish", "/v1/deleteall", "/v1/resend", "/v1/bulk-delete", "/v1/cancelAll", "/v1/orders/refundnow", "/v1/batch-send", "/v1/unsubscribe", "/v1/rerun"]) expect(reason(run("GET", http(path))), path).toBe("write");
   });
 
   it("an action word listed in the connection's operations does not make it a read", () => {
@@ -92,6 +96,10 @@ describe("plain HTTP: every write shape is refused", () => {
     expect(reason(run("GET", http(`/v1/graphql?query=${encodeURIComponent("subscription { a }")}`)))).toBe("write");
     expect(reason(run("GET", http(`/v2/search?query=${encodeURIComponent("{ not graphql")}`)))).toBe("allowed");
     expect(reason(run("GET", http("/v2/search?query=shoes")))).toBe("allowed");
+    // A document this check cannot read (too deep) that still holds a mutation is refused, not passed.
+    const deep = `query Q${"{a".repeat(70)}${"}".repeat(70)} mutation M{deleteAllUsers{ok}}`;
+    expect(reason(run("GET", http(`/api/gql?query=${encodeURIComponent(deep)}&operationName=M`)))).toBe("write");
+    expect(reason(run("GET", http(`/api/gql?query=${encodeURIComponent("{ unreadable Mutation")}`)))).toBe("write");
   });
 });
 
@@ -164,6 +172,21 @@ describe("GraphQL", () => {
     expect(reason(run("POST", http("/graphql/"), { body: json({ query: "{ a }" }) }))).toBe("allowed");
     expect(reason(run("POST", http("/graphql/"), { body: json({ query: "mutation { a }" }) }))).toBe("write");
     expect(reason(run("POST", http("/graphql"), { body: json({ query: "{ a }" }) }, policy({ graphqlPaths: [] })))).toBe("write");
+  });
+
+  it("a JSON body sent as application/graphql is not a query: a selection set holds no string", () => {
+    const polyglot = json({ query: "mutation { deleteAllUsers { ok } }" });
+    expect(reason(run("POST", http("/graphql"), { body: polyglot, headers: { "content-type": "application/graphql" } }))).toBe("unreadable");
+    expect(reason(run("POST", http("/graphql"), { body: '{"a": 1}', headers: { "content-type": "application/graphql" } }))).toBe("unreadable");
+    expect(run("POST", http("/graphql"), { body: 'query ($a: String = "x") { a(b: "y", c: 3) { d } }', headers: { "content-type": "application/graphql" } })).toMatchObject({ allow: true });
+  });
+
+  it("a header name repeated in another case is not read: the forwarder sends one and this check read the other", () => {
+    const headers = { "content-type": "application/graphql", "Content-Type": "application/json" };
+    expect(reason(run("POST", http("/graphql"), { body: json({ query: "mutation { a }" }), headers }))).toBe("unreadable");
+    expect(reason(run("GET", http("/v2/items"), { headers: { Accept: "a", accept: "b" } }))).toBe("unreadable");
+    expect(reason(run("GET", fs("/documents/users/alice"), { headers: { Accept: "a", accept: "b" } }))).toBe("unreadable");
+    expect(reason(run("GET", http("/v2/items"), { headers: { Accept: "a", "Accept-Language": "b" } }))).toBe("allowed");
   });
 
   it("enforces the request-size cap on the body", () => {
@@ -342,8 +365,7 @@ describe("BigQuery: a SELECT with a forced cap, never a write", () => {
     expect(cap(5e12)).toBe("1000000000");
     expect(cap("500")).toBe("500");
     expect(cap(500)).toBe("500");
-    expect(cap("0")).toBe("0");
-    for (const bad of ["-1", "1e9", "abc", "", " 5", "05", -1, 1.5, true, null, {}]) expect(cap(bad), JSON.stringify(bad)).toBe("unreadable");
+    for (const bad of ["0", 0, "-1", "1e9", "abc", "", " 5", "05", -1, 1.5, true, null, {}]) expect(cap(bad), JSON.stringify(bad)).toBe("unreadable");
     const own = query("SELECT 1", { maximumBytesBilled: "999999999999" });
     if (!own.allow) throw new Error("expected allow");
     expect((JSON.parse(own.forwardBody ?? "{}") as { maximumBytesBilled: string }).maximumBytesBilled).toBe("1000000000");
@@ -374,14 +396,47 @@ describe("BigQuery: a SELECT with a forced cap, never a write", () => {
     expect(query('SELECT "a;b"')).toMatchObject({ allow: true });
     expect(query("SELECT '''a;b'''")).toMatchObject({ allow: true });
     expect(query("(SELECT 1)")).toMatchObject({ allow: true });
-    expect(query("SELECT 'it\\'s; DROP'")).toMatchObject({ allow: true });
   });
 
   it("a string, comment or quoted name left open is unreadable, not a read", () => {
-    for (const sql of ["SELECT 'open", "SELECT /* open", "SELECT `open", 'SELECT """open', "SELECT 'a\nb'"]) expect(bigQueryStatementIsRead(sql), sql).toBe("unreadable");
+    for (const sql of ["SELECT 'open", "SELECT /* open", "SELECT `open", 'SELECT """open', "SELECT 'a\nb'", "SELECT 'it\\'s; DROP'"]) expect(bigQueryStatementIsRead(sql), sql).toBe("unreadable");
     expect(bigQueryStatementIsRead(5)).toBe("unreadable");
     expect(bigQueryStatementIsRead("")).toBe("unreadable");
     expect(bigQueryStatementIsRead("x".repeat(70_000))).toBe("unreadable");
+  });
+
+  it("a backslash anywhere is unreadable: raw strings take no escapes and other strings and quoted names do, so BigQuery would read a script here as a read", () => {
+    const rawString = "SELECT r'\\' AS a; DELETE FROM d.t WHERE TRUE; SELECT '\\'' AS b";
+    const quotedName = "SELECT 1 AS `a\\` 'q`; DELETE FROM d.t WHERE TRUE; SELECT '#'";
+    for (const sql of [rawString, quotedName, "SELECT REGEXP_CONTAINS(x, r'\\d+') FROM d.t", "SELECT 'a\\nb'"]) {
+      expect(bigQueryStatementIsRead(sql), sql).toBe("unreadable");
+      expect(reason(query(sql, { useLegacySql: false })), sql).toBe("unreadable");
+    }
+  });
+
+  it("a table of another project, or one on the production list, is not read: p.d.t names its project", () => {
+    expect(query("SELECT * FROM `acme-staging-4321.d.t`")).toMatchObject({ allow: true });
+    expect(query("SELECT * FROM acmestaging.d.t", {}).allow).toBe(false);
+    expect(reason(query("SELECT * FROM `acme-prod-1234.sales.orders`"))).toBe("prod");
+    expect(reason(query("SELECT * FROM `ACME-PROD-1234.sales.orders`"))).toBe("prod");
+    expect(reason(query("SELECT * FROM `555555555.sales.orders`"))).toBe("prod");
+    expect(reason(query("SELECT * FROM `other-project-9.d.t`"))).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM `other-project-9`.d.t"))).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM other_project.d.t"))).toBe("not_allowed");
+    expect(reason(query("SELECT a.b.c FROM d.t AS a"))).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM `region-us`.INFORMATION_SCHEMA.JOBS"))).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM x JOIN `acme-prod-1234.sales.orders` USING (id)"))).toBe("prod");
+    expect(reason(query("SELECT * FROM d.t, `acme-prod-1234`.sales.orders"))).toBe("prod");
+    expect(query("SELECT 1.5 AS x, 'acme-prod-1234.sales.orders' AS y")).toMatchObject({ allow: true });
+    expect(query("SELECT * FROM d.t -- acme-prod-1234.sales.orders")).toMatchObject({ allow: true });
+    expect(bigQueryProjectRefs("SELECT * FROM `p-1.d.t` JOIN p2.d.t USING (id)")).toEqual(["p-1", "p2"]);
+    expect(bigQueryProjectRefs("SELECT 'it' ")).toEqual([]);
+    expect(bigQueryProjectRefs("SELECT 'open")).toBeUndefined();
+  });
+
+  it("a user-defined, remote or model function is not a read: a dotted name that is not a BigQuery namespace, and ML.* and AI.* with it", () => {
+    for (const sql of ["SELECT d.remote_fn(x) FROM d.t", "SELECT `acme-staging-4321.d.fn`(x) FROM d.t", "SELECT ML.GENERATE_TEXT(MODEL d.m, TABLE d.t) FROM d.t", "SELECT AI.GENERATE(x) FROM d.t", "SELECT p.d.fn(x)", "SELECT * FROM EXTERNAL_QUERY('c', 'select 1')"]) expect(query(sql).allow, sql).toBe(false);
+    for (const sql of ["SELECT SAFE.PARSE_DATE('%Y', x), NET.HOST(y) FROM d.t", "SELECT COUNT(x), SUM(t.y) FROM d.t AS t"]) expect(query(sql).allow, sql).toBe(true);
   });
 
   it("refuses an unknown or session-creating member, a wrong type, and a dry run of a write", () => {
@@ -391,6 +446,17 @@ describe("BigQuery: a SELECT with a forced cap, never a write", () => {
     expect(reason(query("DROP TABLE d.t", { dryRun: true }))).toBe("write");
     expect(reason(run("POST", bq("/queries"), { body: json({ dryRun: true }) }))).toBe("unreadable");
     expect(reason(run("POST", bq("/queries"), { body: '{"query":"SELECT 1","dryRun":true,"dryRun":false}' }))).toBe("unreadable");
+  });
+});
+
+describe("the classifier's own caps fail closed", () => {
+  it("a request or BigQuery cap that is not a whole number from 1 to Rovara's maximum refuses every request", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.5, "4096", null, 10 ** 15, 2 ** 60]) {
+      expect(reason(run("GET", http("/v2/items"), {}, policy({ limits: { requestBytes: bad as number, bigQueryBytesBilled: 1_000_000_000 } }))), `request ${typeof bad} ${String(bad)}`).toBe("unreadable");
+      expect(reason(query("SELECT 1", {}) && run("POST", bq("/queries"), { body: json({ query: "SELECT 1" }) }, policy({ limits: { requestBytes: 4_096, bigQueryBytesBilled: bad as number } }))), `bq ${typeof bad} ${String(bad)}`).toBe("unreadable");
+    }
+    expect(reason(run("GET", http("/v2/items"), {}, policy({ limits: { requestBytes: 1_048_576, bigQueryBytesBilled: 100_000_000_000 } })))).toBe("allowed");
+    expect(reason(run("GET", http("/v2/items"), {}, policy({ limits: { requestBytes: 1_048_577, bigQueryBytesBilled: 1 } })))).toBe("unreadable");
   });
 });
 

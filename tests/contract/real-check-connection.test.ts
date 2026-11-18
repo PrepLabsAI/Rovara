@@ -26,7 +26,12 @@ const aws = (over: Record<string, unknown> = {}) => stamp({ ...base, id: "orders
 const ref = (over: { env?: string; org?: string; id?: string; key?: string } = {}) => rc.realCheckSecretRef(over.env ?? "staging", over.org ?? ORG, over.id ?? "tiktok-sandbox", over.key ?? "token");
 const httpBlock = (over: Record<string, unknown> = {}) => ({ secretRef: ref(), placement: { scheme: "bearer" }, operations: [], graphqlPaths: [], ...over });
 const vendor = (over: Record<string, unknown> = {}) => stamp({ ...base, id: "tiktok-sandbox", orgId: ORG, label: "TikTok sandbox", kind: "http_secret_ref", http: httpBlock(), hosts: ["open-sandbox.tiktokapis.com"], ...over });
-const ok = (value: unknown, options: rc.RealCheckSchemaOptions = {}) => rc.realCheckSchemaFor(options).safeParse(value).success;
+/** Whether the record passes the schema. A record built by spreading a stamped one has the old digest: it is stamped again first, so a test of one rule tests that rule and not the approval's digest (the tests of the digest say so). */
+const ok = (value: unknown, options: rc.RealCheckSchemaOptions = {}) => {
+  const record = value as { approvals?: Array<Record<string, unknown>> };
+  const restamped = Array.isArray(record.approvals) && record.approvals.every((each) => each.approvedDigest !== "0".repeat(64)) ? stamp({ ...record, approvals: record.approvals.map(({ approvedDigest: _old, ...rest }) => rest) }) : value;
+  return rc.realCheckSchemaFor(options).safeParse(restamped).success;
+};
 const parsed = (value: Record<string, unknown>) => rc.RealCheckConnectionSchema.parse(value);
 const deny = (over: Partial<RealCheckProdDeny> = {}): RealCheckProdDeny => ({ accountIds: [], hosts: [], arnPrefixes: [], gcpProjects: [], ...over });
 const NOW = Date.parse("2026-12-01T00:00:00.000Z");
@@ -311,7 +316,8 @@ describe("approvals: one approver, bound to what was shown", () => {
     expect(rc.realCheckApprovalDigest(vendor({ orgId: OTHER_ORG, http: httpBlock({ secretRef: ref({ org: OTHER_ORG }) }) }) as never)).not.toBe(digest);
     const moved = { ...first, id: "other-conn", http: httpBlock({ secretRef: ref({ id: "other-conn" }) }) };
     expect(rc.realCheckApprovalDigest(moved as never)).not.toBe(digest);
-    expect(ok(moved)).toBe(false);
+    // Taken as it is, the other connection's record does not carry the first one's approval.
+    expect(rc.RealCheckConnectionSchema.safeParse(moved).success).toBe(false);
   });
 
   it("expires within 90 days of the last approval, a company may shorten it, and never lengthen it", () => {
@@ -539,6 +545,8 @@ describe("the run grant", () => {
     expect(problems({ connectionId: "other-conn" })).toContain("connection");
     expect(problems({ projectId: "unlisted" })).toContain("project");
     expect(problems({ revision: 2 })).toContain("revision");
+    // A grant whose dates cannot be read (a hand-made object, not a parsed one) is outside its time.
+    expect(rc.realCheckGrantProblems({ ...rc.RealCheckRunGrantSchema.parse(grant()), issuedAt: "x", expiresAt: "y" }, record, NOW)).toContain("grant_time");
     expect(problems({ approvalDigest: "0".repeat(64) })).toContain("digest");
     expect(problems({ revocationEpoch: 1 })).toContain("epoch");
     expect(problems({}, { ...record, status: "suspended" })).toContain("status");

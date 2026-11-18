@@ -99,7 +99,11 @@ function skipGroup(tokens: readonly Token[], start: number): number | undefined 
   const stack: string[] = [];
   for (let i = start; i < tokens.length; i += 1) {
     const token = tokens[i] as Token;
-    if (token.kind !== "punct") continue;
+    // Directly inside a selection set (no argument list or list between it and here) a string or a number is not GraphQL: it is what a JSON body looks like (`{"query": ...}`), read as an operation by a lexer alone.
+    if (token.kind !== "punct") {
+      if (token.kind !== "name" && stack.length > 0 && stack.every((closerNeeded) => closerNeeded === "}")) return undefined;
+      continue;
+    }
     const closer = CLOSER[token.value];
     if (closer !== undefined) {
       stack.push(closer);

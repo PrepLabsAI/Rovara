@@ -45,13 +45,19 @@ describe("parseGraphqlDocument", () => {
   });
 
   it("refuses what does not lex or whose brackets do not match", () => {
-    for (const source of ["", "   ", "query {", "query { a ", "{ a } }", "query { a(x: [1) }", "query { a(x: \"open) }", 'query { a(x: """open) }', "query { a } %", "query { a(x: 1.) }", "query { a(x: 1a) }", "query { a } \u0000", "query ($a) { a }}", "query @ { a }", "query A B { a }", "fragment on T { a }", "fragment F T { a }", "query (", "}", "...", "query { a } ."]) {
+    for (const source of ["", "   ", "query {", "query { a ", "{ a } }", "query { a(x: [1) }", "query { a(x: [1}) }", "query { a(x: {1]) }", "query ( { ) }", "query { a(x: \"open) }", 'query { a(x: """open) }', "query { a } %", "query { a(x: 1.) }", "query { a(x: 1a) }", "query { a } \u0000", "query ($a) { a }}", "query @ { a }", "query A B { a }", "fragment on T { a }", "fragment F T { a }", "query (", "}", "...", "query { a } ."]) {
       expect(code(source), JSON.stringify(source)).toMatch(/unreadable|not_an_operation/u);
       expect(code(source)).not.toBe("ok");
     }
     expect(code("query { a } %")).toBe("unreadable");
     expect(code(undefined)).toBe("unreadable");
     expect(code(42)).toBe("unreadable");
+  });
+
+  it("a JSON text is not a document: a string or a number directly inside a selection set is refused", () => {
+    for (const source of ['{"query":"mutation { a }"}', '{"a": 1}', '{ "a" }', "{ 1 }", '{ a { "b" } }', '{ a { b } "x" }']) expect(code(source), source).toBe("unreadable");
+    // Arguments, variable defaults and input objects hold strings and numbers.
+    for (const source of ['{ a(x: "s", y: 3, z: {k: "v", n: [1, 2]}) { b } }', 'query ($a: String = "x", $n: Int = 5) { a(b: $a) }', '{ a @include(if: true) { b } }']) expect(code(source), source).toBe("ok");
   });
 
   it("a document with only a fragment has no operation", () => {
