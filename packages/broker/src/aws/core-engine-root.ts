@@ -71,6 +71,7 @@ import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
 import { WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../core/task-flow/stop-request.js";
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
+import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -644,6 +645,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
       ...(inputs.linearIntake === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId) }),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
+      // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
+      // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
+      artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.artifact_read_refused", companyId, reason }) }),
       // DEC 254zm: a starting task pins the project's newest usable approved test environment (the company's own records), as on a laptop.
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
