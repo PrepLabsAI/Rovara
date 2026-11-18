@@ -14,12 +14,12 @@ import {
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../developer/task-person-identity.js";
-import { evaluateProjectAuthority, readProjectAuthority, type ProjectAuthorityReader, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
+import { evaluateProjectAuthority, readProjectAuthority, type ProjectAuthorityReader, type ProjectAuthorityRevision, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import { META, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
-import { membershipKey, strictLiveMembership } from "./company-check.js";
+import { membershipKey, recordInCompany, strictLiveMembership } from "./company-check.js";
 
 export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
   "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
@@ -64,6 +64,31 @@ function projectedDeveloperRecord(record: TaskPersonDeveloperRecordProjection | 
     ...(record.revoked === undefined ? {} : { revoked: record.revoked }),
     ...(record.displayName === undefined ? {} : { displayName: record.displayName }),
   } as unknown as DeveloperRecord;
+}
+
+/**
+ * The dispatcher's latest-revision Query for the runtime proof: the revision's key, its company (`companyId`, row 3654 #3: the web proof's second company lock) and only the two definition fields
+ * the policy needs. The dispatcher's role reads the State table without an attribute limit, so naming `companyId` needs no new grant.
+ */
+export function taskPersonLatestRevisionQuery(stateTableName: string, project: string) {
+  return {
+    TableName: stateTableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
+    ProjectionExpression: "#pk, #sk, #companyId, #definition.#revision, #definition.#developerTasks",
+    ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk", "#companyId": "companyId", "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
+    ConsistentRead: true as const,
+    Limit: 1,
+    ScanIndexForward: false,
+  };
+}
+
+/** The reader's answer for that Query's response: the newest revision with its company as stored (absent stays absent, anything else is carried as is for the company check to refuse), or none. */
+export function taskPersonRevisionFromResponse(response: unknown): { revision?: ProjectAuthorityRevision; complete: boolean } {
+  const item = (response as { Items?: Array<{ pk?: string; sk?: string; companyId?: unknown; definition?: { revision?: number; developerTasks?: unknown } }> }).Items?.[0];
+  if (item?.definition === undefined) return { complete: true };
+  return { revision: { ...(item.pk === undefined ? {} : { pk: item.pk }), ...(item.sk === undefined ? {} : { sk: item.sk }), ...(item.companyId === undefined ? {} : { companyId: item.companyId }), revision: item.definition.revision as number,
+    definition: Object.hasOwn(item.definition, "developerTasks") ? { developerTasks: item.definition.developerTasks } : {} }, complete: true };
 }
 
 /** C2: the fields of a `COMPANY_MEMBER#<developerId>` / `COMPANY` row the web proof reads (the reviewed `Membership` record, company-check.ts). */
@@ -182,14 +207,17 @@ function identityDependencies(input: {
       if (item !== undefined && (item.pk !== key.pk || item.sk !== key.sk)) throw unavailable();
       return strictLiveMembership(item, targetDeveloperId);
     } }),
-    projectGrant: async (targetDeveloperId, project) => {
+    projectGrant: async (targetDeveloperId, project, taskCompanyId) => {
       if (targetDeveloperId !== developerId) throw unavailable();
       // The project's latest revision and the person's own grants only: no channel bindings and no Slack user id, so the answer can only be
-      // `access: "granted"` (a developer or administrator grant). The company is bound by rule 3 (membership in the task's company).
+      // `access: "granted"` (a developer or administrator grant). The company is bound by rule 3 (membership in the task's company) AND, as a second lock
+      // (row 3654 #3), by the revision itself: the revision row must name the task's company (an unstamped row is the implicit company's, as everywhere else).
       admission.assertOpen();
       const latest = await ports.projectAuthorityReader.latestRevision(project, admission, admission.admitStateRead());
       admission.assertOpen();
       if (!latest.complete || latest.revision === undefined) throw unavailable();
+      // Fail closed and without a verdict: a revision of another company (or of an unreadable company) is never read as "no grant", which would demote a person; the step parks like any unavailable proof.
+      if (typeof taskCompanyId !== "string" || !recordInCompany({ companyId: latest.revision.companyId }, taskCompanyId)) throw unavailable();
       const grants = await ports.projectAuthorityReader.memberships(targetDeveloperId, admission, admission.admitStateRead());
       admission.assertOpen();
       if (!grants.complete) throw unavailable();

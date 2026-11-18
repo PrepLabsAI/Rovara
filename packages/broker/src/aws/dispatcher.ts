@@ -19,7 +19,7 @@ import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
-import { createTaskPersonRuntime, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
+import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
@@ -411,21 +411,9 @@ function taskPersonRuntimePorts(input: {
     },
     projectAuthorityReader: {
       async latestRevision(project, admission, abortSignal) {
-        const response = await taskAuthorityDocumentClient.send(new QueryCommand({
-          TableName: input.stateTableName,
-          KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-          ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
-          ProjectionExpression: "#pk, #sk, #definition.#revision, #definition.#developerTasks",
-          ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk", "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
-          ConsistentRead: true,
-          Limit: 1,
-          ScanIndexForward: false,
-        }), { abortSignal });
+        const response = await taskAuthorityDocumentClient.send(new QueryCommand(taskPersonLatestRevisionQuery(input.stateTableName, project)), { abortSignal });
         admission.assertOpen();
-        const item = (response as { Items?: Array<{ pk?: string; sk?: string; definition?: { revision?: number; developerTasks?: unknown } }> }).Items?.[0];
-        if (item?.definition === undefined) return { complete: true };
-        return { revision: { ...(item.pk === undefined ? {} : { pk: item.pk }), ...(item.sk === undefined ? {} : { sk: item.sk }), revision: item.definition.revision as number,
-          definition: Object.hasOwn(item.definition, "developerTasks") ? { developerTasks: item.definition.developerTasks } : {} }, complete: true };
+        return taskPersonRevisionFromResponse(response);
       },
       async memberships(developerId, admission, abortSignal) {
         const result = await queryPages<{ pk: string; sk: string; projectName: string; role?: string }>({
