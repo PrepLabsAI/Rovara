@@ -12,6 +12,7 @@ import { TASK_LOG_SURFACE_WORDS, type ChannelEvent, type DocumentStore, type Org
 import { taskKey } from "../task-flow/keys.js";
 import { taskSessionId } from "../sessions/create.js";
 import { inertTicketLine, plainHttpsLink } from "../ticket-updates/text.js";
+import { safeEntryOf } from "../task-log/read.js";
 import { readTaskLog } from "../task-log/store.js";
 import type { ChannelCompanyOf, ChannelMemberRule } from "./company.js";
 import { readTaskThread } from "./threads.js";
@@ -77,10 +78,10 @@ export function taskLogThreadMirror(deps: LogMirrorDeps): (taskId: string) => Pr
     const thread = await readTaskThread(deps.store, orgId, sessionId);
     if (thread === undefined) return;
     const { conversation } = thread;
-    const entries = await readTaskLog(deps.store, orgId, taskId);
-    // What this chat already says is not said again: an entry given in this chat is skipped before anything is claimed, and the cap counts only entries that could be told.
-    const tellable = entries.filter(isDecision).filter((entry) => entry.surface !== conversation.channel).slice(0, MIRROR_LINES_MAX);
-    const fresh = tellable.filter((entry) => deps.now() - Date.parse(entry.at) <= MIRROR_WINDOW_MS);
+    // Every entry is made safe once more before it is drawn (a row written by an older build or by hand is redacted here too); one that does not come out whole is left out.
+    const entries = (await readTaskLog(deps.store, orgId, taskId)).flatMap((entry) => safeEntryOf(entry) ?? []);
+    // What this chat already says is not said again: an entry given in this chat is skipped before anything is claimed. Entries too old to be told now do not use up the budget.
+    const fresh = entries.filter(isDecision).filter((entry) => entry.surface !== conversation.channel && deps.now() - Date.parse(entry.at) <= MIRROR_WINDOW_MS).slice(0, MIRROR_LINES_MAX);
     if (fresh.length === 0) return;
     const adapter = await reach(orgId, thread);
     if (adapter === undefined) return;

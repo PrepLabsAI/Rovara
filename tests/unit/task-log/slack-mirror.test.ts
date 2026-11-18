@@ -153,14 +153,26 @@ describe("origin and dedupe", () => {
 
 describe("the company boundary", () => {
   it("a thread of another company's chat workspace hears nothing (the host's rule), and so does a task of another company", async () => {
-    const w = await world({ companyOf: async () => false });
+    const w = await world({ companyOf: async () => OTHER_ORG });
     await w.add(TASK, answer("web"));
     await w.told(TASK);
     expect(w.adapter.delivered).toEqual([]);
+    const same = await world({ companyOf: async () => ORG });
+    await same.add(TASK, answer("web"));
+    await same.told(TASK);
+    expect(same.lines()).toHaveLength(1);
     const other = await world({ taskOrg: OTHER_ORG });
     await other.add(TASK, answer("web"));
     await other.told(TASK);
     expect(other.adapter.delivered).toEqual([]);
+  });
+
+  it("a task row that names no company tells nothing and does not fail", async () => {
+    const w = await world();
+    await w.store.put({ item: { ...taskKey(TASK), project: "web", title: "Add a retry", sessionId: SESSION } });
+    await w.add(TASK, answer("web"));
+    await expect(w.told(TASK)).resolves.toBeUndefined();
+    expect(w.adapter.delivered).toEqual([]);
   });
 
   it("a company's entries are never read for another company's task: rows of another company in the task's partition are not told", async () => {
@@ -217,6 +229,22 @@ describe("the information budget and the words", () => {
     const line = w.lines()[0]!;
     for (const bad of ["<", ">", "@", "`", "*", "[", "]", "|", token, "://"]) expect(line.replace(PAGE, ""), bad).not.toContain(bad);
     expect(line).toContain("[REDACTED]".replace(/[[\]]/gu, " ").trim());
+  });
+
+  it("a row written by hand with a credential in it is redacted before it is told, and old entries do not use up the budget", async () => {
+    const w = await world();
+    const token = fakeToken();
+    await w.store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "TASKLOG#answer:r9:q9", entityType: "TASK_LOG", orgId: ORG, taskId: TASK, entry: { key: "answer:r9:q9", at: AT, kind: "answer", questionId: "q9", round: 9, text: `use ${token} ok`, by: `Ana ${token}`, surface: "web" } } });
+    await w.store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "TASKLOG#approval:hand", entityType: "TASK_LOG", orgId: ORG, taskId: TASK, entry: { key: "approval:hand", at: AT, kind: "approval", what: "plan", outcome: "approved", by: `Nick ${token}`, surface: "web" } } });
+    await w.told(TASK);
+    expect(w.lines()).toHaveLength(2);
+    expect(w.lines().join("\n")).not.toContain(token);
+    const old = await world();
+    await old.add(TASK, Array.from({ length: MIRROR_LINES_MAX }, (_, n) => answer("web", { round: n + 1, at: new Date(clock.ms - MIRROR_WINDOW_MS - 60_000 - n).toISOString() })[0]!));
+    await old.add(TASK, answer("web", { round: 99, text: "fresh one" }));
+    await old.told(TASK);
+    expect(old.lines()).toHaveLength(1);
+    expect(old.lines()[0]).toContain("fresh one");
   });
 
   it("a line is one line and short, whatever the answer", async () => {

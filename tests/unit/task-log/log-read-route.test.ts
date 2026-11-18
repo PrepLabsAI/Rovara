@@ -155,7 +155,20 @@ describe("who reads a task's log", () => {
     const store = await world();
     await fill(store);
     await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "META", entityType: "DEVELOPER_TASK", taskId: TASK, companyId: OTHER_ORG, sessionId: SESSION, title: "x", requestText: "x" } });
-    expect((await get(routes(store), OWNER))?.statusCode).toBe(404);
+    const answer = await get(routes(store), OWNER);
+    expect(answer?.statusCode).toBe(404);
+    expect(answer?.body).toBe((await get(routes(store), OWNER, "ses_zzzzzzzzzzzzzzzzzzzz"))?.body);
+  });
+
+  it("the task is the session's own: a query or a header naming another task changes nothing", async () => {
+    const store = await world();
+    await world({ taskId: TASK_2, sessionId: SESSION_2, store });
+    await fill(store, TASK);
+    await appendTaskLog(store, { orgId: ORG, taskId: TASK_2, entries: answerEntriesOf({ round: 1, at: T0, by: "Bo", surface: "web", questions: QUESTIONS, answers: [{ questionId: "q1", optionId: "b" }] }) });
+    const answer = await routes(store)({ method: "GET", path: `/v1/app/sessions/${SESSION}/log?task=${TASK_2}&taskId=${TASK_2}&session=${SESSION_2}`, headers: { "x-task-id": TASK_2 } }, { principal: OWNER });
+    expect(answer?.statusCode).toBe(200);
+    expect(answer!.body).toContain("Ana Ruiz");
+    expect(answer!.body).not.toContain("Bo");
   });
 
   it("only GET is served on the path", async () => {
@@ -176,12 +189,13 @@ describe("what is shown of an entry", () => {
     const row = (key: string, entry: Record<string, unknown>) => store.put({ item: { ...taskLogKey(TASK, key), entityType: "TASK_LOG", orgId: ORG, taskId: TASK, entry: { key, at: T0, ...entry } } });
     await row("answer:r1:q1", { kind: "answer", questionId: "q1", round: 1, text: `use ${token} then ok`, by: `Ana ${token}`, surface: "web" });
     await row("question:r1:q1", { kind: "question", questionId: "q1", round: 1, text: `which? ${token}`, choices: [`a ${token}`, "b"] });
+    await row("approval:hand", { kind: "approval", what: "plan", outcome: "approved", by: `Nick ${token}`, surface: "web" });
     await row("plan:r1", { kind: "plan_summary", revision: 1, needed: `need ${token}`, lines: [`do ${token}`], risk: "low", estimate: `est ${token}` });
     const answer = await get(routes(store), OWNER);
     expect(answer?.statusCode).toBe(200);
     expect(answer!.body).not.toContain(token);
     expect(answer!.body).toContain("[REDACTED]");
-    expect(entriesOf(answer!.body)).toHaveLength(3);
+    expect(entriesOf(answer!.body)).toHaveLength(4);
   });
 
   it("leaves out an entry that does not parse and an entry whose key is not its row's", async () => {
