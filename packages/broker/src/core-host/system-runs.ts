@@ -46,7 +46,7 @@ export function effectiveSystemRunsGateOf(flag: CoreSwitch, companyId: OrgId, st
  * `enabled()` false), because an ABSENT gate means ON (the laptop's rule) and every hosted company would then get Rovara's automatic re-checks. The broker root calls this for every company's runtime, and so does the
  * dispatcher's (the dispatcher's setup gate before a build can RETRY a re-check, which must stop when the flag or the consent goes off). tests/unit/system-runs-hosted-gate.test.ts holds the function and both calls.
  */
-export function hostedSystemRunsFor(deps: { systemRuns?: { enabled(): boolean | Promise<boolean> }; store: Pick<DocumentStore, "get"> }, companyId: OrgId, flag: CoreSwitch): { enabled(): Promise<boolean> } {
+export function hostedSystemRunsFor(deps: { systemRuns?: { enabled(): boolean | Promise<boolean> } | undefined; store: Pick<DocumentStore, "get"> }, companyId: OrgId, flag: CoreSwitch): { enabled(): Promise<boolean> } {
   const gate = effectiveSystemRunsGateOf(flag, companyId, deps.store);
   deps.systemRuns = gate;
   return gate;
