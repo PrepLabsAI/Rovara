@@ -7,7 +7,7 @@
 //   - the merge fact (the outcome word and the merge revision),
 //   Nothing Rovara wrote is in it: not the description (Rovara writes it from the plan, the names of the requester and approver and the task link) and not the title (it comes from the Slack request).
 // It holds no Slack, no tracker, no session message, no task description, no plan, no finding, no loaded lesson, no other repository. Its subject sets `repoInputs` ({place, repository, linkPrefix}) for exactly that repository, so
-// 's `repoVisibilityOf` marks every draft `repoOnly` BY CONSTRUCTION; the drafts then go through the normal curate, trial and eligibility rules (stable or person-approved before a weekly pull request).
+// 's `repoVisibilityOf` marks every draft `repoOnly` BY CONSTRUCTION; the drafts then go through the normal curate, trial and eligibility rules.
 //
 // Provider neutrality: this file knows no code host. A `RepoChangeRequest` is the code-host-neutral description of one change request (place, repository, link and link prefix, revision, title, description,
 // comments, edits) that the code host's ADAPTER produces (`local/app/lessons-sources.ts` from the code host's view); nothing here builds a URL or parses one.

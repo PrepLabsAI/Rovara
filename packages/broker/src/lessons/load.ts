@@ -189,8 +189,6 @@ export interface SelectInput {
   active: readonly Lesson[];
   intent: string; planSummary?: string; repos: readonly string[]; files: readonly string[]; languages: readonly string[];
   reader: SelectReader; where: string; budget: LoadBudget;
-  /** Lessons are checked this many at a time against the access records (default `CHECK_PAGE`). */
-  pageSize?: number;
   /** A further cheap, caller-owned filter of the lessons that fit the stage and scope, before any are ranked or read (the local-tools filters). It may read; a lesson it drops is never read further. */
   prefilter?: (eligible: readonly Lesson[]) => Promise<readonly Lesson[]>;
 }
@@ -278,7 +276,7 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
   let complete: boolean;
   try {
     const checked = await readVisibleRanked({
-      access: deps.access, key, viewer, where: input.where, log, live, ranked: scored.map((entry) => entry.lesson), pageSize: input.pageSize ?? CHECK_PAGE,
+      access: deps.access, key, viewer, where: input.where, log, live, ranked: scored.map((entry) => entry.lesson), pageSize: CHECK_PAGE,
       enough: (kept) => { choose(kept); return chosen.length >= budget.lessons; }, deadlineAt,
     });
     choose(checked.kept);

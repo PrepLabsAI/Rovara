@@ -5,7 +5,7 @@
 // What is listed (and nothing else: the customer's own build output is theirs to keep or ignore, and Rovara does not guess at it):
 //   - `.agentx` and `.agentx-*` (the task store, the check history `.agentx/last-checks.json`, the preparation manifest, the sandbox's scratch folders), as a file or a folder, at any depth;
 //   - Code's local store files if one is misplaced inside a checkout: `.rovara/state.db*` and `.rovara/audit.db*` (the database and its `-wal`, `-shm` and `-journal` files; O40). Only those: `.rovara/rules/`, `.rovara/project.yaml` and
-//     `.rovara/lessons.md` are the customer's own files and stay committable (the lessons file has its own guard).
+//     `.rovara/lessons.md` are the customer's own files and stay committable.
 // Names are matched without regard to case (`:(icase)`), so a case-insensitive file system cannot hide `.AGENTX` from the rule.
 //
 // Each entry is a Git pathspec (`glob` magic), so Git does the matching, in `git add` and in `git diff` alike, and the two cannot drift apart. The worker deletes the Git variables that change how a pathspec is read

@@ -47,28 +47,6 @@ describe.each(factories)("the lesson store contract (%s)", (_name, make) => {
     expect((await store.versions(KEY, "les_a0000001")).map((v) => v.title)).toEqual(["Retries use withRetry", "Second"]);
     expect((await store.snapshots(KEY)).map((s) => [s.setVersion, s.members.length])).toEqual([[0, 0], [1, 1], [2, 1]]);
   });
-  it("fingerprints a text per project and repository with a project secret, and marks gone fingerprints: per project, cleared on request", async () => {
-    const { store } = make();
-    const other = { ...KEY, project: "other" };
-    const hash = "0123456789abcdef";
-    const a = (await store.textFingerprints(KEY, "github:repo/1", [hash, "fedcba9876543210"]));
-    expect(a.get(hash)).toMatch(/^[0-9a-f]{32}$/u);
-    expect(a.get(hash)).not.toBe(a.get("fedcba9876543210"));
-    // Stable for the project, different for another repository and another project.
-    expect((await store.textFingerprints(KEY, "github:repo/1", [hash])).get(hash)).toBe(a.get(hash));
-    expect((await store.textFingerprints(KEY, "github:repo/2", [hash])).get(hash)).not.toBe(a.get(hash));
-    expect((await store.textFingerprints(other, "github:repo/1", [hash])).get(hash)).not.toBe(a.get(hash));
-    const fp = a.get(hash)!;
-    expect([...await store.goneFingerprintsOf(KEY, [fp])]).toEqual([]);
-    await store.markGoneFingerprint(KEY, fp);
-    await store.markGoneFingerprint(KEY, fp);
-    expect([...await store.goneFingerprintsOf(KEY, [fp, "0".repeat(32)])]).toEqual([fp]);
-    expect([...await store.goneFingerprintsOf(other, [fp])]).toEqual([]);
-    await store.clearGoneFingerprint(KEY, fp);
-    await store.clearGoneFingerprint(KEY, fp);
-    expect([...await store.goneFingerprintsOf(KEY, [fp])]).toEqual([]);
-    expect([...await store.goneFingerprintsOf(KEY, [])]).toEqual([]);
-  });
   it("listPage walks the set in id order a page at a time, filtered by status, and says where the next page starts", async () => {
     const { store } = make();
     for (let i = 1; i <= 5; i += 1) await commit(store, mk(`les_a000000${i}`, i === 3 ? { status: "retired" } : {}));
@@ -293,17 +271,7 @@ describe.each(factories)("the lesson store contract (%s)", (_name, make) => {
     expect(Object.keys((await store.flags(KEY)).pausedSources ?? {})).toEqual(["slack:C1"]);
     expect(await make().store.flags(KEY)).toEqual({});
   });
-  it("goneOf: answers withdrawn and purged for the ids that are gone, nothing for an unknown id, in chunks past 100 ids, and keeps projects apart", async () => {
-    const { store } = make();
-    const ids = Array.from({ length: 250 }, (_, i) => `les_g${String(i).padStart(7, "0")}`);
-    await store.markGone(KEY, ids[3]!, "withdrawn");
-    await store.markGone(KEY, ids[199]!, "purged");
-    await store.purge(KEY, ids[249]!);
-    const found = await store.goneOf(KEY, [...ids, "les_unknown1", ids[3]!]);
-    expect([...found.entries()].sort()).toEqual([[ids[3], "withdrawn"], [ids[199], "purged"], [ids[249], "purged"]]);
-    expect((await store.goneOf(OTHER, ids)).size).toBe(0);
-    expect((await store.goneOf(KEY, [])).size).toBe(0);
-  });
+
 });
 
 // ---- what only the document-store implementation has to get right
@@ -346,16 +314,6 @@ const touchesSnapshot = (items: readonly TransactItem[]): boolean => items.some(
 
 describe("the document-store lesson store only", () => {
   const fresh = () => { const db = new MemoryDocumentStore(); return { db, store: new DocumentLessonStore(db) }; };
-
-  it("the gone-text marks and their secret sit under LESSONSET (the project erase wipes them) and hold no bare text hash", async () => {
-    const { db, store } = fresh();
-    const hash = "0123456789abcdef";
-    const fp = (await store.textFingerprints(KEY, "github:repo/1", [hash])).get(hash)!;
-    await store.markGoneFingerprint(KEY, fp);
-    const items = await itemsOf(db);
-    expect(items.map((item) => item.sk).sort()).toEqual([`LESSONSET#GONETEXT#${fp}`, "LESSONSET#GONETEXTKEY"]);
-    for (const item of items) expect(JSON.stringify(item).includes(hash)).toBe(false);
-  });
 
   it("every item sits in the project's partition under a sort key the project erase wipes", async () => {
     const { db, store } = fresh();

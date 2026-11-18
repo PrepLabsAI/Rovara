@@ -1,7 +1,7 @@
 // Port lane P2, item C4: GitHub's words become Rovara's at the adapter, and only there.
 import { describe, expect, it } from "vitest";
 import { GITHUB_ACTIONS_APP_ID } from "@agentx/contracts";
-import { accountKindOf, checkOf, detailsOf, mergeableStateOf, statusOf } from "../../packages/broker/src/plugins/code-host/github/mapping.js";
+import { accountKindOf, checkOf, mergeableStateOf, statusOf } from "../../packages/broker/src/plugins/code-host/github/mapping.js";
 import type { PullRequestStatus } from "../../packages/broker/src/github-pull-status.js";
 
 const status = (over: Partial<PullRequestStatus> = {}): PullRequestStatus => ({
@@ -33,11 +33,5 @@ describe("the GitHub adapter speaks Rovara's words", () => {
     expect(checkOf({ ...base, appId: GITHUB_ACTIONS_APP_ID }).logReadable).toBeUndefined();
     // The app id stays an opaque `source` the core only compares.
     expect(checkOf({ ...base, jobId: "9", appId: 5 }).source).toBe("5");
-  });
-
-  it("carries who made a change request and which repository it is against only when GitHub said", () => {
-    const details = { number: 7, url: "https://github.com/acme/app/pull/7", state: "open" as const, headBranch: "b", baseBranch: "main", headCommit: "a".repeat(40), title: "t", body: "" };
-    expect(detailsOf("https://github.com/acme/app", details)).not.toHaveProperty("authoredByRovara");
-    expect(detailsOf("https://github.com/acme/app", { ...details, authoredByApp: false, baseRepositoryId: "42" })).toMatchObject({ authoredByRovara: false, baseRepositoryId: "42" });
   });
 });

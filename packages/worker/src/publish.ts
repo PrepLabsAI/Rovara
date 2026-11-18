@@ -21,7 +21,6 @@ import {
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, type CredentialedGitRunner } from "./git-auth.js";
 import { CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, candidateLayout, snapshotTree, withIsolatedGit } from "./isolated-git.js";
-import { assertLessonsFileUntouched } from "./lessons-file-guard.js";
 import { assertNoRovaraWorkingFiles, unstageRovaraWorkingFiles } from "./never-commit-guard.js";
 import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
@@ -251,10 +250,8 @@ export async function publishWorkspace(
     });
   }
 
-  // Owner decision 50.4: a task never pushes a change to the team's lessons file. Checked on the commit about to go, before any readiness check or credential. A workflow publication's commits are the task's own on its pinned
-  // base; any other publication is one commit on the latest base, so its first parent is the base.
+  // A workflow publication's commits are the task's own on its pinned base; any other publication is one commit on the latest base, so its first parent is the base.
   const publicationBase = candidateTreeSha !== undefined && invocation.payload.publicationMode === "COMMITTED_HEAD" ? (invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit) : undefined;
-  await assertLessonsFileUntouched(git, commit, publicationBase);
   // TE-B9 (O38): the same moment, the same commit: none of Rovara's own working files (`ROVARA_NEVER_COMMIT`) is in what is about to go, whatever the workspace layout. Fails closed, before any check, credential or push.
   // A retry of a committed publication is HEAD as the task (or an earlier attempt) left it, possibly several commits on the preparation commit, so its first parent is not the base: check against the commit preparation
   // checked out (L2). Every other path builds one commit on the base it names, whose first parent is that base.

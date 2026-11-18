@@ -2,7 +2,7 @@
 // route below (full access only, like the other company-admin routes); `aws/developer-routes.ts` authenticates the caller and hands the request here through its optional `lessons` dependency
 // (absent: every route answers "Lessons are off."). The deployed wiring (Step 6) builds this with `createLessonsApi` for the install.
 //
-//   GET  /v1/dev/projects/{project}/lessons?list=proposed|approved|retired&since=<ms>&limit=1..100&cursor=<next>   one page of one list (since: created at or after); each lesson's `usedInTasks` = distinct tasks given it
+//   GET  /v1/dev/projects/{project}/lessons?list=proposed|approved|retired&since=<ms>&limit=1..50&cursor=<next>   one page of one list (since: created at or after); each lesson's `usedInTasks` = distinct tasks given it
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/approve          { version, edit? }                   Keep: a person approves the version they read, or an edit of it (title, description, body)
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/reject           { version, reason }                  Drop: reason is one of REJECT_REASONS (fixed words, never a person's text)
 //   POST /v1/dev/projects/{project}/lessons/decisions                   { decisions: [...] }                 Keep or Drop for up to 20 proposed lessons at once (the inbox's batch row); one answer each
@@ -23,7 +23,7 @@
 //   - Every read and write goes through the lessons of that company (`lessonsOf(companyId)`), whose keys are all under the company's partition. A project the company does not have, or one the person is not
 //     on the roster of, is "No such project." (the same words, so another company's project names cannot be probed).
 //   - Who decides (approve, reject, retire, the proposed and retired lists, retire requests) is the lessons library's own rule (the project's approvers, read live); the mode is set only by a project
-//     admin or a company owner or admin, read live. A script token never decides or sets anything.
+//     admin or a company owner or admin, read live. A script token gets nothing from this API: it neither reads nor decides nor sets.
 //   - Every write is audited: by the library for approve, reject and retire (its own order: approve records before it commits; reject and retire record after, best effort, as on the laptop), and here BEFORE
 //     the write for the mode and a retire request (no record, no change).
 //   - A person's erased words never come back: reasons are fixed words, people are named live (an erased person is "a former member"), and an erased person's retire request is never listed.
@@ -41,7 +41,7 @@ import { idIn } from "../lessons/types.js";
 import { countLessonUses } from "../lessons/use-count.js";
 import { snoozeTrialOffer, tallyTrialOffer, trialOfferEarned, trialOfferSnoozed, trialWouldStart, type TrialOfferTally } from "../lessons/earned-trust.js";
 import { readDigestSettingStrict, writeDigestSetting } from "../lessons/digest-notice.js";
-import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
+import { LESSON_PAGE_LISTS, LESSON_PAGE_MAX, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
@@ -77,7 +77,7 @@ const FROM_STORED: Record<LearningMode, LessonApiMode> = { Off: "off", Collect: 
 const LESSON_ID = /^[A-Za-z0-9_-]{4,64}$/u;
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const PAGE_DEFAULT = 50;
-const RETIRE_REQUESTS_MAX = 100;
+const RETIRE_REQUESTS_MAX = 50;
 const RETIRE_REQUEST_KEEP_SECONDS = 30 * 86_400;
 
 const EditSchema = z.object({ title: z.string().trim().min(1).max(80), description: z.string().max(160), body: z.string().trim().min(1).max(600) }).strict();
@@ -96,7 +96,7 @@ const TrialOfferBody = z.object({ decision: z.enum(["accept", "not_now"]) }).str
 const WeeklySummaryBody = z.object({ on: z.boolean() }).strict();
 const PageQuery = z.object({
   list: z.enum(LESSON_PAGE_LISTS).default("approved"),
-  limit: z.string().regex(/^[1-9][0-9]{0,2}$/u).transform(Number).refine((n) => n <= 100).optional(),
+  limit: z.string().regex(/^[1-9][0-9]{0,2}$/u).transform(Number).refine((n) => n <= LESSON_PAGE_MAX).optional(),
   cursor: z.string().min(1).max(400).optional(),
   since: z.string().regex(/^[0-9]{1,16}$/u).transform(Number).optional(),
 }).strict();
@@ -113,7 +113,7 @@ export interface LessonsApiRequest {
 export interface LessonsApiCaller {
   /** The person the sign-in vouched for. */
   personId: string;
-  /** Set when the caller holds a script token: it may read, never decide or set. */
+  /** Set when the caller holds a script token: it gets nothing from this API (a refusal, for reads as well as writes). */
   scriptToken?: { tokenId: string } | undefined;
 }
 
@@ -217,8 +217,8 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     if (lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     // The lessons handed back must be the member company's own: anything else is a wiring fault, refused before any read.
     if (lessons.companyId !== companyId) throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
-    const writing = method !== "GET";
-    if (writing && caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+    // A script token neither reads nor changes lessons here: the lists are for team members, on their own screens, a page at a time.
+    if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
 
     let project: string;
     try { project = decodeURIComponent(rawProject!); } catch { throw notFound(NO_SUCH_PROJECT); }
@@ -264,7 +264,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
 
     if (route === "list") {
       const query = PageQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
-      if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "list takes list (proposed, approved or retired), since, limit (1 to 100) and cursor, once each");
+      if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "list takes list (proposed, approved or retired), since, limit (1 to 50) and cursor, once each");
       const after = query.data.cursor === undefined ? undefined : decodeCursor(query.data.cursor, query.data.list);
       const page = await buildLessonsPage(deps, who, project, { list: query.data.list, limit: query.data.limit ?? PAGE_DEFAULT, ...(after === undefined ? {} : { after }), ...(query.data.since === undefined ? {} : { since: query.data.since }) });
       // "Used in N tasks": the distinct tasks each shown lesson was given to (its use rows, this company and project only). A lesson that could not be counted has no `usedInTasks`, and the page says so (`usedInIncomplete`).

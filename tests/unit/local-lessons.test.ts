@@ -10,14 +10,13 @@ import { builtinModelProviderBook } from "../../packages/broker/src/local/model-
 import { LESSON_LOAD_DEADLINE_MS, createLocalLessons, type LocalLessons } from "../../packages/broker/src/local/app/lessons.js";
 import { resolveLearning, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { localLessonsEnabled } from "../../packages/broker/src/lessons/switch.js";
-import { newRepoFileState } from "../../packages/broker/src/lessons/repo-file-state.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { NO_REASON_TEXT, buildTaskReflectSubject } from "../../packages/broker/src/lessons/task-subject.js";
 import type { CodeMilestoneHandler } from "../../packages/broker/src/core/milestones/milestones.js";
 import { COMPANY, createHarness, definition, type Harness } from "../support/task-flow-harness.js";
 import { draft, lessonRecord } from "./lessons/lesson-helpers.js";
-import { createLessonRoutes } from "../../packages/broker/src/local/app/lessons-routes.js";
+import { LOCAL_ALL_REFUSED, createLessonRoutes } from "../../packages/broker/src/local/app/lessons-routes.js";
 import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
 import type { LessonRepositories, LessonRepository } from "../../packages/broker/src/local/app/lessons-repos.js";
 import type { BrokerRequest } from "../../packages/broker/src/handler.js";
@@ -114,66 +113,6 @@ describe("the switch", () => {
     expect(await w.lessons.usedInPullRequest({ taskId: w.taskId, project: "payments", startingRevision: 1 }, "demo")).toMatchObject({ count: 0, none: true, reason: "off" });
     // The page still shows what exists.
     expect((await w.lessons.list()).map((view) => view.id)).toEqual(["les_aaaa1111"]);
-  });
-});
-
-describe("the lessons page's repository switches", () => {
-  it("switching a repository on needs a fresh page session; a repository the project does not have is not found", async () => {
-    const w = await world();
-    const stale = await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "on", fresh: false });
-    expect(stale).toMatchObject({ ok: false, reason: "refused" });
-    expect(JSON.stringify(stale)).toContain("last few minutes");
-    expect(await w.lessons.repoSwitch({ project: "payments", repo: "nothing", action: "on", fresh: true })).toMatchObject({ ok: false, reason: "not_found" });
-    expect(await w.lessons.repoSwitch({ project: "payments", repo: "nothing", action: "off", fresh: false })).toMatchObject({ ok: false, reason: "not_found" });
-    expect(await w.lessons.repoSwitches()).toEqual(expect.any(Array));
-  });
-});
-
-describe("the lessons page's answer for lessons that went missing from a file", () => {
-  const DIGEST = "0123456789abcdef";
-  const WEEK = 7 * 86_400_000;
-  /** A repository switched on whose file lost seven lessons in one change `ageMs` ago: past the week, a person is being asked. (The fake code host cannot write, so the state is seeded, as the nightly pass would have left it.) */
-  async function asking(ageMs = WEEK + 86_400_000): Promise<World> {
-    const w = await world();
-    const repoFile = w.lessons.runtime.repoFile!;
-    const target = (await repoFile.targets(COMPANY, "payments"))[0]!;
-    expect(await repoFile.deps.state.put(w.key, { ...newRepoFileState(target.place, target.name), enabled: true, readBackHeld: { missing: 7, digest: DIGEST, at: w.h.clock.now - ageMs } }, 0)).toBeDefined();
-    return w;
-  }
-  const heldOf = async (w: World) => (await w.lessons.runtime.repoFile!.deps.state.list(w.key))[0]!.readBackHeld;
-
-  it("the page's row carries the card (how many, and the digest) only while a person is asked", async () => {
-    const w = await asking();
-    expect((await w.lessons.repoSwitches())[0]!.repos[0]).toMatchObject({ repo: "demo", enabled: true, retireConfirm: { missing: 7, digest: DIGEST } });
-    // Before the week's hold is over nobody is asked yet.
-    const early = await asking(86_400_000);
-    expect((await early.lessons.repoSwitches())[0]!.repos[0]).not.toHaveProperty("retireConfirm");
-  });
-
-  it("retiring needs a fresh page session; keeping does not; each answer is recorded for exactly the set the owner saw, by the owner", async () => {
-    const w = await asking();
-    const stale = await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_confirm", held: DIGEST, fresh: false });
-    expect(stale).toMatchObject({ ok: false, reason: "refused" });
-    expect(JSON.stringify(stale)).toContain("last few minutes");
-    expect((await heldOf(w))!.verdict).toBeUndefined();
-    // Another set (the file changed), or no digest at all: stale, nothing recorded.
-    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", held: "f".repeat(16), fresh: false })).toMatchObject({ ok: false, reason: "stale" });
-    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", fresh: false })).toMatchObject({ ok: false, reason: "stale" });
-    expect(w.h.audit.some((event) => event.action === "lesson.repo_file_retire_decided")).toBe(false);
-    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", held: DIGEST, fresh: false })).toEqual({ ok: true, message: "Saved." });
-    expect(await heldOf(w)).toMatchObject({ missing: 7, verdict: "keep" });
-    const decided = w.h.audit.filter((event) => event.action === "lesson.repo_file_retire_decided");
-    expect(decided).toHaveLength(1);
-    expect(decided[0]).toMatchObject({ actor: { id: localOwnerPrincipal({ companyId: COMPANY }).personId }, details: { verdict: "keep", missing: 7 } });
-    // A person who changes their mind may still retire a kept set, on a fresh page.
-    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_confirm", held: DIGEST, fresh: true })).toEqual({ ok: true, message: "Saved." });
-    expect(await heldOf(w)).toMatchObject({ verdict: "retire" });
-  });
-
-  it("nothing is asked before the week's hold is over: an answer is a conflict", async () => {
-    const w = await asking(86_400_000);
-    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", held: DIGEST, fresh: true })).toMatchObject({ ok: false, reason: "stale" });
-    expect((await heldOf(w))!.verdict).toBeUndefined();
   });
 });
 
@@ -499,7 +438,7 @@ describe("the owner's routes", () => {
     expect(await call(w, "GET", "/v1/dev/projects")).toEqual({ status: undefined, body: undefined });
   });
 
-  it("only reads: the API token cannot retire a lesson, mark one, switch the lessons file, or approve, reject or merge one: those are the page's", async () => {
+  it("only reads: the API token cannot retire a lesson, mark one, or approve, reject or merge one: those are the page's", async () => {
     const w = await world();
     await put(w, pending());
     for (const action of ["approve", "reject", "merge"]) {
@@ -527,11 +466,28 @@ describe("the owner's routes", () => {
     expect((await call(w, "GET", `/v1/app/tasks/${w.taskId}/lessons`)).status).toBe(200);
   });
 
-  it("answers the lessons file status, and refuses every switch from the API token", async () => {
+  it("answers at most one page (50) of each list in one call, and says the list was cut", async () => {
     const w = await world();
-    expect((await call(w, "GET", "/v1/app/projects/payments/lessons/repo")).status).toBe(200);
-    for (const action of ["on", "off", "resume"]) expect((await call(w, "POST", "/v1/app/projects/payments/lessons/repo", { repo: "nothing", action })).status).toBe(403);
+    for (let n = 0; n < 60; n += 1) await put(w, active({ id: `les_many${String(n).padStart(4, "0")}`, title: `Advice number ${n}` }));
+    for (let n = 0; n < 60; n += 1) await put(w, pending({ id: `les_wait${String(n).padStart(4, "0")}`, title: `Waiting advice ${n}` }));
+    const view = await call(w, "GET", "/v1/app/projects/payments/lessons");
+    expect(view.status).toBe(200);
+    expect((view.body!["active"] as unknown[]).length).toBe(50);
+    expect((view.body!["waiting"] as unknown[]).length).toBe(50);
+    expect(view.body!["truncated"]).toEqual(expect.arrayContaining(["active", "waiting"]));
   });
+
+  it("has no repository lessons file: its old status and switch paths are not routes any more, for every method", async () => {
+    const w = await world();
+    for (const method of ["GET", "POST", "PUT", "DELETE"]) {
+      const answer = await call(w, method, "/v1/app/projects/payments/lessons/repo", method === "POST" ? { repo: "demo", action: "on" } : undefined);
+      expect(answer.status, method).toBe(404);
+      expect(JSON.stringify(answer.body), method).toContain("route not found");
+    }
+    // A lesson id may not be spelled "repo" to reach anything else either: the history of it is an ordinary lesson that is not there.
+    expect((await call(w, "GET", "/v1/app/projects/payments/lessons/repo/history")).status).not.toBe(200);
+  });
+
 });
 
 describe("what a finished task tells lessons", () => {
@@ -548,7 +504,7 @@ describe("what a finished task tells lessons", () => {
     async standing(_repository: unknown, person: { login: string }) { return permissions[person.login] ?? { permission: "read", accountType: "person" }; },
   });
   const repo = (codeHost: unknown): LessonRepository => ({ name: "demo", url: REPOSITORY, place: "github:repo/77", fullName: "example/demo", private: true, codeHost: codeHost as never, repository: { url: REPOSITORY }, scope: { orgId: COMPANY } });
-  const repos = (found: LessonRepository): LessonRepositories => ({ ofProject: async () => [found], ofTask: async () => found, scopes: () => ({ read: async () => new Set([found.place]) }), targets: async () => [] });
+  const repos = (found: LessonRepository): LessonRepositories => ({ ofProject: async () => [found], ofTask: async () => found, scopes: () => ({ read: async () => new Set([found.place]) }) });
 
   it("reads the owner's words as a member's, the agent's as advice, and a reviewer as a member only when the host says they can write", async () => {
     const w = await world();
@@ -582,7 +538,7 @@ describe("what a finished task tells lessons", () => {
       await w.h.store.transact([ownerNoteItem({ taskId: w.taskId, requestId, text: "Fix only the problems listed. The owner gave no further instructions for them.", now: new Date(w.h.clock.now), ...(notes === undefined ? {} : { findingNotes: notes }) })]);
       return requestId;
     }
-    const sources = (w: World) => createLocalLessonSources({ flow: w.h.deps, companyId: COMPANY, ownerId: "local-owner", repos: { ofProject: async () => [], ofTask: async () => undefined, scopes: () => ({ read: async () => new Set<string>() }), targets: async () => [] }, now: () => w.h.clock.now });
+    const sources = (w: World) => createLocalLessonSources({ flow: w.h.deps, companyId: COMPANY, ownerId: "local-owner", repos: { ofProject: async () => [], ofTask: async () => undefined, scopes: () => ({ read: async () => new Set<string>() }) }, now: () => w.h.clock.now });
     const back = (w: World, requestId: string, workspaceId: string = COMPANY) => sources(w).rows.sendBack({ workspaceId, project: "payments", taskId: w.taskId, requestId });
 
     it("reads the person's per-finding notes as their words, with their standing, and never the summary", async () => {
@@ -683,6 +639,24 @@ describe("lessons for local coding tools on a laptop (decision 46b)", () => {
     expect(await ask(w, {})).toMatchObject({ status: 429, body: { error: { code: "TOO_MANY_REQUESTS" } } });
     w.h.clock.advance(60);
     expect((await ask(w, {})).status).toBe(200);
+  });
+
+  it("has no bulk mode: a body that names `all` (true or false) is refused with one fixed sentence, for the owner and for a script token, and the answer never carries more than the budget", async () => {
+    const w = await world();
+    for (let n = 0; n < 8; n += 1) await put(w, active({ id: `les_bulk000${n}`, title: `Advice number ${n}`, trial: { state: "stable", startedAt: 1, stableAt: 2 } }));
+    const token = { ...w.h.owner, scriptToken: { tokenId: "stk_x", name: "tool", permissions: ["lessons"] as const, projects: ["payments"] } };
+    const REFUSED = { status: 400, body: { error: { code: "CONFIG_INVALID", message: LOCAL_ALL_REFUSED } } };
+    for (const caller of [w.h.owner, token]) {
+      for (const all of [true, false, "yes", null]) expect(await ask(w, { all, task: "advice" }, caller), JSON.stringify(all)).toMatchObject(REFUSED);
+    }
+    // Nothing of the lessons or of the value is in the sentence.
+    expect(LOCAL_ALL_REFUSED).not.toMatch(/les_|Advice/u);
+    // The ordinary read still answers, cut at the project's budget (never the whole set).
+    const ordinary = await ask(w, { task: "advice" }, token);
+    expect(ordinary.status).toBe(200);
+    expect((ordinary.body!["lessons"] as unknown[]).length).toBeLessThanOrEqual(5);
+    // The file-reading flag went with the file: it is a field the route does not take.
+    expect(await ask(w, { skipRepoFile: true })).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID", message: "body: has a field this route does not take" } } });
   });
 
   it("re-checks a script token's lessons permission and projects itself, whatever the authentication let through", async () => {

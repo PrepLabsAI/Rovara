@@ -246,6 +246,21 @@ describe("the company comes from live membership only", () => {
 });
 
 describe("lists and paging", () => {
+  it("a page is at most 50 lessons, and a page of 50 from a long list says where the next one starts", async () => {
+    const w = await setUp();
+    await put(w, A, ...Array.from({ length: 53 }, (_, n) => lesson(A, `les_big${String(n).padStart(5, "0")}`, { updatedAt: 1000 + n })));
+    const { api: target } = api(w);
+    const first = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "50" });
+    expect(first.ok && (first.body["lessons"] as unknown[]).length).toBe(50);
+    expect(first.ok && typeof first.body["next"]).toBe("string");
+    const dflt = await call(target, "a-contrib", "GET", `${P}/lessons`);
+    expect(dflt.ok && (dflt.body["lessons"] as unknown[]).length).toBe(50);
+    expect(await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "51" })).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    const second = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "50", cursor: first.ok ? first.body["next"] as string : "" });
+    expect(second.ok && (second.body["lessons"] as unknown[]).length).toBe(3);
+    expect(second.ok && "next" in second.body).toBe(false);
+  });
+
   it("pages through a list newest change first with an opaque cursor, and refuses a cursor of another list or a malformed one without echoing it", async () => {
     const w = await setUp();
     await put(w, A, ...[1, 2, 3, 4, 5].map((n) => lesson(A, `les_page000${n}`, { updatedAt: n * 10 })));
@@ -264,7 +279,7 @@ describe("lists and paging", () => {
     const wrong = await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list: "retired", cursor });
     expect(wrong).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
     const canary = "CANARY<b>";
-    for (const query of [{ cursor: canary }, { cursor: Buffer.from(`["approved",1,"${canary}"]`).toString("base64url") }, { limit: "0" }, { limit: "101" }, { list: canary }, { other: canary }]) {
+    for (const query of [{ cursor: canary }, { cursor: Buffer.from(`["approved",1,"${canary}"]`).toString("base64url") }, { limit: "0" }, { limit: "51" }, { limit: "101" }, { list: canary }, { other: canary }]) {
       const answer = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, query);
       expect(answer, JSON.stringify(query)).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
       expect(JSON.stringify(answer)).not.toContain("CANARY");
@@ -316,15 +331,17 @@ describe("decisions on one lesson", () => {
     expect(await call(target, "a-admin", "GET", `${P}/lessons/retire-requests`)).toMatchObject({ ok: true, body: { requests: [] } });
   });
 
-  it("a script token reads but never decides or sets", async () => {
+  it("a script token gets nothing: not the paginated lists, not a task's lessons, and never a decision or a setting", async () => {
     const w = await setUp();
     await put(w, A, lesson(A, "les_apend001", { status: "pending" }));
     const { api: target } = api(w);
     const token = { scriptToken: { tokenId: "t1" } };
-    for (const [method, path, body] of ROUTES.filter(([method]) => method !== "GET")) {
+    for (const [method, path, body] of ROUTES) {
       expect(await call(target, "a-admin", method, path, body, undefined, token), `${method} ${path}`).toMatchObject({ ok: false, code: "FORBIDDEN", message: "A script token cannot do that." });
     }
-    expect((await call(target, "a-admin", "GET", `${P}/lessons`, undefined, undefined, token)).ok).toBe(true);
+    // The same person without the token reads the same list: the refusal is the token's, not the route's.
+    expect((await call(target, "a-admin", "GET", `${P}/lessons`)).ok).toBe(true);
+    for (const list of ["approved", "proposed", "retired"]) expect(await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list, limit: "2" }, token), list).toMatchObject({ ok: false, code: "FORBIDDEN" });
     expect(lessonEvents(w)).toEqual([]);
   });
 });

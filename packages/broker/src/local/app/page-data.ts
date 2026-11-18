@@ -85,7 +85,7 @@ export interface PageDataDeps {
   /** Fix with agent. Absent: the task page has no such part. */
   diagnosis?: Pick<LocalDiagnosis, "pageView" | "diagnose">;
   /** The lessons page: what Rovara has learned, and the owner's decisions on it. Absent: the page says there is nothing. */
-  lessons?: Pick<LocalLessons, "list" | "act" | "repoSwitches" | "repoSwitch" | "localToolsSwitches" | "localToolsSwitch">;
+  lessons?: Pick<LocalLessons, "list" | "act" | "localToolsSwitches" | "localToolsSwitch">;
   /** The model each step uses. Absent: no models page. */
   modelSelection?: ModelSelectionService;
   /** The cost ledger: what the task has cost so far. Absent: the page says nothing of it. */
@@ -259,7 +259,6 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
     async getDesignReview() { return undefined; },
     async readMockup() { return undefined; },
     async listLessons() { return deps.lessons === undefined ? [] : deps.lessons.list(); },
-    async listLessonRepos() { return deps.lessons === undefined ? [] : deps.lessons.repoSwitches(); },
     async listLessonLocalTools() { return deps.lessons === undefined ? undefined : deps.lessons.localToolsSwitches(); },
     async readEvidenceImage(taskId, sha256) {
       // The page session is checked by the server; the task's company here (a task of another company is not found, the same as one that does not exist).
@@ -294,7 +293,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "modelSelection" | "diagnosis" | "lessons"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "lessonRepoAction" | "lessonLocalToolsAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "modelSelection" | "acknowledgeSecondReview"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "modelSelection" | "diagnosis" | "lessons"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "lessonLocalToolsAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "modelSelection" | "acknowledgeSecondReview"> {
   return {
     async diagnose(input): Promise<LocalActionResult> {
       return deps.diagnosis === undefined ? { ok: false, reason: "not_found", message: "That is no longer there." } : deps.diagnosis.diagnose(input);
@@ -385,9 +384,6 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
     },
     async lessonAction(input): Promise<LocalActionResult> {
       return deps.lessons === undefined ? { ok: false, reason: "refused", message: "Lessons are not on this install." } : deps.lessons.act(input);
-    },
-    async lessonRepoAction(input): Promise<LocalActionResult> {
-      return deps.lessons === undefined ? { ok: false, reason: "refused", message: "Lessons are not on this install." } : deps.lessons.repoSwitch(input);
     },
     async lessonLocalToolsAction(input): Promise<LocalActionResult> {
       return deps.lessons === undefined ? { ok: false, reason: "refused", message: "Lessons are not on this install." } : deps.lessons.localToolsSwitch(input);

@@ -6,7 +6,7 @@ import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 //   the PR      the "Lessons used" section of a task's pull request and the numbered list a comment refers to;
 //   capture     a merged or closed task puts one message of ids on the `lessons-reflect` queue; a pass reads it, takes a lease and reflects. So does a person's send-back of a task that is still open
 //               (`noteSentBack`, learn on send-back): its correction can help the next task before this one ends;
-//   upkeep      once a day per project: expired lessons swept, stable trials promoted, the repository lessons file's erasure sweep and weekly pass.
+//   upkeep      once a day per project: expired lessons swept, stable trials promoted.
 // Nothing here makes a model call by itself: the reflection worker does, through the runtime's model, which the library gates on the switch.
 import { randomUUID } from "node:crypto";
 import {
@@ -34,7 +34,6 @@ import { NO_REASON_TEXT } from "./task-subject.js";
 import { retryDelayFor, runReflectMessage, type ReflectWorkerDeps } from "./reflect-worker.js";
 import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps } from "./task-end.js";
 import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "./used-in-pr.js";
-import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob } from "./repo-file-job.js";
 import { planLoadFacts } from "./plan-facts.js";
 import { LESSON_USE_KEEP_SECONDS } from "./use-count.js";
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
@@ -251,12 +250,6 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       await sweepExpired({ ...runtime.counters, vectors: runtime.vectors }, runtime.store, key, {}).catch(() => undefined);
       await promoteStableTrials({ ...runtime.counters, store: runtime.store }, key).catch(() => undefined);
     }
-    // The erasure sweep comes first and has its own budget; then the weekly lessons file pass (each repository is off until a person switches it on).
-    const repoFile = runtime.repoFile;
-    if (repoFile === undefined) return;
-    const day = Math.floor(now() / 86_400_000);
-    await lessonsRepoFileSweepJob(repoFile, companyId, projects, 60_000, day).catch(() => undefined);
-    await lessonsRepoFilePublishJob(repoFile, companyId, projects, 120_000, day).catch(() => undefined);
   }
 
   async function noteReverted(taskId: string): Promise<void> {

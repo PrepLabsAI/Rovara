@@ -149,9 +149,6 @@ function scopedCalls(provider: GitHubCodeHostProvider, url: string, scope: unkno
     ["mergePullRequest", () => provider.mergePullRequest(url, 1, { sha, method: "squash" }, s)],
     ["getJobLogTail", () => provider.getJobLogTail(url, "1", s)],
     ["getPathKindAtCommit", () => provider.getPathKindAtCommit!(url, "src/a.ts", sha, s)],
-    ["commitFilesToBranch", () => provider.commitFilesToBranch!(url, { branch: "rovara/lessons/x", baseBranch: "main", message: "m", files: [] } as never, s)],
-    ["findLessonsPullRequest", () => provider.findLessonsPullRequest!(url, "rovara/lessons/x", s)],
-    ["deleteLessonsBranch", () => provider.deleteLessonsBranch!(url, "rovara/lessons/x", s)],
     ["listTreeAtCommit", () => provider.listTreeAtCommit!(url, sha, s)],
     // Wiki W0: the file map's two other listings.
     ["listDirectoryAtCommit", () => provider.listDirectoryAtCommit!(url, "", sha, s)],

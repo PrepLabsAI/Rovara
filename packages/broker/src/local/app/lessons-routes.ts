@@ -2,8 +2,6 @@
 // GET /v1/app/projects/{p}/lessons what Rovara has learned for the project: what waits for a decision, what is used, what was removed
 // GET /v1/app/projects/{p}/lessons/{id}/history one lesson's versions and who approved each
 // POST /v1/app/projects/{p}/lessons/{id}/approve|reject|merge|retire refused: a lesson is decided on its page, in the owner's browser (`rovara open lessons`), because each of these is the owner's own act
-// GET /v1/app/projects/{p}/lessons/repo the project's repositories with the state of their `.rovara/lessons.md`
-// POST /v1/app/projects/{p}/lessons/repo refused: the switches for the file are on the page too
 // GET /v1/app/tasks/{task}/lessons the lessons a task was given
 // POST /v1/app/tasks/{task}/lessons/{id}/feedback refused: marking a lesson wrong is done on the page or by a writer's comment on the pull request
 // GET /v1/app/projects/{p}/lessons/local-tools whether local coding tools get the project's lessons now, and why not (decision 46b)
@@ -17,8 +15,7 @@ import { INDEX_EXPIRY_ATTRIBUTE, LocalLessonsBodySchema, agentXError, change, co
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
-import { repoFileStatus } from "../../lessons/repo-file-routes.js";
-import { buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
+import { LESSON_PAGE_MAX, buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
 import { takeRate } from "../../core/script-tokens/rate.js";
 import { LocalLessonsUnavailable, lessonsForLocalTool, type LocalLessonsDeps, type LocalToolsCounter } from "../../lessons/local-tools.js";
 import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
@@ -33,7 +30,7 @@ const COMPANY_LOCAL_TOOLS = "/v1/app/org/lessons/local-tools";
 export const LOCAL_LESSONS_PER_MINUTE = 60;
 const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
 const NO_SUCH_PROJECT = "No such project.";
-/** At most this many people's names are looked up in one call (the repo-file pass's limit): over it, nothing is returned. */
+/** At most this many people's names are looked up in one call: over it, nothing is returned. */
 const MAX_NAME_LOOKUPS = 300;
 
 /** The day's counter row: fixed numbers per person, project and day, expired by the store's index retention. Best effort: a failure to count never blocks or changes the answer. */
@@ -52,6 +49,8 @@ export function localLessonsDayCounter(store: DocumentStore, now: () => number):
     },
   };
 }
+/** What a local tool is told when its body asks for every lesson at once (`all`): lessons are given a few at a time, for a task or a part of the code, and never in bulk. */
+export const LOCAL_ALL_REFUSED = "all: Rovara gives lessons a few at a time, for a task or a part of the code. It does not give them all at once.";
 export const DECIDE_ON_THE_PAGE = "A lesson is approved on its page, by you. Run `rovara open lessons` to open it; an assistant cannot approve for you.";
 export const CHANGE_ON_THE_PAGE = "This is changed on the lessons page, by you. Run `rovara open lessons` to open it; the API token can only read.";
 
@@ -88,6 +87,8 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
     if (await flow.projects.latest(project) === undefined) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
     let raw: unknown;
     try { raw = request.body === undefined || request.body === "" ? {} : JSON.parse(request.body); } catch { throw agentXError("CONFIG_INVALID", "body: is not JSON"); }
+    // The bulk mode is gone: a body that names `all` (true or false) gets one fixed sentence, never the value and never a partial answer.
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw) && Object.hasOwn(raw, "all")) throw agentXError("CONFIG_INVALID", LOCAL_ALL_REFUSED);
     const parsed = LocalLessonsBodySchema.safeParse(raw);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
@@ -99,12 +100,10 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
       store: runtime.store, settings: runtime.settings, access: runtime.access, localTools: runtime.localTools, now: nowMs,
       names: (key, found) => peopleNames(developerId, key, found),
       log: (event, fields) => flow.log?.({ component: "lessons", event, ...Object.fromEntries(Object.entries(fields).filter(([, value]) => typeof value === "number" || typeof value === "boolean")) }),
-      // What is merged into the repository's own lessons file now (decision 50a): the file pass's state, ids only.
-      ...(runtime.repoFile === undefined ? {} : { repoFileIds: async (key: ScopeKey, place: string) => { const state = await runtime.repoFile!.deps.state.get(key, place); return state === undefined ? undefined : new Set(Object.keys(state.rendered)); } }),
     };
     let outcome: Awaited<ReturnType<typeof lessonsForLocalTool>>;
     try {
-      outcome = await lessonsForLocalTool(deps, { orgId: companyId, project, remote: parsed.data.repo, task: parsed.data.task, files: parsed.data.files, stage: parsed.data.stage, all: parsed.data.all, skipRepoFile: parsed.data.skipRepoFile });
+      outcome = await lessonsForLocalTool(deps, { orgId: companyId, project, remote: parsed.data.repo, task: parsed.data.task, files: parsed.data.files, stage: parsed.data.stage });
     } catch (error) {
       await count(0, error instanceof LocalLessonsUnavailable ? "unavailable" : "error");
       throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
@@ -140,15 +139,8 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
         const action = project[3];
         if (id === undefined) {
           if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
-          return json(200, await buildLessonsView(runtime.routes, who, name));
-        }
-        if (id === "repo" && action === undefined) {
-          if (runtime.repoFile === undefined) throw agentXError("NOT_FOUND", "Lessons are not available for this project.");
-          if (request.method === "GET") {
-            try { return json(200, await repoFileStatus(runtime.repoFile, { workspaceId: companyId, project: name })); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "Rovara can't read this project's repositories right now. Try again."); }
-          }
-          if (request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
-          throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);
+          // The API answers at most one page of each list (50): the whole set is read on the owner's page, never in one API call.
+          return json(200, await buildLessonsView(runtime.routes, who, name, { listMax: LESSON_PAGE_MAX }));
         }
         if (id === "local-tools" && action === undefined) {
           if (request.method === "POST") throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);

@@ -5,7 +5,7 @@ import { approveLesson, type ApproveDeps } from "../../../packages/broker/src/le
 import { curateDraft, foldDuplicate, type CurateDeps } from "../../../packages/broker/src/lessons/curate.js";
 import { reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/broker/src/lessons/reflect.js";
 import type { EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { afterPersonEdit, citationsStayIn, isRepoFileEligible, mergeKeepsRepoOnly, repoVisibilityOf } from "../../../packages/broker/src/lessons/repo-eligibility.js";
+import { afterPersonEdit, citationsStayIn, mergeKeepsRepoOnly, repoVisibilityOf } from "../../../packages/broker/src/lessons/repo-eligibility.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, allowAllAccess, candidateJson, codeCite, directory, draft, embedder, lessonRecord, memberSpan, reply, seed, settings, subject, verifier } from "./lesson-helpers.js";
 
@@ -108,7 +108,7 @@ describe("a person's edit-and-approve is text typed in Rovara", () => {
     return { store, deps, seeded: seed(store, lesson) };
   }
   const edit = { title: "Retries", description: "", body: "Per the Q3 customer escalation in #deals, retries stay at 3." };
-  it("an edit clears repoOnly and records typed_in_rovara, keeping the reasons it had; the file gate then refuses the lesson", async () => {
+  it("an edit clears repoOnly and records typed_in_rovara, keeping the reasons it had", async () => {
     const s = setup(true);
     await s.seeded;
     expect(await approveLesson(s.deps, { ...KEY, lessonId: "les_pend0001", approverId: "ann", edit })).toMatchObject({ ok: true });
@@ -116,7 +116,6 @@ describe("a person's edit-and-approve is text typed in Rovara", () => {
     expect(after.body).toContain("#deals");
     expect(after.provenance.repoOnly).toBeUndefined();
     expect(after.provenance.repoBlockCodes).toEqual(["typed_in_rovara"]);
-    expect(isRepoFileEligible({ ...after, status: "active", trial: { state: "stable", startedAt: 1 } }, A, [])).toBe(false);
   });
   it("an edit of a lesson that was already blocked keeps those reasons and adds typed_in_rovara", async () => {
     const s = setup(false);

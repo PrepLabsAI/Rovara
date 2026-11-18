@@ -79,7 +79,7 @@ describe("reflect sets repoOnly from every input the reflector was given", () =>
   });
 
   it("the pure eligibility code imports no model, spend, audit, org or team-record code (so it can be ported as it is)", () => {
-    for (const file of ["repo-eligibility.ts", "repo-eligibility-report.ts"]) {
+    for (const file of ["repo-eligibility.ts"]) {
       const source = readFileSync(new URL(`../../../packages/broker/src/lessons/${file}`, import.meta.url), "utf8");
       const imports = [...source.matchAll(/^import [^;]*? from "([^"]+)";/gmu)].map((m) => m[1]!);
       for (const from of imports) expect(["./trial.js", "./project-repo-audience.js", "./types.js", "./repo-eligibility.js", "./store.js"], `${file} imports ${from}`).toContain(from);

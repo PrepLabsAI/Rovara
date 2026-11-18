@@ -38,7 +38,7 @@ const restrictedTo = (id: string, scope: string, over: Partial<Lesson> = {}): Le
 const stable = (id: string, over: Partial<Lesson> = {}): Lesson => lesson(id, { approvals: trial, trial: { state: "stable", startedAt: 1, stableAt: 2 }, ...over });
 const onTrial = (id: string, over: Partial<Lesson> = {}): Lesson => lesson(id, { approvals: trial, trial: { state: "trial", startedAt: 1 }, ...over });
 
-interface World { deps: LocalLessonsDeps; store: InMemoryLessonStore; logs: Array<{ event: string; fields: Record<string, unknown> }>; reads: { tasks: number; store: number; settings: number }; tasks: Record<string, LessonTaskAudience | undefined>; mayRead: Array<readonly string[]>; localTools: LocalToolsSettings; learning: LearningSettings; namesFail: { value: boolean }; fileIds: { value: ReadonlySet<string> | undefined | "throw" } }
+interface World { deps: LocalLessonsDeps; store: InMemoryLessonStore; logs: Array<{ event: string; fields: Record<string, unknown> }>; reads: { tasks: number; store: number; settings: number }; tasks: Record<string, LessonTaskAudience | undefined>; mayRead: Array<readonly string[]>; localTools: LocalToolsSettings; learning: LearningSettings; namesFail: { value: boolean } }
 function world(over: { learning?: LearningSettings; local?: Partial<LocalToolsSettings>; projectRepos?: ReadonlySet<string> | "throw"; byRemote?: "throw" | "none" } = {}): World {
   setLearnedLessonsGate(() => true);
   const store = new InMemoryLessonStore();
@@ -50,7 +50,6 @@ function world(over: { learning?: LearningSettings; local?: Partial<LocalToolsSe
   const learning: LearningSettings = { preset: "standard", mode: "On", ...over.learning };
   const localTools: LocalToolsSettings = { companyStays: false, ...over.local };
   const namesFail = { value: false };
-  const fileIds: World["fileIds"] = { value: undefined };
   const projectRepos = over.projectRepos ?? new Set([PLACE_A, PLACE_B]);
   const team = withLessonAudiences({ read: async () => new Map() }, { read: async (_org, ids) => { reads.tasks += 1; return new Map(ids.map((id) => [id, id in tasks ? tasks[id] : wideAudience()])); } });
   const taskVisibility = withProjectRepoScopes(team, {
@@ -63,11 +62,10 @@ function world(over: { learning?: LearningSettings; local?: Partial<LocalToolsSe
     store: countingStore, access, now: () => NOW, log: (event, fields) => { logs.push({ event, fields }); },
     settings: { read: async () => { reads.settings += 1; return learning; } },
     localTools: { read: async () => localTools },
-    // The display names of the project's members and the lessons' own people (the repo-file wiring's rule): a lesson that names a member who did not write it is as private as one that names its author.
+    // The display names of the project's members and the lessons' own people: a lesson that names a member who did not write it is as private as one that names its author.
     names: async () => { if (namesFail.value) throw new Error("names down"); return ["Ann Archer", "Bob Baker", "Omar Diaz", "Maya Chen"]; },
-    repoFileIds: async () => { if (fileIds.value === "throw") throw new Error("down"); return fileIds.value; },
   };
-  return { deps, store, logs, reads, tasks, mayRead, localTools, learning, namesFail, fileIds };
+  return { deps, store, logs, reads, tasks, mayRead, localTools, learning, namesFail };
 }
 const ask = (w: World, over: Partial<LocalLessonsInput> = {}) => lessonsForLocalTool(w.deps, { orgId: WS, project: PROJECT, remote: REMOTE_A, task: "add a retry", files: ["src/retry.ts"], ...over });
 const idsOf = async (w: World, over: Partial<LocalLessonsInput> = {}): Promise<string[]> => {
@@ -121,8 +119,6 @@ describe("what a local tool gets", () => {
     const answer = await answerOf(w, { task: "add a retry with backoff" });
     expect(answer.lessons).toHaveLength(5);
     expect(answer.lessons[0]!.id).toBe("les_many0005");
-    const all = await answerOf(w, { all: true });
-    expect(all.lessons).toHaveLength(8);
   });
 });
 
@@ -378,24 +374,6 @@ describe("a lesson flagged for review does not leave Rovara", () => {
     await seed(w.store, lesson("les_review0001", { reviewRequired: true }), lesson("les_retire0001", { retireProposedAt: 5 }), lesson("les_harm000001", { counters }),
       lesson("les_tier2conv01", { tier: 2, approvals: [...person, { approvalId: "b", by: "bob", at: 1, mode: "second_person" }] }), lesson("les_fine00001"));
     expect(await idsOf(w)).toEqual(["les_fine00001"]);
-  });
-});
-
-describe("the lessons already merged into the repository's .rovara/lessons.md (decision 50a)", () => {
-  it("are returned and marked by default, and left out when the tool says it reads the file; a failed read of the file's state leaves them in", async () => {
-    const w = world();
-    await seed(w.store, lesson("les_infile0001", { scope: {} }), lesson("les_notfile001", { scope: {} }));
-    w.fileIds.value = new Set(["les_infile0001"]);
-    const marked = await answerOf(w);
-    expect(marked.lessons.find((l) => l.id === "les_infile0001")).toMatchObject({ inRepoFile: true });
-    expect(marked.lessons.find((l) => l.id === "les_notfile001")!.inRepoFile).toBeUndefined();
-    expect(marked.markdown).toContain("(also in .rovara/lessons.md)");
-    expect(await idsOf(w, { skipRepoFile: true })).toEqual(["les_notfile001"]);
-    w.fileIds.value = "throw";
-    expect(await idsOf(w, { skipRepoFile: true })).toEqual(["les_infile0001", "les_notfile001"]);
-    // with no repository there is no file to be in
-    w.fileIds.value = new Set(["les_infile0001"]);
-    expect(await idsOf(w, { skipRepoFile: true, remote: undefined })).toEqual(["les_infile0001", "les_notfile001"]);
   });
 });
 
