@@ -820,4 +820,5 @@ describe("what did not change", () => {
 // those 6 rows still gives 0a31f2f4...).
 // Batch 13 (rule D): and for #855's one new row (POST /v1/dev/tasks/{taskId}/answers tasks:act; added, none changed; removing exactly that row still gives ef0ea58f...).
 // The batch's other new rows are APP_ROUTES rows (test environment, wiki map, wiki reads, setup confirm/discard/decide), which this DEV_ROUTES digest does not cover.
-const EXISTING_ROUTES_DIGEST = "8e72149c128813727deb3c8af95007454d20f7fb60e4762249e438a8b497ca80";
+// Rule D (proof list): and for one new row (GET /v1/dev/tasks/{taskId}/evidence tasks:read, Cloud's Proof tab; added, none changed; removing exactly that row still gives 8e72149c...).
+const EXISTING_ROUTES_DIGEST = "e02b47a29de6adab1e46bbe11a34b9f00d321ac521000166585e584fcc63b4d3";

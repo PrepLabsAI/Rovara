@@ -83,6 +83,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/diff", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:read" },
+  // Cloud's Proof tab: the task's proof index (what the proof page shows as checked for its current code, and its failing tests), under the task read's own rule.
+  { method: "GET", path: "/v1/dev/tasks/{taskId}/evidence", requires: "tasks:read" },
   // Tasks: start.
   { method: "POST", path: "/v1/dev/tasks", requires: "tasks:start" },
   // Tasks: act on a task the person may act on.
