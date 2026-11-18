@@ -8,6 +8,7 @@
 // (the merge's file list was not read), overlap can be neither shown nor ruled out, so no lesson is excluded for it: they share the credit as before this lane, but 1/k of it each, never a whole mark each. (This is the one place
 // "unknown" works in a lesson's favour: leaving every lesson with no credit would let a good lesson fade for want of a file list. Blame never takes this road: a revert with unknown files marks nothing, `revert-question.ts`.)
 // A revert, or a clean merge with no eligible lesson, credits nobody. Nothing here is ever a mark AGAINST a lesson.
+import { knowledgeCreditShares, type KnowledgeUseReport } from "@agentx/contracts";
 import { globToRegExp } from "./guards.js";
 import type { Lesson } from "./types.js";
 
@@ -42,23 +43,27 @@ export function lessonAreaOverlap(lesson: Pick<Lesson, "scope">, touched: readon
  * `reports` are the task's Build and Fix use reports; absent or empty means no report was made.
  */
 export function lessonCreditShares(input: { lessons: ReadonlyMap<string, Pick<Lesson, "scope">>; loaded: ReadonlySet<string>; reports: readonly UseReport[] | undefined; touched: readonly string[] | undefined }): Map<string, number> {
-  const eligible = new Set<string>();
   const reports = input.reports ?? [];
   if (reports.length > 0) {
-    for (const report of reports) {
-      for (const unit of report.units) {
+    // The pure 1/k rule is the contract's (`knowledgeCreditShares`, L4-AK2): of the Build and Fix reports, a lesson is eligible when it was given and the agent said it used it (or, when no report was made at all, when its area was
+    // touched), and each eligible one is owed 1/k. Here the units are first cut to the lessons that reached the prompt AND whose area the change touched (the worker's own check, and the broker's own check of the changed files when
+    // it has them), so a lesson reported as used in an area the change did not touch is not counted in k and earns nothing.
+    const cut: KnowledgeUseReport[] = reports.map((report) => ({
+      v: 1, stage: "IMPLEMENT", reported: report.reported,
+      units: report.units.flatMap((unit) => {
         const id = lessonIdOfUnit(unit);
-        if (id === undefined || !input.loaded.has(id) || !input.lessons.has(id)) continue;
-        // The agent said it used it (when it reported), and the change touched the area (the worker's own check of the step; the broker's check of the changed files, when it has them, must agree).
-        const claimed = report.reported ? unit.used === true && unit.areaTouched : unit.areaTouched;
-        if (claimed && (input.touched === undefined || lessonAreaOverlap(input.lessons.get(id)!, input.touched))) eligible.add(id);
-      }
-    }
-  } else {
-    for (const id of input.loaded) {
-      const lesson = input.lessons.get(id);
-      if (lesson !== undefined && lessonAreaOverlap(lesson, input.touched)) eligible.add(id);
-    }
+        if (id === undefined || !input.loaded.has(id) || !input.lessons.has(id) || !unit.areaTouched) return [];
+        if (input.touched !== undefined && !lessonAreaOverlap(input.lessons.get(id)!, input.touched)) return [];
+        return [{ id: `L-${id}`, kind: "lesson" as const, given: "push" as const, areaTouched: true, ...(unit.used === undefined ? {} : { used: unit.used }) }];
+      }),
+    }));
+    const shared = knowledgeCreditShares(cut);
+    return new Map([...shared].map(([shown, share]) => [shown.replace(/^L-/u, ""), share] as const).sort((a, b) => a[0].localeCompare(b[0])));
+  }
+  const eligible = new Set<string>();
+  for (const id of input.loaded) {
+    const lesson = input.lessons.get(id);
+    if (lesson !== undefined && lessonAreaOverlap(lesson, input.touched)) eligible.add(id);
   }
   const share = eligible.size === 0 ? 0 : 1 / eligible.size;
   return new Map([...eligible].sort().map((id) => [id, share] as const));

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { passesFitFloor, fitOrder } from "../../../packages/broker/src/lessons/fit.js";
 import { FIT_FLOOR_COSINE, FIT_FLOOR_WORDS, resolveRanking } from "../../../packages/broker/src/lessons/scoring-settings.js";
+import { lessonTextOf, textHash } from "../../../packages/broker/src/lessons/similarity.js";
 import { NO_FIT_FLOOR, PROJECT, WS, closeEmbedder } from "./lesson-helpers.js";
 import { fitting, ids, unrelated, world } from "./phase12-helpers.js";
 
@@ -72,7 +73,7 @@ describe("what a step is loaded with", () => {
     const none = await w.load();
     expect(ids(none)).toEqual([]);
     // An embedder that finds every text exactly as close as every other: the cosine is 1, over the floor (the lesson's vector is of that embedder's own spec).
-    await w.vectors.put(WS, PROJECT, closeEmbedder.spec, "les_sem00001", { hash: "stale", vector: [1, 0, 0, 0] });
+    await w.vectors.put(WS, PROJECT, closeEmbedder.spec, "les_sem00001", { hash: textHash(lessonTextOf((await w.store.get({ workspaceId: WS, project: PROJECT }, "les_sem00001"))!)), vector: [1, 0, 0, 0] });
     const close = await w.load({ taskId: "task-2" }, { embedder: closeEmbedder });
     expect(ids(close)).toEqual(["les_sem00001"]);
   });

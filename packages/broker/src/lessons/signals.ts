@@ -3,9 +3,8 @@
 // "no signals": the neutral prior, no evidence and nothing under question, which is exactly what a project with no rows has).
 //
 // Only this company's rows for this project are read (each partition is keyed by company AND project and every row is checked again). Read only. Ids and numbers only.
-import { type DocumentStore, type OrgId } from "@agentx/contracts";
+import { companyScoped, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { readAreaMarks } from "./area-check.js";
-import { mergePk } from "./measure.js";
 import { readEvidenceTotals } from "./evidence.js";
 import { readUnderQuestion } from "./revert-question.js";
 import { CLEAN_MERGE_MIN_TASKS, CLEAN_MERGE_WINDOW_DAYS, DEFAULT_RANKING, SIGNALS_ROWS_MAX, SIGNALS_TTL_MS, SIGNALS_WAIT_MS, evidenceWindowMs, type RankingSettings } from "./scoring-settings.js";
@@ -36,7 +35,8 @@ export interface SignalsReader { read(key: ScopeKey): Promise<ProjectSignals | u
 
 /** The project's clean-merge rate from its merged and reverted task rows (`measure.ts`): counted over the window, null while there are too few merged tasks. */
 export async function readCleanMergeRate(store: Pick<DocumentStore, "query">, input: { companyId: OrgId; project: string; now: number; windowDays?: number; rowsMax?: number; minTasks?: number }): Promise<number | null> {
-  const pk = mergePk(input.companyId, input.project);
+  // The partition of the project's merged and reverted task rows (the same key words as `measure.ts` `mergePk`).
+  const pk = companyScoped(input.companyId, `LESSON_MERGE#${input.project}`);
   const since = input.now - (input.windowDays ?? CLEAN_MERGE_WINDOW_DAYS) * DAY;
   const merged = new Set<string>();
   const reverted = new Set<string>();

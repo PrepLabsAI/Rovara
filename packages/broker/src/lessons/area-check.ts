@@ -13,6 +13,8 @@ import type { Lesson } from "./types.js";
 const DAY = 86_400_000;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 const ID = /^[A-Za-z0-9_-]{4,64}$/u;
+/** How long an area mark is read for (the nightly check rewrites it while it holds). */
+export const AREA_CHECK_KEEP_MS = AREA_CHECK_KEEP_DAYS * DAY;
 export type AreaMarkKind = "area_gone" | "area_rewritten";
 const KINDS: ReadonlySet<string> = new Set<AreaMarkKind>(["area_gone", "area_rewritten"]);
 
@@ -61,7 +63,7 @@ export async function runAreaChecks(deps: AreaCheckDeps, key: ScopeKey, options:
   const mark = async (lessonId: string, kind: AreaMarkKind): Promise<void> => {
     await deps.docs.put({
       item: {
-        pk: questionPk(deps.companyId, key.project), sk: `A#${lessonId}#${kind}`, entityType: "LESSON_QUESTION", kind, project: key.project, lessonId, at, keepUntil: at + AREA_CHECK_KEEP_DAYS * DAY,
+        pk: questionPk(deps.companyId, key.project), sk: `A#${lessonId}#${kind}`, entityType: "LESSON_QUESTION", kind, project: key.project, lessonId, at, keepUntil: at + AREA_CHECK_KEEP_MS,
         ...(deps.docs.ttlAttribute === undefined ? {} : { [deps.docs.ttlAttribute]: Math.floor(at / 1000) + AREA_CHECK_KEEP_DAYS * 86_400 }),
       },
     });

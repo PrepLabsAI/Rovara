@@ -89,23 +89,25 @@ describe("what the loader does with the strength", () => {
 
   it("a NEW lesson is not ranked below an old one for age alone (it starts at the project's rate, not at zero)", async () => {
     const w = await world();
-    // Both fit equally. The old lesson has been loaded 20 times with 9 helpful marks and 9 against (a middling record); the new one has none.
-    await w.add(fitting("les_new00001", same), fitting("les_old00001", { ...same, counters: { loaded: 20, helpful: 9, harmful: 9, citationStale: 0 } }));
+    // Both fit equally. The old lesson has been loaded 30 times with 2 helpful marks and 20 against (a poor record, though its Wilson bound is above 0); the new one has none.
+    // (Lessons of identical words are ranked in id order by the similarity step, so the OLD lesson is named to come first on that tie: the new one must win on its strength alone.)
+    await w.add(fitting("les_aold0001", { ...same, counters: { loaded: 30, helpful: 2, harmful: 20, citationStale: 0 } }), fitting("les_znew0001", same));
     const result = await w.load({}, { ranking: { ...NO_FIT_FLOOR, newcomerSlots: 0 } });
-    expect(ids(result)[0]).toBe("les_new00001");
+    expect(ids(result)[0]).toBe("les_znew0001");
     // Under Wilson the new lesson's third of the score was 0 and the middling old lesson's was positive: the old one won on age.
     expect(result.manifest.lessons[0]!.score).toBeGreaterThanOrEqual(result.manifest.lessons[1]!.score);
   });
 
   it("a lesson with evidence rows 'for' outranks an untouched one of equal fit, and one with rows 'against' ranks below it", async () => {
     const w = await world();
-    await w.add(fitting("les_none0001", same), fitting("les_good0001", same), fitting("les_bad00001", same));
+    // (Ids chosen so that the similarity step's id-order tie-break favours the lesson with 'against' rows and disfavours the one with 'for' rows: the evidence has to overcome it.)
+    await w.add(fitting("les_bbbb0001", same), fitting("les_zzzz0001", same), fitting("les_aaaa0001", same));
     for (let i = 0; i < 4; i += 1) {
-      await w.evidence.note({ workspaceId: WS, project: PROJECT, lessonId: "les_good0001", kind: "for", weight: 1, at: w.clock.now() - i * DAY, id: `t${i}` });
-      await w.evidence.note({ workspaceId: WS, project: PROJECT, lessonId: "les_bad00001", kind: "against", weight: 1, at: w.clock.now() - i * DAY, id: `m${i}` });
+      await w.evidence.note({ workspaceId: WS, project: PROJECT, lessonId: "les_zzzz0001", kind: "for", weight: 1, at: w.clock.now() - i * DAY, id: `t${i}` });
+      await w.evidence.note({ workspaceId: WS, project: PROJECT, lessonId: "les_aaaa0001", kind: "against", weight: 1, at: w.clock.now() - i * DAY, id: `m${i}` });
     }
     const order = ids(await w.load({}, { ranking: { ...NO_FIT_FLOOR, newcomerSlots: 0 } }));
-    expect(order).toEqual(["les_good0001", "les_none0001", "les_bad00001"]);
+    expect(order).toEqual(["les_zzzz0001", "les_bbbb0001", "les_aaaa0001"]);
   });
 
   it("the prior follows the project's clean-merge rate: with the same evidence a lesson ranks higher in a project that merges clean than in one that does not", async () => {

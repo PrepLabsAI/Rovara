@@ -21,6 +21,7 @@ import type { LocalToolsSettingsStore } from "./local-tools.js";
 import { documentLessonVectors } from "./document-vectors.js";
 import { documentMeasureSink } from "./measure.js";
 import { documentEvidenceSink, type EvidenceSink } from "./evidence.js";
+import { readTaskUseReports } from "./use-reports.js";
 import { cachedSignalsReader, weeklyExtrasOf, type SignalsReader } from "./signals.js";
 import { modelCorrectionJudge } from "./judge-model.js";
 import type { LoadDeps } from "./load.js";
@@ -154,7 +155,7 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   const evidence = documentEvidenceSink(input.store, input.companyId);
   const load: LoadDeps = { ...base, store, embedder, vectors, settings, access, measure: documentMeasureSink(input.store, input.companyId, input.now), signals };
   const outcomeJudge = model === undefined || input.spend === undefined ? REFUSING_JUDGE : modelCorrectionJudge({ model, spend, pause, edition });
-  const counters: CounterDeps = { ...base, store, judge: outcomeJudge, settings, vectors, evidence };
+  const counters: CounterDeps = { ...base, store, judge: outcomeJudge, settings, vectors, evidence, useReports: (key, taskId) => readTaskUseReports(input.store, { companyId: input.companyId, project: key.project, taskId }) };
   const process: ProcessDeps = {
     ...base, store, judgeModel, spend, pause, edition, embedder, vectors, access, verifier, facts, settings,
     // The project's own repositories, read live when a lesson is tiered or put on trial; no port or an unreadable definition is "not known", which leaves a repository-restricted lesson restricted.

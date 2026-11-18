@@ -42,7 +42,7 @@ import type { ModelSelectionService } from "../model-selection/service.js";
 import type { UsableModels } from "../model-selection/usable-models.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
-import type { LearnedContext, WikiContext } from "@agentx/contracts";
+import type { KnowledgeContext, LearnedContext, WikiContext } from "@agentx/contracts";
 import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
@@ -378,8 +378,10 @@ export interface TaskFlowDeps {
   /**
    * The lessons a step is given: asked when the step's invocation is built, only for a task step. `features` are the worker's. The answer is the worker's `learnedContext` or none; it never throws into the dispatch, and a slow
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
+   * Lead 4 L4-AK2: for a worker that lists "task.knowledgeContext.v1" the answer may also carry the `knowledgeContext` (facts, skill names, the "more" line, the look-up's pull set), and a fix round passes the correction's
+   * words in `fix` so the lessons are picked again by them (ranking only).
    */
-  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
+  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }) => Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
   /**
    * The project wiki a step is given (lead 4 A1): asked when the step's invocation is built, only for a task step whose worker lists "task.wikiContext.v1". The caller passes the task's OWN project (from the
    * workspace record), its task id and the repositories of the revision it runs on; the answer is the worker's `wikiContext` or none, built from the company's wiki as it is at that moment. It never throws into the

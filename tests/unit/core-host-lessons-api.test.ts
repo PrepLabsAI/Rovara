@@ -76,7 +76,7 @@ async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" })
     built?.attach();
     if (built !== undefined) lessons.set(companyId, built);
     const principal = localOwnerPrincipal({ companyId });
-    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint and wrap network calls in withRetry", workflow: true, workflowPath: "QUICK" });
     tasks.set(companyId, task.taskId);
     spaces.set(companyId, task.workspaceId);
   }

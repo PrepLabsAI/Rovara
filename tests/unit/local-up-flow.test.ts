@@ -17,6 +17,7 @@ import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bind
 import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
 import { planDocument } from "../support/plan-documents.js";
+import { maximal as knowledgeFixture } from "./knowledge-wiring/fixtures.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
@@ -334,6 +335,26 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
       // The switch off: the next step carries none.
       await setWikiAgentSwitch(options, "payments", false);
       expect(await createWikiForStep(options)({ companyId: IMPLICIT_COMPANY_ID, project: "payments", taskId: started.body.task.taskId, operationId: "aaaaaaaa-1111-4111-8111-111111111111", workflowMode: "PLAN", repositories: ["demo"] })).toEqual({});
+    }
+  });
+
+  it("lead 4 L4-AK2: a step is sent the knowledge context only when its worker lists the feature, and a context the schema refuses never blocks the step", async () => {
+    for (const [features, kind] of [[undefined, "valid"], [[...WORKER_INVOCATION_FEATURES].filter((feature) => feature !== "task.knowledgeContext.v1"), "valid"], [undefined, "invalid"]] as const) {
+      const h = await launch(features === undefined ? {} : { features });
+      expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
+      const flow = h.runtime.app.flow.deps;
+      flow.learned = async () => ({ knowledgeContext: (kind === "valid" ? knowledgeFixture("UNDERSTAND") : { v: 1, nonsense: true }) as never });
+      const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "44444444-4444-4444-8444-444444444444", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+      const store = h.runtime.registry.require("storage");
+      const workspaceId = (await store.get({ pk: `DEVTASK#${started.body.task.taskId}`, sk: "META" }))!["workspaceId"] as string;
+      const seen = new Set<string>();
+      const prepare = await h.nextJob(workspaceId, seen);
+      expect((await h.callback(prepare, "result", { status: "SUCCEEDED", result: {} })).status).toBe(200);
+      const understand = await h.nextJob(workspaceId, seen);
+      expect(understand).toMatchObject({ kind: "task", payload: { workflowMode: "UNDERSTAND" } });
+      const sent = (understand.payload as Record<string, unknown>)["knowledgeContext"] as { stage: string; pull?: { units: unknown[] } } | undefined;
+      if (features === undefined && kind === "valid") { expect(sent?.stage).toBe("UNDERSTAND"); expect(sent?.pull?.units.length).toBeGreaterThan(0); }
+      else expect(sent).toBeUndefined();
     }
   });
 
