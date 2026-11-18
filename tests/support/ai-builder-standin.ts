@@ -3,6 +3,7 @@
 // measurement, the question-level comparison, the changed-prompt classifier. Only the model (a local stub), the money (a scripted meter) and the sandbox (a plain child process in a
 // checkout) are stand-ins.
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -19,6 +20,7 @@ import { candidatePromptChanges, changedPromptClassifier } from "../../packages/
 import type { EvalFinalCheckPlan, EvalFinalCheckPorts } from "../../packages/worker/src/verification/eval-final-check.js";
 import { createEvalMeter } from "../../packages/worker/src/verification/eval-model-access.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
+import { EvalSandboxRunFailure, diagnoseEvalFailure } from "../../packages/worker/src/verification/eval-run-diagnostic.js";
 import { createEvalRunner, type EvalSandboxExec, type EvalSandboxRequest } from "../../packages/worker/src/verification/eval-runner.js";
 import { answer, classAnswer, scriptedAccess } from "./eval-model-access.js";
 
@@ -37,6 +39,45 @@ export const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 /** A clean environment for the project's own commands: no secrets, no bytecode written, no home directory writes. */
 const cleanEnv = (extra: Record<string, string>): NodeJS.ProcessEnv => ({ PATH: process.env["PATH"] ?? "", PYTHONDONTWRITEBYTECODE: "1", PYTHONHASHSEED: "0", HOME: tmpdir(), ...extra });
+
+/**
+ * L4-EVS: the stand-in's "saved environment": a folder that holds the project's one third-party package (PyYAML, `requirements.txt`) the way an installed environment does. Offline there is no PyPI, so it holds a
+ * tiny stand-in module with the same name and the one function the eval command uses (`safe_load` of flat `key: value` lines). The eval command is run with `python3 -S` (no site-packages of the machine at all, as in
+ * the sealed worker image, which has python3 and pip and nothing else) and `PYTHONPATH` set to this folder for a world that has the saved environment, so the result never depends on what this Mac has installed.
+ */
+const YAML_STAND_IN = [
+  "def safe_load(text):",
+  "    out = {}",
+  "    for line in text.splitlines():",
+  "        line = line.split('#', 1)[0].strip()",
+  "        if not line or ':' not in line:",
+  "            continue",
+  "        key, value = line.split(':', 1)",
+  "        value = value.strip()",
+  "        try:",
+  "            out[key.strip()] = float(value) if '.' in value else int(value)",
+  "        except ValueError:",
+  "            out[key.strip()] = value",
+  "    return out",
+  "",
+].join("\n");
+export function createSavedEnvironment(): { readonly path: string; remove(): void } {
+  const path = mkdtempSync(join(tmpdir(), "vx-saved-env-"));
+  writeFileSync(join(path, "yaml.py"), YAML_STAND_IN);
+  return { path, remove: () => rmSync(path, { recursive: true, force: true }) };
+}
+let sharedSavedEnvironment: ReturnType<typeof createSavedEnvironment> | undefined;
+/** One per process, for the commands the tests run directly (the team's gate, a plain eval run); removed when the process ends. */
+export function savedEnvironmentPath(): string {
+  if (sharedSavedEnvironment === undefined) { sharedSavedEnvironment = createSavedEnvironment(); process.once("exit", () => sharedSavedEnvironment?.remove()); }
+  return sharedSavedEnvironment.path;
+}
+/** The eval command's own interpreter flags: no site-packages of the machine. */
+export const EVAL_PYTHON_FLAGS = ["-S"] as const;
+/** Run the project's eval command (`python3 -S evals/run.py ...`) in a checkout, with or without the saved environment. */
+export function evalRun(dir: string, args: string[], env: Record<string, string> = {}, saved = true): Run {
+  return runProject(dir, PYTHON, [...EVAL_PYTHON_FLAGS, ...args], { ...(saved ? { PYTHONPATH: savedEnvironmentPath() } : {}), ...env });
+}
 
 export interface StandInRepo {
   readonly root: string;
@@ -79,7 +120,7 @@ export function runProject(dir: string, command: string, args: string[], env: Re
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 export const unitTests = (dir: string): Run => runProject(dir, PYTHON, ["-m", "unittest", "discover", "-s", "tests", "-t", "."]);
-export const teamGate = (dir: string): Run => runProject(dir, PYTHON, ["evals/run.py", "--gate"], { DESKBOT_FAKE_VERTEX: "1" });
+export const teamGate = (dir: string, saved = true): Run => evalRun(dir, ["evals/run.py", "--gate"], { DESKBOT_FAKE_VERTEX: "1" }, saved);
 
 /** The fake Vertex endpoint, started from the sample's own `fake_vertex/server.py` as a child process on a free port. */
 export interface FakeVertex { readonly endpoint: string; readonly requests: () => Promise<number>; stop(): Promise<void> }
@@ -136,6 +177,8 @@ export interface StandInWorldOptions {
   transport?: Transport;
   /** The sample's change patch for the candidate (a file under changes/), or undefined for no change. */
   patch?: string | undefined;
+  /** Whether the eval runs in the project's saved environment (its PyYAML installed) or in the bare sandbox (nothing but the standard library). Default "saved". */
+  environment?: "saved" | "bare";
   /** Refuse every model call with this class, as the stage's gateway would. */
   providerClass?: "rate_limit" | "provider_error" | undefined;
 }
@@ -151,6 +194,8 @@ export interface StandInWorld {
   /** Every frame the eval's model calls produced, with what the real route check said about it. */
   readonly frames: Array<{ side: "old" | "new"; row: string; path: string; routed: boolean; refusal?: string | undefined }>;
   readonly sides: Array<{ side: "old" | "new"; runs: number; ids: readonly string[]; exitCode: number | null }>;
+  /** The saved environment this world's eval runs with (undefined for a bare world). */
+  readonly savedEnvironment: string | undefined;
   readonly fake: FakeVertex;
   cleanup(): Promise<void>;
 }
@@ -164,12 +209,15 @@ const readBody = (request: IncomingMessage): Promise<Buffer> => new Promise((res
 export async function createStandInWorld(options: StandInWorldOptions = {}): Promise<StandInWorld> {
   const repo = await createStandInRepo();
   let fake: FakeVertex | undefined;
-  try { return await buildWorld(options, repo, started => { fake = started; }); }
-  catch (error) { await fake?.stop(); await rm(repo.root, { recursive: true, force: true }); throw error; }
+  const removers: Array<() => void> = [];
+  try { return await buildWorld(options, repo, started => { fake = started; }, remove => { removers.push(remove); }); }
+  catch (error) { await fake?.stop(); removers.forEach(remove => remove()); await rm(repo.root, { recursive: true, force: true }); throw error; }
 }
 
-async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFake: (fake: FakeVertex) => void): Promise<StandInWorld> {
+async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFake: (fake: FakeVertex) => void, onCleanup: (remove: () => void) => void): Promise<StandInWorld> {
   const transport = options.transport ?? "gemini";
+  const saved = options.environment === "bare" ? undefined : createSavedEnvironment();
+  onCleanup(() => saved?.remove());
   const candidate = repo.candidate(options.patch, "candidate");
   const baseDir = await checkout(repo, repo.baseSha, "base");
   const candidateDir = await checkout(repo, candidate.commitSha, "candidate");
@@ -223,17 +271,23 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
       // The variables Rovara's fresh check sandbox sets (freshEvalEnvironment): the Gemini client's base URL and placeholder keys, side, runs, ids. Nothing for Vertex.
       const env = cleanEnv({
         ROVARA_EVAL_SIDE: request.side, ROVARA_EVAL_RUNS: String(request.runs), ROVARA_EVAL_IDS: request.ids.join(","),
+        ...(saved === undefined ? {} : { PYTHONPATH: saved.path }),
         ...(transport === "gemini" ? { GOOGLE_GEMINI_BASE_URL: base, GEMINI_API_KEY: "rovara-test-key", GOOGLE_API_KEY: "rovara-test-key" } : { VERTEX_API_ENDPOINT: base }),
       });
       const notBeforeMs = Date.now() - 1000;
+      let stderrTail = "";
       try {
         const exitCode = await new Promise<number | null>((resolve, reject) => {
-          const child = spawn(EVAL_COMMAND.executable, [...EVAL_COMMAND.args], { cwd: join(dir, EVAL_COMMAND.cwd), env, stdio: "ignore" });
+          // The bare sandbox shape: `-S` (no site-packages of this machine), stderr kept (its last 16 KB) the way the sandbox's capped log is, never shown raw.
+          const child = spawn(EVAL_COMMAND.executable, [...EVAL_PYTHON_FLAGS, ...EVAL_COMMAND.args], { cwd: join(dir, EVAL_COMMAND.cwd), env, stdio: ["ignore", "ignore", "pipe"] });
+          child.stderr.on("data", (chunk: Buffer) => { stderrTail = (stderrTail + chunk.toString("utf8")).slice(-16_384); });
           const stop = () => child.kill("SIGKILL");
           request.signal.addEventListener("abort", stop, { once: true });
           child.once("error", reject); child.once("exit", code => { request.signal.removeEventListener("abort", stop); resolve(code); });
         });
         sides.push({ side: request.side, runs: request.runs, ids: request.ids, exitCode });
+        // What the real sandbox does: a command that failed and left no report is a failed run with a named, redacted cause (the diagnostic), never a half result.
+        if (exitCode !== 0 && !existsSync(join(dir, EVAL_REPORT.cwd, EVAL_REPORT.argument))) throw new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "run", exitCode: exitCode ?? undefined, output: stderrTail, secrets: ["runtoken", "rovara-test-key"] }));
       } finally { await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }); }
       return {
         report: { root: dir, cwd: EVAL_REPORT.cwd, argument: EVAL_REPORT.argument, notBeforeMs },
@@ -262,7 +316,7 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
     meter: createEvalMeter(access.access), cache, baselines: createEvalBaselines(), runner: createEvalRunner(exec),
   };
   return {
-    repo, baseDir, candidateDir, candidate, ports, plan, grant, cache, frames, sides, fake,
-    cleanup: async () => { await fake.stop(); await rm(repo.root, { recursive: true, force: true }); },
+    repo, baseDir, candidateDir, candidate, ports, plan, grant, cache, frames, sides, fake, savedEnvironment: saved?.path,
+    cleanup: async () => { await fake.stop(); saved?.remove(); await rm(repo.root, { recursive: true, force: true }); },
   };
 }

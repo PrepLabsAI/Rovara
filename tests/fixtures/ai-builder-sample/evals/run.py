@@ -20,6 +20,8 @@ import os
 import sys
 from pathlib import Path
 
+import yaml  # the one third-party package: requirements.txt (PyYAML)
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -28,8 +30,9 @@ from deskbot.vertex_client import GeminiApiClient, ModelError, VertexClient  # n
 from evals.support.scoring import judge  # noqa: E402
 
 CASES_DIR = ROOT / "evals" / "support" / "cases"
-THRESHOLD = 0.9
-MODEL = os.environ.get("DESKBOT_MODEL", "gemini-2.5-flash")
+CONFIG = yaml.safe_load((ROOT / "evals" / "config.yaml").read_text(encoding="utf-8"))
+THRESHOLD = float(CONFIG["threshold"])
+MODEL = os.environ.get("DESKBOT_MODEL", CONFIG["model"])
 
 
 def load_cases() -> list:
