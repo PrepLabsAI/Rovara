@@ -53,7 +53,8 @@ async function world(options: { bindings?: false } = {}) {
   const sent: unknown[] = [];
   const send = h.db.send.bind(h.db);
   h.db.send = vi.fn(async (command: unknown) => { sent.push(command); return send(command as never); });
-  const revision = (id: string) => h.db.get(`PROJECT#${id}`, "REV#000000000001");
+  // DEC 254zzz80: a project's first revision, wherever it is: a named company's own partition (`ORG#<company>#PROJECT#<id>`), else the legacy row.
+  const revision = (id: string) => h.db.find((item) => item.sk === "REV#000000000001" && typeof item.pk === "string" && (item.pk === `PROJECT#${id}` || /^ORG#[^#]+#PROJECT#/.test(item.pk) && item.pk.endsWith(`#PROJECT#${id}`)))[0];
   const projectRows = () => h.db.find((item) => typeof item.pk === "string" && (item.pk.startsWith("PROJECT#") || item.pk.includes("#PROJECT_CATALOG") || item.pk.includes("#PROJECT_NAME") || item.pk.startsWith("MEMBER#") || item.pk.includes("#MEMBER#") || item.pk.includes("#PROJECT#")));
   return { ...h, deps, clientProjects, companyOf, sent, revision, projectRows, as: (next: string) => { company = next; } };
 }
@@ -200,15 +201,23 @@ describe("the claim is taken in the registration's own transaction", () => {
 describe("the Rovara administrator's create is unchanged", () => {
   it("without per-company naming: id == name, the global check, no claim row", async () => {
     const h = await world();
-    expect(await h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] })).toEqual({ name: "web", latestRevision: 1 });
-    expect(await h.deps.createClientProject(PERSON, { repository: "acme-a/api" })).toEqual({ name: "api", latestRevision: 1 });
+    // The create answers the company it wrote in (DEC 254zzz80: the route reads the project back there).
+    expect(await h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] })).toEqual({ name: "web", latestRevision: 1, companyId: A });
+    expect(await h.deps.createClientProject(PERSON, { repository: "acme-a/api" })).toEqual({ name: "api", latestRevision: 1, companyId: A });
     expect(h.db.find((item) => typeof item.pk === "string" && item.pk.includes("#PROJECT_NAME"))).toEqual([]);
+    // The same company's second web or api: taken, in today's words (its own partition holds them).
+    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] }))).toBe("name_taken");
+    await expect(h.deps.createClientProject(PERSON, { repository: "acme-a/api" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: a project named api already exists; choose another name" });
+    expect((await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-a/api"] })).results).toEqual([{ repository: "acme-a/api", outcome: "refused", reason: "name_taken" }]);
+    // A name in the install's legacy rows (the shared namespace) is still taken for every company.
+    h.db.set({ pk: "PROJECT#docs", sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "docs", revision: 1 } });
     h.as(B);
-    // Today's shared namespace, for the administrator only: B's administrator is refused A's web.
-    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] }))).toBe("name_taken");
-    await expect(h.deps.createClientProject(PERSON, { repository: "acme-b/api" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: a project named api already exists; choose another name" });
-    const bulk = await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-b/api"] });
-    expect(bulk.results).toEqual([{ repository: "acme-b/api", outcome: "refused", reason: "name_taken" }]);
+    expect(await reason(h.deps.createClientProject(PERSON, { repository: "acme-b/web", name: "docs" }))).toBe("CONFIG_INVALID");
+    // DEC 254zzz80: a named company's projects live in its own partition, so B's administrator creates B's own web and api (two companies, one name).
+    expect(await h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] })).toEqual({ name: "web", latestRevision: 1, companyId: B });
+    expect((await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-b/api"] })).results).toEqual([{ repository: "acme-b/api", outcome: "created", project: "api" }]);
+    expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")?.companyId).toBe(A);
+    expect(h.db.get(`ORG#${B}#PROJECT#web`, "REV#000000000001")?.companyId).toBe(B);
   });
 });
 

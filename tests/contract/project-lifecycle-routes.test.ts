@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentXError, IMPLICIT_COMPANY_ID, ReviewedProjectArchiveOutcomeSchema, ReviewedProjectArchivePreviewSchema, ReviewedProjectRestoreOutcomeSchema, ReviewedProjectRestorePreviewSchema, SLACK_CHANNEL, channelBindingPartition, orgProjectCatalogKey, projectMetaKey, projectRevisionKey } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
+import { namedCompany, revisionKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { ARCHIVE_NOT_ON_ENGINE, LIFECYCLE_BODY, LIFECYCLE_NOT_ALLOWED, LIFECYCLE_STALE, LIFECYCLE_UNREADABLE, lifecycleAccess, lifecycleAuditPrefix, lifecycleRequestKey, routeProjectLifecycle } from "../../packages/broker/src/aws/project-lifecycle-routes.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
@@ -36,7 +37,11 @@ function harness(options: { companies?: boolean; fullAccess?: boolean; engine?: 
   // DEC 254zzz80: each person's live company decides where their grants live (a named company's own partition; the implicit company or none: the legacy row).
   const companyOfPerson = new Map<string, string>();
   const join = (id: string, companyId: string, role: "owner" | "admin" | "member", revoked = false) => (companyOfPerson.set(id, companyId), db.set({ pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME, ...(revoked ? { revokedAt: TIME } : {}) }));
-  const project = (name: string, companyId: string | undefined, revision = 1) => db.set({ pk: `PROJECT#${name}`, sk: `REV#${String(revision).padStart(12, "0")}`, entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision } });
+  // DEC 254zzz80 (R2-F1): a NAMED company's project lives in its own partition (`revisionKeyFor`, a schema-valid definition, as the core writes it); the built-in company's and an
+  // unstamped project keep the legacy row.
+  const project = (name: string, companyId: string | undefined, revision = 1) => namedCompany(companyId) !== undefined
+    ? db.set({ ...revisionKeyFor(companyId, name, revision), entityType: "PROJECT", definition: { ...definition, name, revision } })
+    : db.set({ pk: `PROJECT#${name}`, sk: `REV#${String(revision).padStart(12, "0")}`, entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision } });
   const grantPk = (id: string) => { const companyId = companyOfPerson.get(id); return companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? `MEMBER#${id}` : `ORG#${companyId}#MEMBER#${id}`; };
   const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: grantPk(id), sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
   vi.spyOn(console, "log").mockImplementation(() => undefined);

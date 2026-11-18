@@ -5,6 +5,8 @@ import { LEGACY_KEY_SCOPE, scopedProjectPk } from "../../packages/broker/src/e2e
 import { routeLinkingRequest } from "../../packages/broker/src/aws/developer-routes.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyRouteHarness, PERSON, TASK, TIME } from "../support/company-route-harness.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
+import { namedCompany } from "../../packages/broker/src/aws/company-layout.js";
 
 const projectPath = "/v1/dev/client/projects/shared-project";
 const taskPaths = ["messages", "comments", "diff?repository=api&number=1"].map((part) => `/v1/dev/tasks/${TASK}/${part}`);
@@ -46,6 +48,8 @@ function harness(companyId?: string) {
     h.project(company);
     const row = h.db.get("PROJECT#shared-project", "REV#000000000001")!;
     h.db.set({ ...row, definition: { name: "shared-project", revision: 1, repositories: [{ name: "api", url: "https://github.com/example/api.git", defaultBranch: "main" }] } });
+    // DEC 254zzz80: and in a named company's own partition, with the same repository.
+    if (typeof company === "string" && namedCompany(company) !== undefined) h.db.set(companyProjectRow(company, "shared-project", 1, { repositories: [{ name: "api", url: "https://github.com/example/api.git", defaultBranch: "main" }] }));
     if (administrator) h.db.set({ pk: grantPk(company), sk: "PROJECT#shared-project", projectName: "shared-project", role: "administrator" });
   };
   return { ...h, call, project, bearer, companyOf, signInAs };
@@ -102,12 +106,17 @@ describe("merge-up membership-resolved reads", () => {
   it("checks the final project revision even if it changes after access was read", async () => {
     const h = harness(COMPANY_A.orgId); h.project(COMPANY_A.orgId);
     const send = h.deps.documentClient.send.bind(h.deps.documentClient);
+    // DEC 254zzz80: A's project is in A's own partition; the access list reads it first, then the detail read reads it again. Between the two, the row turns into one
+    // that names company B (drift): the detail read must see it and answer "not found".
+    const ownPk = `ORG#${COMPANY_A.orgId}#PROJECT#shared-project`;
+    let reads = 0;
     h.deps.documentClient = { send: async (command: unknown) => {
       const input = (command as { input: { ProjectionExpression?: string; ExpressionAttributeValues?: Record<string, unknown> } }).input;
-      if (input.ExpressionAttributeValues?.[":rev"] === "REV#" && input.ProjectionExpression === undefined) h.project(COMPANY_B.orgId);
+      if (input.ExpressionAttributeValues?.[":rev"] === "REV#" && input.ExpressionAttributeValues[":pk"] === ownPk && ++reads === 2) h.db.set({ ...h.db.get(ownPk, "REV#000000000001")!, companyId: COMPANY_B.orgId });
       return send(command);
     } };
     expect((await h.call()).statusCode).toBe(404);
+    expect(reads).toBe(2);
   });
   it("bounds all access-list and detail reads as one call, without a partial answer", async () => {
     const h = harness(COMPANY_A.orgId); h.project(COMPANY_A.orgId);
@@ -175,9 +184,12 @@ describe("named T-lane known gaps (not isolation claims)", () => {
     expect((await h.call("/v1/dev/client/projects", "POST", { repository: "example/api" })).statusCode).toBe(404);
     expect(h.deps.createClientProject).toHaveBeenCalledExactlyOnceWith(PERSON, { repository: "example/api" });
   });
-  it.each(["GET", "PUT", "DELETE"])("T2/T3 client member %s still operates across company boundaries", async (method) => {
+  it.each(["GET", "PUT", "DELETE"])("T2/T3 client member %s across company boundaries: closed by DEC 254zzz80 (a named caller's project is only its own partition's)", async (method) => {
     const h = harness(COMPANY_B.orgId); h.project(COMPANY_A.orgId);
     h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, developerId: PERSON, displayName: "Test Person", revoked: false });
+    expect((await h.call(`${projectPath}/members${method === "GET" ? "" : `/${PERSON}`}`, method)).statusCode).toBe(404);
+    // Control: the same caller on its own company's project of that name operates.
+    h.project(COMPANY_B.orgId);
     expect((await h.call(`${projectPath}/members${method === "GET" ? "" : `/${PERSON}`}`, method)).statusCode).toBe(200);
   });
   it.each(["messages", "comments"])("T2 task POST %s does not resolve supplied membership", async (kind) => {

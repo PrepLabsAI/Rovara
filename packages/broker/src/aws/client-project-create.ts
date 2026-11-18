@@ -13,6 +13,7 @@ import { AgentXError, errorStatus, orgProjectCatalogPk, type AgentXErrorCode, Or
   type BulkProjectRefusal, type ClientRepositoriesResponse, type ClientRepositoryChoicesResponse } from "@agentx/contracts";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { recordInCompany, type boundedCompanyReads, type CompanyMembershipReader } from "./company-check.js";
+import { namedCompany, namedCompanyLatestRevisionRow } from "./company-layout.js";
 import type { GithubInstallationBindings } from "./github-credentials.js";
 
 /** The one answer for a repository the caller's company may not use (multi-repository create). Names no repository and no cause. */
@@ -161,12 +162,13 @@ export async function projectsByRepository(store: { send(command: unknown): Prom
     cursor = page.LastEvaluatedKey;
   } while (cursor !== undefined);
   const marks = new Map<string, string[]>();
+  // DEC 254zzz80: a named company's projects are read from its own partition (company-layout.ts checks it); the legacy rows keep their stored-company check.
+  const named = namedCompany(companyId);
   await eachLimited(names, LOOKUP_CONCURRENCY, async (name) => {
-    const latest = await budget.client.send(new QueryCommand({ TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
-      ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true })) as { Items?: unknown[] };
-    const record = latest.Items?.[0] as { definition?: { name?: unknown; repositories?: unknown } } | undefined;
+    const record = (named !== undefined ? await namedCompanyLatestRevisionRow(budget.client, tableName, named, name) : ((await budget.client.send(new QueryCommand({ TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true })) as { Items?: unknown[] }).Items?.[0])) as { definition?: { name?: unknown; repositories?: unknown } } | undefined;
     // A catalog row whose project is missing or not the company's marks nothing.
-    if (record === undefined || !recordInCompany(record, companyId) || record.definition?.name !== name || !Array.isArray(record.definition.repositories)) return;
+    if (record === undefined || (named === undefined && !recordInCompany(record, companyId)) || record.definition?.name !== name || !Array.isArray(record.definition.repositories)) return;
     for (const repository of record.definition.repositories as Array<{ url?: unknown }>) {
       const key = typeof repository?.url === "string" ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(repository.url) : null;
       if (key === null) continue;

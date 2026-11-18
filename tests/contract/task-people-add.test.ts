@@ -17,6 +17,7 @@ import { addTaskWebPerson, confirmTaskPeopleProposal, getTaskPeopleCandidates, t
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 import { T0, TEAM } from "../support/developer-fakes.js";
 
 const TASK_A = "44444444-4444-4444-8444-444444444444";
@@ -168,7 +169,7 @@ describe("candidates: the read budget on the route wiring", () => {
     const db = new FakeDynamoDb();
     const meta = webTask();
     db.set(meta as unknown as Record<string, unknown>);
-    db.set({ pk: "PROJECT#payments", sk: "REV#000000000007", companyId: COMPANY_A, definition: { revision: 7 } });
+    db.set(companyProjectRow(COMPANY_A, "payments", 7)); // DEC 254zzz80: the project in its company's own partition
     const KAI_ID = ownerKeyForSubject(GH, "gh-kai");
     const people = [
       record(WREN_ID, "cloud", CLOUD, "wren-7", "Wren Cloud"),
@@ -198,7 +199,7 @@ describe("candidates: the read budget on the route wiring", () => {
     const { deps, meta, queries } = routeWorld();
     const listed = await deps.listTaskWebCandidates!(meta, 200);
     expect(listed.candidates.length).toBeGreaterThanOrEqual(2);
-    expect(queries.filter((query) => query.pk === "PROJECT#payments")).toHaveLength(1);
+    expect(queries.filter((query) => query.pk === `ORG#${COMPANY_A}#PROJECT#payments`)).toHaveLength(1);
   });
 
   it("leaves out a person whose grant rows exceed the cap, and keeps the others", async () => {

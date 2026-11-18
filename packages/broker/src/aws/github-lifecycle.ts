@@ -12,10 +12,11 @@
 //   - GitHub's page where the installation itself is removed, for the disconnect answer.
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { AgentXNameSchema, agentXError, companyLog, PROJECT_CATALOG_PK } from "@agentx/contracts";
+import { AgentXNameSchema, agentXError, companyLog, orgProjectCatalogPk, PROJECT_CATALOG_PK } from "@agentx/contracts";
 import { parseGitHubRepository } from "../github-app.js";
 import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
 import { boundedCompanyReads, recordInCompany } from "./company-check.js";
+import { namedCompany, namedCompanyLatestRevisionRow } from "./company-layout.js";
 import { REPOSITORY_MOVES_MAX, repositoryFullName, type GithubInstallationBindings, type LifecycleAction } from "./github-credentials.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError } from "./github-webhooks.js";
 
@@ -177,11 +178,13 @@ export function repositoryUsesInstallation(repository: unknown, installation: { 
 export async function projectsUsingInstallation(deps: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number }, companyId: string,
   installation: { installationId: number; accountLogin: string; ownerElsewhere?: boolean }): Promise<string[]> {
   const budget = boundedCompanyReads(deps.documentClient, deps.now);
+  // DEC 254zzz80: a named company's projects live only in its own partition: its own catalog, and each project's latest revision there (company-layout.ts checks the partition).
+  const named = namedCompany(companyId);
   const names: string[] = [];
   let startKey: Record<string, unknown> | undefined;
   do {
     const page = await budget.client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-      ExpressionAttributeValues: { ":pk": PROJECT_CATALOG_PK, ":prefix": "PROJECT#" }, ConsistentRead: true, Limit: CATALOG_PAGE,
+      ExpressionAttributeValues: { ":pk": named === undefined ? PROJECT_CATALOG_PK : orgProjectCatalogPk(named), ":prefix": "PROJECT#" }, ConsistentRead: true, Limit: CATALOG_PAGE,
       ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }) })) as { Items?: Array<{ sk?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
     for (const item of page.Items ?? []) {
       const name = typeof item.sk === "string" && item.sk.startsWith("PROJECT#") ? AgentXNameSchema.safeParse(item.sk.slice("PROJECT#".length)) : undefined;
@@ -195,13 +198,16 @@ export async function projectsUsingInstallation(deps: { documentClient: { send(c
   for (let index = 0; index < names.length; index += READS_AT_ONCE) {
     const batch = names.slice(index, index + READS_AT_ONCE);
     const latest = await Promise.all(batch.map(async (name) => {
+      if (named !== undefined) return namedCompanyLatestRevisionRow(budget.client, deps.tableName, named, name);
       const response = await budget.client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
         ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
       return response.Items?.[0];
     }));
     batch.forEach((name, offset) => {
       const row = latest[offset];
-      if (row === undefined || !recordInCompany(row, companyId)) return;
+      // A named company's catalog entry with no usable revision (unreadable, or drift naming another company) counts as using it, as an unreadable legacy revision does: fail closed.
+      if (named !== undefined && row === undefined) { using.push(name); return; }
+      if (row === undefined || (named === undefined && !recordInCompany(row, companyId))) return;
       const repositories = (row as { definition?: { repositories?: unknown } }).definition?.repositories;
       if (!Array.isArray(repositories) || repositories.some((repository) => repositoryUsesInstallation(repository, installation))) using.push(name);
     });

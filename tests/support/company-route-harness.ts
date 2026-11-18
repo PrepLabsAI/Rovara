@@ -3,6 +3,8 @@ import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../pa
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
+import { namedCompany } from "../../packages/broker/src/aws/company-layout.js";
+import { companyProjectRow } from "./company-layout-projects.js";
 
 export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects",
   "GET /v1/dev/client/repositories", "POST /v1/dev/client/projects", "POST /v1/dev/client/projects/bulk", "GET /v1/dev/client/repositories/available",
@@ -61,6 +63,8 @@ export function companyRouteHarness() {
   };
   const project = (companyId?: unknown, access: "grant" | "channel" | "none" = "grant", name = "shared-project") => {
     db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, ...(companyId === undefined ? {} : { companyId }) });
+    // DEC 254zzz80 (R2-F1): a NAMED company's project readers read its own partition; the legacy row above stays for the readers that still read the install's rows.
+    if (typeof companyId === "string" && namedCompany(companyId) !== undefined) db.set(companyProjectRow(companyId, name, 1));
     // DEC 254zzz80: the grant lives where the project's company keeps grants (a named company's own partition; the built-in company and none: the legacy row).
     const named = typeof companyId === "string" && companyId !== IMPLICIT_COMPANY_ID && /^org_[0-9a-z]{20}$/.test(companyId);
     if (access === "grant") db.set({ pk: named ? `ORG#${companyId}#MEMBER#${PERSON}` : `MEMBER#${PERSON}`, sk: `PROJECT#${name}`, projectName: name, role: "developer" });

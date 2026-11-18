@@ -22,10 +22,11 @@
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  AGENTX_NAME_PATTERN, OrgIdSchema, ReviewedProjectArchiveBodySchema, ReviewedProjectRestoreBodySchema, agentXError, companyScoped, projectMetaKey,
+  AGENTX_NAME_PATTERN, OrgIdSchema, ReviewedProjectArchiveBodySchema, ReviewedProjectRestoreBodySchema, agentXError, companyScoped, orgProjectCatalogKey, projectMetaKey,
   type OrgId, type OrgRole, type ReviewedProjectArchiveOutcome, type ReviewedProjectArchivePreview, type ReviewedProjectRestoreOutcome, type ReviewedProjectRestorePreview,
 } from "@agentx/contracts";
 import { recordInCompany } from "./company-check.js";
+import { namedCompany, namedCompanyLatestRevisionRow, revisionKeyFor } from "./company-layout.js";
 import { projectKey } from "./project-records.js";
 
 export const LIFECYCLE_NOT_FOUND = "project not found";
@@ -94,13 +95,14 @@ async function readCurrent(ctx: ProjectLifecycleContext, personId: string, rawPr
   let project: string;
   try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND); }
   if (!ProjectName.safeParse(project).success) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
-  const latest = await ctx.documentClient.send(new QueryCommand({
+  // DEC 254zzz80: a named company's project is the latest revision in its own partition (company-layout.ts checks the partition and the core's order).
+  const named = namedCompany(company.data);
+  const row = named !== undefined ? await namedCompanyLatestRevisionRow(ctx.documentClient, ctx.tableName, named, project) : (await ctx.documentClient.send(new QueryCommand({
     TableName: ctx.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-  })) as { Items?: Array<Record<string, unknown>> };
-  const row = latest.Items?.[0];
+  })) as { Items?: Array<Record<string, unknown>> }).Items?.[0];
   // The project's own company, as its latest revision names it: a legacy row with no company is the install's implicit company's, never the caller's.
-  if (row === undefined || !recordInCompany(row, company.data)) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
+  if (row === undefined || (named === undefined && !recordInCompany(row, company.data))) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
   const revision = (row["definition"] as { revision?: unknown } | undefined)?.revision;
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
   const grant = await ctx.grantRole(personId, project);
@@ -137,6 +139,23 @@ async function restorePreview(ctx: ProjectLifecycleContext, current: Current): P
   };
 }
 
+/**
+ * The checks that the previewed project revision is still the latest, in the change's transaction. Legacy: no newer revision row. A named company (DEC 254zzz80, its own partition, read
+ * in the core's order): the catalog still points at it (or there is no catalog row), and no newer revision row exists unless it is a candidate (a setup waiting for approval is not the
+ * latest until its approval moves the catalog, which the first check sees).
+ */
+function stillLatest(tableName: string, current: Current) {
+  if (namedCompany(current.companyId) === undefined) {
+    return [{ ConditionCheck: { TableName: tableName, Key: projectKey(current.project, current.projectRevision + 1), ConditionExpression: "attribute_not_exists(pk)" } }];
+  }
+  return [
+    { ConditionCheck: { TableName: tableName, Key: orgProjectCatalogKey(current.companyId, current.project), ConditionExpression: "attribute_not_exists(pk) OR latestRevision = :revision",
+      ExpressionAttributeValues: { ":revision": current.projectRevision } } },
+    { ConditionCheck: { TableName: tableName, Key: revisionKeyFor(current.companyId, current.project, current.projectRevision + 1), ConditionExpression: "attribute_not_exists(pk) OR candidate = :candidate",
+      ExpressionAttributeValues: { ":candidate": true } } },
+  ];
+}
+
 /** One change (archive or restore), after the caller and the body were checked. */
 async function change(ctx: ProjectLifecycleContext, personId: string, current: Current, action: "archive" | "restore", body: { requestId: string; expectedOrgId?: string | undefined; expectedRevision: number; expectedProjectRevision: number }): Promise<{ receipt: Record<string, unknown>; replayed: boolean }> {
   if (current.access !== "manage" || current.basis === undefined) throw agentXError("FORBIDDEN", LIFECYCLE_NOT_ALLOWED);
@@ -170,7 +189,7 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
   try {
     await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
       // The project revision the preview named is still the latest: no newer revision row landed in between.
-      { ConditionCheck: { TableName: ctx.tableName, Key: projectKey(current.project, current.projectRevision + 1), ConditionExpression: "attribute_not_exists(pk)" } },
+      ...stillLatest(ctx.tableName, current),
       { Update: {
         TableName: ctx.tableName, Key: metaKey,
         UpdateExpression: "SET entityType = :entity, companyId = :company, #project = :project, #status = :to, lifecycleRevision = :next, lifecycleChangedAt = :at, lifecycleChangedBy = :person",

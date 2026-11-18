@@ -9,6 +9,7 @@ import { intakeItemIdOf, type AuditEvent, type OrgId, type Principal } from "@ag
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
 import { RecordingStore } from "../support/intake-world.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { LinearConnections, type LinearAppSettings } from "../../packages/broker/src/aws/linear-connections.js";
 import { handleLinearAppWebhook } from "../../packages/broker/src/aws/linear-app-webhook.js";
@@ -68,7 +69,7 @@ async function world(options: { onCore?: readonly string[] } = {}) {
     expect((await call("POST", `${BASE}/complete`, { state: started.body.state, code })).status).toBe(200);
   };
   const project = async (name: string, companyId: string) => {
-    h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, companyId });
+    h.db.set(companyProjectRow(companyId, name, 1)); // DEC 254zzz80: a named company's project in its own partition
     expect((await call("PUT", `${BASE}/projects/${name}`, { teamId: "team-a-eng" })).status).toBe(200);
   };
   member(PERSON, A, "admin"); as(PERSON); await connect(WORKSPACE_A); await project("alpha", A);

@@ -230,6 +230,8 @@ import {
   type ModelSelection,
   type ProjectModelOptions,
   projectCatalogKey,
+  orgProjectCatalogKey,
+  type OrgId,
   type ChannelMembersRequest,
   isAdminChangePressEvent,
   type AdminChangeOutcome,
@@ -298,7 +300,7 @@ import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusa
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
 import { boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
-import { grantKeyFor, namedCompany } from "./company-layout.js";
+import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -822,7 +824,9 @@ function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHa
         const issue = error.issues[0];
         throw agentXError("CONFIG_INVALID", `the project definition is invalid: ${issue?.path.join(".") || "definition"}: ${issue?.message ?? "invalid"}; fix it and plan again`);
       }
-      if (await getItem(dependencies, projectKey(definition.name, definition.revision)) !== undefined) {
+      // DEC 254zzz80: the revision's key in the company registration will write to (registerProject's own company rule: no developer, no company).
+      const planCompany = identity.developer === undefined ? undefined : await githubCallerCompany(dependencies, identity.developer.developerId, boundedCompanyReads(dependencies.documentClient));
+      if (await getItem(dependencies, revisionKeyFor(planCompany, definition.name, definition.revision)) !== undefined) {
         throw agentXError("CONFIG_INVALID", `revision ${definition.revision} of ${definition.name} is already registered; use a newer revision number`);
       }
       // C8: the vendor preflight runs here, at planning, and never again at apply: neither in the
@@ -2222,6 +2226,8 @@ async function githubCallerCompany(dependencies: AwsBrokerDependencies, personId
 }
 
 async function checkRegistrationCompany(dependencies: AwsBrokerDependencies, name: string, companyId: string | undefined, budget: ReturnType<typeof boundedCompanyReads>) {
+  // DEC 254zzz80: a named company registers in its own partition; this legacy check stays for it too, so an id another company (or the built-in one) holds in the install's
+  // rows is still refused: project ids stay unique against the legacy namespace.
   if (companyId === undefined) return;
   const response = await budget.client.send(new QueryCommand({ TableName: dependencies.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)", ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":revision": "REV#" },
@@ -2278,6 +2284,12 @@ async function registerProject(
   const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
   const companyBudget = checked?.githubCompany?.budget ?? boundedCompanyReads(dependencies.documentClient);
   const companyId = checked?.githubCompany === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : checked.githubCompany.companyId;
+  // DEC 254zzz80: a named company's revision, catalog pointer and checks live in its own partition (company-layout.ts); the built-in company and no company keep the legacy rows.
+  const ownCompany = namedCompany(companyId);
+  // The admin setup-approval run (its execution, dispatch and terminal checks) reads only the legacy revision row: a named company's setup goes through the project setup flow instead.
+  if (ownCompany !== undefined && (definition.e2e !== undefined || setupApproval !== undefined)) throw agentXError("FORBIDDEN", NAMED_COMPANY_SETUP_APPROVAL_REFUSED);
+  /** A stored revision is this registration's company's: by its own partition for a named company (a row there may leave its company out), else by its stored company. */
+  const inCompany = (row: unknown) => ownCompany !== undefined ? row !== null && typeof row === "object" && ownPartitionRow(row as Record<string, unknown>, ownCompany) : recordInCompany(row, companyId);
   await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
@@ -2347,12 +2359,12 @@ async function registerProject(
     if (takeover !== undefined) return "takeover";
     throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true with a takeOwnershipReason (agentx admin project register --take-ownership --ownership-reason <why>); the takeover is recorded`);
   };
-  const key = projectKey(definition.name, definition.revision);
-  const readCatalogSnapshot = () => readProjectCatalogSnapshot(dependencies, definition.name);
-  const repairCatalogPointerFromHistory = () => repairProjectCatalogPointerFromHistory(dependencies, definition.name);
+  const key = revisionKeyFor(companyId, definition.name, definition.revision);
+  const readCatalogSnapshot = () => ownCompany !== undefined ? readNamedCompanyCatalogSnapshot(dependencies, ownCompany, definition.name) : readProjectCatalogSnapshot(dependencies, definition.name);
+  const repairCatalogPointerFromHistory = () => ownCompany !== undefined ? repairNamedCompanyCatalogPointer(dependencies, ownCompany, definition.name, definition.revision) : repairProjectCatalogPointerFromHistory(dependencies, definition.name);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
-    if (!recordInCompany(existing, companyId)) throw agentXError("NOT_FOUND", "registered project not found");
+    if (!inCompany(existing)) throw agentXError("NOT_FOUND", "registered project not found");
     for (const repository of definition.repositories) await checkCompanyRepository(dependencies, companyId, repository.url, companyBudget);
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
     if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
@@ -2428,7 +2440,8 @@ async function registerProject(
     const accounts = await planAccounts();
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
-      corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
+      // A named company's record IS its own-partition row (no legacy source to copy from).
+      corePlan = ownCompany !== undefined ? { status: "existing", writes: [] } : await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
       if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
@@ -2454,13 +2467,16 @@ async function registerProject(
       // Spec 025 A3: the admin project list reads this row instead of scanning the table.
       ...(updateCatalog ? [{ Update: {
         TableName: dependencies.tableName,
-        Key: projectCatalogKey(definition.name),
-        UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        Key: ownCompany !== undefined ? orgProjectCatalogKey(ownCompany, definition.name) : projectCatalogKey(definition.name),
+        UpdateExpression: ownCompany !== undefined
+          ? "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
+          : "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
         ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
           : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
             : "latestRevision = :observed AND latestRevision < :revision",
         ExpressionAttributeNames: { "#name": "name" },
         ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": latestRevision, ":now": now,
+          ...(ownCompany === undefined ? {} : { ":company": ownCompany }),
           ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
       } }] : []),
       ...(setupAdmissionRows?.transactionItems ?? []),
@@ -2479,7 +2495,7 @@ async function registerProject(
       // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
       const winner = await getItem<RegisteredProjectRecord>(dependencies, key);
       if (winner !== undefined) {
-        if (!recordInCompany(winner, companyId)) throw agentXError("NOT_FOUND", "registered project not found");
+        if (!inCompany(winner)) throw agentXError("NOT_FOUND", "registered project not found");
         if (!sameJsonContent(winner.definition, definition) || !sameJsonContent(winner.runtimeBinding, runtimeBinding)
           || !sameJsonContent(winner.setupApproval, setupApprovalBinding)) {
           throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
@@ -2523,6 +2539,56 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
     throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
   }
   return { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
+}
+
+/** Why a named company's registration may not carry the admin setup approval (DEC 254zzz80). */
+export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's project takes its setup through the project's setup flow, not a setup approval sent with registration";
+
+/**
+ * DEC 254zzz80: registerProject's snapshot for a named company, from its own partition: the catalog row (`orgProjectCatalogKey`; a row written by the core may leave its name and
+ * company out, but one that names another project or company is refused) and the newest stored revision of any kind (a candidate occupies its revision number too).
+ */
+async function readNamedCompanyCatalogSnapshot(dependencies: AwsBrokerDependencies, company: OrgId, projectName: string): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
+  const catalogKey = orgProjectCatalogKey(company, projectName);
+  const catalog = await getItem<{ pk?: unknown; sk?: unknown; entityType?: string; name?: string; latestRevision?: number }>(dependencies, catalogKey);
+  if (catalog !== undefined && (catalog.pk !== catalogKey.pk || catalog.sk !== catalogKey.sk || catalog.entityType !== "PROJECT_CATALOG" || (catalog.name !== undefined && catalog.name !== projectName)
+    || !ownPartitionRow(catalog, company) || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is unavailable or invalid");
+  }
+  const pk = revisionKeyFor(company, projectName, 1).pk;
+  const response = await dependencies.documentClient.send(new QueryCommand({ TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+    ExpressionAttributeValues: { ":pk": pk, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true })) as { Items?: Array<Record<string, unknown>> };
+  const newest = response.Items?.[0] as RegisteredProjectRecord | undefined;
+  const newestRevision = newest?.definition?.revision ?? 0;
+  if (newest !== undefined && (newest.pk !== pk || !ownPartitionRow(newest as unknown as Record<string, unknown>, company) || newest.definition.name !== projectName || !Number.isSafeInteger(newestRevision) || newestRevision < 1)) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
+  }
+  if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
+  return { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
+}
+
+/**
+ * A named company's duplicate registration: the catalog points at least at the revision just found stored (a candidate is never made the latest here: only its approval does that).
+ * Moves the pointer forward only, conditionally on what was read.
+ */
+async function repairNamedCompanyCatalogPointer(dependencies: AwsBrokerDependencies, company: OrgId, projectName: string, revision: number): Promise<void> {
+  const stored = await getItem<Record<string, unknown>>(dependencies, revisionKeyFor(company, projectName, revision));
+  if (stored === undefined || stored.candidate === true) return;
+  const snapshot = await readNamedCompanyCatalogSnapshot(dependencies, company, projectName);
+  if ((snapshot.catalog?.latestRevision ?? 0) >= revision) return;
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName, Key: orgProjectCatalogKey(company, projectName),
+      UpdateExpression: "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+      ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)" : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)" : "latestRevision = :observed",
+      ExpressionAttributeNames: { "#name": "name" },
+      ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":company": company, ":revision": revision, ":now": new Date().toISOString(),
+        ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
+  }
 }
 
 async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string, options: { createCatalogRow?: boolean } = {}): Promise<void> {
@@ -14685,10 +14751,14 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
   if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
   const rules = { ...(dependencies.githubBindings === undefined ? {} : { bindings: dependencies.githubBindings }),
     ...(clientProjects.repositoryInstallation === undefined ? {} : { live: (url: string) => clientProjects.repositoryInstallation!(url) }) };
-  const projectExists = async (name: string) => ((await dependencies.documentClient.send(new QueryCommand({
+  const revisionIn = async (pk: string) => ((await dependencies.documentClient.send(new QueryCommand({
     TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
-  })) as { Items?: unknown[] }).Items ?? []).length > 0; const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
+    ExpressionAttributeValues: { ":pk": pk, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] }).Items ?? []).length > 0;
+  // DEC 254zzz80: a named company's fresh id must be free in its own partition (any revision, a candidate too) as well as globally.
+  const projectExists = async (name: string, owner?: string) => await revisionIn(`PROJECT#${name}`) || (namedCompany(owner) !== undefined && await revisionIn(revisionKeyFor(owner, name, 1).pk)); const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
+  // DEC 254zzz80: today's global names (id == name) created for a named company are registered in its own partition, so a name it already holds there is taken too.
+  const nameTaken_ = async (owner: string | undefined, companyId: string | undefined, name: string) => await names.taken(owner, name) || (owner === undefined && namedCompany(companyId) !== undefined && await projectExists(name, companyId));
   /**
    * Guided onboarding PR 6: one project from `repositories`, for `companyId` (the caller's, from membership). Every repository is checked against the
    * company's bindings with GitHub's live answer before any token is made for any of them; one that fails refuses the whole create, in one fixed answer.
@@ -14705,7 +14775,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
     }
     const repositoryNames = uniqueRepositoryNames(found.map((entry) => entry.name));
     const name = options.name ?? repositoryNames[0]!; const nameOwner = names.owner(naming, companyId);
-    if (await names.taken(nameOwner, name)) throw nameTaken(name); const id = await names.idFor(nameOwner, name);
+    if (await nameTaken_(nameOwner, companyId, name)) throw nameTaken(name); const id = await names.idFor(nameOwner, name);
     const cwd = `repo/${repositoryNames[0]!}`;
     // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted. They run in the first repository.
     const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
@@ -14723,11 +14793,11 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       // Registration checks every repository's binding once more (its own budget), in the transaction's company.
       await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) }, ...names.claim(nameOwner, name) });
     } catch (error) {
-      if (await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable();
+      if (await nameTaken_(nameOwner, companyId, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable();
       if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
       throw error;
     }
-    return { name: id, latestRevision: 1 };
+    return { name: id, latestRevision: 1, ...(companyId === undefined ? {} : { companyId }) };
   };
   return {
     ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }), ...companyProjectCreatorOf(dependencies.githubBindings !== undefined, dependencies.companies),
@@ -14768,7 +14838,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       const found = companyId === undefined ? await clientProjects.repositoryDefaults(url) : await budget.read(() => clientProjects.repositoryDefaults(url));
       const repositoryName = projectRepositoryName(found.name);
       const name = input.name ?? repositoryName; const nameOwner = names.owner(naming, companyId);
-      if (await names.taken(nameOwner, name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`); const id = await names.idFor(nameOwner, name);
+      if (await nameTaken_(nameOwner, companyId, name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`); const id = await names.idFor(nameOwner, name);
       const cwd = `repo/${repositoryName}`;
       // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
       const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
@@ -14781,7 +14851,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       // As the person: their developer ID owns the project, so they administer it and it is listed for them.
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
       try { await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget }, ...names.claim(nameOwner, name) }); } catch (error) { if (nameOwner !== undefined && await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable(); throw error; } // L2-1
-      return { name: id, latestRevision: 1 };
+      return { name: id, latestRevision: 1, ...(companyId === undefined ? {} : { companyId }) };
     },
     async createClientProjects(developerId, input, naming) {
       const commitBy = Date.now() + COMMIT_DEADLINE_MS;

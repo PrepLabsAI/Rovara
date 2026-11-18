@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 it("broker People directory sends only task-record scope and rejects foreign task before transport", async () => {
   for (const [companyId, teamId] of [[A, "T0AAAAAAA"], [B, "T0BBBBBBB"]] as const) {
@@ -32,10 +33,10 @@ it("broker company mode cannot use an installation callback when workspace depen
   expect(channelMembers).not.toHaveBeenCalled();
 });
 
-it("project senders retain the verified thread and use T4a project ownership for an unstamped policy projection", async () => {
+it("project senders retain the verified thread; a named company's project is the one in its own partition (DEC 254zzz80), whatever the legacy lookup says", async () => {
   for (const [companyId, teamId] of [[A, "T0AAAAAAA"], [B, "T0BBBBBBB"]] as const) {
     const db = new FakeDynamoDb();
-    db.set({ pk: "PROJECT#payments", sk: "REV#000001", definition: { revision: 1 } });
+    db.set(companyProjectRow(companyId, "payments", 1));
     db.set({ pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0SHARED", teamId, channelId: "C0SHARED", projectName: "payments", updatedAt: "2026-11-15T00:00:00.000Z" });
     const getProject = vi.fn(async () => ({ companyId }));
     const deps = developerTaskRouteDependencies({ documentClient: db, tableName: "state", now: Date.now, tasks: {} as never,
@@ -43,7 +44,11 @@ it("project senders retain the verified thread and use T4a project ownership for
       developer: { slackTeamId: "T0INSTALL" } as never,
     }, { developerId: "a".repeat(64) } as never, { teamId, channelId: "C0SHARED", threadTs: "1700000000.000001" });
     expect(await deps.workspaceForProject!("payments")).toEqual({ companyId, teamId });
+    // The legacy lookup (T4a's, `PROJECT#<name>`) is not this company's partition: what it says no longer decides.
     getProject.mockResolvedValue({ companyId: companyId === A ? B : A });
+    expect(await deps.workspaceForProject!("payments")).toEqual({ companyId, teamId });
+    // Only the company's own revision does: without it the project is not the company's.
+    db.delete(`ORG#${companyId}#PROJECT#payments`, "REV#000000000001");
     await expect(deps.workspaceForProject!("payments")).rejects.toThrow("This Slack workspace is not available.");
   }
 });
@@ -51,7 +56,7 @@ it("project senders retain the verified thread and use T4a project ownership for
 
 it.each(["missing dependencies", "no binding", "ambiguous binding"])("project access maps %s to a fixed AgentX refusal", async (kind) => {
   const db = new FakeDynamoDb();
-  db.set({ pk: "PROJECT#payments", sk: "REV#000001", companyId: A, definition: { revision: 1 } });
+  db.set(companyProjectRow(A, "payments", 1));
   if (kind === "ambiguous binding") for (const teamId of ["T0AAAAAAA", "T0BBBBBBB"]) {
     db.set({ pk: `ORG#${A}#SLACK_WORKSPACES`, sk: `TEAM#${teamId}`, entityType: "COMPANY_SLACK_WORKSPACE_VIEW", companyId: A, teamId, boundAt: "2026-11-15T00:00:00.000Z", boundBy: "operator" });
     db.set({ pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0SHARED", teamId, channelId: "C0SHARED", projectName: "payments", updatedAt: "2026-11-15T00:00:00.000Z" });
