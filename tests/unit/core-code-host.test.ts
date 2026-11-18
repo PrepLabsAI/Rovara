@@ -158,6 +158,8 @@ function scopedCalls(provider: GitHubCodeHostProvider, url: string, scope: unkno
     ["listCommitActivity", () => provider.listCommitActivity!(url, sha, s, { since: "2026-08-01T00:00:00Z", cap: 5 })],
     ["getPullRequestFileRevisions", () => provider.getPullRequestFileRevisions!(url, 1, s)],
     ["getCommitChanges", () => provider.getCommitChanges!(url, sha, s)],
+    // Lane L4-LM1b (revert detection): the newest commits of a branch.
+    ["listRecentCommits", () => provider.listRecentCommits!(url, "main", 10, s)],
     ["getCompareChanges", () => provider.getCompareChanges!(url, sha, "b".repeat(40), s)],
     ["listPullRequestComments", () => provider.listPullRequestComments!(url, 1, {}, s)],
     ["postPullRequestComment", () => provider.postPullRequestComment!(url, 1, "Done.", s)],
