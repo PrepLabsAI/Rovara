@@ -334,7 +334,8 @@ async function runTurnAs(input: TurnInput, scopeOf: (input: TurnInput) => Promis
         });
       } catch (error) {
         // The company's gateway refused the call (no AI connected, no room, a fault): the fixed words, not the model's or the gateway's.
-        const words = input.signal?.aborted === true ? undefined : turnRefusalWords(turnModels);
+        // Any failed turn on the company's gateway says fixed words (a mid-stream provider error could carry the provider's own text).
+        const words = input.signal?.aborted === true ? undefined : turnRefusalWords(turnModels) ?? (turnModels.kind === "gateway" ? refusalWords("unavailable") : undefined);
         if (words === undefined) throw error;
         log("model_access.turn_refused", { eventId: input.message.eventId });
         return words;
