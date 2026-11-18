@@ -16,12 +16,24 @@ export const LocalLessonsBodySchema = z.object({
   task: z.string().max(LOCAL_LESSONS_TASK_MAX).optional(),
   files: z.array(z.string().min(1).max(400).refine(NoControl, "must not contain control characters")).max(LOCAL_LESSONS_FILES_MAX).optional(),
   stage: LocalLessonsStageSchema.optional(),
-  /** The whole allowed set for the repository in one block (at most 300 lessons and 64 KB), for a tool that wants one block at session start. */
+  /** Refused when true (`LOCAL_KNOWLEDGE_NO_BULK_MESSAGE`): there is no bulk read of team knowledge. The field stays in the shape so an older tool that sends it is told why, not "unknown field". */
   all: z.boolean().optional(),
   /** The tool reads the repository's `.rovara/lessons.md`: leave out the lessons already merged into it. Without this, those lessons are returned and marked `inRepoFile`. */
   skipRepoFile: z.boolean().optional(),
 }).strict();
 export type LocalLessonsBody = z.infer<typeof LocalLessonsBodySchema>;
+
+/**
+ * Team knowledge read OUTSIDE Rovara (a coding tool, `agentx mcp`, a script token), owner decisions 2026-11-17: an answer holds at most 10 units and 2 KB; one person may read 300 times a day; an admin is told when one
+ * person's tools were served more than 150 DISTINCT units in a day; there is no list-all and no bulk mode (the old `all` flag is refused). Browser-safe numbers, so a screen and a test say the same thing.
+ */
+export const LOCAL_KNOWLEDGE_UNITS_MAX = 10;
+export const LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX = 2_048;
+export const LOCAL_KNOWLEDGE_DAY_CALLS_MAX = 300;
+export const LOCAL_KNOWLEDGE_DISTINCT_ALERT = 150;
+/** The refusal words when a person's day is used up, and when a bulk read is asked for. Fixed: nothing the caller sent is echoed. */
+export const LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE = "Team knowledge was read too many times today. Try again tomorrow.";
+export const LOCAL_KNOWLEDGE_NO_BULK_MESSAGE = "bulk reads of team knowledge are not offered; ask by file path or in words.";
 
 export const LOCAL_LESSONS_OFF_REASONS = ["install_switch", "company_stays", "learning_off", "regulated", "project_setting"] as const;
 export const LocalLessonSchema = z.object({
@@ -34,6 +46,33 @@ export const LocalLessonsResponseSchema = z.object({
   lessons: z.array(LocalLessonSchema).max(300), markdown: z.string().max(100_000), complete: z.boolean(),
 }).strict();
 export type LocalLessonsResponse = z.infer<typeof LocalLessonsResponseSchema>;
+/**
+ * The table of contents (`POST /v1/dev/projects/{project}/knowledge/areas`, a POST so a remote stays out of addresses): a TREE of the project's team knowledge, project > repository > top folder, with how many units of each
+ * kind. Names and numbers only: no unit text, no id. At most `LOCAL_KNOWLEDGE_AREAS_MAX` folder rows in all, biggest first. `repo` (the checkout's git remote) must be one of the project's repositories and narrows the
+ * tree to that repository (plus the units that apply to every repository). At this version only lessons are served, so rules, facts and skills count 0 (the field is there so a client reads the same shape when they are).
+ */
+export const LOCAL_KNOWLEDGE_AREAS_MAX = 100;
+export const LocalKnowledgeAreasBodySchema = z.object({ repo: z.string().min(1).max(LOCAL_LESSONS_REMOTE_MAX).refine(NoControl, "must not contain control characters").optional() }).strict();
+export const LocalKnowledgeAreaSchema = z.object({
+  area: z.string().min(1).max(200),
+  rules: z.number().int().min(0), lessons: z.number().int().min(0), facts: z.number().int().min(0), skills: z.number().int().min(0),
+}).strict();
+export const LocalKnowledgeRepoSchema = z.object({ repo: z.string().min(1).max(200), areas: z.array(LocalKnowledgeAreaSchema).max(LOCAL_KNOWLEDGE_AREAS_MAX) }).strict();
+export const LocalKnowledgeAreasResponseSchema = z.object({
+  status: z.enum(["ok", "off"]), reason: z.enum(LOCAL_LESSONS_OFF_REASONS).optional(), message: z.string().max(400),
+  project: z.string().max(100),
+  repos: z.array(LocalKnowledgeRepoSchema).max(LOCAL_KNOWLEDGE_AREAS_MAX),
+  /** How many more folder rows exist than are listed (the tree is cut at the cap, biggest first). */
+  more: z.number().int().min(0),
+  /** False when the scan or the time ended before every lesson was looked at: the counts are then at least what is shown. */
+  complete: z.boolean(),
+}).strict();
+export type LocalKnowledgeAreasResponse = z.infer<typeof LocalKnowledgeAreasResponseSchema>;
+export const LocalKnowledgeAreasReaderSchema = forwardReader(LocalKnowledgeAreasResponseSchema);
+export type LocalKnowledgeAreasRead = z.output<typeof LocalKnowledgeAreasReaderSchema>;
+/** The label of the units that name no repository: they apply to every repository of the project. */
+export const LOCAL_KNOWLEDGE_ANY_REPO = "any repository";
+
 /** What a client reads of the answer: a newer server's extra fields are kept, not refused. */
 export const LocalLessonsResponseReaderSchema = forwardReader(LocalLessonsResponseSchema);
 export type LocalLessonsRead = z.output<typeof LocalLessonsResponseReaderSchema>;

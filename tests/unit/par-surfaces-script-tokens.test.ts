@@ -131,11 +131,15 @@ describe("the token format and the closed list", () => {
     expect(scriptTokenRoute("GET", "/v1/dev/tasks")).toEqual({ permission: "read", project: "query" });
     expect(scriptTokenRoute("GET", `/v1/dev/tasks/${task}`)).toEqual({ permission: "read", project: "task", taskId: task });
     expect(scriptTokenRoute("GET", `/v1/dev/tasks/${task}/events`)).toEqual({ permission: "read", project: "task", taskId: task });
+    // Team knowledge is one permission, `lessons` (shown as "Team knowledge"): the answer read and the table of contents, each by POST, with the project in the path.
+    expect(scriptTokenRoute("POST", "/v1/dev/projects/payments/lessons")).toEqual({ permission: "lessons", project: "path", name: "payments" });
+    expect(scriptTokenRoute("POST", "/v1/dev/projects/payments/knowledge/areas")).toEqual({ permission: "lessons", project: "path", name: "payments" });
     for (const [method, path] of [
       ["POST", `/v1/dev/tasks/${task}/workflow/decision`], ["POST", `/v1/dev/tasks/${task}/close`], ["POST", `/v1/dev/tasks/${task}/cancel`], ["POST", `/v1/dev/tasks/${task}/continue`],
       ["GET", `/v1/dev/tasks/${task}/plan`], ["POST", `/v1/dev/tasks/${task}/workflow/retry`], ["GET", "/v1/dev/projects"], ["POST", "/v1/admin/projects"], ["GET", "/v1/app/sessions"],
       ["POST", "/v1/local/pages/open"], ["GET", "/v1/local/status"], ["GET", "/v1/app/script-tokens"], ["POST", "/v1/app/script-tokens"], ["POST", "/v1/app/script-tokens/stk_x/revoke"], ["DELETE", "/v1/dev/tasks"],
       ["GET", `/v1/dev/tasks/${task}/../projects`], ["GET", `/v1/dev/tasks/${task}/x`], ["GET", "/v1/internal/model-access"],
+      ["GET", "/v1/dev/projects/payments/knowledge/areas"], ["POST", "/v1/dev/projects/payments/knowledge"], ["POST", "/v1/dev/projects/payments/knowledge/areas/x"], ["POST", "/v1/dev/projects/payments/knowledge/all"],
     ] as const) expect(scriptTokenRoute(method, path), `${method} ${path}`).toBeUndefined();
   });
 
@@ -443,7 +447,7 @@ describe("rovara up: making a token on a page, and using it", () => {
   it("a token with only the lessons permission reaches the local coding tools read of its own projects and nothing else, and the page words say what it is for", async () => {
     const h = await launch();
     const made = await h.makeToken({ projects: ["payments"], permissions: ["lessons"] });
-    expect(made.html).toContain("read the team lessons of these projects");
+    expect(made.html).toContain("read the team knowledge of these projects");
     const refused = { status: 403, body: { error: { code: "FORBIDDEN", message: SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE } } };
     expect(await start(h, made.secret, 50)).toMatchObject(refused);
     expect(await h.call(made.secret, "/v1/dev/tasks?project=payments")).toMatchObject(refused);

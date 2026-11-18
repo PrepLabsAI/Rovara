@@ -25,11 +25,11 @@ describe("the reader behind it", () => {
   it("a PRIVATE repository: names only lessons that reached the prompt and are open to the project; never a restricted one; none when learning is off", async () => {
     const store = await seeded();
     const read = lessonsUsedReaderOver({ store, settings: settings(), access: allowAllAccess, names, visibility: async () => "private" });
-    expect(await read(input)).toEqual({ count: 1, taskUrl: PAGE, items: [{ id: "les_open0001", title: "Open lesson", notHelpfulUrl: `${PAGE}?notHelpful=les_open0001` }] });
+    expect(await read(input)).toEqual({ count: 1, taskUrl: PAGE, items: [{ id: "les_open0001", title: "Open lesson", why: "HTTP retries in api use withRetry.", notHelpfulUrl: `${PAGE}?notHelpful=les_open0001` }] });
     expect(await lessonsUsedReaderOver({ store, settings: settings({ mode: "Off" }), access: allowAllAccess, names, visibility: async () => "private" })(input)).toBeUndefined();
     expect(await read({ ...input, pageUrl: undefined })).toBeUndefined();
     expect(await read({ ...input, project: "other" })).toBeUndefined();
-    expect(lessonsUsedSection(await read(input))).toEqual({ count: 1, taskUrl: PAGE, entries: [{ title: "Open lesson", notHelpfulUrl: `${PAGE}?notHelpful=les_open0001` }] });
+    expect(lessonsUsedSection(await read(input))).toEqual({ count: 1, taskUrl: PAGE, entries: [{ title: "Open lesson", why: "HTTP retries in api use withRetry.", notHelpfulUrl: `${PAGE}?notHelpful=les_open0001` }] });
   });
 
   it("a PUBLIC repository, an unknown one, a visibility that cannot be read, or no reader at all: the count and the link, never a title", async () => {

@@ -12,15 +12,20 @@
 // POST /v1/app/org/lessons/local-tools refused: the switch is on the lessons page
 // POST /v1/dev/projects/{p}/lessons a local coding tool's read (decision 46b): the lessons the whole project may read, stable or person-approved, for the repository its git remote names. The owner's API token or a
 // script token with the `lessons` permission for that project; 60 a minute per person; the day's count per person and project holds numbers only (no lesson, task, file or repository text).
+// POST /v1/dev/projects/{p}/knowledge/areas the table of contents: a tree project > repository > top folder of the project's team knowledge with unit counts by kind, names and numbers only (same permission, same limits)
+// Both reads are for tools OUTSIDE Rovara, so they carry the owner's limits (2026-11-17): at most 10 units and 2 KB an answer, 300 reads a day per person (a fixed refusal after that), no bulk mode (`all` is refused), one audit
+// record per answer holding the unit ids and no text, and one admin notice a day when a person's tools were served more than 150 DISTINCT units.
 // The API token only reads. Authentication happens before this (the identity adapter vouches for the principal). Nothing here reads who is acting from a body.
-import { INDEX_EXPIRY_ATTRIBUTE, LocalLessonsBodySchema, agentXError, change, companyScoped, indexExpiresAt, type DocumentStore } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, agentXError, change, companyScoped, indexExpiresAt, type DocumentStore } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { repoFileStatus } from "../../lessons/repo-file-routes.js";
 import { buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
-import { takeRate } from "../../core/script-tokens/rate.js";
-import { LocalLessonsUnavailable, lessonsForLocalTool, type LocalLessonsDeps, type LocalToolsCounter } from "../../lessons/local-tools.js";
+import type { LocalToolsCounter } from "../../lessons/local-tools.js";
+import { KNOWLEDGE_UNAVAILABLE, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
+import { knowledgeLimits, type KnowledgeLimits } from "../../lessons/knowledge-limits.js";
+import type { NoticeService } from "../../services/notices.js";
 import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
 import { peopleOf, type Lesson } from "../../lessons/types.js";
 import type { ScopeKey } from "../../lessons/store.js";
@@ -29,10 +34,10 @@ import type { LocalLessons } from "./lessons.js";
 const PROJECT_LESSONS = /^\/v1\/app\/projects\/([^/]+)\/lessons(?:\/([A-Za-z0-9_-]{1,64})(?:\/(approve|reject|merge|retire|history))?)?$/u;
 const TASK_LESSONS = /^\/v1\/app\/tasks\/([0-9a-f-]{36})\/lessons(?:\/([A-Za-z0-9_-]{4,64})\/feedback)?$/u;
 const LOCAL_LESSONS = /^\/v1\/dev\/projects\/([^/]+)\/lessons$/u;
+const KNOWLEDGE_AREAS = /^\/v1\/dev\/projects\/([^/]+)\/knowledge\/areas$/u;
 const COMPANY_LOCAL_TOOLS = "/v1/app/org/lessons/local-tools";
-export const LOCAL_LESSONS_PER_MINUTE = 60;
-const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
-const NO_SUCH_PROJECT = "No such project.";
+export { LOCAL_LESSONS_PER_MINUTE };
+const UNAVAILABLE = KNOWLEDGE_UNAVAILABLE;
 /** At most this many people's names are looked up in one call (the repo-file pass's limit): over it, nothing is returned. */
 const MAX_NAME_LOOKUPS = 300;
 
@@ -52,17 +57,27 @@ export function localLessonsDayCounter(store: DocumentStore, now: () => number):
     },
   };
 }
+/**
+ * The per-person day limits and the day counter of team knowledge read outside Rovara, over one company's store. The store's expiry attribute is named HERE, where it is allowed (the TTL guard test lists this file), and
+ * handed to the limits; the hosted twin (`core-host/knowledge-api.ts`) builds its own from this, so neither names the attribute itself.
+ */
+export function knowledgeReadStores(store: DocumentStore, now: () => number): { limits: KnowledgeLimits; counter: LocalToolsCounter } {
+  return {
+    counter: localLessonsDayCounter(store, now),
+    limits: knowledgeLimits({ store, now, expiry: { attribute: INDEX_EXPIRY_ATTRIBUTE, expiresAt: (atMs) => indexExpiresAt(new Date(atMs).toISOString()) } }),
+  };
+}
 export const DECIDE_ON_THE_PAGE = "A lesson is approved on its page, by you. Run `rovara open lessons` to open it; an assistant cannot approve for you.";
 export const CHANGE_ON_THE_PAGE = "This is changed on the lessons page, by you. Run `rovara open lessons` to open it; the API token can only read.";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 
-export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskFlowDeps }): (request: BrokerRequest, caller: TaskCaller) => Promise<BrokerResponse | undefined> {
+export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskFlowDeps; /** Where the once-a-day admin notice is queued; absent: the audit record alone says it. */ notices?: Pick<NoticeService, "queueAdmin"> | undefined }): (request: BrokerRequest, caller: TaskCaller) => Promise<BrokerResponse | undefined> {
   const { lessons, flow } = options;
   const companyId = flow.companyId;
   const runtime = lessons.runtime;
   const nowMs = (): number => (flow.now?.() ?? new Date()).getTime();
-  const counter = localLessonsDayCounter(flow.store, nowMs);
+  const { counter, limits } = knowledgeReadStores(flow.store, nowMs);
 
   /** The display names a lesson that leaves Rovara must not hold: the owner's, the person asking, and the people of the lessons asked about; a name that cannot be read, or too many people, throws. */
   async function peopleNames(developerId: string, key: ScopeKey, found: readonly Lesson[]): Promise<string[]> {
@@ -77,56 +92,31 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
     return names;
   }
 
-  /** A local coding tool's read (decision 46b). The token's permission and project were checked when it was authenticated; they are checked again here. */
-  async function localRead(project: string, request: BrokerRequest, caller: TaskCaller): Promise<object> {
-    const developerId = caller.principal.personId;
-    let allowed: boolean;
-    try { allowed = await takeRate(flow.store, { pk: companyScoped(companyId, "LESSON_LOCAL_READS"), sk: developerId }, LOCAL_LESSONS_PER_MINUTE, 60_000, nowMs); }
-    catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-    if (!allowed) throw agentXError("TOO_MANY_REQUESTS", "Too many lesson requests. Try again in a minute.");
-    if (caller.scriptToken !== undefined && (!caller.scriptToken.permissions.includes("lessons") || !caller.scriptToken.projects.includes(project))) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
-    if (await flow.projects.latest(project) === undefined) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
-    let raw: unknown;
-    try { raw = request.body === undefined || request.body === "" ? {} : JSON.parse(request.body); } catch { throw agentXError("CONFIG_INVALID", "body: is not JSON"); }
-    const parsed = LocalLessonsBodySchema.safeParse(raw);
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      // Field names only: the values are the caller's.
-      throw agentXError("CONFIG_INVALID", `${issue === undefined || issue.path.length === 0 ? "body" : issue.path.join(".")}: ${issue === undefined || issue.code === "unrecognized_keys" ? "has a field this route does not take" : issue.message}`);
-    }
-    const count = async (found: number, refusal?: string): Promise<void> => { try { await counter.count({ orgId: companyId, project, developerId, lessons: found, refusal }); } catch { /* bookkeeping only */ } };
-    const deps: LocalLessonsDeps = {
-      store: runtime.store, settings: runtime.settings, access: runtime.access, localTools: runtime.localTools, now: nowMs,
-      names: (key, found) => peopleNames(developerId, key, found),
-      log: (event, fields) => flow.log?.({ component: "lessons", event, ...Object.fromEntries(Object.entries(fields).filter(([, value]) => typeof value === "number" || typeof value === "boolean")) }),
-      // What is merged into the repository's own lessons file now (decision 50a): the file pass's state, ids only.
-      ...(runtime.repoFile === undefined ? {} : { repoFileIds: async (key: ScopeKey, place: string) => { const state = await runtime.repoFile!.deps.state.get(key, place); return state === undefined ? undefined : new Set(Object.keys(state.rendered)); } }),
-    };
-    let outcome: Awaited<ReturnType<typeof lessonsForLocalTool>>;
-    try {
-      outcome = await lessonsForLocalTool(deps, { orgId: companyId, project, remote: parsed.data.repo, task: parsed.data.task, files: parsed.data.files, stage: parsed.data.stage, all: parsed.data.all, skipRepoFile: parsed.data.skipRepoFile });
-    } catch (error) {
-      await count(0, error instanceof LocalLessonsUnavailable ? "unavailable" : "error");
-      throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
-    }
-    if (outcome.kind === "unknown_repo") {
-      await count(0, "unknown_repo");
-      throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
-    }
-    await count(outcome.answer.lessons.length, outcome.answer.reason);
-    return outcome.answer;
-  }
+  /** A local coding tool's read (decision 46b): the shared implementation (`lessons/knowledge-serve.ts`), the same one the hosted twin runs. */
+  const server = createKnowledgeServer({
+    companyId, store: flow.store, now: nowMs, runtime, limits, counter,
+    names: (developerId, key, found) => peopleNames(developerId, key, found),
+    projectExists: async (project) => (await flow.projects.latest(project)) !== undefined,
+    tellAdmins: async (notice) => { await options.notices?.queueAdmin({ orgId: companyId, developerIds: [lessons.owner.id], noticeId: notice.noticeId, kind: "knowledge_read" }); },
+    log: flow.log === undefined ? undefined : (entry) => flow.log?.(entry),
+    // What is merged into the repository's own lessons file now (decision 50a): the file pass's state, ids only.
+    ...(runtime.repoFile === undefined ? {} : { repoFileIds: async (key: ScopeKey, place: string) => { const state = await runtime.repoFile!.deps.state.get(key, place); return state === undefined ? undefined : new Set(Object.keys(state.rendered)); } }),
+  });
+  const localRead = async (project: string, request: BrokerRequest, caller: TaskCaller, tool: "lessons" | "areas"): Promise<object> =>
+    await server.read({ project, developerId: caller.principal.personId, tool, body: request.body, ...(caller.scriptToken === undefined ? {} : { token: caller.scriptToken }) });
 
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
     const project = PROJECT_LESSONS.exec(path);
     const task = TASK_LESSONS.exec(path);
     const local = request.method === "POST" ? LOCAL_LESSONS.exec(path) : null;
-    if (project === null && task === null && local === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
+    const areas = request.method === "POST" ? KNOWLEDGE_AREAS.exec(path) : null;
+    if (project === null && task === null && local === null && areas === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
     try {
       if (caller.principal.companyId !== companyId) throw agentXError("FORBIDDEN", "this is not your install");
       const who = { orgId: companyId, developerId: caller.principal.personId };
-      if (local !== null) return json(200, await localRead(decodeURIComponent(local[1]!), request, caller));
+      if (local !== null) return json(200, await localRead(decodeURIComponent(local[1]!), request, caller, "lessons"));
+      if (areas !== null) return json(200, await localRead(decodeURIComponent(areas[1]!), request, caller, "areas"));
       if (path === COMPANY_LOCAL_TOOLS) {
         if (request.method === "POST") throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);
         if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");

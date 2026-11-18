@@ -826,4 +826,6 @@ describe("what did not change", () => {
 // Rule D (proof list): and for one new row (GET /v1/dev/tasks/{taskId}/evidence tasks:read, Cloud's Proof tab; added, none changed; removing exactly that row still gives 8e72149c...).
 // Batch 14 combined (rule D): those two rows plus #960's GET /v1/dev/projects/{project}/lessons/measure (full). All 3 added, none changed: removing exactly those 3 rows
 // still gives 425c010b... (the batch-14 table above).
-const EXISTING_ROUTES_DIGEST = "e585a6143bf06e59b70b86b207dec41c343aee0253436308d29fe83771fa8b9c";
+// L4-AK1H (rule D): and for the 2 hosted team knowledge rows (POST /v1/dev/projects/{project}/lessons full, POST /v1/dev/projects/{project}/knowledge/areas full; all added, none changed; removing exactly
+// those 2 rows still gives e585a6143bf06e59b70b86b207dec41c343aee0253436308d29fe83771fa8b9c, the batch-14 + #997 table above).
+const EXISTING_ROUTES_DIGEST = "fd6902f654b3bad0477cc673caf579ac9cf7ab23b7c8282819e267ef048a9cc0";

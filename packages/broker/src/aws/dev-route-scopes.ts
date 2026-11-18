@@ -142,6 +142,10 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
+  // L4-AK1H: team knowledge for a tool outside Rovara (core-host/knowledge-api.ts): a signed-in person's own token (full access, like the rows above) or a script token with the Team knowledge permission naming the project
+  // (checked by the knowledge API; no sign-in client scope reaches it). At most 10 units and 2 KB an answer, 300 reads a day a person, no bulk mode.
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/knowledge/areas", requires: "full" },
   // The Home number "Corrections you had to repeat" (core-host/lessons-repeats-api.ts): one project (its roster), or the company (owners and admins). Full access only, live membership.
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/repeats", requires: "full" },
   { method: "GET", path: "/v1/dev/lessons/repeats", requires: "full" },

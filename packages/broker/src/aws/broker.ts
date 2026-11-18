@@ -1466,7 +1466,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -15601,7 +15601,9 @@ function buildBrokerHandler(callbackSigningKey: string) {
         log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
       }),
     }),
-    services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.notification === undefined && wiring.upkeep === undefined ? {} : { notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }) } }) }),
+    services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }),
+      // L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now; the core root answers it once built (before that: no one).
+      notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true } }),
     // L4-LPPL: who approves, who is on a project's roster and who a lesson may name, from the install's own live member and grant records (aws/hosted-lessons-people.ts). Without the sign-in table
     // (no company layer) nothing is given, so lessons stay unbuilt and are reported (core_engine.lessons_not_wired), never built over no people.
     ...(process.env.DEVELOPER_SIGNIN_TABLE_NAME === undefined || process.env.DEVELOPER_SIGNIN_TABLE_NAME === "" ? {} : {
