@@ -227,6 +227,11 @@ function header(headers: RealCheckRequest["headers"], name: string): string | un
 }
 
 /** Whether two header names differ only in case: a forwarder sends one of them and this check read the other, so the request is not read at all. */
+/** A header name that is not an HTTP token, or a value with a control character (a line break splits a request in two), is not a header: the request is not read. */
+function hasMalformedHeader(headers: RealCheckRequest["headers"]): boolean {
+  return headers !== undefined && Object.entries(headers).some(([name, value]) => !/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/u.test(name) || /\p{Cc}/u.test(value));
+}
+
 function hasRepeatedHeaderName(headers: RealCheckRequest["headers"]): boolean {
   if (headers === undefined) return false;
   const names = Object.keys(headers).map((name) => name.toLowerCase());
@@ -577,7 +582,7 @@ export function classifyRealCheckRequest(request: RealCheckRequest, policy: Real
   if (deny === undefined || (prodDenyIsEmpty(deny) && (deny.gcpProjects ?? []).length === 0)) return refuse("prod", label);
   if (prodDenyMatchesHost(deny, host) || testAccountHostProblems([host]).length > 0) return refuse("prod", label);
   if (hostProblem(host) !== undefined || !policy.hosts.some((allowed) => allowed === host)) return refuse("host_not_allowed", label);
-  if (hasRepeatedHeaderName(request.headers)) return refuse("unreadable", label);
+  if (hasRepeatedHeaderName(request.headers) || hasMalformedHeader(request.headers)) return refuse("unreadable", label);
   if (hasMethodOverrideHeader(request.headers)) return refuse("write", label);
   // A cap that is not a plain number is not a cap: nothing is read under it.
   const limits = ownLimits(policy);

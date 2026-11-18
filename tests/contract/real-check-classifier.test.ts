@@ -184,6 +184,14 @@ describe("GraphQL", () => {
     expect(run("POST", http("/graphql"), { body: 'query ($a: String = "x") { a(b: "y", c: 3) { d } }', headers: { "content-type": "application/graphql" } })).toMatchObject({ allow: true });
   });
 
+  it("a header that is not a header is not read: a name that is no token, a value with a line break or another control character", () => {
+    for (const headers of [{ "X-A\r\nX-B": "1" }, { "bad name": "1" }, { "": "1" }, { Accept: "a\r\nX-HTTP-Method-Override: DELETE" }, { Accept: "a\nb" }, { Accept: "a\u0000b" }]) {
+      expect(reason(run("GET", http("/v2/items"), { headers })), JSON.stringify(headers)).toBe("unreadable");
+      expect(reason(run("GET", gcs("/storage/v1/b/acme-staging-bucket"), { headers })), JSON.stringify(headers)).toBe("unreadable");
+    }
+    expect(reason(run("GET", http("/v2/items"), { headers: { Accept: "application/json, text/plain;q=0.5", "X-Request-Id": "abc 123" } }))).toBe("allowed");
+  });
+
   it("a header name repeated in another case is not read: the forwarder sends one and this check read the other", () => {
     const headers = { "content-type": "application/graphql", "Content-Type": "application/json" };
     expect(reason(run("POST", http("/graphql"), { body: json({ query: "mutation { a }" }), headers }))).toBe("unreadable");
