@@ -82,6 +82,8 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/wiki-build/refresh", "full"], ["POST", "/v1/app/projects/payments/wiki-build/agents", "full"], ["POST", "/v1/app/projects/payments/wiki-build/delete", "full"],
     // Lead 4 N1: the nightly upkeep switch.
     ["GET", "/v1/app/projects/payments/upkeep", "full"], ["PUT", "/v1/app/projects/payments/upkeep", "full"],
+    // L4-P3: the company's one control over Rovara's automatic runs.
+    ["GET", "/v1/app/company/system-runs", "full"], ["PUT", "/v1/app/company/system-runs", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -105,6 +107,8 @@ describe("the /v1/app route table", () => {
       ["PUT", "/v1/app/projects/payments/wiki-build"], ["DELETE", "/v1/app/projects/payments/wiki-build"], ["GET", "/v1/app/projects/payments/wiki-build/stop"], ["GET", "/v1/app/projects/payments/wiki-build/delete"], ["POST", "/v1/app/projects/payments/wiki-build/extra"], ["GET", "/v1/app/projects/payments/wiki-builds"],
       // The upkeep switch: GET and PUT only, no other tail.
       ["POST", "/v1/app/projects/payments/upkeep"], ["DELETE", "/v1/app/projects/payments/upkeep"], ["PATCH", "/v1/app/projects/payments/upkeep"], ["GET", "/v1/app/projects/payments/upkeep/extra"], ["PUT", "/v1/app/projects/payments/upkeeps"],
+      // The company's automatic-runs control: GET and PUT only, no other tail.
+      ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });

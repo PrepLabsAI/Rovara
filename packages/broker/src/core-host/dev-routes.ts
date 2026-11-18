@@ -62,6 +62,7 @@ import { isWikiMapPath, routeHostedWikiMap, type HostedWikiMapWiring } from "./w
 import { isWikiPath, routeHostedWiki, type HostedWikiWiring } from "./wiki-routes.js";
 import { isWikiBuildPath, routeHostedWikiBuild, type HostedWikiBuildWiring } from "./wiki-build-routes.js";
 import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upkeep-routes.js";
+import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -191,7 +192,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method)) return true;
-  if (isWikiPath(path, method) || isWikiBuildPath(path, method) || isUpkeepPath(path, method)) return true;
+  if (isWikiPath(path, method) || isWikiBuildPath(path, method) || isUpkeepPath(path, method) || isSystemRunsPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -440,6 +441,17 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           return await routeHostedUpkeep({
             request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            // L4-P3: allowing the company's automatic runs (the setup step) needs a fresh step-up, checked here against the company's window like making a script token.
+            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
+          });
+        }
+        if (isSystemRunsPath(path, request.method)) {
+          // L4-P3: the company's one control over Rovara's automatic runs. The role is membership's, read for this request; allowing needs a fresh step-up; the ceiling is the upkeep wiring's.
+          if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedSystemRuns({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
           });
         }
         if (isWikiBuildPath(path, request.method)) {
