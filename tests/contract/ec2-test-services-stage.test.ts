@@ -1,11 +1,12 @@
 // DEC 254zm: the EC2 worker's test-services stage (packages/worker/ec2/test-services-stage.sh) and boot.sh's hook, run in bash with fake host commands. Every path the stage writes as root is
 // replaced by a temporary one; every line that decides something runs as written.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { mirroredStarterEntries } from "../../packages/contracts/src/test-service-mirror.js";
+import { gcpPackWorkerEntries, mirroredStarterEntries } from "../../packages/contracts/src/test-service-mirror.js";
 import { ec2WorkerBootScript, type Ec2WorkerBootConfig } from "../../packages/contracts/src/session.js";
 import { parseBootFacts } from "../../packages/worker/src/test-services-report.js";
 
@@ -29,7 +30,7 @@ interface Host {
 }
 
 /** A fake host: iptables with a rules file, mounts as marker files, docker answering the stage's calls. Options turn single steps into failures. */
-function host(options: { failDockerRestart?: boolean; failPull?: RegExp; failAllPulls?: boolean; failLogin?: boolean; failIp6Insert?: boolean; noMetadataBlock?: boolean; refs?: string[]; list?: string } = {}): Host {
+function host(options: { failDockerRestart?: boolean; failPull?: RegExp; failAllPulls?: boolean; failLogin?: boolean; failIp6Insert?: boolean; noMetadataBlock?: boolean; refs?: string[]; list?: string; packRefs?: string[]; packList?: string } = {}): Host {
   const dir = mkdtempSync(join(tmpdir(), "ts-stage-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
@@ -44,6 +45,9 @@ function host(options: { failDockerRestart?: boolean; failPull?: RegExp; failAll
   writeFileSync(h.pulled, "");
   writeFileSync(join(dir, "refs"), `${(options.refs ?? references).join("\n")}\n`);
   writeFileSync(join(dir, "list"), `${options.list ?? JSON.stringify(mirroredStarterEntries(REGISTRY, "staging"))}\n`);
+  // L4-E8I: what the worker image's CLI prints for `pack-refs` and `pack-list` (only asked for while the pack setting is on).
+  writeFileSync(join(dir, "packrefs"), `${(options.packRefs ?? []).join("\n")}\n`);
+  writeFileSync(join(dir, "packlist"), `${options.packList ?? "[]"}\n`);
   writeFileSync(join(dir, "firewall"), "exit 0\n");
   // boot.sh's ensure_docker wrote this before the stage runs.
   writeFileSync(h.daemon, '{"data-root": "/mnt/workspace/.docker"}\n');
@@ -67,7 +71,7 @@ esac`;
   const failPull = options.failAllPulls === true ? "1" : options.failPull === undefined ? "" : options.failPull.source;
   fake("docker", `case "$1" in
   run) for a; do :; done
-       case " $* " in *" refs "*) cat "${join(dir, "refs")}" ;; *" list "*) cat "${join(dir, "list")}" ;; *) exit 1 ;; esac ;;
+       case " $* " in *" pack-refs "*) cat "${join(dir, "packrefs")}" ;; *" pack-list "*) cat "${join(dir, "packlist")}" ;; *" refs "*) cat "${join(dir, "refs")}" ;; *" list "*) cat "${join(dir, "list")}" ;; *) exit 1 ;; esac ;;
   login) cat >/dev/null; ${options.failLogin === true ? "exit 1" : "exit 0"} ;;
   logout) exit 0 ;;
   pull) ${failPull === "1" ? "exit 1" : failPull === "" ? ":" : `[[ "$2" =~ ${failPull} ]] && exit 1`}; printf '%s\\n' "$2" >>"${h.pulled}" ;;
@@ -203,11 +207,11 @@ describe("the test-services stage on a worker", () => {
     expect(calls(h).some((line) => line.startsWith("docker pull") || line.startsWith("systemctl"))).toBe(false);
   });
 
-  it("takes at most eight references, whatever the worker image prints", () => {
+  it("takes at most nine references, whatever the worker image prints", () => {
     const many = Array.from({ length: 12 }, (_, index) => `${REGISTRY}/agentx-staging--test-services/postgres-${String(index + 10)}/postgres@sha256:${String(index % 10).repeat(64)}`);
     const h = host({ refs: many });
     expect(runStage(h).status).toBe(0);
-    expect(readFileSync(h.pulled, "utf8").trim().split("\n")).toHaveLength(8);
+    expect(readFileSync(h.pulled, "utf8").trim().split("\n")).toHaveLength(9);
   });
 
   it("pulls only the references that passed, when the worker image names some others too", () => {
@@ -299,5 +303,130 @@ describe("boot.sh's test-services hook", () => {
     expect(readFileSync(new URL("../../environments/base/Dockerfile", import.meta.url), "utf8")).toContain("COPY --from=build /opt/agentx/packages/worker ./packages/worker");
     expect(readFileSync(new URL("../../.dockerignore", import.meta.url), "utf8")).not.toMatch(/ec2|\.sh/u);
     expect(spawnSync("bash", ["-n"], { input: stage, encoding: "utf8" }).status).toBe(0);
+  });
+});
+
+// ---- L4-E8I (owner DEC 254zzz62): the GCP pack in the stage. Off by default: the stage does exactly what it did (the tests above run it with no pack setting and pass unchanged).
+describe("the test-services stage: the GCP pack", () => {
+  const packOn = (groups: string) => ({ ROVARA_TEST_SERVICES_GCP_PACK: groups });
+  const entriesFor = (groups: string) => gcpPackWorkerEntries(REGISTRY, "staging", groups);
+  const refsOf = (groups: string) => [...new Set(entriesFor(groups).map((entry) => entry.reference))];
+  const sdk = refsOf("pulled")[0]!;
+  const starterList = JSON.stringify(mirroredStarterEntries(REGISTRY, "staging"));
+  const pulledOf = (h: Host) => readFileSync(h.pulled, "utf8").trim().split("\n").sort();
+  const ownerImages = (h: Host): Array<{ reference: string; family: string }> => JSON.parse(envLines(h).find((line) => line.startsWith("AGENTX_TEST_SERVICES_OWNER_IMAGES="))!.slice("AGENTX_TEST_SERVICES_OWNER_IMAGES=".length)) as Array<{ reference: string; family: string }>;
+
+  it("with the pack on: pulls the starters, the mirrored copies from this account's ECR and Google's SDK image by digest from gcr.io, and the owner list holds all of them (the SDK image once per family)", () => {
+    const h = host({ packRefs: refsOf("mirrored:pulled"), packList: JSON.stringify(entriesFor("mirrored:pulled")) });
+    const result = runStage(h, packOn("mirrored:pulled"));
+    expect(result.status, result.stderr).toBe(0);
+    expect(pulledOf(h)).toEqual([...references, ...refsOf("mirrored:pulled")].sort());
+    expect(sdk).toMatch(/^gcr\.io\/google\.com\/cloudsdktool\/google-cloud-cli@sha256:[a-f0-9]{64}$/u);
+    const owner = ownerImages(h);
+    expect(owner.map((entry) => entry.family).sort()).toEqual(["bigtable", "datastore", "firestore", "gcs", "mongodb", "mysql", "postgres", "postgres", "pubsub", "redis", "spanner"]);
+    expect(owner.filter((entry) => entry.reference === sdk).map((entry) => entry.family).sort()).toEqual(["bigtable", "datastore", "firestore", "pubsub"]);
+    // The starters' boot facts are about the starters only.
+    expect(factsOf(h)).toMatchObject({ prepull: "ok", prepulled: 5 });
+    // The worker image's CLI is asked with no network, no capability and a read-only root, exactly as for the starters.
+    for (const line of calls(h).filter((entry) => entry.startsWith("docker run"))) expect(line).toContain("--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint node");
+    expect(result.stderr).toContain("the GCP pack (mirrored:pulled): 3 of 3 image(s) arrived");
+  });
+
+  it("the SDK image is pulled by digest only, from gcr.io or us-docker.pkg.dev, with no login to Google (the one login is this account's ECR, removed after)", () => {
+    for (const host_ of ["gcr.io", "us-docker.pkg.dev"]) {
+      const reference = `${host_}/google.com/cloudsdktool/google-cloud-cli@sha256:${"a".repeat(64)}`;
+      const h = host({ packRefs: [reference], packList: JSON.stringify([{ reference, family: "pubsub", version: "594.0.0" }]) });
+      expect(runStage(h, packOn("pulled")).status).toBe(0);
+      expect(pulledOf(h)).toContain(reference);
+    }
+    const h = host({ packRefs: refsOf("pulled"), packList: JSON.stringify(entriesFor("pulled")) });
+    runStage(h, packOn("pulled"));
+    const logins = calls(h).filter((line) => line.startsWith("docker login"));
+    expect(logins).toHaveLength(1);
+    expect(logins[0]).toContain(REGISTRY);
+    expect(calls(h).some((line) => /docker (login|logout) .*(gcr\.io|pkg\.dev)/u.test(line))).toBe(false);
+    for (const line of calls(h).filter((entry) => entry.startsWith("docker pull"))) expect(line).toMatch(/@sha256:[a-f0-9]{64}$/u);
+  });
+
+  it.each([
+    ["another registry host", `eu.gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:${"b".repeat(64)}`],
+    ["a lookalike host", `gcr.io.evil.example/google.com/cloudsdktool/google-cloud-cli@sha256:${"b".repeat(64)}`],
+    ["a host with a port", `gcr.io:5000/google.com/cloudsdktool/google-cloud-cli@sha256:${"b".repeat(64)}`],
+    ["storage.googleapis.com", `storage.googleapis.com/x/y@sha256:${"b".repeat(64)}`],
+    ["Docker Hub", `docker.io/library/redis@sha256:${"b".repeat(64)}`],
+    ["a tag", "gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators"],
+    ["another account's ECR", `999988887777.dkr.ecr.us-west-2.amazonaws.com/agentx-staging--test-services/spanner-1.5.59/spanner@sha256:${"c".repeat(64)}`],
+    ["another environment's copy", `${REGISTRY}/agentx-prod--test-services/spanner-1.5.59/spanner@sha256:${"c".repeat(64)}`],
+    ["a repository in the pull-through prefix", `${REGISTRY}/agentx-staging/worker@sha256:${"c".repeat(64)}`],
+  ])("pulls nothing from %s, whatever the worker image prints", (_name, bad) => {
+    const h = host({ packRefs: [bad], packList: "[]" });
+    expect(runStage(h, packOn("mirrored:pulled")).status).toBe(0);
+    expect(pulledOf(h)).toEqual([...references].sort());
+    expect(calls(h).some((line) => line.startsWith("docker pull") && line.includes(bad))).toBe(false);
+  });
+
+  it("takes at most four pack references", () => {
+    const many = Array.from({ length: 6 }, (_, index) => `gcr.io/cloud-spanner-emulator/emulator${index}@sha256:${String(index).repeat(64)}`);
+    const h = host({ packRefs: many, packList: "[]" });
+    expect(runStage(h, packOn("mirrored")).status).toBe(0);
+    expect(pulledOf(h).filter((line) => line.startsWith("gcr.io/"))).toHaveLength(4);
+  });
+
+  it.each([undefined, "", "off", "none", "Mirrored", "mirrored,pulled", "mirrored:pulled:bigquery:pulled", "mirrored; touch /x", "$(id)", "mirrored:", ":mirrored", "pulled::mirrored"])("setting %j: no pack is asked for, planned or pulled, and the stage is the one it was", (setting) => {
+    const h = host({ packRefs: refsOf("mirrored:pulled"), packList: JSON.stringify(entriesFor("mirrored:pulled")) });
+    const result = runStage(h, setting === undefined ? {} : packOn(setting));
+    expect(result.status, result.stderr).toBe(0);
+    expect(pulledOf(h)).toEqual([...references].sort());
+    expect(calls(h).some((line) => line.includes("pack-refs") || line.includes("pack-list"))).toBe(false);
+    expect(readFileSync(h.envFile, "utf8")).toContain(`AGENTX_TEST_SERVICES_OWNER_IMAGES=${starterList}`);
+  });
+
+  it("a pack that fails never costs the starters: its pulls fail, the owner list is the starters', and the stage still succeeds", () => {
+    const h = host({ failPull: /gcr\.io|spanner|gcs/u, packRefs: refsOf("mirrored:pulled"), packList: JSON.stringify(entriesFor("mirrored:pulled")) });
+    const result = runStage(h, packOn("mirrored:pulled"));
+    expect(result.status, result.stderr).toBe(0);
+    expect(pulledOf(h)).toEqual([...references].sort());
+    expect(envLines(h)).toContain(`AGENTX_TEST_SERVICES_OWNER_IMAGES=${starterList}`);
+    expect(result.stderr).toContain("0 of 3 image(s) arrived");
+  });
+
+  it("an unusable pack owner list is left out, and the starters' list is untouched", () => {
+    const h = host({ packRefs: refsOf("mirrored"), packList: "not json" });
+    const result = runStage(h, packOn("mirrored"));
+    expect(result.status, result.stderr).toBe(0);
+    expect(pulledOf(h)).toEqual([...references, ...refsOf("mirrored")].sort());
+    expect(envLines(h)).toContain(`AGENTX_TEST_SERVICES_OWNER_IMAGES=${starterList}`);
+    expect(result.stderr).toContain("the pack's owner list was not usable");
+  });
+
+  it("the sealed box's rules are the same with the pack on: the stage adds no firewall rule, network, route or address pool for it", () => {
+    const off = host();
+    expect(runStage(off).status).toBe(0);
+    const on = host({ packRefs: refsOf("mirrored:pulled"), packList: JSON.stringify(entriesFor("mirrored:pulled")) });
+    expect(runStage(on, packOn("mirrored:pulled")).status).toBe(0);
+    expect(readFileSync(on.rules, "utf8")).toBe(readFileSync(off.rules, "utf8"));
+    expect(readFileSync(on.rules6, "utf8")).toBe(readFileSync(off.rules6, "utf8"));
+    expect(readFileSync(on.daemon, "utf8")).toBe(readFileSync(off.daemon, "utf8"));
+    const touched = (h: Host) => calls(h).filter((line) => /^(iptables|ip6tables|systemctl) /u.test(line));
+    expect(touched(on)).toEqual(touched(off));
+    expect(calls(on).some((line) => /docker (network|run .*--network (?!none))/u.test(line))).toBe(false);
+  });
+
+  it("the walls and the run directory code is byte for byte what it was, and the pack's code never touches a firewall, a network or an address", () => {
+    const fn = (name: string) => {
+      const start = stage.indexOf(`\n${name}() {`);
+      return stage.slice(start + 1, stage.indexOf("\n}\n", start) + 3);
+    };
+    // The text of the functions that put the sealed box's walls up (pinned: any edit to them, a widening included, changes the hash and must be reviewed).
+    const walls = ["ts_metadata_blocked", "ts_wall_run_networks", "ts_run_walls_present", "ts_ipv6_active", "ts_wall_ipv6", "ts_mount_run_dir", "ts_withhold", "ts_address_pools", "ts_install_restore_unit"].map(fn).join("");
+    expect(createHash("sha256").update(walls).digest("hex")).toBe("990067525d1b971cdfe121a47f258ac173a27682d89759b609bd7ae4f503ead0");
+    const pack = fn("ts_pack_references");
+    expect(pack).toContain("--network none");
+    expect(pack).not.toMatch(/iptables|ip6tables|DOCKER-USER|docker network|--network (?!none)|docker pull|curl|wget|nc |ssh/u);
+    // Exactly one pull site, and it is the one that was there (a pack pull goes through ts_pull, by digest).
+    expect(stage.match(/docker pull/gu)).toHaveLength(1);
+    // The only registry hosts the stage names for a source pull: one pattern, exactly the two (no wildcard, no storage host, no other Google name).
+    expect(stage.match(/\(gcr\\\.io\|us-docker\\\.pkg\\\.dev\)/gu)).toHaveLength(1);
+    expect(stage).not.toMatch(/googleapis|\*\.gcr|eu\.gcr|asia\.gcr|artifactregistry/u);
   });
 });

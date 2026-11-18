@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { gzipSync } from "node:zlib";
 import { z } from "zod";
+import { GCP_PACK_PARAMETER_DEFAULT, GCP_PACK_PARAMETER_VALUES, GCP_PACK_SETTING_VARIABLE } from "./gcp-pack-images.js";
 import { SSM_GET_PARAMETERS_MAX_NAMES } from "./ssm-parameters.js";
 import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./model-providers.js";
 
@@ -462,6 +463,11 @@ export const Ec2WorkerBootConfigSchema = z
      */
     testServices: z.literal(true).optional(),
     /**
+     * ROVARA_TEST_SERVICES_GCP_PACK (lane L4-E8I): the GCP pack groups the install's TestServicesGcpPack setting switches on (`mirrored`, `pulled:bigquery`, ...: exactly one of the setting's values, never `off`). Absent when the pack is off
+     * and always absent without `testServices`: no pack image is named, planned or pulled, and the user data stays byte-identical to before.
+     */
+    testServicesGcpPack: z.string().refine((value) => value !== GCP_PACK_PARAMETER_DEFAULT && GCP_PACK_PARAMETER_VALUES.includes(value), "the pack setting must be one of its non-off values").optional(),
+    /**
      * AGENTX_BOOT_STAGE2_SHA256: the SHA-256 of the stage 2 boot script (`boot-stage2.sh`) that the worker image carries at /opt/agentx/boot/stage2.sh.
      * boot.sh reads it out of the image it pulled by digest and runs it only if its hash is this. Required for a named environment, whose boot is
      * two stages; absent for the legacy deployment, whose single-file boot has no stage 2.
@@ -476,6 +482,9 @@ export const Ec2WorkerBootConfigSchema = z
   })
   .strict()
   .superRefine((config, context) => {
+    if (config.testServicesGcpPack !== undefined && config.testServices !== true) {
+      context.addIssue({ code: "custom", path: ["testServicesGcpPack"], message: "the GCP pack is only for a launch that runs test services" });
+    }
     if (config.environmentKind === "named" && config.bootStage2Sha256 === undefined) {
       context.addIssue({ code: "custom", path: ["bootStage2Sha256"], message: "a named environment's worker boots stage 2 from its image, so bootStage2Sha256 is required" });
     }
@@ -507,6 +516,7 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.modelProxyUrl) variables.push(["AGENTX_MODEL_PROXY_URL", parsed.modelProxyUrl]);
   if (parsed.environmentKind) variables.push(["AGENTX_ENVIRONMENT_KIND", parsed.environmentKind]);
   if (parsed.testServices) variables.push(["AGENTX_TEST_SERVICES", "1"]);
+  if (parsed.testServicesGcpPack) variables.push([GCP_PACK_SETTING_VARIABLE, parsed.testServicesGcpPack]);
   if (parsed.bootStage2Sha256) variables.push([AGENTX_BOOT_STAGE2_SHA256, parsed.bootStage2Sha256]);
   if (parsed.executorImage) variables.push(["EXECUTOR_IMAGE", parsed.executorImage]);
   if (parsed.modelFallback) variables.push(["AGENTX_MODEL_FALLBACK", parsed.modelFallback]);

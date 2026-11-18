@@ -47,7 +47,9 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "coreEngine.agentModel")).toMatchObject({ value: "", where: "stack parameter CoreAgentModel on agentx-staging-control-plane" });
     // Batch 13 (#906, DEC 254zm): the hosted test service images setting, none until the starter copies are checked.
     expect(rows.find((row) => row.key === "testServices.images")).toMatchObject({ where: "stack parameter TestServiceImages on agentx-staging-control-plane" });
-    expect(rows).toHaveLength(26);
+    // L4-E8I (owner DEC 254zzz62): the GCP pack setting, off until set, on the foundation and the control plane (the foundation first).
+    expect(rows.find((row) => row.key === "testServices.gcpPack")).toMatchObject({ where: "stack parameter TestServicesGcpPack on agentx-staging-foundation and agentx-staging-control-plane" });
+    expect(rows).toHaveLength(27);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

@@ -6,6 +6,7 @@ import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParamete
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { withoutNatEgressAddresses, withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
+import { withoutGcpPackControlPlane, withoutGcpPackFoundation } from "../support/gcp-pack-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
@@ -247,10 +248,10 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
+      const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(withoutGcpPackFoundation(template)))
         : stack.stackName === "agentx-staging-access" ? withoutDnsFirewallAccess(template)
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
-        : stack.stackName === "agentx-staging-control-plane" ? withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutBrokerSlackPoster(template, "staging"))))), "staging"))
+        : stack.stackName === "agentx-staging-control-plane" ? withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutBrokerSlackPoster(withoutGcpPackControlPlane(template), "staging"))))), "staging"))
         : stack.stackName === "agentx-staging-slack" ? withoutSlackCompanyService(template) : template;
       expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
     }, 120_000);

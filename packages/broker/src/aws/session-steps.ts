@@ -5,7 +5,7 @@ import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { hostedWorkersRunTestServices } from "./hosted-test-services.js";
+import { hostedGcpPackSetting, hostedWorkersRunTestServices } from "./hosted-test-services.js";
 import { InstanceTypeSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ProvisionerMachineFallbackSchema, WORKER_SETTING_PARAMETERS, chunkParameterNames, ec2WorkerUserData } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager } from "./sessions.js";
@@ -74,6 +74,8 @@ export interface SessionStepsDependencies {
    * as AGENTX_TEST_SERVICES=1, and the worker's boot runs the test-services stage its image carries. Otherwise nothing is added and the boot script is byte-identical to before.
    */
   testServices?: boolean;
+  /** L4-E8I: the GCP pack setting (`hostedGcpPackSetting`): a launch that runs test services then carries it too (rendered as ROVARA_TEST_SERVICES_GCP_PACK). Absent when the pack is off: the user data is byte-identical to before. */
+  testServicesGcpPack?: string;
 }
 
 /** The body of the worker's /ping, or of a failed boot's report in its place. */
@@ -145,6 +147,7 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           ...(settings.openaiSecretArn ? { openaiSecretArn: settings.openaiSecretArn } : {}),
           ...(settings.modelFallback ? { modelFallback: settings.modelFallback } : {}),
           ...(dependencies.testServices === true ? { testServices: true as const } : {}),
+          ...(dependencies.testServices === true && dependencies.testServicesGcpPack !== undefined ? { testServicesGcpPack: dependencies.testServicesGcpPack } : {}),
           logGroupName: dependencies.logGroupName,
         }, dependencies.bootScript());
         // Already base64 gzip, the form RunInstances takes (#229).
@@ -241,4 +244,5 @@ export const handler = createSessionStepsHandler({
   logGroupName: process.env.WORKER_LOG_GROUP_NAME ?? "",
   ping: (url) => pingWorker(url),
   testServices: hostedWorkersRunTestServices(process.env),
+  ...(hostedGcpPackSetting(process.env) === undefined ? {} : { testServicesGcpPack: hostedGcpPackSetting(process.env)! }),
 });

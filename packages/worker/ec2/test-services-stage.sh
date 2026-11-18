@@ -11,6 +11,8 @@
 # What a worker that passes gets, the same rules the laptop proves:
 #   - the install's copies of the starter images, pulled by root BY DIGEST from this account's ECR (the worker container never pulls and has no login);
 #     the references and digests come from the worker image's own contracts (test-services-mirror-cli.js), so they are the digests the broker plans with;
+#   - with the pack setting on (ROVARA_TEST_SERVICES_GCP_PACK, default off): the pack's mirrored images from this account's ECR like the starters, and Google's SDK emulators image BY DIGEST from Google's registry (gcr.io or us-docker.pkg.dev, 443,
+#     pulled by root on the host, never by the worker container or the sealed run networks; never copied into our ECR, anonymous: no credential is sent). Nothing in the pack's pull touches a wall below;
 #   - AGENTX_TEST_SERVICES_OWNER_IMAGES: the owner list of exactly the copies that arrived (the worker runs nothing else: listed digests only, and only
 #     if the digest is on this host), AGENTX_WORKER_IMAGE (the sealed check's resolver guard runs from it), AGENTX_TEST_SERVICES_BOOT_FACTS;
 #   - a 64 MiB tmpfs run directory at the same path on the host and in the worker (the launcher mounts it into the worker only while it is mounted);
@@ -22,9 +24,11 @@ readonly TS_RUN_DIR=/run/agentx-test-services
 readonly TS_UNIT=rovara-test-services.service
 readonly TS_RESTORE=/usr/local/libexec/rovara-test-services-restore
 readonly TS_CLI=/opt/agentx/packages/worker/dist/test-services-mirror-cli.js
-readonly TS_MAX_IMAGES=8
+readonly TS_MAX_IMAGES=9
 readonly TS_PULL_SECONDS=180
 readonly TS_PULL_PARALLEL=3
+# The GCP pack (lane L4-E8I): ROVARA_TEST_SERVICES_GCP_PACK, the groups the install's TestServicesGcpPack setting names, in the launch's boot configuration. Only an exact list of the three words is read; anything else is no pack.
+readonly TS_PACK_GROUPS_PATTERN='^(mirrored|pulled|bigquery)(:(mirrored|pulled|bigquery)){0,2}$'
 TS_PREPULL=none
 TS_COUNT=0
 TS_LOGGED_OUT=false
@@ -99,6 +103,20 @@ ts_mirror_references() {
   done
 }
 
+# The pack's references to pull (the groups in $3, already checked against TS_PACK_GROUPS_PATTERN), as the worker image names them: the install's ECR copies of the mirrored images (the starters' repository family) and Google's SDK
+# image by its pinned source reference on one of the two registries the egress allows. Fixed form only, at most 4 (three copies and the SDK image); anything else is dropped.
+ts_pack_references() {
+  local registry=$1 environment=$2 groups=$3 line count=0 copy_pattern source_pattern
+  copy_pattern="^${registry//./\\.}/agentx-${environment}--test-services/[a-z]+-[0-9]{1,3}(\\.[0-9]{1,3}){0,2}/[a-z]+@sha256:[a-f0-9]{64}\$"
+  source_pattern='^(gcr\.io|us-docker\.pkg\.dev)/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*@sha256:[a-f0-9]{64}$'
+  timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+    --entrypoint node "$AGENTX_WORKER_IMAGE" "$TS_CLI" pack-refs "$registry" "$environment" "$groups" 2>/dev/null | while IFS= read -r line; do
+    count=$((count + 1))
+    ((count <= 4)) || break
+    if [[ "$line" =~ $copy_pattern || "$line" =~ $source_pattern ]]; then printf '%s\n' "$line"; fi
+  done
+}
+
 # Root pulls, by digest, with one ECR login that is removed after. Each pull is bounded on its own; a failed pull does not stop the others. Prints the references that
 # arrived (it runs in a process substitution, so the caller counts them).
 ts_pull() {
@@ -161,13 +179,20 @@ UNIT
 }
 
 test_services_stage_main() {
-  local region=$1 registry=${AGENTX_WORKER_IMAGE%%/*} environment list references=() arrived=() line
+  local region=$1 registry=${AGENTX_WORKER_IMAGE%%/*} environment list references=() arrived=() line groups="" pack_references=() starters_arrived=() pack_arrived=() pack_list starter reference
   [[ "$registry" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$ ]] || { log "test services: the worker image is not in this account's ECR"; return 1; }
   [[ "${AGENTX_LOG_GROUP:-}" =~ ^/agentx/([a-z](-?[a-z0-9])*)/worker$ ]] || { log "test services: not a named environment"; return 1; }
   environment=${BASH_REMATCH[1]}
   ((${#environment} <= 20)) || return 1
   while IFS= read -r line; do references+=("$line"); done < <(ts_mirror_references "$registry" "$environment")
   ((${#references[@]} > 0)) || { log "test services: the worker image names no starter copies"; return 1; }
+  # The pack: only for an exact setting, and only its own references (a failure here never costs the starters).
+  if [[ "${ROVARA_TEST_SERVICES_GCP_PACK:-}" =~ $TS_PACK_GROUPS_PATTERN ]]; then groups=${ROVARA_TEST_SERVICES_GCP_PACK}; fi
+  if [[ -n "$groups" ]]; then
+    while IFS= read -r line; do pack_references+=("$line"); done < <(ts_pack_references "$registry" "$environment" "$groups")
+    ((${#pack_references[@]} > 0)) || log "test services: the worker image names no pack images for this setting"
+  fi
+  ((${#references[@]} + ${#pack_references[@]} <= TS_MAX_IMAGES)) || { log "test services: too many images named"; return 1; }
   ts_address_pools || { log "test services: Docker's address pools could not be set"; ts_withhold pools; return 1; }
   # The container firewall put the metadata block back with Docker's chains; if it is not there now, nothing is offered.
   ts_metadata_blocked || { ts_withhold metadata; return 1; }
@@ -175,17 +200,30 @@ test_services_stage_main() {
   ts_wall_ipv6 || { ts_boot_facts; ts_withhold "$TS_IPV6_REASON"; return 1; }
   ts_mount_run_dir || { ts_withhold run-directory; return 1; }
   ts_install_restore_unit || { ts_withhold restore-unit; return 1; }
-  while IFS= read -r line; do arrived+=("$line"); done < <(ts_pull "$region" "$registry" "${references[@]}")
+  while IFS= read -r line; do arrived+=("$line"); done < <(ts_pull "$region" "$registry" "${references[@]}" ${pack_references[@]+"${pack_references[@]}"})
+  # What arrived, split: a starter copy is one of `references`, anything else is the pack's.
+  for line in ${arrived[@]+"${arrived[@]}"}; do
+    starter=false
+    for reference in "${references[@]}"; do [[ "$line" != "$reference" ]] || starter=true; done
+    if [[ $starter == true ]]; then starters_arrived+=("$line"); else pack_arrived+=("$line"); fi
+  done
   # ts_pull ran in a process substitution: its counters are recounted here from what it printed.
-  TS_COUNT=${#arrived[@]}
+  TS_COUNT=${#starters_arrived[@]}
   if ((TS_COUNT == 0)); then TS_PREPULL=failed; elif ((TS_COUNT < ${#references[@]})); then TS_PREPULL=partial; else TS_PREPULL=ok; fi
   # No ECR token stays on disk after the pulls (the worker has no login of its own and needs none).
   if docker logout "$registry" >/dev/null 2>&1; then TS_LOGGED_OUT=true; fi
   ((TS_COUNT > 0)) || { ts_boot_facts; ts_withhold images; return 1; }
   list=$(timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
-    --entrypoint node "$AGENTX_WORKER_IMAGE" "$TS_CLI" list "$registry" "$environment" "${arrived[@]}" 2>/dev/null | head -c 65536 | head -n 1)
+    --entrypoint node "$AGENTX_WORKER_IMAGE" "$TS_CLI" list "$registry" "$environment" "${starters_arrived[@]}" 2>/dev/null | head -c 65536 | head -n 1)
   [[ "$list" == '[{"reference":"'* && "$list" == *'}]' && "$list" != *"'"* ]] || { ts_boot_facts; ts_withhold owner-list; return 1; }
+  # The pack's owner entries, for what arrived of it, joined to the starters' list. A pack list that is not exactly that shape is left out; the starters are not affected.
+  if ((${#pack_arrived[@]} > 0)); then
+    pack_list=$(timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+      --entrypoint node "$AGENTX_WORKER_IMAGE" "$TS_CLI" pack-list "$registry" "$environment" "$groups" "${pack_arrived[@]}" 2>/dev/null | head -c 65536 | head -n 1)
+    if [[ "$pack_list" == '[{"reference":"'* && "$pack_list" == *'}]' && "$pack_list" != *"'"* ]]; then list="${list%]},${pack_list#[}"; else log "test services: the pack's owner list was not usable; the pack is left out"; fi
+  fi
   { printf 'AGENTX_WORKER_IMAGE=%s\n' "$AGENTX_WORKER_IMAGE"; printf 'AGENTX_TEST_SERVICES_OWNER_IMAGES=%s\n' "$list"; } >>"$WORKER_ENV_FILE" || { ts_withhold environment; return 1; }
   ts_boot_facts || true
   log "test services: $TS_COUNT starter image(s) on this worker ($TS_PREPULL)"
+  [[ -z "$groups" ]] || log "test services: the GCP pack ($groups): ${#pack_arrived[@]} of ${#pack_references[@]} image(s) arrived"
 }

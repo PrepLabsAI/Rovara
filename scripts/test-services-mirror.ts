@@ -12,10 +12,13 @@
 //      the copy. Exit 0 only when all five pass. Run --copy once per environment (the tags are immutable); if a copy stopped midway, --verify names what is missing.
 //   5. Log out: crane auth logout <registry>
 //
+// The GCP pack's three copies (Spanner, fake-gcs-server, BigQuery; L4-E8I): add `--pack` to steps 2, 3 and 4 above. They go to their own repositories (infra/lib/test-service-mirror.ts, `GcpPackImageRead`), by digest, exactly as the five starters do,
+// and `--verify --pack` is the gate before `agentx config set testServices.gcpPack mirrored` (or any value that names `mirrored` or `bigquery`). Google's SDK emulators image is never copied: a worker pulls it from Google's registry.
+//
 // The repositories, names, tags and digests come from @agentx/contracts (test-service-mirror.ts over owner-starter-images.ts), the same functions the infrastructure and the worker's boot stage use.
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { testServiceMirrorRepositories, type TestServiceMirrorRepository, ECR_REGISTRY_PATTERN } from "../packages/contracts/src/index.js";
+import { gcpPackMirrorRepositories, testServiceMirrorRepositories, type TestServiceMirrorRepository, ECR_REGISTRY_PATTERN } from "../packages/contracts/src/index.js";
 
 export interface MirrorStep {
   requested: string;
@@ -27,16 +30,24 @@ export interface MirrorStep {
   digest: string;
 }
 
-/** What `--copy` does, one step per starter image. Throws on a registry or environment that is not one. */
-export function mirrorPlan(registry: string, env: string): MirrorStep[] {
+/** What `--copy` does, one step per starter image, and with `pack` one more per mirrorable GCP pack image. Throws on a registry or environment that is not one. */
+export function mirrorPlan(registry: string, env: string, pack = false): MirrorStep[] {
   if (!ECR_REGISTRY_PATTERN.test(registry)) throw new Error("--registry must be <account>.dkr.ecr.<region>.amazonaws.com");
-  return testServiceMirrorRepositories(env).map((repository: TestServiceMirrorRepository) => ({
+  const steps = testServiceMirrorRepositories(env).map((repository: TestServiceMirrorRepository) => ({
     requested: repository.starter.requested,
     source: repository.starter.reference,
     target: `${registry}/${repository.repositoryName}:${repository.tag}`,
     pinned: `${registry}/${repository.repositoryName}@sha256:${repository.digest}`,
     digest: `sha256:${repository.digest}`,
   }));
+  if (!pack) return steps;
+  return [...steps, ...gcpPackMirrorRepositories(env).map((repository) => ({
+    requested: repository.image.requested,
+    source: repository.image.reference,
+    target: `${registry}/${repository.repositoryName}:${repository.tag}`,
+    pinned: `${registry}/${repository.repositoryName}@sha256:${repository.digest}`,
+    digest: `sha256:${repository.digest}`,
+  }))];
 }
 
 /** The registry calls `--verify` needs, so a test can answer them. */
@@ -77,7 +88,7 @@ export function verifyMirror(steps: readonly MirrorStep[], registry: MirrorRegis
   return { ok, lines };
 }
 
-function argsOf(argv: readonly string[]): { registry: string; env: string; mode: "plan" | "copy" | "verify" } {
+function argsOf(argv: readonly string[]): { registry: string; env: string; mode: "plan" | "copy" | "verify"; pack: boolean } {
   const value = (name: string): string => {
     const at = argv.indexOf(name);
     const found = at < 0 ? undefined : argv[at + 1];
@@ -87,7 +98,7 @@ function argsOf(argv: readonly string[]): { registry: string; env: string; mode:
   const copy = argv.includes("--copy");
   const verify = argv.includes("--verify");
   if (copy && verify) throw new Error("--copy and --verify are separate runs");
-  return { registry: value("--registry"), env: value("--env"), mode: copy ? "copy" : verify ? "verify" : "plan" };
+  return { registry: value("--registry"), env: value("--env"), mode: copy ? "copy" : verify ? "verify" : "plan", pack: argv.includes("--pack") };
 }
 
 export function main(argv: readonly string[]): number {
@@ -95,7 +106,7 @@ export function main(argv: readonly string[]): number {
   let steps: MirrorStep[];
   try {
     args = argsOf(argv);
-    steps = mirrorPlan(args.registry, args.env);
+    steps = mirrorPlan(args.registry, args.env, args.pack);
   } catch (error) {
     console.error(`test-services-mirror: ${error instanceof Error ? error.message : "bad arguments"}`);
     return 2;
@@ -116,7 +127,7 @@ export function main(argv: readonly string[]): number {
   }
   const result = verifyMirror(steps, { digest: (reference) => run("digest", reference), manifest: (reference) => run("manifest", reference) });
   for (const line of result.lines) console.log(line);
-  console.log(result.ok ? "VERIFIED: all five copies answer by their pinned digests" : "NOT VERIFIED: do not set testServices.images to mirrored");
+  console.log(result.ok ? `VERIFIED: all ${steps.length} copies answer by their pinned digests` : `NOT VERIFIED: do not set ${args.pack ? "testServices.gcpPack" : "testServices.images"} to mirrored`);
   return result.ok ? 0 : 1;
 }
 

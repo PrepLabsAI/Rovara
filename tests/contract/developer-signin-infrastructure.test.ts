@@ -7,6 +7,7 @@ import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, IMPLIC
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { withoutGcpPackControlPlane } from "../support/gcp-pack-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { planCompanyImport, planCompanyImportUndo } from "../../packages/broker/src/aws/install-company-import.js";
@@ -661,6 +662,8 @@ describe("task-token key and membership IAM", () => {
     }
     expect(slackInstall).toBe(0);
     // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts; its shape is asserted here, then it is taken out so the digest still pins everything else.
+    // L4-E8I: the GCP pack setting's parameter and its three uses (the broker's and the dispatcher's packed `gp`, the session steps' variable), asserted and taken out (gcp-pack-infrastructure.test.ts checks them in full).
+    withoutGcpPackControlPlane(remainder);
     withoutCoreEngine(remainder);
     // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);

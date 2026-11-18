@@ -11,7 +11,7 @@
 import { z } from "zod";
 import { registerOwnerListCatalog, isOwnerListCatalog } from "./service-catalog-brand.js";
 import { ServiceCatalogSchema, type CatalogEntry, type ServiceCatalog } from "./service-catalog.js";
-import { GCP_PACK, GCP_PACK_FAMILIES, gcpPackSourceMatches, isGcpPackFamily, type GcpPackFamily } from "./gcp-pack-images.js";
+import { GCP_PACK, GCP_PACK_FAMILIES, gcpPackMirrorMatches, gcpPackSourceMatches, isGcpPackFamily, type GcpPackFamily } from "./gcp-pack-images.js";
 import type { VerifiedCatalog } from "./service-catalog-images.js";
 
 export { isOwnerListCatalog };
@@ -94,7 +94,7 @@ export const OwnerImageFamilySchema = z.enum(OWNER_IMAGE_FAMILIES);
 
 /**
  * Every family a list ENTRY may have: the four an owner may approve, and the GCP pack's (gcp-pack-images.ts). The pack's families are in the STARTER list only (owner-starter-images.ts, `OWNER_GCP_PACK_IMAGES`): an owner's own approval
- * (`ownerImageRequest`, the env list, a stored approval) stays on the four, so a repository or a person can never name an image for a pack family. An entry of a pack family must name exactly the repository the pack gives it.
+ * (`ownerImageRequest`, the env list, a stored approval) stays on the four, so a repository or a person can never name an image for a pack family. An entry of a pack family must name exactly the repository the pack gives it, or (a mirrored family) the install's own ECR copy of it (gcpPackMirrorMatches).
  */
 export type OwnerListFamily = OwnerImageFamily | GcpPackFamily;
 export const OWNER_LIST_FAMILIES = [...OWNER_IMAGE_FAMILIES, ...GCP_PACK_FAMILIES] as const;
@@ -209,7 +209,7 @@ export const OwnerListEntrySchema = z
     // Pinned means a digest and NOTHING else: a tag is a name that can move, so a reference with one is refused here, in the broker, in the worker and in the guard's list alike.
     if (parsed === undefined || parsed.digest === undefined || parsed.tag !== undefined || !Hex64.test(parsed.digest)) context.addIssue({ code: "custom", path: ["reference"], message: "an owner-approved image is named by registry, repository and digest only" });
     else if (entry.reference !== pinnedImageReference(parsed, parsed.digest)) context.addIssue({ code: "custom", path: ["reference"], message: "the reference is written in its full form" });
-    else if (isGcpPackFamily(entry.family) ? !gcpPackSourceMatches(entry.family, parsed.registry, parsed.repository) : familyOfRepository(parsed.repository) !== entry.family) context.addIssue({ code: "custom", path: ["family"], message: "the family is the image's own" });
+    else if (isGcpPackFamily(entry.family) ? !(gcpPackSourceMatches(entry.family, parsed.registry, parsed.repository) || gcpPackMirrorMatches(entry.family, entry.version, parsed.registry, parsed.repository)) : familyOfRepository(parsed.repository) !== entry.family) context.addIssue({ code: "custom", path: ["family"], message: "the family is the image's own" });
   });
 export type OwnerListEntry = z.infer<typeof OwnerListEntrySchema>;
 

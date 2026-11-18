@@ -58,7 +58,8 @@ describe("the test service starter copies (DEC 254zm)", () => {
   });
 
   it("creates exactly those five repositories: immutable tags, scan on push, AES256, no lifecycle, kept on delete", () => {
-    const repositories = ofType(foundation, "AWS::ECR::Repository");
+    // (L4-E8I: the GCP pack's three repositories are in the same stack and are checked in gcp-pack-infrastructure.test.ts; these are the starters'.)
+    const repositories = ofType(foundation, "AWS::ECR::Repository").filter(([id]) => !id.includes("GcpPackRepository"));
     expect(repositories.map(([, resource]) => resource.Properties.RepositoryName)).toEqual(testServiceMirrorRepositories("staging").map((mirror) => mirror.repositoryName));
     for (const [, resource] of repositories) {
       expect(resource.Properties.ImageTagMutability).toBe("IMMUTABLE");
@@ -82,7 +83,7 @@ describe("the test service starter copies (DEC 254zm)", () => {
     });
     expect([...TEST_SERVICE_MIRROR_READ_ACTIONS]).toEqual(["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]);
     // No other statement names a copy, and no write action touches the test-services repositories anywhere in the stack.
-    const others = statements.filter((statement) => statement.Sid !== "TestServiceImageRead" && JSON.stringify(statement.Resource).includes("test-services"));
+    const others = statements.filter((statement) => statement.Sid !== "TestServiceImageRead" && statement.Sid !== "GcpPackImageRead" && JSON.stringify(statement.Resource).includes("test-services"));
     expect(others).toEqual([]);
     // The worker's pull-through statement (import, create) names repositories under the prefix only, so it does not reach the copies.
     const pullThrough = statements.find((statement) => statement.Sid === "EcrPullThroughCache")!;

@@ -16,7 +16,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Stack, type App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { defaultBoundaryStatements, environmentPullThroughPrefix, mirroredStarterEntries, serviceRoleStatements, type PolicyStatementJson } from "@agentx/contracts";
+import { defaultBoundaryStatements, environmentPullThroughPrefix, gcpPackWorkerEntries, mirroredStarterEntries, serviceRoleStatements, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { privateImageUri } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -96,7 +96,7 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
 
   it("no ECR statement on the role has a wildcard repository, and the token statement is the only ECR action on *", () => {
     const ecr = staging.filter((statement) => asList(statement.Action).some((action) => String(action).startsWith("ecr:")));
-    expect(ecr.map((statement) => statement.Sid).sort()).toEqual(["EcrImageAccess", "EcrPullThroughCache", "EcrTokenAccess", "TestServiceImageRead"]);
+    expect(ecr.map((statement) => statement.Sid).sort()).toEqual(["EcrImageAccess", "EcrPullThroughCache", "EcrTokenAccess", "GcpPackImageRead", "TestServiceImageRead"]);
     for (const statement of ecr) {
       if (statement.Sid === "EcrTokenAccess") { expect(statement).toMatchObject({ Action: "ecr:GetAuthorizationToken", Resource: "*" }); continue; }
       for (const resource of asList(statement.Resource)) {
@@ -122,8 +122,10 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
       `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx-staging/worker@sha256:${d("c")}`, // the staging build's own repositories (0517-build-images.sh)
       `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx-staging/executor@sha256:${d("d")}`,
       ...mirroredStarterEntries(`${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com`, "staging").map((entry) => entry.reference),
+      // L4-E8I: the GCP pack's three mirrored copies (GcpPackImageRead). Its pulled SDK image is Google's, not ECR's: no ARN.
+      ...gcpPackWorkerEntries(`${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com`, "staging", "mirrored:bigquery").map((entry) => entry.reference).filter((reference) => reference.includes(".dkr.ecr.")),
     ];
-    expect(references).toHaveLength(10);
+    expect(references).toHaveLength(13);
     for (const reference of references) expect(covered(arns, reference), reference).toBe(true);
   });
 
