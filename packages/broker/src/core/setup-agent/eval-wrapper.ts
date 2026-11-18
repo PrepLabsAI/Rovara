@@ -440,7 +440,13 @@ export async function reopenEvalWrapper(deps: Pick<EvalWrapperDeps, "store" | "c
 export async function recordEvalWrapperTest(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now">, project: string, suite: { repository?: string | undefined; selection: string; language: EvalWrapperLanguage }, result: "approved" | "readable" | "unreadable"): Promise<boolean> {
   const row = (await listEvalWrapperFiles(deps, project)).find((entry) => entry.selection === suite.selection && entry.suiteRepository === (suite.repository ?? "") && entry.language === suite.language && entry.status === "present" && entry.match !== "outdated");
   if (row === undefined) return false;
-  const done = await deps.store.update({ key: fileKeyOf(deps.companyId, project, row.id), ops: [change.set("test", result), change.set("testAt", new Date(deps.now()).toISOString())], condition: when.eq("checkedAt", row.checkedAt) });
+  return await writeEvalWrapperTest(deps, project, row, result);
+}
+
+/** One conditional write on the exact row that was read: the same check, the same test state and the same text, so an answer never lands on a file that changed (or was checked again) after it was read. */
+async function writeEvalWrapperTest(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now">, project: string, row: EvalWrapperFileRecord, result: "approved" | "readable" | "unreadable"): Promise<boolean> {
+  const condition = when.and(when.eq("checkedAt", row.checkedAt), when.eq("test", row.test), ...(row.contentDigest === undefined ? [] : [when.eq("contentDigest", row.contentDigest)]));
+  const done = await deps.store.update({ key: fileKeyOf(deps.companyId, project, row.id), ops: [change.set("test", result), change.set("testAt", new Date(deps.now()).toISOString())], condition });
   return done.applied;
 }
 
@@ -456,7 +462,8 @@ export async function settleEvalWrapperTest(deps: Pick<EvalWrapperDeps, "store" 
     if (language === undefined) return false;
     const row = (await listEvalWrapperFiles(deps, project)).find((entry) => entry.selection === plan.selection && entry.suiteRepository === (plan.repository ?? "") && entry.language === language && entry.status === "present" && entry.match !== "outdated" && entry.match !== "other");
     if (row === undefined || row.test === "none" || row.test === result) return false;
-    return await recordEvalWrapperTest(deps, project, { ...(plan.repository === undefined ? {} : { repository: plan.repository }), selection: plan.selection, language }, result);
+    // Written on THIS row as it was read (not looked up again): a check that rewrote the file's record since, or a changed text, leaves the answer unwritten.
+    return await writeEvalWrapperTest(deps, project, row, result);
   } catch { return false; }
 }
 

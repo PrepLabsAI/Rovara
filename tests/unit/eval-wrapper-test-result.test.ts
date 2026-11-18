@@ -112,7 +112,7 @@ describe("the approved test run's answer reaches the wrapper's card", () => {
   });
 
   it("an end that is not about reading (stopped, the monthly limit, a provider that did not answer, a run that never reported) records nothing: the file stays 'test approved'", async () => {
-    for (const reason of ["stopped", "monthly_cap", "provider_incomplete", "not_connected", "unavailable", "over_cap", "questions_changed"] as const) {
+    for (const reason of ["stopped", "monthly_cap", "provider_incomplete", "not_connected", "unavailable", "over_cap", "questions_changed", "invalid_questions", "invalid_identity", "not_confirmed"] as const) {
       const x = await world();
       const { requestId, claimId } = await x.start();
       expect(await recordEvalHealthResult(x.deps(), project, body(requestId, claimId, { status: "not_run", reason }))).toEqual({ outcome: "not_run" });
@@ -267,5 +267,37 @@ describe("one answer, once, and never a failure", () => {
     expect(await recordEvalHealthResult(x.deps(), project, body(requestId, claimId, { status: "measured", record: record() }))).toEqual({ outcome: "finished" });
     spy.mockRestore();
     expect((await x.files())[0]).toMatchObject({ test: "approved" });
+  });
+  it("a file edited between the moment the answer is read for and the write never takes the answer for the old text", async () => {
+    const x = await world();
+    const { requestId, claimId } = await x.start();
+    const real = x.w.store.update.bind(x.w.store);
+    let injected = false;
+    // The check finds EDITED text after the file's record was read and before the answer is written (the record's own digest and test state are what the write names).
+    const spy = vi.spyOn(x.w.store, "update").mockImplementation(async (request) => {
+      if (!injected && String(request.key.sk).startsWith("EVAL_WRAPPER_FILE#")) {
+        injected = true; // same clock: the new check carries the same time, so only the text and the test state tell the rows apart
+        x.model.commit("main", { [x.need.file.path]: `${x.need.file.content}# edited\n` });
+        await detectEvalWrappers(x.wrapperDeps(), project, x.rep, { force: true });
+      }
+      return real(request);
+    });
+    expect(await recordEvalHealthResult(x.deps(), project, body(requestId, claimId, { status: "measured", record: record() }))).toEqual({ outcome: "finished" });
+    spy.mockRestore();
+    expect((await x.files())[0]).toMatchObject({ match: "edited", test: "none" });
+    expect((await x.cards())[0]).toMatchObject({ step: "file_found" });
+  });
+  it("an answer that lands between the read and the write is not overwritten by a stale one", async () => {
+    const x = await world();
+    const { requestId, claimId } = await x.start();
+    const real = x.w.store.update.bind(x.w.store);
+    let injected = false;
+    const spy = vi.spyOn(x.w.store, "update").mockImplementation(async (request) => {
+      if (!injected && String(request.key.sk).startsWith("EVAL_WRAPPER_FILE#")) { injected = true; await recordEvalWrapperTest(x.wrapperDeps(), project, { repository: "web", selection: x.need.selection, language: "python" }, "unreadable"); }
+      return real(request);
+    });
+    await recordEvalHealthResult(x.deps(), project, body(requestId, claimId, { status: "measured", record: record() }));
+    spy.mockRestore();
+    expect((await x.files())[0]).toMatchObject({ test: "unreadable" });
   });
 });
