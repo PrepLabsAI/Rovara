@@ -17,7 +17,10 @@ const refused = () => ({ ok: false as const, code: "MODEL_STALE" as const, words
 
 /** Publish only after the broker has checked every saved choice (and its fallback) against this company's list. Fence concurrent policy changes. */
 export async function publishAgentModelChoice(input: { store: Pick<DocumentStore, "get" | "put" | "transact">; companyId: OrgId; offered: unknown; defaultModel: string; now: () => number }): Promise<void> {
-  const offered = OfferedAgentModelsSchema.parse(input.offered);
+  // DEC 254zzz96 (2): a model's list price is for the page only, never stored: the stored copy holds the names (and reviewer attestation) alone, so a
+  // dispatcher of an older release reads it during a rolling upgrade, and a rollback never meets a priced row it would refuse.
+  const parsed = OfferedAgentModelsSchema.parse(input.offered);
+  const offered = { ...parsed, models: parsed.models.map(({ model }) => ({ model })) };
   const policy = await readModelSelectionPolicy(input.store, input.companyId);
   const names = new Set(offered.models.map((model) => model.model));
   if (!names.has(input.defaultModel)) throw new Error(STORED_MODEL_CHOICE_UNAVAILABLE);
