@@ -88,6 +88,7 @@ import { createLocalPlaybook } from "./playbook.js";
 import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
 import { createLocalWikiMap } from "./wiki-map.js";
 import { createLocalWikiBuild } from "./wiki-build.js";
+import { createLocalUpkeep } from "./upkeep.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { createWikiBuildStarter } from "../../core/wiki-build/starter.js";
 import { projectCitationReader, wikiBuildCallbackWiring, wikiBuildEndedHook } from "../../core/wiki-build/wiring.js";
@@ -628,6 +629,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const wikiMap = createLocalWikiMap({ flow: flow.deps, registry, companyId, now: () => clock().getTime(), log });
   // Wiki W4: the wiki build controls (Build, Stop, Continue, Refresh now, the agents switch, Delete wiki). The task flow's wiki build starter is the one seam left to fill (`starter`).
   const wikiBuildControls = createLocalWikiBuild({ flow: flow.deps, wikiMap, owner, companyId, now: () => clock().getTime(), modelAccessConfigured: async () => (await chosen()) !== undefined, starter: createWikiBuildStarter });
+  // Lead 4 N1: the nightly upkeep switch (owner only; recorded here, and nothing AI-spending starts on a laptop by itself).
+  const upkeepSwitch = createLocalUpkeep({ flow: flow.deps, owner, companyId, audit: registry.require("audit-sink"), now: () => clock().getTime() });
   // The worker's wiki build callback (the owner's standing, the project's own code host read for the citation re-read, this install's wiki store as the page sink) and the end hook for the build record.
   // An embedding product may supply its own (`options.wikiBuild`).
   const wikiBuildCallback = options.wikiBuild ?? wikiBuildCallbackWiring({
@@ -738,7 +741,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => sessionService.refresh(orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await wikiBuildControls.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await wikiBuildControls.routes(request, caller)) ?? (await upkeepSwitch.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await sessionService.start().catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
