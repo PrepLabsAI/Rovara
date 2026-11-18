@@ -44,9 +44,9 @@ const WORKFLOW = STAMP({ merge: "workflow", build: "workflow", flow: "workflow" 
 beforeAll(async () => { await loadSlackBroker(); });
 
 // Every suffix routeDeveloperTaskRequest serves after `/v1/dev/tasks/<id>`, written out by hand.
-const ROUTE_SUFFIXES = ["", "/events", "/plan", "/messages", "/diff", "/comments", "/people", "/people/role", "/people/take-ownership", "/people/requests/abc", "/readers", "/readers/abc",
+const ROUTE_SUFFIXES = ["", "/events", "/plan", "/messages", "/diff", "/comments", "/people", "/people/role", "/people/take-ownership", "/people/candidates", "/people/add", "/people/requests/abc", "/readers", "/readers/abc",
   "/continue", "/cancel", "/close", "/pull-requests", "/share", "/workflow/decision", "/workflow/retry", "/workflow/review", "/workflow/publish-retry", "/workflow/keep-pull-requests",
-  "/workflow/send-back", "/workflow/review-findings", "/workflow/feedback", "/workflow/feedback-decision", "/workflow/feedback-retry", "/canvas-closeout/retry", "/e2e-publication-context", "/answers"];
+  "/workflow/send-back", "/workflow/review-findings", "/workflow/feedback", "/workflow/feedback-decision", "/workflow/feedback-retry", "/canvas-closeout/retry", "/e2e-publication-context", "/answers", "/evidence"];
 
 describe("the owner of each operation, for every stamp", () => {
   it("names an operation for every developer task route, and none for anything else", () => {
@@ -353,6 +353,27 @@ describe("a core task on the AWS developer routes", () => {
     expect(answer.status).toBeGreaterThanOrEqual(500);
     expect(JSON.stringify(answer.body)).not.toContain("Add a /health endpoint");
     expect(workspaceReads()).toEqual([]);
+  });
+});
+
+describe("the proof index on the AWS developer route `GET /v1/dev/tasks/{id}/evidence` (Cloud's Proof tab)", () => {
+  it("a core task's index comes from the core's own handler: the same answer the core gives, and no AWS reader touches its workspace", async () => {
+    const { dev, task, routes, owner, workspaceReads } = await coreWorld();
+    const own = await routes.route({ method: "GET", path: `/v1/dev/tasks/${task.taskId}/evidence`, headers: {} }, { principal: owner, client: "cli" });
+    expect(own?.statusCode).toBe(200);
+    const read = await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}/evidence`);
+    expect(read).toEqual({ status: 200, body: JSON.parse(own!.body) as unknown });
+    expect(read.body).toMatchObject({ taskId: task.taskId, items: [] });
+    expect(workspaceReads()).toEqual([]);
+  });
+
+  it("another company's caller reads a core task's index exactly like a task id that does not exist", async () => {
+    const { dev, task } = await coreWorld();
+    const theirs = await dev(OMAR, "GET", `/v1/dev/tasks/${task.taskId}/evidence`);
+    const missingId = randomUUID();
+    const missing = await dev(OMAR, "GET", `/v1/dev/tasks/${missingId}/evidence`);
+    expect(theirs.status).toBe(404);
+    expect(JSON.stringify(theirs).replaceAll(task.taskId, "<id>")).toBe(JSON.stringify(missing).replaceAll(missingId, "<id>"));
   });
 });
 

@@ -8,7 +8,7 @@ import type { OrgId, TaskDependencyPlan, TestEnvDependency, TestEnvironmentBody 
 import type { FixtureDenyFor, FixtureStore } from "./fixture-store.js";
 
 /** What this module asks of the fixture store. */
-export type FixtureReadPort = Pick<FixtureStore, "record" | "readApproved" | "deliver">;
+export type FixtureReadPort = Pick<FixtureStore, "record" | "readApproved" | "deliver" | "specSlice">;
 
 /**
  * How the install hands out the store (`AwsBrokerDependencies.fixtureStore`, made by `fixtureStoreForRoutes` of fixture-store-aws.ts from the install's fixture key): a factory that takes the production deny list the CALLER knows,

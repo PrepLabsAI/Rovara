@@ -2,6 +2,7 @@
 // or about leaving it out, is an approval like any other: it goes through `createDecisionGate` and the `approvers` port, so the gate's proof checks, single-use proofs, request-id rule, sign-in rule and risk tier all hold, on every surface.
 // What is decided here: which choices the hold offers (`designChoicesOf`, from the stored review alone), the risk the request is graded at, and what each choice does to the workflow (the contract's own moves).
 // Nothing a caller sends sets an amount or a tier: the choice names itself and the amount comes from the task's record.
+import { flowWorkEventItems } from "../work-events/flow-events.js";
 import { createHash } from "node:crypto";
 import {
   DESIGN_REVIEW_CAP_MAX_USD, IMPLICIT_COMPANY_ID, WorkflowSnapshotSchema, WorkflowTransitionError, canonicalJson, change, lowerDesignReviewTier, raiseDesignReviewCap, skipDesignReview, when,
@@ -63,7 +64,7 @@ export function designChoiceDigest(workflow: WorkflowSnapshot): string | undefin
 }
 
 export interface DesignChoiceSubjectOptions {
-  flow: Pick<TaskFlowDeps, "store" | "companyId" | "now">;
+  flow: Pick<TaskFlowDeps, "store" | "companyId" | "now" | "workEvents">;
   reader: ProjectPlaybookReader;
 }
 
@@ -131,7 +132,7 @@ export function createDesignChoiceSubject(options: DesignChoiceSubjectOptions): 
             : skipDesignReview(workflow, { expectedRevision, by, now: at });
         const row = next.stage === "PLAN_CRITIQUE" && next.state === "READY" ? designRowItem(deps, taskId, next.revision, "CRITIQUE", at)
           : offered.choice === "skip" && next.stage === "PLAN" && next.state === "READY" ? dispatchRowItem(deps, taskId, next.revision, "PLAN", at) : undefined;
-        return { ops: [...workflowWriteOps(workflow, next).ops, change.set("updatedAt", at)], extra: [decisionRow, ...(row === undefined ? [] : [row]), ...designWaitArmItems(deps, taskId, next, Date.parse(at))], result: { choice: offered.choice, workflow: next } };
+        return { ops: [...workflowWriteOps(workflow, next).ops, change.set("updatedAt", at)], extra: [decisionRow, ...(row === undefined ? [] : [row]), ...designWaitArmItems(deps, taskId, next, Date.parse(at)), ...flowWorkEventItems({ enabled: options.flow.workEvents, orgId: options.flow.companyId, project: loaded.request.projectName ?? "", before: workflow, after: next, room: 40 })], result: { choice: offered.choice, workflow: next } };
       } catch (error) {
         if (error instanceof WorkflowTransitionError) throw new SubjectRefusal("invalid_outcome", error.message);
         throw error;

@@ -154,14 +154,7 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
       return readable ? { day, usdMicros: number("usdMicros"), entries: number("entries"), uncountedEntries: number("uncountedEntries") } : { day, usdMicros: number("usdMicros"), entries: 1, uncountedEntries: 1 };
     },
     async taskCost(companyId, taskId) {
-      const total = await deps.store.get({ pk: costPartition(companyId, taskId), sk: "TOTAL" });
-      if (total === undefined) return emptyCost(taskId);
-      const number = (name: string): number => (typeof total[name] === "number" ? total[name] : 0);
-      return {
-        taskId, currency: typeof total["currency"] === "string" ? total["currency"] : undefined, micros: number("micros"),
-        tokens: { input: number("tokensInput"), output: number("tokensOutput"), cacheRead: number("tokensCacheRead"), cacheWrite: number("tokensCacheWrite") },
-        entries: number("entries"), unpricedEntries: number("unpricedEntries"), ...(typeof total["updatedAt"] === "string" ? { updatedAt: total["updatedAt"] } : {}),
-      };
+      return taskCostFromTotal(taskId, await deps.store.get({ pk: costPartition(companyId, taskId), sk: "TOTAL" }));
     },
   };
 }
@@ -178,4 +171,15 @@ export function costLine(cost: TaskCost): string {
   const amount = usd === undefined ? `${(cost.micros / 1_000_000).toFixed(2)} ${cost.currency ?? ""}`.trim() : `$${usd.toFixed(2)}`;
   if (cost.unpricedEntries === 0) return amount;
   return `${amount} so far, ${String(cost.unpricedEntries)} ${cost.unpricedEntries === 1 ? "call" : "calls"} not priced`;
+}
+
+/** A task's cost from its stored `TOTAL` row (zero when there is none). The one reading of that row: the ledger's own `taskCost` and the cost report both use it. */
+export function taskCostFromTotal(taskId: string, total: StoredDocument | undefined): TaskCost {
+  if (total === undefined) return emptyCost(taskId);
+  const number = (name: string): number => (typeof total[name] === "number" ? total[name] : 0);
+  return {
+    taskId, currency: typeof total["currency"] === "string" ? total["currency"] : undefined, micros: number("micros"),
+    tokens: { input: number("tokensInput"), output: number("tokensOutput"), cacheRead: number("tokensCacheRead"), cacheWrite: number("tokensCacheWrite") },
+    entries: number("entries"), unpricedEntries: number("unpricedEntries"), ...(typeof total["updatedAt"] === "string" ? { updatedAt: total["updatedAt"] } : {}),
+  };
 }

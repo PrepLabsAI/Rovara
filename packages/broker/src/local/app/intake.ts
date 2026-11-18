@@ -28,7 +28,9 @@ import type { SessionChange } from "../../core/sessions/summary.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
-import { readTicketUpdates, readWriteAccess, saveTicketUpdates, ticketMomentsOnChange, ticketUpdatesHandler } from "../../core/ticket-updates/index.js";
+import { readTicketUpdates, readWriteAccess, refreshTicketThread, saveTicketUpdates, ticketMomentsOnChange, ticketUpdatesHandler, type TicketUpdatesDependencies } from "../../core/ticket-updates/index.js";
+import { taskLogMilestoneHandler } from "../../core/task-log/milestones.js";
+import type { TaskLogHooks } from "../../core/task-log/hooks.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 
 /** The paths this module owns under `/v1/app/projects/`. */
@@ -47,6 +49,10 @@ export interface LocalIntakeDeps {
   /** A key only this install holds (derived from its root key): a ticket's fence label is made from it. */
   fenceKey: Uint8Array;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
+  /** The task log's hook: the ticket's thread is brought up to date when an answer, a decision or a question lands (`core/task-log/hooks.ts`). Absent: only a milestone updates the thread. */
+  taskLog?: Pick<TaskLogHooks, "subscribe"> | undefined;
+  /** The plan's summary for the task log (`core/task-log/plan-summary-source.ts`), read when the plan waits for review. Late-bound by the host: the decision gate it needs is made after intake. */
+  planSummaryOf?: TicketUpdatesDependencies["planSummaryOf"];
 }
 
 export interface LocalIntake {
@@ -54,6 +60,8 @@ export interface LocalIntake {
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** One pass of the poll over every source that is due (the timer calls it). */
   poll(): Promise<PollReport>;
+  /** Brings up to date the ticket threads whose root comment was edited a moment ago when something new landed (the timer calls it). */
+  flushThreads(): Promise<void>;
   /** For `SummaryDependencies.onChange`: a ticket's task whose plan waits, or that was closed, tells its ticket. */
   onSessionChange(change: SessionChange): Promise<void>;
   /** The engine's ports, for tests and for a later webhook receiver. */
@@ -110,7 +118,22 @@ export function createLocalIntake(deps: LocalIntakeDeps): LocalIntake {
   });
 
   // The write-back: a milestone handler on the ticket the task started from. Registered once, before the first milestone is written.
-  deps.milestones.register(ticketUpdatesHandler({ store, now: deps.now, trackerFor, scope, log }));
+  // A laptop's tasks are the owner's alone (`taskShared` absent), so a thread above `status_only` is written only where the tracker can make an internal comment; and it has no address for the task's page (http), so no link.
+  const ticketDeps: TicketUpdatesDependencies = { store, now: deps.now, trackerFor, scope, log, planSummaryOf: (orgId, taskId) => (deps.planSummaryOf === undefined ? Promise.resolve(undefined) : deps.planSummaryOf(orgId, taskId)) };
+  // The task log hears the milestones first (its entries are then there when the ticket's thread is drawn), and the ticket's handler second.
+  deps.milestones.register(taskLogMilestoneHandler({ store, planSummaryOf: ticketDeps.planSummaryOf, log }));
+  deps.milestones.register(ticketUpdatesHandler(ticketDeps));
+  // A thread whose root was edited a moment ago is not edited again for a minute: what landed meanwhile waits here, and the timer brings it in.
+  const behind = new Set<string>();
+  const refreshThread = async (taskId: string): Promise<void> => {
+    const outcome = await refreshTicketThread(ticketDeps, taskId);
+    if (outcome === "too_soon" || outcome === "busy") behind.add(taskId);
+    else behind.delete(taskId);
+  };
+  deps.taskLog?.subscribe(refreshThread);
+  const flushThreads = async (): Promise<void> => {
+    for (const taskId of [...behind]) await refreshThread(taskId).catch(() => undefined);
+  };
   const momentTable = { store, milestones: deps.milestones, now: deps.now, log };
   const onSessionChange = ticketMomentsOnChange(momentTable);
 
@@ -182,6 +205,7 @@ export function createLocalIntake(deps: LocalIntakeDeps): LocalIntake {
   return {
     ports,
     poll,
+    flushThreads,
     onSessionChange,
     async routes(request, caller) {
       const path = request.path.split("?")[0] ?? request.path;

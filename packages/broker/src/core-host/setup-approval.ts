@@ -16,12 +16,14 @@ import { type AuditSink, type Approvers, type IdentityProvider, type OrgId, type
 import { createDecisionGate, type Credential, type DecisionGate } from "../core/decisions/approval-gate.js";
 import { createSetupProposalSubject } from "../core/setup-agent/apply.js";
 import { createEvalSpendSubject } from "../core/setup-agent/eval-spend.js";
-import { SETUP_RISK_APPROVER, setupApproverAllows, type SetupApproverStanding, type SetupRisk } from "../core/setup-agent/setup-risk.js";
+import { createSetupHostSubject } from "../core/setup-agent/host-ask.js";
+import { SETUP_RISK_APPROVER, setupApproverAllows, setupHostApproverAllows, type SetupApproverStanding, type SetupRisk } from "../core/setup-agent/setup-risk.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { deployedSessionMembers } from "./deployed-decisions.js";
-import { issueEvalSpendStepUpApproval, issueSetupStepUpApproval, type SetupStepUpApprovalInput } from "./hosted-approvers.js";
+import { issueEvalSpendStepUpApproval, issueSetupHostStepUpApproval, issueSetupStepUpApproval, type SetupHostStepUpApprovalInput, type SetupStepUpApprovalInput } from "./hosted-approvers.js";
 
 export const SETUP_NEEDS_ADMIN = "This setup change reaches outside the project's commands (a website, a secret, a registry, an integration or something Rovara does not recognise), so a company owner or admin must approve it.";
+export const SETUP_HOST_NEEDS_ADMIN = "A website for a setup run changes what the project's code can reach, so only a company owner or admin can allow or refuse it.";
 export const SETUP_NEEDS_MAINTAINER = "Only the project's maintainers, or a company owner or admin, can decide this setup.";
 
 /** The words of a refusal by the candidate's risk and the answer (any maintainer may reject). */
@@ -33,15 +35,20 @@ export const setupDecisionRequestId = (digest: string, candidateRevision: number
 /** The card a candidate is decided on, at the digest the person saw (the hosted approvers point checks the proof was issued for it). */
 export const setupCardOf = (project: string, artifactDigest: string): { cardId: string; contentVersion: string } => ({ cardId: `setup_proposal:${project}`, contentVersion: artifactDigest });
 
+/** The card a website ask is decided on, at the digest the person saw (the host and when it was asked): the hosted approvers point checks the proof was issued for it. */
+export const setupHostCardOf = (subjectId: string, artifactDigest: string): { cardId: string; contentVersion: string } => ({ cardId: `setup_host:${subjectId}`, contentVersion: artifactDigest });
+
 /** The card an eval spend item is decided on, at the digest the person saw (L4-EVC; the hosted approvers point checks the proof was issued for it). */
 export const evalSpendCardOf = (project: string, artifactDigest: string): { cardId: string; contentVersion: string } => ({ cardId: `eval_spend:${project}`, contentVersion: artifactDigest });
 
-/** What the hosted setup route needs to decide a candidate. */
+/** What the hosted setup route needs to decide a candidate, and a website ask. */
 export interface HostedSetupApproval {
   /** The approval gate over the company's approvers point, with the hosted setup subject (risk from the diff, the live standing rule). */
   gate: DecisionGate;
   /** The approvers point's proof of one act (a fresh step-up). Throws when it cannot be issued (the route refuses). */
   issue: (act: SetupStepUpApprovalInput) => Credential | Promise<Credential>;
+  /** L4-SF (d): the approvers point's proof of one act on a website ask (a fresh step-up bound to the ask's id, digest, answer and card). Throws when it cannot be issued (the route refuses). */
+  issueHost: (act: SetupHostStepUpApprovalInput) => Credential | Promise<Credential>;
   /** L4-EVC: the same proof, for one act on the project's eval spend item (its own subject: a setup proof can never stand for it). Decided through the same gate and the eval subject's live rule (owner, admin or the project's maintainer). */
   issueEval: (act: SetupStepUpApprovalInput) => Credential | Promise<Credential>;
   /** L4-EVC: the company's live members as the eval seams read them (the same people as `standing`). */
@@ -78,6 +85,8 @@ export interface HostedSetupApprovalOptions {
   people: SetupApprovalPeople;
   /** The install's step-up proof key (`stepUpApprovalKeyOf`). */
   proofKey: Buffer;
+  /** L4-SF (c): the other copy of the project's revisions an approval keeps in step (the old broker's registry, aws/setup-registry-mirror.ts). Absent: none. */
+  registryMirror?: NonNullable<Parameters<typeof createSetupProposalSubject>[0]["approval"]>["registryMirror"];
   now: () => Date;
 }
 
@@ -92,12 +101,25 @@ export function createHostedSetupApproval(options: HostedSetupApprovalOptions): 
       // Read live inside the decision: the approver the point vouched for, in this company, at the candidate's risk.
       mayDecide: async (approver, input) => approver.companyId === companyId && setupApproverAllows(await standing(approver.personId, input.project), input.risk, input.outcome),
       refusal: setupApproverRefusal,
+      ...(options.registryMirror === undefined ? {} : { registryMirror: options.registryMirror }),
     },
   });
+  // L4-SF (d): a website ask is high risk always, so a company owner or admin decides it (either answer), on their live standing read inside the decision. The ask's own checks (no private, paste or
+  // tunnel names; the refusal list read again on approval) are the host-ask subject's, unchanged.
+  const hostSubject = createSetupHostSubject({
+    store: options.store,
+    approval: { mayDecide: async (approver, input) => approver.companyId === companyId && setupHostApproverAllows(await standing(approver.personId, input.project)), refusal: SETUP_HOST_NEEDS_ADMIN },
+  });
+  // L4-EVC: the project's eval spend item, decided by a company owner or admin or the project's maintainer, read live inside the decision (eval-spend.ts `roleFor`).
   const evalMembers = deployedSessionMembers(companyId, options.people);
   const gate = createDecisionGate({
-    store: options.store, approvers: options.approvers, audit: options.audit, subjects: [subject, createEvalSpendSubject({ store: options.store, companyId, members: evalMembers })], now: options.now,
+    store: options.store, approvers: options.approvers, audit: options.audit, subjects: [subject, hostSubject, createEvalSpendSubject({ store: options.store, companyId, members: evalMembers })], now: options.now,
     ...(options.identity === undefined ? {} : { identity: options.identity }),
   });
-  return { gate, standing, evalMembers, issue: (act) => issueSetupStepUpApproval(options.proofKey, act, options.now().getTime()), issueEval: (act) => issueEvalSpendStepUpApproval(options.proofKey, act, options.now().getTime()) };
+  return {
+    gate, standing, evalMembers,
+    issue: (act) => issueSetupStepUpApproval(options.proofKey, act, options.now().getTime()),
+    issueHost: (act) => issueSetupHostStepUpApproval(options.proofKey, act, options.now().getTime()),
+    issueEval: (act) => issueEvalSpendStepUpApproval(options.proofKey, act, options.now().getTime()),
+  };
 }

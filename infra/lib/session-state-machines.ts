@@ -2,6 +2,7 @@
 // #76). The provisioner starts from a ProvisioningInput and the deleter from a DeletionInput
 // (packages/broker/src/aws/sessions.ts). Each step that records progress calls the session steps
 // Lambda, which applies the SESSION transition conditionally on the generation.
+import { MACHINE_LAUNCH_AMI_PARAMETERS } from "@agentx/contracts";
 
 type State = Record<string, unknown>;
 
@@ -67,14 +68,30 @@ function step(props: SessionStateMachineProps, payload: Record<string, unknown>,
 /** Records the failure text for the cleanup path. */
 const toCleanup = { ErrorEquals: ["States.ALL"], Next: "Cleanup", Assign: { failure: "{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}" } };
 
-/** Launches the worker from the launch template; `pinned` also overrides its AMI with the qualified one. */
-function runInstance(props: SessionStateMachineProps, workspaceTags: Array<{ Key: string; Value: string }>, pinned: boolean): State {
+/**
+ * DEC 254zb: what a sized launch (the input's `machine`) sets on top of the template. arm64 keeps the template's AMI (or the AR-4 pin, qualified on arm64);
+ * x86_64 boots the public x86 Amazon Linux 2023 AMI, resolved by EC2 at launch, never the arm64 pin. The type is bounded by the provisioner's IAM allow-list.
+ */
+type Sizing = "none" | "arm64" | "x86_64";
+
+/**
+ * The EC2 error codes that mean "this size cannot launch here now" and that create no instance: no capacity, the type is not offered in the zone, or a
+ * vCPU / instance quota. EC2 errors reach Step Functions as a generic Ec2.Ec2Exception, so the code is looked for in the error and its cause.
+ */
+export const SIZE_UNAVAILABLE_CODES = ["InsufficientInstanceCapacity", "Unsupported", "VcpuLimitExceeded", "InstanceLimitExceeded"] as const;
+/** The fixed reason a session records when its sized launch fell back to the template's default size. */
+export const MACHINE_FALLBACK_REASON = "size-unavailable";
+
+/** Launches the worker from the launch template; `pinned` also overrides its AMI with the qualified one; `sizing` adds the chosen type (and the x86 AMI). */
+function runInstance(props: SessionStateMachineProps, workspaceTags: Array<{ Key: string; Value: string }>, pinned: boolean, sizing: Sizing = "none"): State {
   return {
     Type: "Task",
     Resource: ec2("runInstances"),
     Arguments: {
       LaunchTemplate: { LaunchTemplateId: "{% $launchTemplateId %}", Version: "$Default" },
       ...(pinned ? { ImageId: "{% $qualifiedAmi %}" } : {}),
+      ...(sizing === "x86_64" ? { ImageId: `resolve:ssm:${MACHINE_LAUNCH_AMI_PARAMETERS.x86_64}` } : {}),
+      ...(sizing === "none" ? {} : { InstanceType: "{% $machine.instanceType %}" }),
       MinCount: 1,
       MaxCount: 1,
       SubnetId: "{% $subnetId %}",
@@ -88,11 +105,35 @@ function runInstance(props: SessionStateMachineProps, workspaceTags: Array<{ Key
     Assign: {
       instanceId: "{% $states.result.Instances[0].InstanceId %}",
       privateIp: "{% $states.result.Instances[0].PrivateIpAddress %}",
+      instanceType: "{% $states.result.Instances[0].InstanceType %}",
       waits: 0,
     },
     Retry: RETRY_IDEMPOTENT,
-    Catch: [toCleanup],
+    // A sized launch that cannot get its size falls back to the default size (SizedLaunchFailed); every other failure cleans up as before.
+    Catch: sizing === "none" ? [toCleanup] : [{ ...toCleanup, Next: "SizedLaunchFailed", Assign: { ...toCleanup.Assign, lastError: "{% $states.errorOutput %}" } }],
     Next: "RecordInstance",
+  };
+}
+
+/** AUTOREQUALIFY AR-4's pin read, for the default (`suffix` "") and the sized arm64 (`suffix` "Sized") launches: the same states and the same fallbacks. */
+function pinStates(props: SessionStateMachineProps, suffix: "" | "Sized"): Record<string, State> {
+  return {
+    [`ReadQualifiedAmi${suffix}`]: {
+      Type: "Task",
+      Resource: ssm("getParameter"),
+      Arguments: { Name: props.workerAmiParameterName },
+      Assign: { qualifiedAmi: "{% $states.result.Parameter.Value %}" },
+      Retry: [{ ErrorEquals: [PARAMETER_NOT_FOUND], MaxAttempts: 0 }, ...RETRY_IDEMPOTENT],
+      Catch: [{ ErrorEquals: [PARAMETER_NOT_FOUND], Next: `RunInstance${suffix}` }, { ErrorEquals: ["States.ALL"], Next: `QualifiedAmiReadFailed${suffix}` }],
+      Next: `QualifiedAmiWellFormed${suffix}`,
+    },
+    [`QualifiedAmiWellFormed${suffix}`]: {
+      Type: "Choice",
+      Choices: [{ Condition: `{% $count($match($qualifiedAmi, /${AMI_ID_PATTERN_SOURCE}/)) > 0 %}`, Next: `RunInstancePinned${suffix}` }],
+      Default: `QualifiedAmiMalformed${suffix}`,
+    },
+    [`QualifiedAmiReadFailed${suffix}`]: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-read-failed" }, Next: `RunInstance${suffix}` },
+    [`QualifiedAmiMalformed${suffix}`]: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-malformed" }, Next: `RunInstance${suffix}` },
   };
 }
 
@@ -116,6 +157,10 @@ export function provisionerDefinition(props: SessionStateMachineProps): State {
           volumeType: "{% $states.input.volumeType %}",
           qualifiedAmi: null,
           pinFallback: null,
+          // DEC 254zb: the chosen size ({ instanceType, chip }), absent or null for the template's default size (today's launch, unchanged).
+          machine: "{% $exists($states.input.machine) ? $states.input.machine : null %}",
+          machineFallback: null,
+          instanceType: null,
           // The execution name: CreateVolume and RunInstances are idempotent per generation.
           clientToken: "{% 'ws-' & $states.input.workspaceId & '-gen-' & $string($states.input.generation) %}",
           expectNewVolume: false,
@@ -179,37 +224,52 @@ export function provisionerDefinition(props: SessionStateMachineProps): State {
       }, {
         Assign: { userData: "{% $states.result.Payload.userData %}" },
         Catch: [toCleanup],
-        Next: "ReadQualifiedAmi",
+        Next: "SizeChosen",
       }),
+      // DEC 254zb: no chosen size takes today's path (the pin read, then the template's type). arm64 sizes keep the pin; x86 sizes never use it.
+      SizeChosen: {
+        Type: "Choice",
+        Choices: [
+          { Condition: "{% $exists($machine.chip) and $machine.chip = 'x86_64' %}", Next: "RunInstanceX86" },
+          { Condition: "{% $exists($machine.chip) and $machine.chip = 'arm64' %}", Next: "ReadQualifiedAmiSized" },
+        ],
+        Default: "ReadQualifiedAmi",
+      },
       // AUTOREQUALIFY AR-4: workers boot from the AMI the test machine was qualified on, so a renewal
       // causes no kernel drift. The pin must never stop a worker from starting: no parameter yet (before
       // the first automatic requalification), any read fault whatever its error name, and a value that is
       // not an AMI ID all launch from the launch template's AMI as before. The last two record a fixed
       // reason (pinFallback) in the execution, and the reconciler reports an unreadable pin.
-      ReadQualifiedAmi: {
-        Type: "Task",
-        Resource: ssm("getParameter"),
-        Arguments: { Name: props.workerAmiParameterName },
-        Assign: { qualifiedAmi: "{% $states.result.Parameter.Value %}" },
-        Retry: [{ ErrorEquals: [PARAMETER_NOT_FOUND], MaxAttempts: 0 }, ...RETRY_IDEMPOTENT],
-        Catch: [{ ErrorEquals: [PARAMETER_NOT_FOUND], Next: "RunInstance" }, { ErrorEquals: ["States.ALL"], Next: "QualifiedAmiReadFailed" }],
-        Next: "QualifiedAmiWellFormed",
-      },
-      QualifiedAmiWellFormed: {
-        Type: "Choice",
-        Choices: [{ Condition: `{% $count($match($qualifiedAmi, /${AMI_ID_PATTERN_SOURCE}/)) > 0 %}`, Next: "RunInstancePinned" }],
-        Default: "QualifiedAmiMalformed",
-      },
-      QualifiedAmiReadFailed: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-read-failed" }, Next: "RunInstance" },
-      QualifiedAmiMalformed: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-malformed" }, Next: "RunInstance" },
+      ...pinStates(props, ""),
       RunInstance: runInstance(props, workspaceTags, false),
       RunInstancePinned: runInstance(props, workspaceTags, true),
+      ...pinStates(props, "Sized"),
+      RunInstanceSized: runInstance(props, workspaceTags, false, "arm64"),
+      RunInstancePinnedSized: runInstance(props, workspaceTags, true, "arm64"),
+      RunInstanceX86: runInstance(props, workspaceTags, false, "x86_64"),
+      // A size that cannot launch here now falls back ONCE to the default launch, under its own idempotency token (the sized call's token never
+      // names a different request), and the session records the fixed reason so the task can say so. Any other error fails as before.
+      SizedLaunchFailed: {
+        Type: "Choice",
+        Choices: [{
+          Condition: `{% ${SIZE_UNAVAILABLE_CODES.map((code) => `$contains($string($lastError.Error) & ' ' & $string($lastError.Cause), '${code}')`).join(" or ")} %}`,
+          Next: "SizeUnavailable",
+        }],
+        Default: "Cleanup",
+      },
+      SizeUnavailable: {
+        Type: "Pass",
+        Assign: { machine: null, machineFallback: MACHINE_FALLBACK_REASON, failure: null, clientToken: "{% $clientToken & '-std' %}" },
+        Next: "ReadQualifiedAmi",
+      },
       RecordInstance: step(props, {
         action: "recordInstance",
         workspaceId: "{% $workspaceId %}",
         generation: "{% $generation %}",
         instanceId: "{% $instanceId %}",
         privateIp: "{% $privateIp %}",
+        instanceType: "{% $instanceType %}",
+        machineFallback: "{% $machineFallback %}",
       }, { Catch: [toCleanup], Next: "WaitForRunning" }),
       WaitForRunning: { Type: "Wait", Seconds: 5, Next: "DescribeInstance" },
       DescribeInstance: {

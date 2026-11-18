@@ -38,7 +38,13 @@ import {
   OrgIdSchema,
   canonicalJson,
   fixtureSetDigest,
+  MockSpecSliceSchema,
+  mockSpecSliceDigest,
+  mockSpecSliceKey,
+  pinMockSpecSlice,
   type FixtureSet,
+  type MockSpecCatalogEntry,
+  type MockSpecSlice,
   type TestEnvProdDeny,
 } from "@agentx/contracts";
 import type { DecisionItem } from "../decisions/project.js";
@@ -171,6 +177,8 @@ export interface FixtureRecord {
   submittedAt: string;
   decidedBy?: string;
   decidedAt?: string;
+  /** Digest-only pointer to the separate approval-time vendor spec slice row. */
+  mockSpecSliceDigest?: string;
   withdrawnBy?: string;
   withdrawnAt?: string;
   /** Compare-and-set counter of the row. */
@@ -195,6 +203,8 @@ export interface FixtureIndexPort {
   /** Replaces the row when its `version` is the expected one; false otherwise. */
   replace(record: FixtureRecord, expectedVersion: number): Promise<boolean>;
   listByDependency(orgId: string, project: string, dependencyId: string): Promise<FixtureRecord[]>;
+  putMockSpecSlice(key: string, digest: string, slice: MockSpecSlice): Promise<boolean>;
+  getMockSpecSlice(key: string): Promise<{ digest: string; slice: MockSpecSlice } | undefined>;
 }
 
 /** The production deny list of ONE project of an org (its approved environment's). */
@@ -209,6 +219,7 @@ export interface FixtureStoreDependencies {
   denyFor: FixtureDenyFor;
   now?: () => Date;
   prefix?: string;
+  specCatalog?: readonly MockSpecCatalogEntry[];
 }
 
 export type StoreRefusal = "disabled" | "bad_org" | "bad_project" | "bad_digest" | "not_found";
@@ -306,7 +317,9 @@ export interface FixtureStore {
   /** The same, from a store id (the task plan names one): the id's org and project must be the caller's. */
   deliverById(callerOrgId: string, callerProject: string, storeId: string): ReturnType<FixtureStore["deliver"]>;
   /** The approved set itself, with the stored bytes checked against the digest. */
-  readApproved(orgId: string, project: string, digest: string): Promise<{ ok: true; set: FixtureSet } | { ok: false; reason: DeliverRefusal }>;
+  readApproved(orgId: string, project: string, digest: string): Promise<{ ok: true; set: FixtureSet; decidedAt?: string } | { ok: false; reason: DeliverRefusal }>;
+  /** Approval-time spec evidence, reachable only through this company's project mock row. */
+  specSlice(orgId: string, project: string, digest: string): Promise<{ ok: true; digest: string; slice: MockSpecSlice } | { ok: false; reason: StoreRefusal | "not_approved" | "digest_mismatch" }>;
 }
 
 export function createFixtureStore(deps: FixtureStoreDependencies): FixtureStore {
@@ -347,6 +360,7 @@ export function createFixtureStore(deps: FixtureStoreDependencies): FixtureStore
     if (row === undefined) return { ok: false, reason: "not_found" };
     if (status === "withdrawn") { if (row.status !== "approved") return { ok: false, reason: "not_approved" }; }
     else if (row.status !== "pending") return { ok: false, reason: "already_decided" };
+    let approvedSet: FixtureSet | undefined;
     if (status === "approved") {
       // High: the first recording from a test account, or an environment that answers the unrecorded from the schema. It is approved only with a fresh sign-in.
       if ((row.firstFromTestAccount || verified.schemaSynth) && !signedInRecently(verified.signedInAt, now())) return { ok: false, reason: "fresh_sign_in_required" };
@@ -355,11 +369,26 @@ export function createFixtureStore(deps: FixtureStoreDependencies): FixtureStore
       if (loaded === undefined || !row.scanClean) return { ok: false, reason: "not_found" };
       if (loaded === "mismatch") return { ok: false, reason: "digest_mismatch" };
       if (!(await scanNow(orgId, project, loaded.set))) return { ok: false, reason: "data_guard" };
+      approvedSet = loaded.set;
     }
     const at = now().toISOString();
+    let specSliceDigest: string | undefined;
+    if (status === "approved") {
+      if (approvedSet === undefined) return { ok: false, reason: "not_found" };
+      const key = mockSpecSliceKey(orgId, project, digest);
+      const existing = await deps.index.getMockSpecSlice(key);
+      if (existing !== undefined) {
+        if (existing.digest !== mockSpecSliceDigest(existing.slice) || existing.slice.companyId !== orgId || existing.slice.project !== project || existing.slice.mockDigest !== digest) return { ok: false, reason: "already_decided" };
+        specSliceDigest = existing.digest;
+      } else {
+        const slice = { entityType: "MOCK_SPEC_SLICE" as const, ...pinMockSpecSlice({ companyId: orgId, project, set: approvedSet, cutAt: now(), ...(deps.specCatalog === undefined ? {} : { catalog: deps.specCatalog }) }) };
+        specSliceDigest = mockSpecSliceDigest(slice);
+        if (!(await deps.index.putMockSpecSlice(key, specSliceDigest, slice))) return { ok: false, reason: "already_decided" };
+      }
+    }
     const next: FixtureRecord = status === "withdrawn"
       ? { ...row, status, withdrawnBy: plainLine(verified.actor, 120), withdrawnAt: at, version: row.version + 1 }
-      : { ...row, status, decidedBy: plainLine(verified.actor, 120), decidedAt: at, version: row.version + 1 };
+      : { ...row, status, decidedBy: plainLine(verified.actor, 120), decidedAt: at, ...(specSliceDigest === undefined ? {} : { mockSpecSliceDigest: specSliceDigest }), version: row.version + 1 };
     return (await deps.index.replace(next, row.version)) ? { ok: true, record: next } : { ok: false, reason: "already_decided" };
   };
   /** Makes sure the object at the key is the submitted bytes: writes it when absent, and replaces one that does not hash to the digest (conditional on it being unchanged since it was read). */
@@ -461,7 +490,19 @@ export function createFixtureStore(deps: FixtureStoreDependencies): FixtureStore
       const loaded = await load(orgId, project, digest);
       if (loaded === undefined) return { ok: false, reason: "not_found" };
       if (loaded === "mismatch") return { ok: false, reason: "digest_mismatch" };
-      return (await scanNow(orgId, project, loaded.set)) ? { ok: true, set: loaded.set } : { ok: false, reason: "data_guard" };
+      return (await scanNow(orgId, project, loaded.set)) ? { ok: true, set: loaded.set, ...(row.decidedAt === undefined ? {} : { decidedAt: row.decidedAt }) } : { ok: false, reason: "data_guard" };
+    },
+    async specSlice(orgId, project, digest) {
+      const refused = gate(orgId, project, digest);
+      if (refused !== undefined) return { ok: false, reason: refused };
+      const row = await rowOf(orgId, project, digest);
+      if (row === undefined) return { ok: false, reason: "not_found" };
+      if (row.status !== "approved" || row.mockSpecSliceDigest === undefined) return { ok: false, reason: "not_approved" };
+      const found = await deps.index.getMockSpecSlice(mockSpecSliceKey(orgId, project, digest));
+      if (found === undefined || found.digest !== row.mockSpecSliceDigest || mockSpecSliceDigest(found.slice) !== found.digest) return { ok: false, reason: "digest_mismatch" };
+      const parsed = MockSpecSliceSchema.safeParse(found.slice);
+      if (!parsed.success || parsed.data.companyId !== orgId || parsed.data.project !== project || parsed.data.mockDigest !== digest) return { ok: false, reason: "digest_mismatch" };
+      return { ok: true, digest: found.digest, slice: parsed.data };
     },
   };
 }
@@ -470,6 +511,7 @@ export function createFixtureStore(deps: FixtureStoreDependencies): FixtureStore
 export function createMemoryFixturePorts(options: { signUrl?: (key: string, seconds: number) => string } = {}): { objects: FixtureObjectPort & { dump(): Map<string, Uint8Array> }; index: FixtureIndexPort } {
   const blobs = new Map<string, Uint8Array>();
   const rows = new Map<string, FixtureRecord>();
+  const slices = new Map<string, { digest: string; slice: MockSpecSlice }>();
   const rowKey = (orgId: string, project: string, digest: string): string => `${orgId}/${project}/${digest}`;
   return {
     objects: {
@@ -489,6 +531,12 @@ export function createMemoryFixturePorts(options: { signUrl?: (key: string, seco
       putIfAbsent: (record) => { const key = rowKey(record.orgId, record.project, record.digest); if (rows.has(key)) return Promise.resolve(false); rows.set(key, record); return Promise.resolve(true); },
       replace: (record, expectedVersion) => { const key = rowKey(record.orgId, record.project, record.digest); if (rows.get(key)?.version !== expectedVersion) return Promise.resolve(false); rows.set(key, record); return Promise.resolve(true); },
       listByDependency: (orgId, project, dependencyId) => Promise.resolve([...rows.values()].filter((row) => row.orgId === orgId && row.project === project && row.dependencyId === dependencyId)),
+      putMockSpecSlice: (key, digest, slice) => {
+        const existing = slices.get(key);
+        if (existing !== undefined) return Promise.resolve(existing.digest === digest && mockSpecSliceDigest(existing.slice) === digest);
+        slices.set(key, { digest, slice }); return Promise.resolve(true);
+      },
+      getMockSpecSlice: (key) => Promise.resolve(slices.get(key)),
     },
   };
 }

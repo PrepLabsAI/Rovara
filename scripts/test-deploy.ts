@@ -310,6 +310,8 @@ export const CONTROL_PLANE_LAMBDAS = {
  */
 export const CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED: Readonly<Record<string, string>> = {
   TaskPersonProofFunction817A5A36: "invoked through a published Lambda version, which a code-only change set cannot move; it needs a CDK deploy",
+  // Batch 14 (#907, C8B): the attention email sender exists only while CoreAttentionEmail is on (off by default), so a code-only change set cannot count on it.
+  CoreEngineJobsAttentionEmailSenderC7CE396D: "exists only while CoreAttentionEmail is on (off by default); a code-only change set cannot move a function the stack may not have; it needs a CDK deploy",
 };
 type AlwaysLambdaUnit = keyof typeof CONTROL_PLANE_LAMBDAS;
 /** The renewal's Lambda (AUTOREQUALIFY) is a code unit too, but only on a stack that deployed `requalify-infra`: it is not in CONTROL_PLANE_LAMBDAS, which equals the default synth. */
