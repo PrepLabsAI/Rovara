@@ -183,6 +183,7 @@ describe("a changed eval set (D6)", () => {
     const second = await w.run(filesOf(30), reportOf(30, { maxCallsPerQuestion: 20, maxCostMicrosPerQuestion: 1 }));
     const preview = (await second.card()).suites[0]!;
     expect(preview.seen.perCheckHighMicros).toBeLessThan(1_800_000);
+    expect(preview.versusApproved).toMatchObject({ within: false });
     const answer = await second.confirmOnly();
     expect(answer.evalSpend).toMatchObject({ state: "waiting", card: { needsApproval: "Needs approval: your eval set grew past the approved $1.80" } });
     expect(w.approved).toHaveLength(1);
@@ -323,6 +324,15 @@ describe("the health run is opt-in (D5)", () => {
     await bigger.confirmOnly();
     expect(await reader(w)).toBeUndefined();
     expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("none");
+  });
+  it("a request is void when the approval it was made under is replaced by a new approved item of the same cost (another model)", async () => {
+    const { w } = await approved();
+    await ask(w);
+    expect(await reader(w)).toBeDefined();
+    const other = await w.run(filesOf(2), reportOf(2, { model: "gemini-2.5-pro", modelVersion: "gemini-2.5-pro-001" }));
+    await other.approve();
+    expect((await w.record())?.plan.estimate.costMicros).toBe(600_000);
+    expect(await reader(w)).toBeUndefined();
   });
   it("a request whose approver lost the right to approve is void", async () => {
     const roles: Record<string, Role> = { ...ROLES, ada: { company: "admin" } };
