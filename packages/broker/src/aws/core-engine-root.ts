@@ -88,7 +88,7 @@ import { WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../core/task-
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
-import { createHostedEvidence } from "../core-host/hosted-evidence.js";
+import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -751,7 +751,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       standingInstructions: hostedStandingInstructions({ registry, companyId, now }),
       // L4-HW4 (the laptop's `evidence.keepAfterChecks`): when a run's checks are recorded for a candidate, the evidence of that run (per-check output, the failing tests with the change that most likely broke each, the baseline words) is
       // kept for the Proof route, in the company-bound object store (only this company's own workspaces; the same data guard and caps as the laptop). A rerun of the checks also asks the worker to save the raw parts (`evidenceCapture`).
-      keepEvidence: createHostedEvidence({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, env, now: () => now().getTime(), log, refused: (reason) => log({ event: "core_engine.evidence_refused", companyId, reason }) }).keepAfterChecks,
+      keepEvidence: hostedKeepEvidence({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, env, now: () => now().getTime(), log, refused: (reason) => log({ event: "core_engine.evidence_refused", companyId, reason }) }),
       // DEC 254zm: a starting task pins the project's newest usable approved test environment (the company's own records), as on a laptop.
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
