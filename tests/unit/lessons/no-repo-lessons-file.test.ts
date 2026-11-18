@@ -16,6 +16,9 @@ const files = packages.flatMap((name) => sourcesOf(join(ROOT, "packages", name, 
 
 /** Names that only the repository lessons file (or the bulk read) ever had. */
 const GONE = /repoFileAction|repoFileStatus|RepoFileRuntime|RepoFileState|RepoFileStore|RepoFileTarget|lessonsRepoFile|closeOpenPullRequestFor|setLessonGoneListener|notifyLessonGone|repoSwitch|lessonRepoAction|listLessonRepos|LessonReposView|LessonsRepoFile|LESSON_FILE_|COMMIT_FILES_MAX|CommitFilesInput|CommitFilesResult|\bcommitFiles\b|commitFilesToBranch|findLessonsPullRequest|deleteLessonsBranch|changeRequestForBranch|authoredByRovara|baseRepositoryId|skipRepoFile|inRepoFile|repoFileIds|isRepoFileEligible|repoFileBlockers|textFingerprints|goneOf|markGoneFingerprint|goneFingerprintsOf|clearGoneFingerprint|lesson\.repo_file|rovara\/lessons-|lessons\/repo(?![\w-])|LOCAL_ALL_MAX|LOCAL_LESSONS_REPO_FILE|assertLessonsFileUntouched|assertPushCarriesNoLessonsFile|touchesLessonsFile|lessonsFileUnreadable|REPOFILE|LESSON_GONE_TEXT/u;
+/** Names that only the repository-visibility marks (`repoOnly`, `repoTwins`) and the second, repository-only reflection ever had. Only the schema's reader of old rows may name the marks. */
+const MARKS = /reflectRepoOnly|RepoChangeRequest|repoOnlySubjectOf|repoReflectKey|hasRepoCorrection|repoVisibilityOf|mergedRepoVisibility|mergeKeepsRepoOnly|afterPersonEdit|twinPreference|chooseWithTwins|repoTwins|repoBlockCodes|REPO_BLOCK_CODES|RepoBlockCode|repo_twin|mergeBlocked|reflect_repo_visible|repo_reflect|repo_only|promptStyle|repoInputs|RepoInputsProof|\brepoOnly\b|repoChanges/u;
+const MARKS_READER = "packages/broker/src/lessons/types.ts";
 /** The only files that may still name the path: the replay copy's "file arm" (a test harness for how lessons are delivered, not a write into a customer's repository). */
 const REPLAY_FILE_ARM = new Set([
   "packages/contracts/src/eval-files.ts", "packages/worker/src/eval-files.ts", "packages/contracts/src/learned-context.ts", "packages/contracts/src/protocol.ts", "packages/contracts/src/never-commit.ts",
@@ -28,13 +31,21 @@ describe("no repository lessons file, no bulk read of lessons", () => {
   });
 
   it("no source file is named for the lessons file, its guard, or its code-host write", () => {
-    const named = files.filter((file) => /repo-file|lessons-file-guard|commit-files|repo-eligibility-report|document-repo-file/u.test(file.rel)).map((file) => file.rel);
+    const named = files.filter((file) => /repo-file|lessons-file-guard|commit-files|repo-eligibility|repo-reflect|repo-eligibility-report|document-repo-file/u.test(file.rel)).map((file) => file.rel);
     expect(named).toEqual([]);
   });
 
   it("no source names a route, setting, job, audit action, contract field, store method or code-host method of the lessons file", () => {
     const hits = files.flatMap((file) => file.text.split("\n").flatMap((line, index) => (GONE.test(line) ? [`${file.rel}:${String(index + 1)}: ${line.trim().slice(0, 120)}`] : [])));
     expect(hits).toEqual([]);
+  });
+
+  it("no source sets, reads or shows the repository-visibility marks, and nothing makes a second reflection per merged pull request", () => {
+    const hits = files.filter((file) => file.rel !== MARKS_READER).flatMap((file) => file.text.split("\n").flatMap((line, index) => (MARKS.test(line) ? [`${file.rel}:${String(index + 1)}: ${line.trim().slice(0, 120)}`] : [])));
+    expect(hits).toEqual([]);
+    // The one reader of old rows only drops the fields.
+    const reader = files.find((file) => file.rel === MARKS_READER)!.text;
+    expect(reader).toContain("withoutRemovedMarks");
   });
 
   it("only the replay copy's file arm still names .rovara/lessons.md, and Rovara writes it to no repository of a customer", () => {
@@ -55,6 +66,11 @@ describe("no repository lessons file, no bulk read of lessons", () => {
     expect(LocalLessonsResponseSchema.safeParse({ status: "ok", message: "", project: "p", lessons: Array.from({ length: 51 }, () => lesson), markdown: "", complete: true }).success).toBe(false);
     expect(LocalLessonsBodySchema.safeParse({ all: true }).success).toBe(false);
     expect(LocalLessonsBodySchema.safeParse({ skipRepoFile: true }).success).toBe(false);
+  });
+
+  it("the marks guard would catch each kind of comeback (mutants)", () => {
+    for (const text of ["await reflectRepoOnly(deps, subject, changes)", "provenance.repoOnly = place", "lesson.repoTwins", "repoBlockCodes: []", "promptStyle: 'repo_only'", "tierReasons.includes('repo_twin')", "mergeBlocked: true", "count('learning.reflect_repo_visible')", "base.repoChanges"]) expect(MARKS.test(text), text).toBe(true);
+    for (const text of ["repoOnlyScopes(lesson)", "mentionsRepoPlace(lesson)", "the repository's own words"]) expect(MARKS.test(text), text).toBe(false);
   });
 
   it("the guard itself would catch each kind of comeback (mutants)", () => {

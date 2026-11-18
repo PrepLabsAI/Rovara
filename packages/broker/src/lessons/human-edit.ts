@@ -14,7 +14,7 @@ import { currentLearningAttempt } from "./learning-deadline.js";
 import { learningCaps, modeAllows, resolveLearning, type LearningSettingsReader } from "./policy.js";
 import { processDraftRetrying } from "./draft-retry.js";
 import { newTaskFailureTally, withFailuresCountedOnce, type TaskFailureTally } from "./pause.js";
-import { attachCapLadder, noteTaskHeld, readTaskHeld, reflectRepoOnly, withEdits } from "./repo-reflect.js";
+import { attachCapLadder, noteTaskHeld, readTaskHeld } from "./task-held.js";
 import type { ProcessDeps } from "./process.js";
 import { isEvalRunMark } from "./eval-run.js";
 import { reflectSubject, type ReflectDeps } from "./reflect.js";
@@ -52,12 +52,12 @@ function editSpan(file: HumanEditInput["files"][number], input: Pick<HumanEditIn
   };
 }
 
-/** What the edit's own reflection came to, and the edit's lines as spans when they were usable (every author a live member): the repo-only reflection of the pull request is given those and no others. */
-interface EditRun { result: { candidates: number }; edits: EvidenceSpan[]; /** Learning is off for the project: nothing more is read or called for this edit. */ off?: true }
+/** What the edit's own reflection came to. */
+interface EditRun { result: { candidates: number }; /** Learning is off for the project: nothing more is read or called for this edit. */ off?: true }
 
 export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEditExtractorPort {
   const run = async (input: HumanEditInput, tally: TaskFailureTally, onActive: () => Promise<void>): Promise<EditRun> => {
-      const none: EditRun = { result: { candidates: 0 }, edits: [] };
+      const none: EditRun = { result: { candidates: 0 } };
       if (input.authors.length === 0 || input.files.length === 0) return none;
       // A lesson names every author and a provenance list holds 20 names: an edit by a crowd is not learned from (no name is ever cut).
       if (input.authors.length > MAX_EDIT_AUTHORS) return none;
@@ -89,10 +89,10 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       // The edit's own reflection is given what is left of the task's one Public cap (the task end may have spent from it); a task with nothing left makes no call.
       const cap = learningCaps(deps.reflect.edition, deps.reflect.capsOverride).perTaskUsd;
       const room = cap === undefined ? undefined : Math.round((cap - tally.heldUsd) * 1e6) / 1e6;
-      if (room !== undefined && room < 0.001) return { result: { candidates: 0 }, edits: editSpans };
+      if (room !== undefined && room < 0.001) return { result: { candidates: 0 } };
       const result = await reflectSubject({ ...withFailuresCountedOnce(deps.reflect, tally), taskBudget: tally, ...(room === undefined ? {} : { capsOverride: { ...deps.reflect.capsOverride, perTaskUsd: room } }) }, { ...subject, requireEvidenceKind: "human_edit" });
       if (result.reason === "model_error" || (result.reason === "spend_refused" && currentLearningAttempt()?.fault === "retryable")) throw new Error("the model call failed");
-      if (result.status !== "ok") return { result: { candidates: 0 }, edits: editSpans };
+      if (result.status !== "ok") return { result: { candidates: 0 } };
       const key = { workspaceId: input.workspaceId, project: input.project };
       let kept = 0;
       const signal = currentLearningAttempt()?.signal;
@@ -101,35 +101,12 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
         if (signal?.aborted === true) { deps.log?.("learning.drafts_cut_at_deadline", { taskId: input.taskId }); break; }
         try { await processDraftRetrying(processDeps, key, draft, { ...(deps.log === undefined ? {} : { log: (event, fields) => deps.log!(event, { taskId: input.taskId, ...fields }) }) }); kept += 1; } catch { deps.log?.("learning.draft_failed", { taskId: input.taskId }); }
       }
-      return { result: { candidates: kept }, edits: editSpans };
-  };
-
-  /**
-   * A pull request WITH usable human edits gets a second, separate repo-only reflection from this job: the edits, with the pull request's comments for context, under its own once-key (the task
-   * end's comments reflection is its own call and always runs; curate's twin and merge rules dedupe any overlap). The task's facts are read again in full (the comments come with them). `tally` is this run's, started from what the
-   * task's other runs held (Public's cap is one total per task, review). Never throws: the edit's own result stands.
-   */
-  const repoOnly = async (input: HumanEditInput, edits: readonly EvidenceSpan[], tally: TaskFailureTally): Promise<void> => {
-    if (edits.length === 0) return;
-    try {
-      // The switch first, before anything is read: Off, Collect and a lessons switch that is off read nothing for this pull request.
-      if (!modeAllows((await resolveLearning(deps.settings, input.workspaceId, input.project)).mode, "reflect")) return;
-      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId });
-      if (base === undefined || base.facts.workspaceId !== input.workspaceId || base.facts.project !== input.project || base.facts.taskId !== input.taskId) return;
-      const found = (base.repoChanges ?? []).find((change) => change.link.toLowerCase() === input.link.toLowerCase());
-      if (found === undefined) return;
-      const owned = withEdits(found, { place: input.scope, audience: input.audience, spans: edits });
-      if (owned === undefined) return;
-      const subject = buildTaskReflectSubject({ ...base.facts, sendBacks: [] });
-      await reflectRepoOnly({ reflect: deps.reflect, process: deps.process, settings: deps.settings, ...(deps.log === undefined ? {} : { log: deps.log }) }, subject, [owned], tally, { kind: "edits" });
-    } catch {
-      deps.log?.("learning.repo_reflect_failed", { taskId: input.taskId });
-    }
+      return { result: { candidates: kept } };
   };
 
   return {
     async extract(input) {
-      // One tally for the whole job, started from what the task's other runs held (Public's cap is one total per task): the edit's own reflection, its curator judge and the repo-only edits reflection all draw from it.
+      // One tally for the whole job, started from what the task's other runs held (Public's cap is one total per task): the edit's own reflection and its curator judge draw from it.
       const tally = newTaskFailureTally();
       const cap = learningCaps(deps.reflect.edition, deps.reflect.capsOverride).perTaskUsd;
       const key = { workspaceId: input.workspaceId, project: input.project };
@@ -138,7 +115,6 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
         if (cap !== undefined) attachCapLadder(tally, deps.process.store, key, input.taskId, cap);
         if (cap !== undefined) { try { tally.heldUsd = await readTaskHeld(deps.process.store, key, input.taskId, cap); } catch { /* an unreadable total reads as unspent: the cap still bounds each call */ } }
       });
-      if (ran.off !== true) await repoOnly(input, ran.edits, tally);
       if (cap !== undefined && ran.off !== true) { try { await noteTaskHeld(deps.process.store, key, input.taskId, tally.heldUsd, cap); } catch { /* bookkeeping only */ } }
       return ran.result;
     },

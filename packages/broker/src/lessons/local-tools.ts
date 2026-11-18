@@ -21,7 +21,6 @@ import { learnedLessonsSwitchOn, modeAllows, resolveLearning, resolveLoadBudget,
 import { mayNameInRepository, projectRepoScopesOf } from "./project-repo-audience.js";
 import { readVisible } from "./read-visible.js";
 import { normalizeRemote } from "./repo-remote.js";
-import { hasPersonApproval } from "./repo-eligibility.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import { namesAPerson } from "./trial.js";
 import type { Lesson } from "./types.js";
@@ -94,6 +93,11 @@ export type LocalLessonsOutcome = { kind: "answer"; answer: LocalLessonsAnswer }
 
 /** A read inside the call failed: the route answers 503 and the tool says `LOCAL_UNAVAILABLE_LINE`. Never a partial list presented as complete. */
 export class LocalLessonsUnavailable extends Error { constructor(readonly code: string) { super(`local lessons unavailable: ${code}`); this.name = "LocalLessonsUnavailable"; } }
+
+/** The approvals a PERSON gave (not the trial's or the automatic path's). */
+const PERSON_APPROVAL_MODES: ReadonlySet<string> = new Set(["one", "second_person", "sole_owner_exception"]);
+/** Whether a PERSON approved the lesson: not the trial, not the automatic path. */
+const hasPersonApproval = (lesson: Pick<Lesson, "approvals">): boolean => lesson.approvals.some((approval) => PERSON_APPROVAL_MODES.has(approval.mode));
 
 /** The stable lessons and the person-approved ones (decision 46b). A lesson on trial, or live with no person behind it, is not given to a local tool. */
 export const stableOrPersonApproved = (lesson: Pick<Lesson, "trial" | "approvals">): boolean => lesson.trial?.state !== "trial" && (lesson.trial?.state === "stable" || hasPersonApproval(lesson));

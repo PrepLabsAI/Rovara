@@ -129,7 +129,7 @@ function toView(lesson: Lesson, ctx: Context): LessonView {
     // Who approved is for people who decide; a reader sees the lesson, not its approvers.
     approvals: ctx.canDecide ? lesson.approvals.map((a) => ({ by: ctx.person(a.by), at: a.at, mode: a.mode })) : [],
     ...(lesson.trial === undefined ? {} : { trial: lesson.trial.state }),
-    ...(lesson.reviewRequired === true ? { reviewRequired: true as const } : {}), ...(lesson.contradictsWith === undefined ? {} : { contradicts: lesson.contradictsWith }), ...(lesson.possibleDuplicateOf === undefined ? {} : { possibleDuplicate: lesson.possibleDuplicateOf }), ...(lesson.possibleDuplicateOf !== undefined && lesson.tierReasons.includes("repo_twin") ? { mergeBlocked: true as const } : {}),
+    ...(lesson.reviewRequired === true ? { reviewRequired: true as const } : {}), ...(lesson.contradictsWith === undefined ? {} : { contradicts: lesson.contradictsWith }), ...(lesson.possibleDuplicateOf === undefined ? {} : { possibleDuplicate: lesson.possibleDuplicateOf }),
     ...(lesson.retireProposedAt === undefined ? {} : { retireProposed: true as const }), ...(lesson.supersedes === undefined ? {} : { supersedes: lesson.supersedes }),
     ...(lesson.status === "rejected" && lesson.rejectedReason !== undefined ? { rejectedReason: lesson.rejectedReason } : {}),
     canApprove, canReject: ctx.canDecide && pending, canRetire: ctx.canDecide && (lesson.status === "active" || lesson.status === "stale" || pending),
