@@ -27,6 +27,8 @@ export const SAVED_ENV_LABEL_PROVE = "io.rovara.saved-env.prove";
  * with an age never matches once a count rule has them), so it is ENFORCED BY THE BROKER'S MANAGE WALK (SH24), not by the lifecycle policy.
  */
 export const SAVED_ENV_IMAGE_CEILING_DAYS = 30;
+/** Maximum uncompressed seed size admitted into a saved environment image. */
+export const SAVED_ENV_IMAGE_MAX_BYTES = 8 * 1024 * 1024 * 1024;
 /** Untagged images (a failed push) are deleted after this long. */
 export const SAVED_ENV_UNTAGGED_DAYS = 1;
 /**
@@ -285,6 +287,8 @@ export const SavedEnvImageManifestSchema = SavedEnvManifestSchema.omit({ imageDi
 export type SavedEnvImageManifest = z.infer<typeof SavedEnvImageManifestSchema>;
 
 export const SAVED_ENV_BUILD_FAILURES = [
+  /** Staged seed exceeds the install's hard size ceiling. Nothing was built. */
+  "too_large",
   /** The Prove run did not pass, or it was not for the approved environment. */
   "not_proved",
   /** The environment is not the approved revision. */

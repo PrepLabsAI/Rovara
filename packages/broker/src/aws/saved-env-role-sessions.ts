@@ -1,7 +1,7 @@
 // Saved environment images on hosted (lane L4-SE6): the broker's role-assume seam. The ECR adapter of the hosted `image-registry` port (aws/ecr-image-registry.ts, lane L4-SE) asks THIS port for
 // credentials, and makes every ECR call with them and nothing else, so a call can reach only the one repository the session policy names. This file is the only place that calls STS for it.
 //
-// The port is `SavedEnvRoleSessions` (the Codex lane injects it into its adapter; a fake in tests). One method, `assume`:
+// The port is `SavedEnvRoleSessions` (the adapter injects a fake in tests). `assume` issues repository sessions; `listCompanyRepositories` enumerates only the caller's company prefix for erase. For `assume`:
 //   - the repository NAME comes from the caller, but it is checked here against the company: it must be a name `savedEnvRepositoryName` makes, in THIS install's environment, under THIS company's
 //     hash. A company's session policy can therefore never name another company's repository, even if the caller passes one (the repository name is a one-way hash of org + project built by the broker);
 //   - the role is the fixed-name role of the access kind (`agentx-<env>-img-push|pull|manage`), the policy is the contracts' session policy for ONE repository (`savedEnvPushSessionPolicy` and its

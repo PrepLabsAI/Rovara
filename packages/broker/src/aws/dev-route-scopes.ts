@@ -401,3 +401,15 @@ export function devRouteOf(method: string, pathname: string): DevRoute | undefin
 export function appRouteOf(method: string, pathname: string): DevRoute | undefined {
   return APP_COMPILED.find(({ route, pattern }) => route.method === method && pattern.test(pathname))?.route;
 }
+
+// Worker callbacks have no developer-token scope. Keep them out of APP_ROUTES and
+// DEV_ROUTES: a full-access person must never acquire worker authority.
+export const SAVED_ENV_WORKER_ROUTES = [
+  { method: "POST", path: "/v1/internal/workspaces/{workspace}/operations/{operation}/saved-env-push-login", requires: "worker" },
+  { method: "POST", path: "/v1/internal/workspaces/{workspace}/operations/{operation}/saved-env-result", requires: "worker" },
+  { method: "POST", path: "/v1/internal/workspaces/{workspace}/operations/{operation}/saved-env-fallback", requires: "worker" },
+  { method: "POST", path: "/v1/internal/workspaces/{workspace}/operations/{operation}/saved-env-login", requires: "worker" },
+] as const;
+export function savedEnvWorkerRouteOf(method: string, path: string): (typeof SAVED_ENV_WORKER_ROUTES)[number] | undefined {
+  return SAVED_ENV_WORKER_ROUTES.find(row => row.method === method && new RegExp(`^${row.path.replace(/\{[a-z]+\}/gu, "[^/]+")}$`, "u").test(path));
+}

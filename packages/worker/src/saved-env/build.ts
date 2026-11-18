@@ -31,6 +31,7 @@
 //   - the push route belongs to the rebuild job's lease only.
 //
 // Nothing here runs the image, and nothing runs a command of the project outside the fresh sandbox's ports.
+import { pinnedSavedEnvBuilder } from "./builder.js";
 import { createHash, randomBytes } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -38,6 +39,7 @@ import path from "node:path";
 import {
   ImageDigestSchema,
   SAVED_ENV_IMAGE_MANIFEST_PATH,
+  SAVED_ENV_IMAGE_MAX_BYTES,
   SAVED_ENV_IMAGE_SEED_PATH,
   SAVED_ENV_LABEL_KEY,
   SAVED_ENV_LABEL_PROVE,
@@ -152,7 +154,7 @@ export interface SavedEnvBuildPorts {
   /** Copies the trusted `.git` into `<destination>/.git` without hooks, index or config, and writes `config` as its config. */
   installGit(trustedRepositoryDirectory: string, destination: string, config: string): Promise<void>;
   /** `budgetMs` is how long the scan may take (the scan reads its own clock). */
-  scan(root: string, options: { forbiddenValues: readonly string[]; budgetMs: number; links: LinkPolicy }): Promise<SecretScanResult>;
+  scan(root: string, options: { forbiddenValues: readonly string[]; budgetMs: number; maxTotalBytes?: number; links: LinkPolicy }): Promise<SecretScanResult>;
   /** The broker's push login for this repository: short-lived, one repository. Undefined when the broker refused. */
   pushSession(request: { repository: string }): Promise<SavedEnvRegistryAuth | undefined>;
   /** A new private folder; `remove` deletes it with everything in it. */
@@ -190,7 +192,7 @@ export interface SavedEnvBuildInput {
   declaredFolders?: readonly string[];
   /** The interpreter folders a virtual environment's links may name (links.ts). Default: `/usr/bin`, `/usr/local/bin`. */
   links?: Pick<LinkPolicy, "interpreterDirectories" | "managedPythonRoots">;
-  /** The BuildKit image of the throwaway builder, by digest (`repository@sha256:...`); the install's mirror of `moby/buildkit`. Absent: the builder driver's default. */
+  /** The BuildKit image of the throwaway builder, by digest (`repository@sha256:...`); the install's mirror of `moby/buildkit`. Absent: the build is refused. */
   builderImage?: string;
 }
 
@@ -221,8 +223,6 @@ function validRepositories(repositories: readonly BuildRepository[]): boolean {
     && repositories.every((repository) => SAFE_DIRECTORY.test(repository.directory) && BRANCH_NAME.test(repository.defaultBranch) && SHA.test(repository.commit) && repository.repositoryId.length > 0 && repository.repositoryId.length <= 200);
 }
 
-const BUILDER_IMAGE = /^[a-z0-9][a-z0-9._/:-]{0,200}@sha256:[a-f0-9]{64}$/u;
-
 /**
  * Proves the approved environment in a fresh sandbox and, if it passes and the checkout is the default branch head, builds and pushes the saved image from that sandbox. See the top of the file.
  * Resolves (never rejects) with the image digest and manifest, or one fixed failure word.
@@ -234,7 +234,7 @@ export async function proveAndBuildSavedImage(input: SavedEnvBuildInput, ports: 
   const digest = testEnvDigest(parsedEnvironment.data);
   if (digest !== input.approved.digest) return fail("not_approved");
   if (!ImageDigestSchema.safeParse(input.baseImageDigest).success) return fail("base_not_pinned");
-  if (input.builderImage !== undefined && !BUILDER_IMAGE.test(input.builderImage)) return fail("base_not_pinned", "builder");
+  if (!pinnedSavedEnvBuilder(input.builderImage)) return fail("build_failed", "builder_not_configured");
 
   type Folder = Awaited<ReturnType<SavedEnvBuildPorts["temporaryFolder"]>>;
   let fresh: BuildSandbox | undefined;
@@ -242,6 +242,7 @@ export async function proveAndBuildSavedImage(input: SavedEnvBuildInput, ports: 
   let staged: Folder | undefined;
   let docker: Folder | undefined;
   let builder: string | undefined;
+  let builderContainer: string | undefined;
   const localTags: string[] = [];
   try {
     // 2. A fresh sandbox.
@@ -328,7 +329,8 @@ export async function proveAndBuildSavedImage(input: SavedEnvBuildInput, ports: 
     if (input.expectedKey !== undefined && key.key !== input.expectedKey) return fail("unsafe_tree", "key_mismatch");
 
     // 9. Scan the staged seed.
-    const scanned = await ports.scan(seedRoot, { forbiddenValues: input.forbiddenValues, budgetMs: input.scanDeadlineMs ?? 20 * 60_000, links: linkPolicy });
+    const scanned = await ports.scan(seedRoot, { forbiddenValues: input.forbiddenValues, budgetMs: input.scanDeadlineMs ?? 20 * 60_000, maxTotalBytes: SAVED_ENV_IMAGE_MAX_BYTES, links: linkPolicy });
+    if (!scanned.ok && scanned.reason === "unscannable" && scanned.detail === "too_many_bytes") return fail("too_large");
     if (!scanned.ok) return scanned.reason === "found" ? fail("secrets_found") : fail("unsafe_tree", "scan");
 
     // The manifest inside the image has no digest (an image cannot hold its own).
@@ -345,8 +347,16 @@ export async function proveAndBuildSavedImage(input: SavedEnvBuildInput, ports: 
     const local = `rovara-saved-env-build:${randomBytes(8).toString("hex")}`;
     localTags.push(local);
     const name = `rovara-build-${ports.random().replace(/[^a-f0-9]/gu, "").slice(0, 16).padEnd(16, "0")}`;
-    const created = await ports.docker.run(["buildx", "create", "--name", name, "--driver", "docker-container", ...(input.builderImage === undefined ? [] : ["--driver-opt", `image=${input.builderImage}`]), "--bootstrap"], { timeoutMs: DOCKER_QUICK_MS * 5, signal: input.signal });
+    // Manage the rootless container explicitly: buildx's docker-container driver itself
+    // launches privileged containers. The remote driver only connects to this daemon.
+    // RootlessKit needs precisely these seccomp/AppArmor/procfs relaxations; no
+    // privileged container or --oci-worker-no-process-sandbox fallback is allowed.
+    builderContainer = name;
+    const started = await ports.docker.run(["run", "--detach", "--name", name,
+      "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined", "--security-opt", "systempaths=unconfined", input.builderImage], { timeoutMs: DOCKER_QUICK_MS * 5, signal: input.signal });
+    if (started.exitCode !== 0) return fail("build_failed", "builder");
     builder = name;
+    const created = await ports.docker.run(["buildx", "create", "--name", name, "--driver", "remote", "--bootstrap", `docker-container://${name}`], { timeoutMs: DOCKER_QUICK_MS * 5, signal: input.signal });
     if (created.exitCode !== 0) return fail("build_failed", "builder");
     const built = await ports.docker.run(["buildx", "build", "--builder", name, "--network", "none", "--pull=false", "--provenance=false", "--no-cache", "--load", "--tag", local, "--file", path.join(staged.path, "Dockerfile"), staged.path], { timeoutMs: BUILD_TIMEOUT_MS, signal: input.signal });
     if (built.exitCode !== 0) return fail("build_failed");
@@ -391,6 +401,7 @@ export async function proveAndBuildSavedImage(input: SavedEnvBuildInput, ports: 
     await staged?.remove().catch(() => undefined);
     await trusted?.remove().catch(() => undefined);
     if (builder !== undefined) await ports.docker.run(["buildx", "rm", "--force", builder], { timeoutMs: DOCKER_QUICK_MS }).catch(() => undefined);
+    if (builderContainer !== undefined) await ports.docker.run(["rm", "--force", "--volumes", builderContainer], { timeoutMs: DOCKER_QUICK_MS }).catch(() => undefined);
     for (const tag of localTags) await ports.docker.run(["rmi", "--force", tag], { timeoutMs: DOCKER_QUICK_MS }).catch(() => undefined);
     await fresh?.dispose().catch(() => undefined);
   }
@@ -529,7 +540,7 @@ export function realBuildPorts(rest: Pick<SavedEnvBuildPorts, "docker" | "makeFr
     fsck: fsckOf,
     hashWithAttributes: hashWithAttributesOf,
     installGit: installGitInto,
-    scan: (root, options) => scanTreeForSecrets(root, { forbiddenValues: options.forbiddenValues, deadlineAtMs: Date.now() + options.budgetMs, links: options.links }),
+    scan: (root, options) => scanTreeForSecrets(root, { forbiddenValues: options.forbiddenValues, ...(options.maxTotalBytes === undefined ? {} : { maxTotalBytes: options.maxTotalBytes }), deadlineAtMs: Date.now() + options.budgetMs, links: options.links }),
     temporaryFolder: () => temporaryFolderIn(rest.temporaryParent),
     now: () => Date.now(),
     random: () => createHash("sha256").update(randomBytes(16)).digest("hex"),

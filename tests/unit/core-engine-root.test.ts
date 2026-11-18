@@ -6,6 +6,8 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
 import { FakeHostModel } from "@agentx/broker/fakes";
 import type { CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
+import * as codeModulesModule from "../../packages/broker/src/core-host/code-modules.js";
+import { createFakeWorld } from "../support/core-host-fakes.js";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
   brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, setupRunStandingFrom, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
@@ -48,6 +50,27 @@ function rootInputs(env: NodeJS.ProcessEnv, client: { send(command: unknown): Pr
     repositoryCredential: async () => { throw new Error("unused"); }, codeModules: () => brokerCoreModuleDeps(env), origin: () => "https://api.example", log: () => undefined, ...overrides,
   };
 }
+
+it("binds the saved image adapter on the hosted root for cleanup even while off, without assuming a role at boot", async () => {
+  const modules = vi.spyOn(codeModulesModule, "codeAdapterModules").mockImplementation(() => createFakeWorld().modules.filter(m => !["metering", "admission", "identity", "approvers", "audit-sink"].includes(m.point)));
+  const assume = vi.fn();
+  const account = "111122223333";
+  const bindings = { AGENTX_ENV: "test", AWS_REGION: "us-west-2", ROVARA_SAVED_ENV_PUSH_ROLE_ARN: `arn:aws:iam::${account}:role/agentx/test/agentx-test-img-push`, ROVARA_SAVED_ENV_PULL_ROLE_ARN: `arn:aws:iam::${account}:role/agentx/test/agentx-test-img-pull`, ROVARA_SAVED_ENV_MANAGE_ROLE_ARN: `arn:aws:iam::${account}:role/agentx/test/agentx-test-img-manage`, ROVARA_SAVED_ENV_REPO_PREFIX: "rovara-env/test" };
+  try {
+    for (const enabled of [undefined, "0", "1"]) {
+      const env = { ...bindings, ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ...(enabled === undefined ? {} : { ROVARA_SAVED_ENVIRONMENTS: enabled }) };
+      const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps), savedEnvSessions: { assume, listCompanyRepositories: async () => [] } }));
+      const registry = await root.app.registry();
+      expect(registry.names("image-registry")).toEqual(["ecr"]);
+      expect(registry.require("image-registry").capabilities.workerPush).toBe(enabled === "1");
+    }
+    const real = createBrokerCoreRoot(rootInputs({ ...bindings, ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_SAVED_ENVIRONMENTS: "1" }, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps) }));
+    expect((await real.app.registry()).names("image-registry")).toEqual(["ecr"]);
+    const unwired = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_SAVED_ENVIRONMENTS: "1" }, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps) }));
+    await expect(unwired.app.registry()).rejects.toThrow("saved environments are not set up on this install");
+    expect(assume).not.toHaveBeenCalled();
+  } finally { modules.mockRestore(); }
+});
 
 describe("the broker's core root, switch off (the default)", () => {
   it("reads no core setting while off and not draining (CORE_ENGINE_BROKER_WIRED), and reads them when on or draining", async () => {

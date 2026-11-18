@@ -205,6 +205,8 @@ export const BROKER_SETTINGS = {
   // DEC 254z-amend3: test services, ON unless exactly "0" (the stack parameter TestServices, TEST_SERVICES_PARAMETER_VALUES). The broker's core reads it as ROVARA_TEST_SERVICES (the laptop's own switch).
   // Not `tx`: Cloud's own table gives that code to its own test services switch, which is off by default; a code means one thing in both.
   testServices: { code: "td", variable: TEST_SERVICES_SETTING_VARIABLE },
+  /** L4-SE: saved environments, default off. */
+  savedEnvironments: { code: "sv", variable: "ROVARA_SAVED_ENVIRONMENTS" },
   // DEC 254zm: whether the install's copies of the starter images are in place (the stack parameter TestServiceImages, TEST_SERVICE_IMAGES_PARAMETER_VALUES). Only exactly "mirrored" lets Code's workers run test services.
   testServiceImages: { code: "ti", variable: TEST_SERVICE_IMAGES_SETTING_VARIABLE },
   // L4-AM (DEC 254zzn(2)): the hosted answers model (the stack parameter CoreAnswersModel), the BROKER only (the dispatcher does not answer), empty = the agent model.
@@ -226,6 +228,10 @@ export const TEST_SERVICES_PARAMETER_DEFAULT = "1";
 /** DEC 254zm: the values of the TestServiceImages stack parameter. `none` (the default): Code's workers do not run test services. `mirrored`: the operator copied and checked the five starter images (scripts/test-services-mirror.ts). */
 export const TEST_SERVICE_IMAGES_PARAMETER_VALUES = ["none", "mirrored"] as const;
 export const TEST_SERVICE_IMAGES_PARAMETER_DEFAULT = "none";
+/** L4-SE: hosted saved environments stay off until their registry roles are provisioned. */
+export const SAVED_ENVIRONMENTS_PARAMETER = "SavedEnvironments";
+export const SAVED_ENVIRONMENTS_PARAMETER_DEFAULT = "0";
+export const SAVED_ENVIRONMENTS_PARAMETER_VALUES = ["0", "1"] as const;
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;
 
