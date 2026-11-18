@@ -2966,7 +2966,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
         const store = h.runtime.registry.require("storage");
         const { taskId, review } = await toReview(h);
         const record = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" })) as never;
-        const cap = await h.runtime.app.flow.deps.taskCapUsd!(record);
+        const cap = (await h.runtime.app.flow.deps.taskCapUsd!(record))!;
         expect(cap).toBe(taskLimitUsd(record));
         expect(cap).toBeLessThan(15);
         // spend that fits the $15 default but not the live limit: no send back
