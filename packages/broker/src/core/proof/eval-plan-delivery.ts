@@ -114,8 +114,12 @@ export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operati
       else if (parsed.data.kind === "saved" && !savedEnvRepositoryIsFor(parsed.data.repository, { orgId: scope.companyId, projectId: scope.project })) log("eval_environment_scope_mismatch");
       else environment = parsed.data;
     }
-    const answer = EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline: await baselineOf(deps.sources.cache(scope.companyId), plan), ...(environment === undefined ? {} : { environment }) });
+    const baseline = await baselineOf(deps.sources.cache(scope.companyId), plan);
+    const answerWith = (env: typeof environment) => EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline, ...(env === undefined ? {} : { environment: env }) });
+    let answer = answerWith(environment);
     if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
+    // An environment that makes the answer too big is dropped (the eval runs on the bare image), never a reason to withhold the plan.
+    if (environment !== undefined && Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_environment_invalid"); answer = answerWith(undefined); if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; } }
     if (Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_plan_oversize"); return NOT_AVAILABLE; }
     return answer.data;
   } catch {
