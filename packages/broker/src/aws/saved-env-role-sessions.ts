@@ -9,7 +9,12 @@
 //     pull and 15 for housekeeping (STS refuses under 900 seconds, so a shorter request gets 900: the adapter ends the login at the caller's own limit);
 //   - the role ARNs, the prefix and the account come from the install's own variables (`ROVARA_SAVED_ENV_*`, set by infra/lib/saved-env-images.ts, named environments only); with any missing, wrong
 //     or from another account, nothing is built ("saved environments are not set up on this install");
+//   - `listCompanyRepositories` (company erase, owner-approved 2026-11-18, lane L4-SE6b): ONE manage session whose policy is exactly `ecr:DescribeRepositories` on THIS company's prefix
+//     (`rovara-env/<env>/o<hash>/*`), then a bounded, paginated DescribeRepositories walk with that session's credentials. Isolation is three layers: the session policy (IAM), the fixed prefix of the
+//     company the call is for (built from the one derivation), and a filter here that drops any name outside `rovara-env/<env>/o<hash>/` before it is returned. A list that does not end inside the bound
+//     is an error, never a partial list: erase must PROVE nothing is left;
 //   - an error is one of two fixed sentences (`ImageRegistryError`): never STS's own words, which can quote an ARN, a session name or a request id. Nothing is cached or logged.
+import { DescribeRepositoriesCommand, ECRClient } from "@aws-sdk/client-ecr";
 import {
   AssumeRoleCommand,
   STSClient,
@@ -24,6 +29,8 @@ import {
   SAVED_ENV_PUSH_SESSION_SECONDS,
   SAVED_ENV_REPO_PREFIX_VARIABLE,
   isSavedEnvRepositoryName,
+  savedEnvCompanyRepositoryPrefix,
+  savedEnvManageListSessionPolicy,
   savedEnvManageRoleName,
   savedEnvManageSessionPolicy,
   savedEnvPullRoleName,
@@ -52,10 +59,29 @@ export interface SavedEnvRoleSessionRequest {
   maxSeconds?: number;
 }
 
-/** The port: credentials limited to ONE repository. Throws `ImageRegistryError` ("refused": never retried; "unavailable": retry later). */
+/** The port: credentials limited to ONE repository, and the one company-wide listing. Throws `ImageRegistryError` ("refused": never retried; "unavailable": retry later). */
 export interface SavedEnvRoleSessions {
   assume(request: SavedEnvRoleSessionRequest): Promise<SavedEnvSession>;
+  /**
+   * Every repository this install holds for ONE company (company erase uses it to prove each image store is gone): the names under `rovara-env/<env>/o<hash>/`, sorted, nothing of another company. A
+   * company with none gets `[]`. A list that cannot be read to its end (an error, a session that ends, more than `SAVED_ENV_LIST_MAX_REPOSITORIES`) throws `unavailable`: never a partial list.
+   */
+  listCompanyRepositories(request: { companyId: string }): Promise<string[]>;
 }
+
+/** What goes to ECR (DescribeRepositories) for one page. The call is injected so a test sends none. */
+export interface SavedEnvDescribeRepositoriesRequest {
+  credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
+  /** The previous page's `nextToken`; absent for the first page. */
+  nextToken?: string;
+  maxResults: number;
+}
+export type SavedEnvDescribeRepositories = (request: SavedEnvDescribeRepositoriesRequest) => Promise<unknown>;
+
+/** The page size, and the most pages one listing reads: at most 2,000 repositories of one company (one per project). Beyond that the answer is `unavailable`, so erase never proves "gone" from a part. */
+export const SAVED_ENV_LIST_PAGE_SIZE = 100;
+export const SAVED_ENV_LIST_MAX_PAGES = 20;
+export const SAVED_ENV_LIST_MAX_REPOSITORIES = SAVED_ENV_LIST_PAGE_SIZE * SAVED_ENV_LIST_MAX_PAGES;
 
 /** What goes to STS (AssumeRole). The call is injected so a test sends none. */
 export interface SavedEnvAssumeRoleRequest {
@@ -127,11 +153,68 @@ function repositoryIsThisCompanys(settings: Pick<SavedEnvRoleSessionSettings, "e
   return given[0] === own[0] && given[1] === own[1] && given[2] === own[2];
 }
 
-export function createSavedEnvRoleSessions(options: { settings: SavedEnvRoleSessionSettings; assumeRole: SavedEnvAssumeRole; now?: () => number }): SavedEnvRoleSessions {
+export function createSavedEnvRoleSessions(options: { settings: SavedEnvRoleSessionSettings; assumeRole: SavedEnvAssumeRole; describeRepositories?: SavedEnvDescribeRepositories; now?: () => number }): SavedEnvRoleSessions {
   const { settings } = options;
   const now = options.now ?? Date.now;
   const scope: Scope = { partition: settings.partition, region: settings.region, account: settings.account };
+  const describeRepositories = options.describeRepositories ?? realSavedEnvDescribeRepositories(settings.region);
+
+  /** STS, and the answer checked: the one place a session comes from. */
+  async function openSession(call: SavedEnvAssumeRoleRequest): Promise<SavedEnvSession> {
+    let answer: unknown;
+    try {
+      answer = await options.assumeRole(call);
+    } catch { throw new ImageRegistryError("unavailable", UNAVAILABLE); }
+    const credentials = (answer as { Credentials?: { AccessKeyId?: unknown; SecretAccessKey?: unknown; SessionToken?: unknown; Expiration?: unknown } } | undefined)?.Credentials;
+    const expiresAtMs = credentials?.Expiration instanceof Date ? credentials.Expiration.getTime() : Number.NaN;
+    if (typeof credentials?.AccessKeyId !== "string" || credentials.AccessKeyId === "" || typeof credentials.SecretAccessKey !== "string" || credentials.SecretAccessKey === ""
+      || typeof credentials.SessionToken !== "string" || credentials.SessionToken === "" || !Number.isFinite(expiresAtMs) || expiresAtMs <= now()) {
+      throw new ImageRegistryError("unavailable", UNAVAILABLE);
+    }
+    return { credentials: { accessKeyId: credentials.AccessKeyId, secretAccessKey: credentials.SecretAccessKey, sessionToken: credentials.SessionToken }, expiresAtMs };
+  }
+
   return {
+    async listCompanyRepositories(request) {
+      // The company's prefix, from the one derivation; an id that is not text (or an empty one) is refused before STS.
+      let companyPrefix: string;
+      let policy: string;
+      try {
+        companyPrefix = savedEnvCompanyRepositoryPrefix({ env: settings.env, orgId: request.companyId });
+        policy = JSON.stringify(savedEnvManageListSessionPolicy(scope, { env: settings.env, orgId: request.companyId }));
+      } catch { throw new ImageRegistryError("refused", REFUSED); }
+      if (policy.length > SESSION_POLICY_MAX_CHARACTERS) throw new ImageRegistryError("refused", REFUSED);
+      // The session name is the company's hash segment: CloudTrail ties the listing to a company without its id in it.
+      const sessionName = `rovara-img-list-${companyPrefix.split("/")[2]!.slice(0, 25)}`;
+      const session = await openSession({ roleArn: settings.roleArns.manage, sessionName, policy, durationSeconds: STS_MINIMUM_SECONDS });
+      const own = `${companyPrefix}/`;
+      const found = new Set<string>();
+      let nextToken: string | undefined;
+      const seenTokens = new Set<string>();
+      for (let page = 0; page < SAVED_ENV_LIST_MAX_PAGES; page += 1) {
+        // A session that ends mid-walk gives a partial list: erase must not see one.
+        if (session.expiresAtMs <= now()) throw new ImageRegistryError("unavailable", UNAVAILABLE);
+        let answer: unknown;
+        try {
+          answer = await describeRepositories({ credentials: session.credentials, ...(nextToken === undefined ? {} : { nextToken }), maxResults: SAVED_ENV_LIST_PAGE_SIZE });
+        } catch { throw new ImageRegistryError("unavailable", UNAVAILABLE); }
+        const body = answer as { repositories?: unknown; nextToken?: unknown } | undefined;
+        if (body === undefined || body === null || typeof body !== "object" || (body.repositories !== undefined && !Array.isArray(body.repositories))) throw new ImageRegistryError("unavailable", UNAVAILABLE);
+        for (const repository of (body.repositories ?? []) as unknown[]) {
+          const name = (repository as { repositoryName?: unknown } | null | undefined)?.repositoryName;
+          // Only this company's names leave this function, whatever ECR answered. A name outside the prefix is dropped (the session policy makes it unreachable; this is the second layer).
+          if (typeof name === "string" && name.length <= 256 && name.startsWith(own) && name.length > own.length && !name.includes("*") && !name.includes("\u0000")) found.add(name);
+        }
+        const token = body.nextToken;
+        if (token === undefined || token === null || token === "") return [...found].sort();
+        // A token that comes back, or is not text, would loop or lose the end of the list.
+        if (typeof token !== "string" || seenTokens.has(token)) throw new ImageRegistryError("unavailable", UNAVAILABLE);
+        seenTokens.add(token);
+        nextToken = token;
+      }
+      // Still more after the bound: not a list erase can trust.
+      throw new ImageRegistryError("unavailable", UNAVAILABLE);
+    },
     async assume(request) {
       // An own property only: "constructor" or "toString" is not an access kind.
       const limit = Object.hasOwn(LIMITS, request.access) ? LIMITS[request.access] : undefined;
@@ -145,17 +228,7 @@ export function createSavedEnvRoleSessions(options: { settings: SavedEnvRoleSess
       const durationSeconds = Math.max(STS_MINIMUM_SECONDS, Math.min(limit.seconds, Math.floor(request.maxSeconds ?? limit.seconds)));
       // The session name is the project's hash segment: CloudTrail ties a session to a repository without a company or project id in it.
       const sessionName = `rovara-img-${request.access}-${request.repository.split("/")[3]!.slice(0, 25)}`;
-      let answer: unknown;
-      try {
-        answer = await options.assumeRole({ roleArn: settings.roleArns[request.access], sessionName, policy, durationSeconds });
-      } catch { throw new ImageRegistryError("unavailable", UNAVAILABLE); }
-      const credentials = (answer as { Credentials?: { AccessKeyId?: unknown; SecretAccessKey?: unknown; SessionToken?: unknown; Expiration?: unknown } } | undefined)?.Credentials;
-      const expiresAtMs = credentials?.Expiration instanceof Date ? credentials.Expiration.getTime() : Number.NaN;
-      if (typeof credentials?.AccessKeyId !== "string" || credentials.AccessKeyId === "" || typeof credentials.SecretAccessKey !== "string" || credentials.SecretAccessKey === ""
-        || typeof credentials.SessionToken !== "string" || credentials.SessionToken === "" || !Number.isFinite(expiresAtMs) || expiresAtMs <= now()) {
-        throw new ImageRegistryError("unavailable", UNAVAILABLE);
-      }
-      return { credentials: { accessKeyId: credentials.AccessKeyId, secretAccessKey: credentials.SecretAccessKey, sessionToken: credentials.SessionToken }, expiresAtMs };
+      return openSession({ roleArn: settings.roleArns[request.access], sessionName, policy, durationSeconds });
     },
   };
 }
@@ -166,12 +239,23 @@ export function realSavedEnvAssumeRole(region: string): SavedEnvAssumeRole {
   return (request) => client.send(new AssumeRoleCommand({ RoleArn: request.roleArn, RoleSessionName: request.sessionName, Policy: request.policy, DurationSeconds: request.durationSeconds }));
 }
 
+/** The real ECR call (one DescribeRepositories page), signed with the session's credentials and nothing else. Built per broker; nothing here keeps a credential past the call. */
+export function realSavedEnvDescribeRepositories(region: string): SavedEnvDescribeRepositories {
+  return async (request) => {
+    // A client per call: its credentials are the one session's, and it is dropped with it.
+    const client = new ECRClient({ region, credentials: { accessKeyId: request.credentials.accessKeyId, secretAccessKey: request.credentials.secretAccessKey, sessionToken: request.credentials.sessionToken } });
+    try {
+      return await client.send(new DescribeRepositoriesCommand({ maxResults: request.maxResults, ...(request.nextToken === undefined ? {} : { nextToken: request.nextToken }) }));
+    } finally { client.destroy(); }
+  };
+}
+
 /** What the hosted root builds: the seam from the install's variables, or `undefined` ("saved environments are not set up on this install": the adapter refuses). */
-export function savedEnvRoleSessionsFromEnvironment(environment: Readonly<Record<string, string | undefined>>, options: { region?: string; assumeRole?: SavedEnvAssumeRole; now?: () => number } = {}): SavedEnvRoleSessions | undefined {
+export function savedEnvRoleSessionsFromEnvironment(environment: Readonly<Record<string, string | undefined>>, options: { region?: string; assumeRole?: SavedEnvAssumeRole; describeRepositories?: SavedEnvDescribeRepositories; now?: () => number } = {}): SavedEnvRoleSessions | undefined {
   const region = options.region ?? environment.AWS_REGION;
   const settings = savedEnvRoleSessionSettings(environment, region);
   if (settings === undefined) return undefined;
-  return createSavedEnvRoleSessions({ settings, assumeRole: options.assumeRole ?? realSavedEnvAssumeRole(settings.region), ...(options.now === undefined ? {} : { now: options.now }) });
+  return createSavedEnvRoleSessions({ settings, assumeRole: options.assumeRole ?? realSavedEnvAssumeRole(settings.region), ...(options.describeRepositories === undefined ? {} : { describeRepositories: options.describeRepositories }), ...(options.now === undefined ? {} : { now: options.now }) });
 }
 
 export const SAVED_ENV_NOT_SET_UP = NOT_SET_UP;
