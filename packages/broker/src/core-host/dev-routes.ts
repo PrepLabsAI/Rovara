@@ -81,6 +81,7 @@ import { isWikiBuildPath, routeHostedWikiBuild, type HostedWikiBuildWiring } fro
 import { hostedAnswerService, isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "./answer-routes.js";
 import { isStartSuggestPath, routeHostedStartSuggest, type HostedStartSuggestWiring } from "./start-suggest-routes.js";
 import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upkeep-routes.js";
+import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } from "./eval-check-routes.js";
 import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
 
@@ -216,6 +217,8 @@ export interface CoreDevWiring {
   upkeep?: HostedUpkeepWiring;
   /** L4-U5b: what the inbox's project notices (`GET /v1/app/inbox/project-notices`) are checked against, live: whether the person still administers the project, and the project's open repair card. Absent: that route lists nothing. */
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
+  /** L4-EVCI2: the setup card's eval check from the customer's CI (`/v1/app/projects/<p>/ci-eval-check`, eval-check-routes.ts). Absent: that path says "not on the core yet". */
+  evalCheck?: HostedEvalCheckWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -264,7 +267,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method)) return true;
+  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -603,6 +606,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
             // L4-P3: allowing the company's automatic runs (the setup step) needs a fresh step-up, checked here against the company's window like making a script token.
             freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
+          });
+        }
+        if (isEvalCheckPath(path, request.method)) {
+          // L4-EVCI2: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+          if (target.wiring.evalCheck === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedEvalCheck({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.evalCheck,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target), log: options.log,
           });
         }
         if (isSystemRunsPath(path, request.method)) {

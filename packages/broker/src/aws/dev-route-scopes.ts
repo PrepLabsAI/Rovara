@@ -337,6 +337,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // Lead 4 N1: the nightly upkeep switch (core-host/upkeep-routes.ts): full access only, then any live role on the project reads it; a live company owner or admin, or the project's administrator, switches it.
   { method: "GET", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
   { method: "PUT", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
+  // L4-EVCI2: the setup card's "Eval check from your CI" (core-host/eval-check-routes.ts): full access only, then any live role on the project reads the confirmed check; a live company owner or admin, or the project's administrator, reads the proposals and confirms one (or none).
+  { method: "GET", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
+  { method: "PUT", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
   // Lead 4 PCF: the plan card's "Change" lists the open features to pick from; the same people as the filing above (the task's starter, a maintainer, an owner or admin).
   { method: "GET", path: "/v1/app/tasks/{taskId}/feature-choices", requires: "full" },
   // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it (a fresh step-up) or withdraws it.

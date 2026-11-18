@@ -44,6 +44,7 @@ import { dispatchRowKey, operationKey, taskPointerKey, workspaceKey, workspacePa
 import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
 import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
+import { writeEvalCheckSetting } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { fromDocument, toDocument, type OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { recordCritiqued } from "../../packages/broker/src/core/plan/check.js";
@@ -2851,6 +2852,21 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(cr.state).toBe("open");
     // The session reads "ready to merge" for a task that waits for it.
     expect(await h.runtime.app.flow.deps.store.get({ pk: `DEVTASK#${waiting.taskId}`, sk: "META" })).toMatchObject({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" } });
+  });
+
+  // L4-EVCI2 mutant W2: the laptop's tracking is made without the confirmed eval check's port (ciEvidence).
+  it("reads the install's confirmed eval check (the setup card's) on the next pass, and says nothing about one before it is confirmed", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const waiting = await toWaitForMerge(h);
+    const evals: Check = { name: "evals", state: "completed", conclusion: "success", required: false, url: "https://github.com/acme/demo/actions/runs/5/job/77", runId: "77", source: "15368" };
+    h.model.setChecks(waiting.commit, [passingCheck(), evals]);
+    await h.runtime.tick();
+    expect(await trackingItem(h, waiting.taskId)).not.toHaveProperty("ciEval");
+    await writeEvalCheckSetting({ store: store(h), companyId: IMPLICIT_COMPANY_ID }, { project: "payments", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334455", now: clock.at });
+    clock.advance(10 * MINUTE);
+    await h.runtime.tick();
+    expect(await trackingItem(h, waiting.taskId)).toMatchObject({ ciEval: { name: "evals" } });
   });
 
   it("fixes failing CI by itself when the timer sees it, pushes the reviewed fix, and announces the approval that makes the pull request ready to merge", async () => {

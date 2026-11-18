@@ -90,6 +90,8 @@ import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens
 import { createLocalPlaybook } from "./playbook.js";
 import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
 import { createLocalWikiMap } from "./wiki-map.js";
+import { createLocalEvalCheck } from "./eval-check.js";
+import { evalCheckEvidencePort } from "../../core/ci-evidence/eval-check-setting.js";
 import { createLocalWikiBuild } from "./wiki-build.js";
 import { createLocalUpkeep } from "./upkeep.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -528,7 +530,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   flow.deps.ciWaitLines = createCiWaitLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
   // L4-LM1c: a person's push to a Rovara pull request is told to lessons, which are built below (the tracking service is made first, so the notice reaches them through this reference).
   const lessonsForHumanEdits: { current?: { noteHumanEdit: HumanEditSink } } = {};
-  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges, humanEdit: async (push) => { await lessonsForHumanEdits.current?.noteHumanEdit(push); } });
+  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges,
+    // L4-EVCI2: the customer's confirmed eval check (the setup card's), kept per company and project; nothing confirmed: a pass is what it was.
+    ciEvidence: evalCheckEvidencePort({ store, companyId, log: (event, fields) => log({ component: "eval_check", event, ...fields }) }), humanEdit: async (push) => { await lessonsForHumanEdits.current?.noteHumanEdit(push); } });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
@@ -653,6 +657,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const wikiMap = createLocalWikiMap({ flow: flow.deps, registry, companyId, now: () => clock().getTime(), log });
   // Wiki W4: the wiki build controls (Build, Stop, Continue, Refresh now, the agents switch, Delete wiki). The task flow's wiki build starter is the one seam left to fill (`starter`).
   const wikiBuildControls = createLocalWikiBuild({ flow: flow.deps, wikiMap, owner, companyId, now: () => clock().getTime(), modelAccessConfigured: async () => (await chosen()) !== undefined, starter: createWikiBuildStarter });
+  // L4-EVCI2: the setup card's eval check from the customer's CI (owner only; the proposals come from the project's workflow files through the code host the registry holds).
+  const evalCheck = createLocalEvalCheck({ flow: flow.deps, registry, companyId, audit: registry.require("audit-sink"), now: () => clock().getTime(), log });
   // Lead 4 N1: the nightly upkeep switch (owner only; recorded here, and nothing AI-spending starts on a laptop by itself).
   const upkeepSwitch = createLocalUpkeep({ flow: flow.deps, owner, companyId, audit: registry.require("audit-sink"), now: () => clock().getTime() });
   // The worker's wiki build callback (the owner's standing, the project's own code host read for the citation re-read, this install's wiki store as the page sink) and the end hook for the build record.
@@ -771,7 +777,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => sessionService.refresh(orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps, notices });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await wikiBuildControls.routes(request, caller)) ?? (await upkeepSwitch.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await wikiBuildControls.routes(request, caller)) ?? (await upkeepSwitch.routes(request, caller)) ?? (await evalCheck.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await sessionService.start().catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
