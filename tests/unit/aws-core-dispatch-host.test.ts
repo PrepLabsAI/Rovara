@@ -18,7 +18,9 @@ import { createAllowAllAdmission, createNoopAuditSink, localOwnerPrincipal } fro
 import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
+import { TASK_SPEND_UNKNOWN } from "../../packages/broker/src/core-host/company-task-spend.js";
 import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
@@ -391,6 +393,34 @@ describe("the core on the dispatcher", () => {
     await b.flow.deps.store.put({ item: documentOf({ ...testEnvLatestKey(COMPANY_B, "shared-name"), entityType: "TEST_ENV_LATEST", orgId: COMPANY_B, project: "shared-name", revision: 1, digest }) });
     expect(await a.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).toEqual({});
     expect(await b.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).not.toEqual({});
+  });
+
+  it("L4-TSU: each company's runtime on the dispatcher carries its own taskSpendUsd over its own cost ledger: another company's row for the same task id is never counted, and what is not known throws in fixed words", async () => {
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const logs: Array<Record<string, unknown>> = [];
+    const built = createDispatcherCoreHost({ ...made.inputs, log: (entry) => { logs.push(entry); }, flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
+    const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
+    expect(typeof a.flow.deps.taskSpendUsd).toBe("function");
+    expect(a.flow.deps.taskSpendUsd).not.toBe(b.flow.deps.taskSpendUsd);
+    const task = "44444444-4444-4444-8444-444444444444", taskB = "77777777-7777-4777-8777-777777777777";
+    const total = async (companyId: typeof COMPANY_A, taskId: string, micros: number, over: Record<string, unknown> = {}) => {
+      await a.flow.deps.store.put({ item: { ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, companyId, workspaceId: `ws-${taskId}` } });
+      await a.flow.deps.store.put({ item: { ...workspaceKey(companyId, `ws-${taskId}`), entityType: "WORKSPACE", id: `ws-${taskId}`, companyId, orgId: companyId } });
+      await a.flow.deps.store.put({ item: { pk: costPartition(companyId, taskId), sk: "TOTAL", entityType: "COST_TOTAL", companyId, taskId, currency: "USD", micros, entries: 1, unpricedEntries: 0, ...over } });
+    };
+    await total(COMPANY_A, task, 6_000_000); await total(COMPANY_B, taskB, 91_000_000);
+    expect(await a.flow.deps.taskSpendUsd!(task)).toBe(6);
+    expect(await b.flow.deps.taskSpendUsd!(taskB)).toBe(91);
+    await total(COMPANY_A, task, 7_000_000);
+    expect(await a.flow.deps.taskSpendUsd!(task)).toBe(7);
+    // the other company's task is no row of A's
+    await expect(a.flow.deps.taskSpendUsd!(taskB)).rejects.toThrow(TASK_SPEND_UNKNOWN);
+    await total(COMPANY_A, task, 7_000_000, { unpricedEntries: 1 });
+    await expect(a.flow.deps.taskSpendUsd!(task)).rejects.toThrow(TASK_SPEND_UNKNOWN);
+    const refusals = logs.filter((entry) => entry["event"] === "dispatch.task_spend_refused");
+    expect(refusals.map((entry) => entry["reason"])).toEqual(["not_recorded", "unpriced_usage"]);
+    expect(JSON.stringify(refusals)).not.toContain(task);
   });
 
   it("lead 4 A1: each company's runtime on the dispatcher carries its own wiki reader, which gives a step nothing for another company's workspace or when no switch is on", async () => {

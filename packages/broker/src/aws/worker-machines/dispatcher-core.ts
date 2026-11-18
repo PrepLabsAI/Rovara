@@ -40,6 +40,7 @@ import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core
 import { companyEngineModelRoute } from "../../core-host/company-engine-model.js";
 import { hostedSystemRunsFor, readSystemRunsSwitch } from "../../core-host/system-runs.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
+import { createCompanyTaskSpend } from "../../core-host/company-task-spend.js";
 import { createTaskTestEnvironment } from "../../core/test-env/seam.js";
 import { hostedServiceCatalog } from "../hosted-test-services.js";
 import { createWikiForStep } from "../../core/wiki/agent-context.js";
@@ -281,6 +282,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         ...(learned === null || learned === undefined ? {} : { learned }),
         // Lead 4 A1: the project wiki, for this company only (its own store, its own id); it gives nothing unless the project's "Give the wiki to agents" switch is on.
         wiki: createWikiForStep({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
+        // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap (the broker's own reader: this company's cost ledger, fresh each time, unknown throws and is never "nothing spent").
+        taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.task_spend_refused", companyId, reason }) }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended (this company's store only).
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
