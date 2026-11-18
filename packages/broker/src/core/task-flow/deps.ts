@@ -165,8 +165,8 @@ export interface StartExtrasInput {
   ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
   /** Where the task started (the surface that asked for it). */
   origin?: WorkOrigin | undefined;
-  /** What the task is for when it is not ordinary work (a setup run); absent for ordinary work. */
-  purpose?: "setup_agent" | undefined;
+  /** What the task is for when it is not ordinary feature work; absent for ordinary work. */
+  purpose?: "setup_agent" | "wiki_build" | undefined;
 }
 
 /** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */

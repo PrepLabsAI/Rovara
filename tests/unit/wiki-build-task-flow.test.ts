@@ -1,7 +1,7 @@
 // Wiki W3b: the wiki build as a task of the task flow. Start (one transaction with the pointer, a read-only pinned preparation), the first step (WIKI_BUILD with the limits and pins and its own callback capability), the end
 // (the first end word stands, the workspace is given back), the payer (the project, whatever surface started it) and the hosted standing rule (the person the run is for must still manage the project).
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WIKI_BUILD_FEATURE, WIKI_BUILD_WORDS, WORKER_INVOCATION_FEATURES, PREPARE_PINS_FEATURE, type OrgId } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
@@ -59,7 +59,10 @@ async function toBuildStep(b: Built, workspaceId: string) {
 describe("start: a task with purpose wiki_build, the pointer in the same transaction", () => {
   it("writes the task, its pointer, its notes and a read-only pinned preparation together", async () => {
     const b = build();
+    const startExtras = vi.fn(() => ({ items: [] }));
+    b.h.deps.startExtras = startExtras;
     const { pointer, task, workspaceId } = await started(b);
+    expect(startExtras).toHaveBeenCalledWith(expect.objectContaining({ purpose: "wiki_build" }));
     expect(task).toMatchObject({ purpose: "wiki_build", project: "payments", wikiBuild: { limits: { budgetCents: 700, pageReserveCents: 50 }, pins: [{ repo: "demo", commit: HEAD }] } });
     expect(task["setupAgentLimits"]).toBeUndefined();
     expect(pointer).toMatchObject({ taskId: task["taskId"], payer: { kind: "project", project: "payments" } });
