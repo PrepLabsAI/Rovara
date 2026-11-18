@@ -23,6 +23,7 @@ import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { taskPointerKey } from "../developer/task-records.js";
+import type { ChatThreadInput, ChatThreadInputResult } from "../core-host/chat-thread-input.js";
 
 /** The state table, as every AWS reader holds it. */
 export interface EngineStateTable {
@@ -164,6 +165,12 @@ export interface CoreTaskEntry {
    * the task must be one this caller may act on, and the conversation's tenant must belong to that company; anything else records nothing (`false`). Written once: a repeat changes nothing. Absent: the deployment keeps no thread.
    */
   recordThread?(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean>;
+  /**
+   * L4-U5d: a later message in the chat thread the task was started from, as input for that task (`core-host/chat-thread-input.ts`): an answer to Understand's questions, a note for the plan, or a follow-up note, under the
+   * rule the web uses for a core task (the caller's live company, the thread's workspace that company's, the task's owner). A refusal writes nothing and is an answer, not a throw; a throw means nothing was saved (the chat retries).
+   * Absent: the deployment takes no input from a thread.
+   */
+  threadInput?(caller: CoreEntryCaller, input: ChatThreadInput): Promise<ChatThreadInputResult>;
 }
 
 /**
@@ -205,8 +212,18 @@ export function coreTaskEntryFrom(
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
   /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
+  /** L4-U5d: the deployment's thread input, asked with the caller as the core knows them. Absent: the entry has no `threadInput`. */
+  threadInput?: (deployed: DeployedCaller, input: ChatThreadInput) => Promise<ChatThreadInputResult>,
 ): CoreTaskEntry {
   return {
+    ...(threadInput === undefined ? {} : {
+      async threadInput(caller: CoreEntryCaller, input: ChatThreadInput): Promise<ChatThreadInputResult> {
+        // No membership is the same refusal as a person who may not: nothing is written.
+        const deployed = await deployedCallerOf(caller);
+        if (deployed === undefined) return { outcome: "refused", notice: "not_allowed" };
+        return await threadInput(deployed, input);
+      },
+    }),
     ...(recordThread === undefined ? {} : {
       async recordThread(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean> {
         let deployed: DeployedCaller | undefined;
