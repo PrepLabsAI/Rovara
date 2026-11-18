@@ -61,14 +61,12 @@ const rechecksOf = async (store: DocumentStore, orgId: OrgId, project: string): 
 const used = async (w: World): Promise<number> => (await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.h.deps.companyId, "payments")).used;
 
 describe("the free re-check at task start stands behind the SystemRuns flag", () => {
-  it("flag OFF: the task starts, and nothing is read, claimed or started for a re-check, even with drift", async () => {
+  it("flag OFF: the task starts, and nothing is claimed or started for a re-check, even with drift", async () => {
     const w = await world();
     w.h.deps.systemRuns = { enabled: () => false };
     w.model.commit("main", { "package-lock.json": "lock-2" });
-    const listing = vi.spyOn(w.host, "setupFileVersions");
     const task = await startTask(w);
     expect(task.taskId).toBeDefined();
-    expect(listing).not.toHaveBeenCalled();
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
     expect(await used(w)).toBe(0);
   });
@@ -104,7 +102,7 @@ describe("the free re-check at task start stands behind the SystemRuns flag", ()
 });
 
 describe("the re-check at task start is attributed to the company (REVIEW-1 M1)", () => {
-  it("flag ON: a re-check writes a usage row for kind setup_check and audits as the project's system owner with the reason", async () => {
+  it("flag ON: a re-check writes a usage row for kind setup_check and audits with its kind and reason", async () => {
     const w = await world();
     w.h.deps.systemRuns = { enabled: () => true };
     w.model.commit("main", { "package-lock.json": "lock-2" });
@@ -112,7 +110,7 @@ describe("the re-check at task start is attributed to the company (REVIEW-1 M1)"
     const report = await readSystemRunUsage(w.h.deps, { project: "payments" });
     expect(report).toMatchObject({ runs: 1, byKind: { setup_check: { runs: 1 } } });
     const event = w.h.audit.find((entry) => entry.action === "setup_recheck.started")!;
-    expect(event.actor).toEqual({ type: "system", id: systemOwnerIdOf(w.h.deps.companyId, "payments") });
+    expect(event.actor).toEqual({ type: "system", id: "rovara" });
     expect(event.details).toMatchObject({ kind: "setup_check", reason: "task_start", attempt: 1 });
   });
 

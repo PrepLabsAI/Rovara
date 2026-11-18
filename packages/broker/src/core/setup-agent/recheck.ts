@@ -160,7 +160,7 @@ async function ensureRecheck(deps: TaskFlowDeps, input: { project: string; defin
       putRow(recheckRowKey(orgId, project, key), row.entityType, { ...row, ...expiry(deps) }),
       overwriteRow(recheckCurrentKey(orgId, project), "SETUP_RECHECK_CURRENT", { orgId, project, key, ...expiry(deps) }),
       ...started.items,
-      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, key), companyId: orgId, at, actor: { type: "system", id: systemOwnerIdOf(orgId, project) }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 1, classes: input.classes, kind: "setup_check", reason: "task_start" } }),
+      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, key), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 1, classes: input.classes, kind: "setup_check", reason: "task_start" } }),
     ]);
     if (!result.applied) {
       // Another start put the same re-check there first: the task joins that one. The place in the cap is that start's (the claim is one per re-check, so this call's claim WAS its own), and only a start that
@@ -285,7 +285,7 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
     const result = await deps.store.transact([
       { kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("attempt", 2), change.set("check", { ...started.mark })], condition: still },
       ...started.items,
-      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, row.key, "2"), companyId: orgId, at, actor: { type: "system", id: systemOwnerIdOf(orgId, project) }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 2, classes: row.classes, kind: "setup_check", reason: "task_start" } }),
+      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, row.key, "2"), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 2, classes: row.classes, kind: "setup_check", reason: "task_start" } }),
     ]);
     if (!result.applied) {
       // The claim is one per re-check and attempt, so another caller's live second attempt holds it too: it goes back only when no second attempt was left behind.
