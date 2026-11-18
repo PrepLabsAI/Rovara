@@ -15112,9 +15112,12 @@ async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: stri
  * membership reader, or Slack company mode's): a broker without one keeps the legacy grant rows for every reader and writer, as before (company-layout.ts then picks the
  * legacy key for the built-in company and none).
  */
-function grantCompany(dependencies: AwsBrokerDependencies, companyId: string | undefined): string | undefined {
-  const layer = dependencies.developer?.companies ?? dependencies.linking?.companies ?? (dependencies.workspaces === undefined ? undefined : dependencies.companies);
-  return layer === undefined ? undefined : companyId;
+/**
+ * DEC 254zzz98 (one rule): a project's grants live where its revisions live. The company that resolved for the caller (or the company a stored record names) picks the layout for
+ * both: a NAMED company's own partition, else (the built-in company, or none) the legacy keys (company-layout.ts `grantKeyFor` decides). No separate company-layer check here.
+ */
+function grantCompany(_dependencies: AwsBrokerDependencies, companyId: string | undefined): string | undefined {
+  return companyId;
 }
 
 /** The company a stored record names (`companyId`), or undefined (unstamped: the built-in company's). */

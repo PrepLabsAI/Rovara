@@ -73,10 +73,9 @@ describe("same name in two companies", () => {
       expect(h.revision(created.name)?.companyId).toBe(company);
       expect((h.revision(created.name)?.definition as { name?: string } | undefined)?.name).toBe(created.name);
       expect(h.db.get(orgProjectNameClaimKey(company, "web").pk, orgProjectNameClaimKey(company, "web").sk)).toMatchObject({ entityType: "PROJECT_NAME_CLAIM", companyId: company, name: "web", projectId: created.name, claimedBy: PERSON });
-      // DEC 254zzz80: this broker has no Code company layer for its developer routes (no developer sign-in membership reader, no Slack company mode), so the
-      // creator's administrator grant keeps the legacy row, which is where those routes read it; nothing is written in the company's own partition.
-      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toMatchObject({ role: "administrator" });
-      expect(h.db.get(`ORG#${company}#MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toBeUndefined();
+      // DEC 254zzz98 (one rule): the creator's administrator grant lives where the project's revision lives, the named company's own partition, and only there.
+      expect(h.db.get(`ORG#${company}#MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toMatchObject({ role: "administrator" });
+      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toBeUndefined();
     }
     expect(a.name).not.toBe(b.name);
     expect(h.revision("web")).toBeUndefined();
