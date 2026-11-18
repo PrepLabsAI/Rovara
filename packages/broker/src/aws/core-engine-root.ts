@@ -60,8 +60,9 @@ import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-hos
 import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
 import { queueSetupBroken } from "../core/notify/attention.js";
 import type { ChatThreads } from "../core-host/chat-threads.js";
-import { channelThreadHandler } from "../core/channel/thread-notices.js";
+import { projectPageUrl } from "../core/decisions/open-path.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
+import { hostedThreadHandler, hostedThreadNotification } from "../core-host/thread-notification.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
@@ -513,6 +514,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   }
   if (settingsBlocked) log({ event: "core_engine.settings_blocked" });
   const now = inputs.now ?? (() => new Date());
+  /** HW5: the web app's own origin for an address in a chat message (a plain https origin, else none: the message then carries no link). A throwing origin reads as none. */
+  const originOf = (): string | undefined => { try { return inputs.origin(); } catch { return undefined; } };
   const membershipOf = inputs.signInTableName === undefined || inputs.signInTableName === ""
     ? async () => undefined
     : membershipWithRoleFromDynamo(inputs.documentClient, inputs.signInTableName);
@@ -605,7 +608,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)),
       // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
-      ...(inputs.linearIntake === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId) }),
+      ...(inputs.linearIntake === undefined && inputs.chatThreads === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }) }),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
       // DEC 254zm: a starting task pins the project's newest usable approved test environment (the company's own records), as on a laptop.
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
@@ -651,9 +654,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             // L4-U5b: the chat thread a task was started from is told its milestones, through this company's own chat adapter only. The person who started the task must still be this company's member.
             if (inputs.chatThreads !== undefined) {
               const threads = inputs.chatThreads;
-              lessons.milestones.register(channelThreadHandler({
-                store: registry.require("storage"), registry: { get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : undefined)) as never },
-                now: () => now().getTime(), companyOf: threads.companyOf,
+              lessons.milestones.register(hostedThreadHandler({
+                threads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
                 isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId,
                 log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }),
               }));
@@ -681,7 +683,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
-          ...(inputs.services?.(companyId, flow, registry, { ...wiring, upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          ...(inputs.services?.(companyId, flow, registry, { ...wiring, upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) },
+            ...(inputs.chatThreads === undefined ? {} : { notification: hostedThreadNotification({ threads: inputs.chatThreads, registry, companyId, store: registry.require("storage"), now: () => now().getTime(), origin: originOf, threadsTold: lessons !== undefined }), threadMoments: lessons !== undefined }) }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
           ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },

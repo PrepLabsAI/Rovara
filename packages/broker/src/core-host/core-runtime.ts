@@ -15,6 +15,7 @@ import { withStepFenceRetry } from "./step-fence.js";
 import { startFenceItems } from "../core/task-flow/start-fence.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
+import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
 import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
 
 /** A core service a scheduled job runs, per company. */
@@ -49,7 +50,16 @@ export interface CoreServiceWiring {
     administers(orgId: OrgId, developerId: string, project: string): Promise<boolean>;
     /** L4-U5: the project's open repair card now, for the admins' "Setup needs repair" notice (dropped when the setup is no longer broken). Absent: no setup row is delivered. */
     setupRead?(orgId: OrgId, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined>;
+    /** HW5: the project's page address (a plain https link) for the admins' "Setup needs repair" notice. Absent: the notice has no link. */
+    setupLink?(project: string): string | undefined;
   } | undefined;
+  /**
+   * HW5: what the notice service needs so what needs a person also reaches the chat thread the task was started from, and links to the task's page: the company's chats as the notice service's registry sees them, the tenant's
+   * company, the thread, the task link, and the three "already told in the thread" reads that keep one message per moment. Absent: the notice service is as before (the inbox only).
+   */
+  notification?: Pick<AttentionDeliveryDependencies, "registry" | "companyOf" | "link" | "thread" | "planCarded" | "setupPausedTold" | "doneToldInThread"> | undefined;
+  /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes. Needs the company's milestones; absent: none are written. */
+  threadMoments?: boolean | undefined;
 }
 
 export interface CoreRuntimeOptions {

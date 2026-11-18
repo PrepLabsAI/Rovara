@@ -374,7 +374,7 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
     const source = read("packages/broker/src/aws/broker.ts");
     expect(source).toMatch(/\.\.\.\(slackCompany === undefined \? \{\} : \{ chatThreads: hostedSlackThreads\(\{ workspaces: slackCompany\.workspaces/u);
     const root = read("packages/broker/src/aws/core-engine-root.ts");
-    expect(root).toMatch(/if \(inputs\.chatThreads !== undefined\) \{[\s\S]{0,400}lessons\.milestones\.register\(channelThreadHandler\(\{/u);
+    expect(root).toMatch(/if \(inputs\.chatThreads !== undefined\) \{[\s\S]{0,400}lessons\.milestones\.register\(hostedThreadHandler\(\{/u);
     expect(root).toContain("isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId");
     expect(root).toContain("coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread(");
   });
