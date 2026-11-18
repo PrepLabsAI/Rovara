@@ -16,9 +16,10 @@ import type { UpkeepPauseReason } from "./upkeep.js";
  * and checked at compile time to be exactly upkeep.ts's `UPKEEP_PAUSE_REASONS` (a reason added or removed on either side fails `tsc`).
  */
 const SETUP_RUN_PAUSE_REASONS = ["no_budget", "monthly_limit", "cost_too_high"] as const;
-type SamePauseReasons = [UpkeepPauseReason] extends [(typeof SETUP_RUN_PAUSE_REASONS)[number]] ? ([(typeof SETUP_RUN_PAUSE_REASONS)[number]] extends [UpkeepPauseReason] ? true : never) : never;
-const samePauseReasons: SamePauseReasons = true;
-void samePauseReasons;
+type SamePauseReasons = [UpkeepPauseReason] extends [(typeof SETUP_RUN_PAUSE_REASONS)[number]] ? ([(typeof SETUP_RUN_PAUSE_REASONS)[number]] extends [UpkeepPauseReason] ? true : false) : false;
+type MustBeTrue<T extends true> = T;
+/** Type only (nothing runs at load time: contracts-side-effects.test.ts): `false` here fails `tsc`. */
+export type SetupRunPauseReasonsMatchUpkeep = MustBeTrue<SamePauseReasons>;
 const UpkeepPauseReasonSchema = z.enum(SETUP_RUN_PAUSE_REASONS);
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
