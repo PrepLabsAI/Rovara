@@ -209,7 +209,7 @@ describe("the Slack Lambda's export", () => {
     const on = createAwsSlackHandlerFromEnvironment({ ...ON, BROKER_FUNCTION_NAME: "broker" }, make as never) as (event: unknown) => Promise<{ body: string }>;
     expect(made).toHaveLength(2);
     // DEC 254zzz80 (R2-F1): the install team's legacy view also knows the install team's company (its operator binding), to pick where its channel bindings are read.
-    expect(made[0]).toEqual({ slackInstallTeamOnly: INSTALL, installTeamCompany: expect.any(Function) });
+    expect(made[0]).toEqual({ slackInstallTeamOnly: INSTALL, installTeamCompany: expect.any(Function) as unknown });
     expect(Object.keys(made[1]!).sort()).toEqual(["onWorkspaceRemoved", "workspaces"]);
     expect((await on({ requestContext: {}, body: JSON.stringify({ team_id: OTHER }) })).body).toBe("company");
     expect((await on({ requestContext: {}, body: JSON.stringify({ team_id: INSTALL }) })).body).toBe("legacy");

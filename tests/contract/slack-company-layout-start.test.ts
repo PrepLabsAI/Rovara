@@ -56,17 +56,15 @@ async function world(options: { installCompany: string; legacyInstall?: boolean 
     await redeemChannelLinkCode({ store, orgId: company, now: Date.now }, person, code.code);
   }
   const starts: Array<Record<string, unknown>> = [];
-  const entry: CoreTaskEntry = {
-    route: vi.fn(async (request: { body?: string }) => { starts.push(JSON.parse(request.body ?? "{}") as Record<string, unknown>); return { statusCode: 200, headers: {}, body: JSON.stringify({ task: { taskId: TASK } }) }; }),
-    recordThread: vi.fn(async () => true),
-  };
+  const route = vi.fn<(request: { body?: string }, caller?: unknown) => Promise<{ statusCode: number; headers: Record<string, string>; body: string }>>(async (request) => { starts.push(JSON.parse(request.body ?? "{}") as Record<string, unknown>); return { statusCode: 200, headers: {}, body: JSON.stringify({ task: { taskId: TASK } }) }; });
+  const entry: CoreTaskEntry = { route, recordThread: vi.fn(async () => true) };
   const module = await loadSlackBroker();
   const handler = module.createAwsBrokerHandler({ ...h.brokerInput, store, workspaces, companies: { companyOf: async (id: string) => members.get(id) },
     ...(options.legacyInstall === false ? {} : { slackWorkspaceLegacyTeamId: SLACK_TEAM }),
     developer: { ...h.brokerInput.developer!, slackTeamId: SLACK_TEAM, coreTasks: entry } } as never);
   const start = (team = SLACK_TEAM) => handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: { teamId: team, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" },
     userId: team === SLACK_TEAM ? USER : USER_B, instructions: "Fix the flaky test", workflowPath: "QUICK", requestId: randomUUID() });
-  return { ...h, handler, entry, starts, start, companyOfTeam };
+  return { ...h, handler, entry, route, starts, start, companyOfTeam };
 }
 
 describe("the Slack start reads the binding in the company's own layout", () => {
@@ -77,7 +75,7 @@ describe("the Slack start reads the binding in the company's own layout", () => 
     expect(result.statusCode, result.body).toBe(200);
     expect(JSON.parse(result.body)).toMatchObject({ taskId: TASK });
     expect(w.starts).toEqual([expect.objectContaining({ project: "demo-tasklog", client: "slack", workflowPath: "QUICK" })]);
-    expect(w.entry.route).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ developerId: PERSON }));
+    expect(w.route).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ developerId: PERSON }));
   });
 
   it("a named company's leftover legacy row (SLACK_BINDING#<team>) binds nothing: refused, the core is never asked", async () => {
@@ -86,26 +84,26 @@ describe("the Slack start reads the binding in the company's own layout", () => 
     expect(w.db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeDefined();
     const result = await w.start();
     expect(result.statusCode).not.toBe(200);
-    expect(w.entry.route).not.toHaveBeenCalled();
+    expect(w.route).not.toHaveBeenCalled();
   });
 
   it("two companies: company B's team never starts from A's binding of the same channel, and starts from its own", async () => {
     const w = await world({ installCompany: A });
     w.db.set(companyBinding(A, OTHER_TEAM));
     expect((await w.start(OTHER_TEAM)).statusCode).not.toBe(200);
-    expect(w.entry.route).not.toHaveBeenCalled();
+    expect(w.route).not.toHaveBeenCalled();
     w.db.set(companyBinding(B, OTHER_TEAM, "b-project"));
     const own = await w.start(OTHER_TEAM);
     expect(own.statusCode, own.body).toBe(200);
     expect(w.starts).toEqual([expect.objectContaining({ project: "b-project" })]);
-    expect(w.entry.route).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ developerId: PERSON_B }));
+    expect(w.route).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ developerId: PERSON_B }));
   });
 
   it("the install team's binding row of ANOTHER company is not the install team's company's", async () => {
     const w = await world({ installCompany: A });
     w.db.set(companyBinding(B));
     expect((await w.start()).statusCode).not.toBe(200);
-    expect(w.entry.route).not.toHaveBeenCalled();
+    expect(w.route).not.toHaveBeenCalled();
   });
 
   it("a named company's binding to a project that is not in its own partition (another company's, or none) binds nothing", async () => {
@@ -114,7 +112,7 @@ describe("the Slack start reads the binding in the company's own layout", () => 
     expect((await w.start()).statusCode).not.toBe(200);
     w.db.set(companyBinding(A, SLACK_TEAM, "no-such-project"));
     expect((await w.start()).statusCode).not.toBe(200);
-    expect(w.entry.route).not.toHaveBeenCalled();
+    expect(w.route).not.toHaveBeenCalled();
   });
 
   it("an administrator's unbind of a named company's channel never deletes a row the read did not find (today it is refused before any write)", async () => {
@@ -137,7 +135,7 @@ describe("the Slack start reads the binding in the company's own layout", () => 
     const result = await handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1700000000.000009" },
       userId: USER, instructions: "Fix it", workflowPath: "QUICK", requestId: randomUUID() });
     expect(result.statusCode).toBe(403);
-    expect(w.entry.route).not.toHaveBeenCalled();
+    expect(w.route).not.toHaveBeenCalled();
   });
 
   it("the built-in company's install team keeps the single-workspace start: the legacy binding and the legacy (Slack-native) caller, exactly as with company mode off", async () => {
@@ -147,7 +145,7 @@ describe("the Slack start reads the binding in the company's own layout", () => 
       const handler = companyMode ? w.handler : (await loadSlackBroker()).createAwsBrokerHandler({ ...w.brokerInput, developer: { ...w.brokerInput.developer!, slackTeamId: SLACK_TEAM, coreTasks: w.entry } } as never);
       const result = await handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" },
         userId: USER, instructions: "Fix the flaky test", workflowPath: "QUICK", requestId: "33333333-3333-4333-8333-333333333333" });
-      const calls = (w.entry.route as ReturnType<typeof vi.fn>).mock.calls.map(([request, caller]) => ({ body: JSON.parse(String((request as { body?: string }).body ?? "{}")) as unknown, caller }));
+      const calls = w.route.mock.calls.map(([request, caller]) => ({ body: JSON.parse(request.body ?? "{}") as unknown, caller }));
       return { status: result.statusCode, body: result.body, calls };
     };
     const on = await run(true);
