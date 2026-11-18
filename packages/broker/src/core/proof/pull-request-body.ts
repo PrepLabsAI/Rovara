@@ -2,12 +2,12 @@
 // code is, between markers that Rovara rewrites after every fix or sync, and it ends with the line that says a person approves and a person merges. The description is public to the repository's
 // readers: every line that a model, a file name or a branch name wrote goes through `inertLine` (redacted, one line, no mention, link, image, cross-reference or hidden comment), every list is bounded,
 // and the whole body stays under the byte cap with its markers, risk and closing line intact so it can always be regenerated in place.
-import { attributionBodyLines, hideEmailAddresses, type ActingAttribution, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
+import { attributionBodyLines, hideEmailAddresses, type ActingAttribution, type PrVerdict, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import { inertLine } from "./inert-text.js";
 import { reviewModelLines } from "./review-model-lines.js";
 import { linearCloseLine, neutralizeLinearWords, normalizeIssueKey, sealLinearText } from "./linear-close.js";
-import { LAYOUT_LEVEL_LAST, layoutBlockLines } from "./pull-request-layout.js";
+import { LAYOUT_LEVEL_LAST, layoutBlockLines, verdictOfLayout } from "./pull-request-layout.js";
 import { proofParts, recordedCheckIdsOf, type ProofContext } from "./proof-section.js";
 import { testProofLinesOf, testProofQualifier } from "./proof-table.js";
 import type { EvidenceRiskSignal } from "./evidence-risk.js";
@@ -252,6 +252,18 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     if (byteLength(lines.join("\n")) <= budgetBytes) return lines;
   }
   return lines;
+}
+
+/**
+ * L4-PRP: the verdict of the code now on the pull request, from the same facts and the same functions the description's block is written from (`rovaraStatusLines`): the "Rovara" Check says these words too. The verdict does
+ * not depend on the shrink level (every level keeps the heading, the six lines and the first items), so it is computed once, at the full block's own inputs.
+ */
+export function rovaraPullRequestVerdict(workflow: WorkflowSnapshot, context: PullRequestBodyContext, reviewLines: (listed: number) => string[]): PrVerdict {
+  const extra = checksExtraLines(workflow, context, 10);
+  return verdictOfLayout({
+    workflow, context, risk: riskShown(workflow, context), parts: proofParts(workflow, context.proof), reviewLines, checksExtra: extra.lines, testsAdded: extra.testsAdded,
+    reviewExtra: [], linearCloseLine: undefined, asOf: context.asOf ?? workflow.updatedAt,
+  });
 }
 
 /** The "Merge order" section: at most 4 lines, each one line (the lines are made inert where they are written, and are cut here again, so nothing a caller passes can add a heading or a link). */

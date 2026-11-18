@@ -13,6 +13,7 @@ import {
   TRACKING_REQUESTS_BASE,
   TRACKING_REQUESTS_PER_EXTRA_PR,
   CI_STATE_WORDS,
+  CodeMilestoneSchema,
   agentXError,
   codeMilestoneKey,
   mergeTrackingDecisionDigest,
@@ -41,7 +42,7 @@ import {
 import { noteBranchHead } from "../branch-sync/branch-writers.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
-import { ownCheckSourceOf, stopSummaryChecks, syncSummaryCheck, type SummaryCheckSource } from "./summary-check.js";
+import { ownCheckSourceOf, readVerdict, stopSummaryChecks, syncSummaryCheck, type SummaryCheckSource } from "./summary-check.js";
 import { ciFixComment, postCiFixComment } from "./pr-comments.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
@@ -164,6 +165,11 @@ export interface MergeTrackingDependencies {
    * written when it changed (summary-check.ts), and a task Rovara stops following has its in-progress Check finished as neutral.
    */
   summaryCheck?: SummaryCheckSource;
+  /**
+   * L4-PRP: the pull request's verdict (the words of its description), asked once when Rovara marks it ready for review: the "ready for review" line on the task's timeline, in the chat and in the ticket then says the verdict's heading.
+   * Independent of the Check's gate. Absent, or a read that fails or takes over two seconds: the line is what it was.
+   */
+  verdict?: SummaryCheckSource["verdict"];
   /** Whether the task's draft must stay a draft (a small change that grew to risky, not yet kept by a person or not yet reviewed at risky). Absent: nothing holds it. */
   readyHold?(task: TrackedTask, current: { repositoryId: string; headSha: string }): Promise<boolean>;
   /** The org's autonomy for Rovara Code, for the deciders; `prepare` when not given. */
@@ -899,11 +905,15 @@ async function trackOne(
       for (const requested of action.milestones) items.push(...deps.milestones.items(requested.milestone, requested.n, { definitionVersion: action.workflow.definitionVersion }));
     }
     if (justReady) {
+      const read = await readVerdict(deps.verdict, { task, repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha: status.headRevision });
       const index = Math.max(0, (task.workflow.pullRequests ?? []).findIndex((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number));
+      const readyText = `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}${markedAnyway ? " It was held for its change proof and a person marked it ready anyway." : ""}`;
+      // The heading (fixed words and counts) goes in only when the milestone's own schema takes it, so words can never stop a pull request from being marked ready.
+      const heading = read !== undefined && CodeMilestoneSchema.shape.verdict.safeParse(read.heading).success && `${readyText} ${read.heading}.`.length <= 500 ? read.heading : undefined;
       items.push(...deps.milestones.items({
         kind: "pr_ready", orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: stamp,
-        text: `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}${markedAnyway ? " It was held for its change proof and a person marked it ready anyway." : ""}`,
-        pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
+        text: heading === undefined ? readyText : `${readyText} ${heading}.`,
+        ...(heading === undefined ? {} : { verdict: heading }), pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
       }, index, { definitionVersion: task.workflow.definitionVersion }));
     }
     items.push(...approvedItems(stamp));

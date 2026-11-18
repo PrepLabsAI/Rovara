@@ -216,8 +216,8 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const key = `pr_opened#${sha(requests.map((request) => `${request.repository}#${String(request.number)}`).join(",")).slice(0, 24)}`;
         const links = requests.flatMap((request) => plainHttpsLink(request.url) ?? []);
         await send(orgId, sessionId, key, () => tell(links.length === 1
-          ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened" } }
-          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${links.map((link) => `\n${link}`).join("")}` } }));
+          ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened", ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }) } }
+          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}` } }));
         return;
       }
 

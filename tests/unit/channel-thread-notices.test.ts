@@ -335,6 +335,20 @@ describe("the milestone lines", () => {
     expect(w.deliveries).toHaveLength(3);
   });
 
+  // L4-PRP: the pull request's verdict heading (the description's words) is said under the pull request line. Mutant T1: the milestone's verdict is not passed on.
+  it("says the pull request's verdict under the pull request card, and in the line for several pull requests; nothing extra without one", async () => {
+    const heading = "Code failed checks · High risk · 4 things to check";
+    const one = await world({ withGate: false });
+    await one.handler.on(milestone("pr_ready", { pullRequests: [PR], verdict: heading }));
+    expect(one.deliveries[0]).toMatchObject({ type: "pr", data: { url: PR.url, action: "opened", verdict: heading } });
+    const two = await world({ withGate: false });
+    await two.handler.on(milestone("pr_ready", { pullRequests: [PR, { ...PR, number: 8, url: "https://git.example.test/acme/web/pull/8" }], verdict: heading }));
+    expect((two.deliveries[0] as { data: { text: string } }).data.text).toContain(`${heading}.`);
+    const none = await world({ withGate: false });
+    await none.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect((none.deliveries[0] as { data: Record<string, unknown> }).data).not.toHaveProperty("verdict");
+  });
+
   it("a closed task is one line too, and the same task is done once whichever ending comes", async () => {
     const w = await world({ withGate: false });
     await w.handler.on(milestone("closed"));

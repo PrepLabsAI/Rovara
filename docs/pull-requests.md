@@ -58,7 +58,7 @@ push, and PR operations.
 Rovara does not merge, approve, delete branches, add reviewers/labels, or force-push in this
 workflow. A Rovara Code (version 2) pull request's description is a verdict with drawers: the result,
 the risk and the number of things to check in one heading, six short lines, a numbered list of what
-needs a person, and folded sections (see docs/local.md, "The description"). Rovara comments on a pull
+needs a person, and folded sections (see docs/local.md, "The description"). The "Rovara" Check and the "ready for review" line in the chat and the ticket say the same heading. Rovara comments on a pull
 request only when a person must act (a failed marked check, a CI fix round after the pull request is
 out of draft, a stop), never for good news. The worker rejects force flags, force-with-lease flags, and plus-prefixed refspecs at the
 credentialed Git command boundary.

@@ -91,7 +91,8 @@ const ATTRIBUTION: ActingAttribution = { requester: person("Priya N.", "a1b2c3d4
 
 const file = (path: string, added: number, removed: number, over: Partial<ChangedFileEntry> = {}): ChangedFileEntry => ({ repository: "app", path, added, removed, ...over });
 
-export interface Scenario { name: string; title: string; body: string }
+/** `inputs` are what the description was built from, for a test that builds another surface (the "Rovara" Check's verdict) from the very same facts. */
+export interface Scenario { name: string; title: string; body: string; inputs: { workflow: WorkflowSnapshot; context: PullRequestBodyContext; proofLines: readonly string[] } }
 
 function render(name: string, input: { workflow: WorkflowSnapshot; evidence: EvidencePack; claims: number; files: ChangedFileEntry[]; context: PullRequestBodyContext; dependencies?: Map<string, readonly { dependencyId: string; trust: "real" | "recorded" | "made_by_rovara" }[]>; checkCount: number; provenAt: readonly number[]; compared?: boolean; proofLines?: string[] }): Scenario {
   const read = readEvidencePack(JSON.parse(JSON.stringify(evidencePackV2Of(input.evidence, { ...WRITER, changedFiles: input.files }))));
@@ -106,8 +107,12 @@ function render(name: string, input: { workflow: WorkflowSnapshot; evidence: Evi
     ...(outcome.view === undefined ? {} : { testing: outcome.view }), ...input.context,
   };
   const body = workflowPullRequestBodyOf(input.workflow, context, input.proofLines ?? []);
-  return { name, title: "Rovara: Show tax on the invoice page and the invoice PDF", body };
+  return { name, title: "Rovara: Show tax on the invoice page and the invoice PDF", body, inputs: { workflow: input.workflow, context, proofLines: input.proofLines ?? [] } };
 }
+
+export const SCENARIO_TASK = { title: "Show tax on the invoice page and the invoice PDF" };
+export const SCENARIO_PLAN_TEXT = planText;
+export const SCENARIO_SESSION = SESSION;
 
 function workflowPullRequestBodyOf(workflow: WorkflowSnapshot, context: PullRequestBodyContext, proofLines: readonly string[]): string {
   return workflowPullRequestBody({ title: "Show tax on the invoice page and the invoice PDF" }, workflow, planText(), SESSION, context, proofLines);
