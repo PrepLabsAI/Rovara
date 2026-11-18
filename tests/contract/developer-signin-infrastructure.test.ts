@@ -3,14 +3,18 @@ import { createHash } from "node:crypto";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
+import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
+import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
+import { planCompanyImport, planCompanyImportUndo } from "../../packages/broker/src/aws/install-company-import.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
@@ -106,6 +110,14 @@ function reaches(template: TemplateJson, statement: Statement, logicalId: string
 const rolesThatMay = (template: TemplateJson, action: string, logicalId: string, sampleArn: string) =>
   [...new Set(grants(template).filter(({ statement }) => statement.Effect !== "Deny" && allows(statement, action) && reaches(template, statement, logicalId, sampleArn)).map(({ role }) => withoutHash(role)))].sort();
 const statementsOfRole = (template: TemplateJson, roleName: string) => grants(template).filter(({ role }) => withoutHash(role) === roleName).map(({ statement }) => statement);
+// DEC 254zzz(2): the install company import's two sign-in table reads are the broker's own role policy (BrokerCompanyImportReads), kept out of the DefaultPolicy that CDK would split.
+const companyImportPolicies = (template: TemplateJson) => ofType(template, "AWS::IAM::Policy").filter(([id]) => withoutHash(id) === "DeveloperSignInBrokerCompanyImportReads");
+const companyImportStatements = (template: TemplateJson) => companyImportPolicies(template).flatMap(([, policy]) => statementsIn(policy.Properties.PolicyDocument));
+/** The broker's statements in its DefaultPolicy: everything except BrokerCompanyImportReads (the one policy CDK's split threshold applies to). */
+const brokerDefaultStatements = (template: TemplateJson) => {
+  const own = new Set(companyImportStatements(template).map((statement) => JSON.stringify(statement)));
+  return statementsOfRole(template, "BrokerServiceRole").filter((statement) => !own.has(JSON.stringify(statement)));
+};
 
 const SAMPLE_KEY_ARN = "arn:aws:kms:us-east-1:111122223333:key/0b8a3c2e-1111-2222-3333-444455556666";
 const SAMPLE_SLACK_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf";
@@ -232,6 +244,10 @@ describe("developer sign-in infrastructure (named environments)", () => {
   it("gives the broker only session, developer, email-index, sign-in client and membership reads on the sign-in table", () => {
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
     const tableStatements = statementsOfRole(named, "BrokerServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
+    // The two company import reads (DEC 254zzz(2)) are asserted exactly in "gives the broker exactly the install company import's two reads" below.
+    const importStatements = new Set(companyImportStatements(named).map((statement) => JSON.stringify(statement)));
+    expect(tableStatements.filter((statement) => importStatements.has(JSON.stringify(statement)))).toHaveLength(2);
+    tableStatements.splice(0, tableStatements.length, ...tableStatements.filter((statement) => !importStatements.has(JSON.stringify(statement))));
     expect(tableStatements).toHaveLength(2);
     const reads = tableStatements.filter((statement) => actionsOf(statement).includes("dynamodb:GetItem"));
     const creatorChecks = tableStatements.filter((statement) => actionsOf(statement).includes("dynamodb:ConditionCheckItem"));
@@ -632,6 +648,10 @@ describe("task-token key and membership IAM", () => {
     // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
     withoutGithubSignIn(remainder, "staging");
+    // DEC 254zzz(2): the install company import's two sign-in table reads are exactly BrokerCompanyImportReads (asserted in full in the test of that name); taken out so the digest still pins everything else.
+    expect(companyImportPolicies(remainder)).toHaveLength(1);
+    withoutCompanyImportReads(remainder);
+    expect(companyImportPolicies(remainder)).toEqual([]);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
@@ -693,7 +713,9 @@ describe("task-token key and membership IAM", () => {
     for (const template of [named, legacy]) {
       const [signIn] = ofType(template, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))!;
       const grants = statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && reaches(template, s, signIn, SAMPLE_TABLE_ARN));
-      for (const action of ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"]) expect(grants.some((s) => allows(s, action))).toBe(false);
+      for (const action of ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]) expect(grants.some((s) => allows(s, action))).toBe(false);
+      // DEC 254zzz(2): the one Query is the install company import's member mirror read, under exactly ORG#<id>#MEMBERS (named environments only).
+      expect(grants.filter((s) => allows(s, "dynamodb:Query")).map((s) => leadingKeysOf(s))).toEqual(template === legacy ? [] : [["ORG#org_????????????????????#MEMBERS"]]);
       if (template === legacy) expect(leadingKeysOf(grants.find((s) => allows(s, "dynamodb:GetItem"))!)).toEqual(["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"]);
       for (const s of statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && s.Condition?.["ForAllValues:StringLike"] !== undefined)) {
         const keys = leadingKeysOf(s);
@@ -1528,7 +1550,8 @@ function probe(tuples: AccessTuple[], principal: string, action: string, resourc
 const BROKER_ARN_ESTIMATE = 144;
 // ENV-ROOM 2 (2026-11-17): the names parameter's ARN joins the GetParameters statement (+147 estimated), paid for by merging the broker's two lambda:InvokeFunction and two
 // states:StartExecution statements (-68 each) and dropping the two inert stream actions from the State statement (-50). Was 6114 / 7492.
-const BROKER_RESOLVED_INLINE_SIZE = 6026; // All inline documents after realistic ARN expansion.
+// DEC 254zzz(2): +710 for BrokerCompanyImportReads (6026 before): the broker's second role policy, counted here with every other inline document. The DefaultPolicy estimate below is unchanged.
+const BROKER_RESOLVED_INLINE_SIZE = 6736; // All inline documents after realistic ARN expansion.
 const BROKER_INLINE_ESTIMATE = 7453; // This replaces the R3R4 pin.
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
@@ -1543,11 +1566,14 @@ function inlineEstimate(statements: Statement[], arnEstimate = BROKER_ARN_ESTIMA
   }, 0) + JSON.stringify(s.Condition ?? {}).length, 0);
 }
 function checkHeadroom(template: TemplateJson): void {
-  const statements = statementsOfRole(template, "BrokerServiceRole");
+  // CDK's split applies to the DefaultPolicy; BrokerCompanyImportReads (DEC 254zzz(2)) is its own role policy and counts in the aggregate below.
+  const statements = brokerDefaultStatements(template);
   const n = inlineEstimate(statements);
   const reserveUnspent = Object.values(RESERVED).reduce((a, b) => a + b, 0);
   const message = `broker inline policy estimate is ${n}, pinned ${BROKER_INLINE_ESTIMATE}. CDK splits at 10,000 into a managed policy the deploy role cannot create (the boundary denies iam:CreatePolicy*), so the deploy would fail. Before adding a statement here, move the grant to a resource policy or merge statements (see briefs/codex/infra-iam-headroom/BRIEF.md). Reserve left: ${8500 - n - reserveUnspent}.`;
-  expect(ofType(template, "AWS::IAM::Policy").filter(([, r]) => JSON.stringify(r.Properties.Roles).includes("BrokerServiceRole")), message).toHaveLength(1);
+  const brokerPolicies = ofType(template, "AWS::IAM::Policy").filter(([, r]) => JSON.stringify(r.Properties.Roles).includes("BrokerServiceRole"));
+  expect(brokerPolicies.filter(([id]) => withoutHash(id) !== "DeveloperSignInBrokerCompanyImportReads"), message).toHaveLength(1);
+  expect(companyImportPolicies(template), message).toHaveLength(1);
   expect(ofType(template, "AWS::IAM::ManagedPolicy"), message).toHaveLength(0);
   expect(Object.keys(template.Resources).filter((id) => id.includes("Overflow")), message).toEqual([]);
   expect(n, message).toBe(BROKER_INLINE_ESTIMATE);
@@ -1660,6 +1686,11 @@ const githubSignInTuples: AccessTuple[] = [
  */
 const envRoom2Added: AccessTuple[] = [["role:BrokerServiceRole", "Allow", "ssm:GetParameters", "arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/broker-names", "{}"]];
 const envRoom2Removed = new Set(["dynamodb:GetRecords", "dynamodb:GetShardIterator"].flatMap((action) => ["table:State", "table:State/index/*"].map((resource) => JSON.stringify(["role:BrokerServiceRole", "Allow", action, resource, "{}"]))));
+/** DEC 254zzz(2): the install company import's two sign-in table reads (BrokerCompanyImportReads); asserted statement by statement in "gives the broker exactly the install company import's two reads". */
+const companyImportTuples: AccessTuple[] = [
+  ["role:BrokerServiceRole", "Allow", "dynamodb:GetItem", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#COMPANY\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+  ["role:BrokerServiceRole", "Allow", "dynamodb:Query", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#MEMBERS\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+];
 /**
  * Web task channel C8, option b (DEC 254zm(3), owner-approved new IAM): the attention email's own sender function may send as the one CoreAttentionEmailSender identity, From pinned, and write X-Ray
  * traces (every function's tracing default). Its role, this policy and the broker's invoke permission (on the function's own policy, not here) exist only while CoreAttentionEmail is on.
@@ -1669,7 +1700,7 @@ const attentionEmailTuples: AccessTuple[] = [
   ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTelemetryRecords", "*", "{}"],
   ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTraceSegments", "*", "{}"],
 ];
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples,
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
@@ -1720,10 +1751,10 @@ describe("broker IAM headroom", () => {
     }]);
   });
 
-  it("pins headroom and preserves the unspent reserve", () => { expect(brokerArnEstimate, "named broker ARN estimate fallback").toBe(BROKER_ARN_ESTIMATE); checkHeadroom(named); expect(inlineEstimate(statementsOfRole(named, "BrokerServiceRole"))).toBe(brokerEstimate); });
+  it("pins headroom and preserves the unspent reserve", () => { expect(brokerArnEstimate, "named broker ARN estimate fallback").toBe(BROKER_ARN_ESTIMATE); checkHeadroom(named); expect(inlineEstimate(brokerDefaultStatements(named))).toBe(brokerEstimate); });
 
   it("enforces the 8500 ceiling including the complete reserve ledger", () => {
-    const n = inlineEstimate(statementsOfRole(named, "BrokerServiceRole"));
+    const n = inlineEstimate(brokerDefaultStatements(named));
     expect(n + Object.values(RESERVED).reduce((a, b) => a + b, 0), `broker inline ceiling ${BROKER_INLINE_TARGET}; RESERVED ledger ${JSON.stringify(RESERVED)}`).toBeLessThanOrEqual(BROKER_INLINE_TARGET);
   });
 
@@ -1794,7 +1825,7 @@ describe("projected broker additions", () => {
       t5: [{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: roleArn(state), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["GITHUB#*"] } } }],
       t6: [{ Effect: "Allow", Action: ["sts:AssumeRole", "sts:TagSession"], Resource: { "Fn::GetAtt": ["CompanySessionRole", "Arn"] } }],
     };
-    const projected = structuredClone(statementsOfRole(named, "BrokerServiceRole"));
+    const projected = structuredClone(brokerDefaultStatements(named));
     const secrets = projected.find((s) => s.Action === "secretsmanager:GetSecretValue" && s.Condition === undefined)!;
     secrets.Resource = [...[secrets.Resource].flat(), { Ref: "CallbackKeyArn" }];
     projected.push(...Object.values(PROJECTED).flat());
@@ -1821,5 +1852,120 @@ describe("headroom evaluator positive and negative controls", () => {
     expect(probe(tuples, broker, "dynamodb:UpdateItem", "table:TurnRecords", { "dynamodb:LeadingKeys": ["TASK#1"] })).toBe(false);
     expect(probe(tuples, broker, "dynamodb:UpdateItem", "table:TurnRecords", { "dynamodb:LeadingKeys": ["CHANGE#1"] })).toBe(true);
     expect(probe(tuples, broker, "dynamodb:ConditionCheckItem", "table:DeveloperSignInTable", {})).toBe(false);
+  });
+});
+
+// DEC 254zzz(2): `agentx admin company import --from-install <org>` failed with AccessDenied on staging: the broker's company import plan reads Code's company record and member
+// mirror on the sign-in table (install-company-import.ts), and the broker held no grant for those two partitions. The fix is exactly two reads, in the broker's own role policy.
+describe("install company import reads (DEC 254zzz(2))", () => {
+  const COMPANY_PARTITION = "ORG#org_????????????????????#COMPANY";
+  const MEMBERS_PARTITION = "ORG#org_????????????????????#MEMBERS";
+  const brokerOf = (template: TemplateJson) => ofType(template, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "BrokerServiceRole")![0];
+  const signInTableOf = (template: TemplateJson) => ofType(template, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))![0];
+
+  it("gives the broker exactly the install company import's two reads, in its own role policy, in named environments only", () => {
+    const policies = companyImportPolicies(named);
+    expect(policies).toHaveLength(1);
+    const [[, policy]] = policies as [[string, Resource]];
+    expect(policy.Properties.Roles).toEqual([{ Ref: brokerOf(named) }]);
+    // Exactly these two statements: action, resource (the table itself, no index, no wildcard) and both conditions, the Null guard included.
+    expect(statementsIn(policy.Properties.PolicyDocument)).toEqual([
+      {
+        Action: "dynamodb:GetItem", Effect: "Allow", Resource: { "Fn::GetAtt": [signInTableOf(named), "Arn"] },
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [COMPANY_PARTITION] }, Null: { "dynamodb:LeadingKeys": "false" } },
+      },
+      {
+        Action: "dynamodb:Query", Effect: "Allow", Resource: { "Fn::GetAtt": [signInTableOf(named), "Arn"] },
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [MEMBERS_PARTITION] }, Null: { "dynamodb:LeadingKeys": "false" } },
+      },
+    ]);
+    // The company id is the shape OrgIdSchema accepts: org_ and 20 base-36 characters.
+    expect(COMPANY_PARTITION.replace("#COMPANY", "").slice("ORG#".length)).toHaveLength("org_".length + 20);
+    // Nothing else changed in the broker's other policy for this: the DefaultPolicy has no ORG# key family, and the legacy (production) template has no such policy.
+    expect(JSON.stringify(brokerDefaultStatements(named))).not.toContain("ORG#");
+    expect(companyImportPolicies(legacy)).toEqual([]);
+    expect(JSON.stringify(legacy)).not.toContain("BrokerCompanyImportReads");
+  });
+
+  it("is a role policy the deploy role and the permissions boundary allow, not a split managed policy", () => {
+    // Simulated with the repo's own policy helpers (no AWS call): CloudFormation puts and deletes the broker's role policy under the install's role path, with the boundary set.
+    const [, role] = ofType(named, "AWS::IAM::Role").find(([id]) => id === brokerOf(named))!;
+    expect(role.Properties.Path).toBe("/agentx/staging/");
+    const brokerRole = "arn:aws:iam::111122223333:role/agentx/staging/agentx-staging-control-plane-BrokerServiceRole-AbCdEf";
+    for (const action of ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]) {
+      expect(policyAllows(deploy, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy ${action}`).toBe(true);
+      expect(policyAllows(boundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `boundary ${action}`).toBe(true);
+    }
+    expect(policyAllows(deploy, "iam:PutRolePolicy", brokerRole.replace("/staging/", "/other/"), { "iam:PermissionsBoundary": boundaryArn })).toBe(false);
+    expect(policyAllows(deploy, "iam:CreatePolicy", "*"), "no managed policy").toBe(false);
+    expect(ofType(named, "AWS::IAM::ManagedPolicy")).toHaveLength(0);
+    for (const action of ["dynamodb:GetItem", "dynamodb:Query"]) expect(policyAllows(boundary, action, "*"), `boundary ${action}`).toBe(true);
+  });
+
+  it("allows the plan's exact reads and nothing wider under ORG#", () => {
+    const tuples = accessTuples(named);
+    const broker = "role:BrokerServiceRole";
+    const table = "table:DeveloperSignInTable";
+    const keys = (...pk: string[]) => ({ "dynamodb:LeadingKeys": pk });
+    for (const [action, pk, allowed] of [
+      ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#COMPANY`, true], ["dynamodb:GetItem", `ORG#${COMPANY_B.orgId}#COMPANY`, true],
+      ["dynamodb:Query", `ORG#${COMPANY_A.orgId}#MEMBERS`, true], ["dynamodb:Query", `ORG#${COMPANY_B.orgId}#MEMBERS`, true],
+      // Each action has only its own partition; every other ORG# partition (and a wrong-shaped id) stays refused.
+      ["dynamodb:Query", `ORG#${COMPANY_A.orgId}#COMPANY`, false], ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#MEMBERS`, false],
+      ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#BAN`, false], ["dynamodb:Query", `ORG#${COMPANY_A.orgId}#BAN`, false],
+      ["dynamodb:GetItem", "ORG#org_aaaaaaaaaaaaaaaaaaa#COMPANY", false], ["dynamodb:GetItem", "ORG#org_aaaaaaaaaaaaaaaaaaaaa#COMPANY", false],
+      ["dynamodb:Query", "ORG#org_aaaaaaaaaaaaaaaaaaa#MEMBERS", false], ["dynamodb:Query", "ORG#org_aaaaaaaaaaaaaaaaaaaaa#MEMBERS", false],
+      ["dynamodb:GetItem", "ORG#org_aaaaaaaaaaaaaaaaaaaa#COMPANY#x", false], ["dynamodb:GetItem", "ORG#x#COMPANY", false],
+      ["dynamodb:GetItem", "ORG#", false], ["dynamodb:Query", "ORG#", false],
+      ["dynamodb:PutItem", `ORG#${COMPANY_A.orgId}#COMPANY`, false], ["dynamodb:UpdateItem", `ORG#${COMPANY_A.orgId}#COMPANY`, false],
+      ["dynamodb:DeleteItem", `ORG#${COMPANY_A.orgId}#MEMBERS`, false], ["dynamodb:PutItem", `ORG#${COMPANY_A.orgId}#MEMBERS`, false],
+      ["dynamodb:Scan", `ORG#${COMPANY_A.orgId}#MEMBERS`, false],
+    ] as const) expect(probe(tuples, broker, action, table, keys(pk)), `${action} ${pk}`).toBe(allowed);
+    // A request that names a second partition beside an allowed one is refused (ForAllValues), as is one with no leading key at all (the Null guard).
+    expect(probe(tuples, broker, "dynamodb:GetItem", table, keys(`ORG#${COMPANY_A.orgId}#COMPANY`, `ORG#${COMPANY_A.orgId}#BAN`))).toBe(false);
+    expect(probe(tuples, broker, "dynamodb:Query", table, {})).toBe(false);
+    // No other role gets these reads (the policy's resource is the sign-in table alone: asserted statement by statement above).
+    for (const other of ["role:DeveloperSignInFunctionServiceRole", "role:DispatcherServiceRole", "role:SlackIngressServiceRole", "role:agentx-other-env"]) {
+      expect(probe(tuples, other, "dynamodb:Query", table, keys(`ORG#${COMPANY_A.orgId}#MEMBERS`)), other).toBe(false);
+    }
+  });
+
+  it("covers every sign-in table read the company import plan and its undo plan make, for two companies", async () => {
+    const tuples = accessTuples(named);
+    const OWNER = "1".repeat(64);
+    const calls: Array<{ command: string; table: string; pk: string }> = [];
+    const db = new FakeDynamoDb({ seed: 7 });
+    for (const company of [COMPANY_A.orgId, COMPANY_B.orgId]) {
+      db.set({ pk: `ORG#${company}`, sk: "META", entityType: "ORG", orgId: company, name: `Company ${company}`, createdAt: "2026-11-01T09:00:00.000Z" });
+      db.set({ pk: `ORG#${company}`, sk: `MEMBER#${OWNER}`, entityType: "ORG_MEMBER", developerId: OWNER, role: "owner", joinedAt: "2026-11-01T09:00:00.000Z" });
+      // The undo plan reads each imported mirror row's membership and the company record.
+      db.set({ pk: companyScoped(company, "MEMBERS"), sk: `MEMBER#${OWNER}`, joinedVia: "import", personId: OWNER, companyId: company });
+    }
+    db.set({ pk: `DEVELOPER#${OWNER}`, sk: "META", developerId: OWNER, provider: "slack", displayName: "Founder", revoked: false });
+    const documentClient = {
+      send: (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+        const input = command.input as { TableName: string; Key?: { pk: string }; ExpressionAttributeValues?: Record<string, string> };
+        calls.push({ command: command.constructor.name, table: input.TableName, pk: input.Key?.pk ?? input.ExpressionAttributeValues?.[":pk"] ?? "" });
+        return db.send(command);
+      },
+    };
+    const reads = { documentClient: documentClient as never, tableName: "State", signInTableName: "signin" };
+    for (const company of [COMPANY_A.orgId, COMPANY_B.orgId]) {
+      await planCompanyImport(reads, company);
+      await planCompanyImportUndo(reads, company);
+    }
+    const signIn = calls.filter((call) => call.table === "signin");
+    for (const company of [COMPANY_A.orgId, COMPANY_B.orgId]) {
+      // Both plans do each of these on the sign-in table (the grant this PR adds and the existing ones).
+      for (const [command, pk] of [["GetCommand", `ORG#${company}#COMPANY`], ["QueryCommand", `ORG#${company}#MEMBERS`], ["GetCommand", `DEVELOPER#${OWNER}`], ["GetCommand", `COMPANY_MEMBER#${OWNER}`]] as const) {
+        expect(signIn, `${command} ${pk}`).toContainEqual({ command, table: "signin", pk });
+      }
+    }
+    // The ORG# reads are only ever those two partitions per company.
+    expect([...new Set(signIn.filter((call) => call.pk.startsWith("ORG#")).map((call) => `${call.command} ${call.pk.replace(/org_[0-9a-z]{20}/u, "<id>")}`))].sort()).toEqual(["GetCommand ORG#<id>#COMPANY", "QueryCommand ORG#<id>#MEMBERS"]);
+    for (const { command, pk } of signIn) {
+      const action = command === "GetCommand" ? "dynamodb:GetItem" : command === "QueryCommand" ? "dynamodb:Query" : "unexpected";
+      expect(probe(tuples, "role:BrokerServiceRole", action, "table:DeveloperSignInTable", { "dynamodb:LeadingKeys": [pk] }), `${command} ${pk}`).toBe(true);
+    }
   });
 });
