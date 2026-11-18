@@ -32,13 +32,21 @@ export interface HostedThreadNotificationInputs {
   threadsTold: boolean;
 }
 
+/**
+ * The company's registry as the notices read it: the `channel` point is the company-scoped chat seam's (an adapter made for company A reaches company A's workspaces only, with A's token), every other point is the registry's.
+ * One function for the thread notices (`hostedThreadNotification`) and the weekly lessons summary (B6), so both reach the chats the same way and neither can reach another company's.
+ */
+export function hostedChannelView(threads: Pick<ChatThreads, "adapterFor" | "channels">, registry: Pick<AdapterRegistry, "get" | "names">, companyId: OrgId): Pick<AdapterRegistry, "get" | "names"> {
+  return {
+    get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : registry.get(point as never, name))) as never,
+    names: ((point: string) => (point === "channel" ? [...threads.channels] : registry.names(point as never))),
+  };
+}
+
 export function hostedThreadNotification(input: HostedThreadNotificationInputs): Pick<AttentionDeliveryDependencies, "registry" | "companyOf" | "link" | "thread" | "planCarded" | "setupPausedTold" | "doneToldInThread"> {
   const { threads, registry, companyId, store } = input;
   return {
-    registry: {
-      get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : registry.get(point as never, name))) as never,
-      names: ((point: string) => (point === "channel" ? [...threads.channels] : registry.names(point as never))),
-    },
+    registry: hostedChannelView(threads, registry, companyId),
     companyOf: threads.companyOf,
     link: (session) => (session.orgId === companyId ? sessionPageUrl(input.origin(), session.sessionId) : undefined),
     async thread(orgId, sessionId) {

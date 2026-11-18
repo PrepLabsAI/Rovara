@@ -201,7 +201,7 @@ describe("the weekly lessons summary", () => {
     }
   });
 
-  it("an empty week sends nothing; a failed send is not repeated in the week (at most once) and never throws", async () => {
+  it("an empty week sends nothing; a failed send is never marked done: the claim is released, the project stays open and the next pass sends it once (L4-JA56 B6); it never throws", async () => {
     const w = await setUp();
     await writeDigestSetting(w.world.store, A, "payments", true, w.world.clock.now);
     await chooseSlack(w, A, "a-admin");
@@ -211,8 +211,42 @@ describe("the weekly lessons summary", () => {
     const busy = await busyWorld();
     await chooseSlack(busy, A, "a-admin");
     const broken = adapter({ fail: true });
-    expect(await run(deps(busy, A, broken))).toMatchObject({ sent: 0, failed: 1 });
-    expect(await run(deps(busy, A, adapter()))).toMatchObject({ sent: 0 });
+    const logs: string[] = [];
+    expect(await run(deps(busy, A, broken, { log: (event) => { logs.push(event); } }))).toMatchObject({ sent: 0, failed: 1 });
+    expect(logs).toEqual(expect.arrayContaining(["digest.send_failed", "digest.undelivered"]));
+    expect(await busy.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" })).toBeUndefined();
+    expect(await busy.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeUndefined();
+    const good = adapter();
+    expect(await run(deps(busy, A, good))).toMatchObject({ sent: 1 });
+    expect(await run(deps(busy, A, good))).toMatchObject({ sent: 0 });
+    expect(good.events).toHaveLength(1);
+    expect(await busy.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeDefined();
+  });
+
+  it("a chat place whose adapter is not served is NOT delivered and NOT marked done: nothing is claimed, the week stays open, a fixed line is logged, and a later pass with the adapter sends it (L4-JA56 B6)", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+    expect(await run(deps(w, A, undefined, { log: (event, fields) => { logs.push([event, fields]); } }))).toMatchObject({ sent: 0, failed: 1 });
+    expect(logs.map(([event]) => event)).toEqual(expect.arrayContaining(["digest.no_adapter", "digest.undelivered"]));
+    expect(logs.find(([event]) => event === "digest.no_adapter")![1]).toEqual({ channel: "chat" });
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" })).toBeUndefined();
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeUndefined();
+    const slack = adapter();
+    expect(await run(deps(w, A, slack))).toMatchObject({ sent: 1 });
+    expect(slack.events).toHaveLength(1);
+  });
+
+  it("with two places, one delivery is enough to close the person for the week (the other place is not retried)", async () => {
+    const w = await busyWorld();
+    await w.world.store.put({ item: { ...prefsKey(A, "a-admin"), orgId: A, targets: [{ channel: "chat", conversation: conversation("TA", "D-one") }, { channel: "chat", conversation: conversation("TA", "D-two") }] } });
+    let calls = 0;
+    const flaky = adapter();
+    const deliver = flaky.deliver.bind(flaky);
+    flaky.deliver = async (event) => { calls += 1; if (calls === 1) throw new Error("down"); await deliver(event); };
+    expect(await run(deps(w, A, flaky))).toMatchObject({ sent: 1, failed: 1 });
+    expect(await run(deps(w, A, flaky))).toMatchObject({ sent: 0 });
+    expect(flaky.events).toHaveLength(1);
   });
 
   it("a person whose records cannot be read is held alone; the others are still told", async () => {

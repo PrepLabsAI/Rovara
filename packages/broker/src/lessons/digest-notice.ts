@@ -188,12 +188,17 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
         // The chats only when the person's own choice sends them there (as the attention notices: "email" alone means no chat; an email choice they unsubscribed from falls back to the chats).
         const goes = effectiveNotify({ channel: prefs.channel ?? defaultNotifyChannel(prefs.targets.length > 0), slackLinked: prefs.targets.length > 0, emailAvailable: true, emailUnsubscribed: prefs.emailUnsubscribed });
         const places: Array<{ target: NotifyTarget; adapter: ChannelAdapter }> = [];
+        // A chat place the person chose whose adapter this install does not serve (the hosted root before B6 asked a registry with no `channel` point): the summary was NOT delivered, so it is neither claimed nor closed.
+        let adapterMissing = false;
         for (const target of prefs.muted || !goes.slack ? [] : prefs.targets) {
           const adapter = deps.registry.get("channel", target.channel);
-          if (adapter === undefined || !adapter.capabilities.proactive) continue;
+          if (adapter === undefined) { adapterMissing = true; log("no_adapter", { channel: target.channel }); continue; }
+          if (!adapter.capabilities.proactive) continue;
           if (!(await tenantIsCompanys(deps.companyOf, companyId, target.channel, target.conversation.tenant))) { log("other_company"); continue; }
           places.push({ target, adapter });
         }
+        // Nowhere to send because no adapter answered: due again on the next pass, never marked done.
+        if (places.length === 0 && adapterMissing) { pending = true; outcome.failed += 1; log("undelivered", { reason: "no_adapter" }); continue; }
         let text: string | undefined;
         if (places.length > 0) {
           const viewer = await deps.directory.identity(companyId, personId);
@@ -211,6 +216,7 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
           condition: { op: "or", conditions: [{ op: "notExists", path: ["pk"] }, { op: "lt", path: ["week"], value: week }] },
         });
         if (!claimed.applied || text === undefined) continue;
+        let delivered = 0;
         for (const { target, adapter } of places) {
           if (!timeLeft()) { outcome.failed += 1; log("send_late"); continue; }
           const event = { version: 1, id: eventId(companyId, project, week, personId, notifyTargetKey(target)), type: "progress", channel: target.channel, conversation: target.conversation, createdAt: new Date(now).toISOString(), data: { text } } as ChannelEvent;
@@ -218,12 +224,19 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
           try {
             await Promise.race([adapter.deliver(event), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("timeout")), DIGEST_SEND_TIMEOUT_MS); timer.unref?.(); })]);
             outcome.sent += 1;
+            delivered += 1;
           } catch (error) {
             outcome.failed += 1;
             log("send_failed", { channel: target.channel, error: error instanceof Error ? error.name : "unknown" });
           } finally {
             if (timer !== undefined) clearTimeout(timer);
           }
+        }
+        // Done for the week only when it was delivered somewhere: a person none of whose sends got through goes back to due (the claim is released), and the project stays open for the next pass.
+        if (delivered === 0) {
+          pending = true;
+          log("undelivered", { reason: "send_failed" });
+          await documents.delete({ key: sentKey, condition: { op: "eq", path: ["at"], value: now } }).catch(() => { log("release_failed"); });
         }
         } catch (error) {
           pending = true;
