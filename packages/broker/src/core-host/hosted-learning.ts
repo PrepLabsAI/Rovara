@@ -119,13 +119,17 @@ export function hostedLessonsLearning(
       const at = now();
       if (chosen === undefined || !(at - chosen.at < LEARNING_MODEL_READ_MS) || at < chosen.at) {
         // One read in flight per port: calls that arrive during it share its answer, so an older, slower answer can never overwrite a newer one.
-        reading ??= (async () => {
-          try {
+        // It is cleared after it settles (never before it is stored), so a reader that throws at once cannot leave a failed read in place.
+        if (reading === undefined) {
+          const read = (async () => {
             let offered: OfferedAgentModels;
             try { offered = OfferedAgentModelsSchema.parse(await readOffered(companyId)); } catch { throw new Error(READ_FAILED_WORDS); }
             chosen = { model: firstOfferedLearningModel(offered) ?? null, at };
-          } finally { reading = undefined; }
-        })();
+          })();
+          reading = read;
+          const clear = () => { if (reading === read) reading = undefined; };
+          read.then(clear, clear);
+        }
         await reading;
       }
       if (chosen === undefined) throw new Error(READ_FAILED_WORDS);

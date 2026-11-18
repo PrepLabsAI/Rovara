@@ -277,6 +277,20 @@ describe("the learning model", () => {
     expect(read.asked).toEqual([ORG_A, ORG_A]);
   });
 
+  it("a reader that throws at once, shared by calls that arrive together, is a fixed-words failure for each and is read again next time", async () => {
+    const r = recording();
+    let fail = true;
+    const asked: string[] = [];
+    const offered = ((companyId: OrgId) => { asked.push(companyId); if (fail) throw new Error("sk-ant-secret"); return Promise.resolve(offering(MODEL)); }) as (companyId: OrgId) => Promise<unknown>;
+    const port = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => NOW, offered })(ORG_A)!;
+    const errors = await Promise.all([port.model.quote!(call(ORG_A)), port.model.quote!(call(ORG_A))].map((pending) => pending.then(() => undefined, (caught: unknown) => (caught as Error).message)));
+    expect(errors).toEqual(["The learning model could not be chosen.", "The learning model could not be chosen."]);
+    expect(asked).toEqual([ORG_A]);
+    fail = false;
+    expect((await port.model.quote!(call(ORG_A))).ok).toBe(true);
+    expect(asked).toEqual([ORG_A, ORG_A]);
+  });
+
   it("agent model zai.glm-5, learning model set: the port exists and learns on the learning model; the offered list is never read", async () => {
     const r = recording();
     const read = reads(() => offering(GLM));
