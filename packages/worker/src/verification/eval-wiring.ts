@@ -2,7 +2,7 @@
 // `evalRequest`; the answer is the `evalFinalCheck` dependency of `runTaskInvocation`, or undefined (the request then reads "not run: not connected", zero calls,
 // exactly as before this file).
 //
-// OFF BY DEFAULT. The eval binds only when the host's environment names the model gateway's address (`ROVARA_EVAL_GATEWAY_URL`, an https origin), the trusted sources
+// OFF BY DEFAULT. The eval binds only when the host's environment names the model gateway's address (`ROVARA_EVAL_GATEWAY_URL`, an https origin; on a hosted worker the broker delivers it with the eval request instead, `evalEnvironmentWithGateway`), the trusted sources
 // below are present and whole, and (for a result at all) a fresh check sandbox is available. Anything less is undefined, or a round kind of "working", which reads
 // "needs a fresh sandbox" before any money is held. Nothing here throws to its caller.
 //
@@ -49,6 +49,21 @@ export function evalGatewayOriginFrom(environment: NodeJS.ProcessEnv): string | 
   // Exactly an origin: anything with credentials, a path, a query or a fragment makes the text differ from `origin` (or `origin/`).
   if (url.protocol !== "https:" || (raw !== url.origin && raw !== `${url.origin}/`)) return undefined;
   return url.origin;
+}
+
+/**
+ * The environment the eval binding reads (`evalFinalCheckForTask`): the host's own, plus the gateway origin the broker delivered with this task's eval request (`evalGatewayUrl`, a hosted worker has no setting of its own).
+ * The host's own `ROVARA_EVAL_GATEWAY_URL` always wins: when it is set at all (even to something that makes the eval stay off) nothing is added. A delivered value that is not exactly an https origin adds nothing. Nothing delivered
+ * (a laptop, an older broker, an install with no gateway) returns the host's environment itself, so the eval is exactly as it was. Never throws; the host's environment is not changed.
+ */
+export function evalEnvironmentWithGateway(environment: NodeJS.ProcessEnv, delivered: string | undefined): NodeJS.ProcessEnv {
+  try {
+    if (typeof delivered !== "string") return environment;
+    const own = environment[EVAL_GATEWAY_URL_VARIABLE];
+    if (typeof own === "string" && own.trim() !== "") return environment;
+    const origin = evalGatewayOriginFrom({ [EVAL_GATEWAY_URL_VARIABLE]: delivered });
+    return origin === undefined ? environment : { ...environment, [EVAL_GATEWAY_URL_VARIABLE]: origin };
+  } catch { return environment; }
 }
 
 /** The trusted capabilities of one invocation, made from this invocation's own scope only (nothing is shared across invocations or companies). */

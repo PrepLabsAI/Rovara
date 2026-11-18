@@ -36,7 +36,7 @@ import { workspaceCompanyReader } from "./workspace-company.js";
 import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
 import type { MoneyStop } from "../../core/task-flow/money-stop.js";
-import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
+import { gatewayModelAccessFromEnvironment, gatewayModelRoute, readGatewayUrl } from "../../core-host/gateway-model-access.js";
 import { companyEngineModelRoute } from "../../core-host/company-engine-model.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
 import { createTaskTestEnvironment } from "../../core/test-env/seam.js";
@@ -143,6 +143,13 @@ export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryT
     return typeof reader !== "function" ? undefined : { standingInstructions: null, modelAccess, learned: reader };
   }
   return { standingInstructions: null, modelAccess, learned: null };
+}
+
+/** The dispatcher's `evalGatewayUrl` flow option: the gateway's checked https origin, only where a model route is configured; `{}` otherwise (also for an unset or malformed setting). */
+export function evalGatewayOf(env: NodeJS.ProcessEnv, modelAccess: unknown): { evalGatewayUrl?: string } {
+  if (modelAccess === null || modelAccess === undefined) return {};
+  const origin = readGatewayUrl(env);
+  return typeof origin === "string" ? { evalGatewayUrl: origin } : {};
 }
 
 /** The words a code host call says on the dispatcher. */
@@ -274,6 +281,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
+        // The gateway's origin goes to a hosted worker with an eval request (the worker has no setting of its own), only where the gateway is configured (the same checked origin the model route uses); otherwise nothing is sent.
+        ...evalGatewayOf(env, modelAccess),
         // The broker's switch controls whether it writes fresh validation rows. The dispatcher always uses a fresh row when present and otherwise its configured default.
         stepModels: dispatcherStoredAgentModelChoice({ store: registry.require("storage"), companyId, now: () => now().getTime(), defaultRoute: async () => modelAccess?.route(), log: inputs.log }),
         ...(learned === null || learned === undefined ? {} : { learned }),
