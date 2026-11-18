@@ -13,6 +13,9 @@ export const COMPANY_EVIDENCE_READ_MAX_BYTES = 4 * 1_048_576;
 /** The folders under a task's workspace that the evidence keeper owns: the pack (with its baseline and dependency facts) and the output tails. */
 const EVIDENCE_FOLDERS: ReadonlySet<string> = new Set(["evidence-pack", "evidence"]);
 
+/** The folder under `private/<owner>/<workspace>/` a key is in, or undefined for a key that is that name itself (no file below it). */
+const folderOf = (key: string): string | undefined => { const parts = key.split("/"); return parts.length >= 5 ? parts[3] : undefined; };
+
 export interface CompanyEvidenceBlobsOptions {
   blobs: ObjectStorage;
   /** The company's own store (the registry's `storage`): where the workspace record that binds a key to this company is read. */
@@ -32,7 +35,7 @@ export function createCompanyEvidenceBlobs(options: CompanyEvidenceBlobsOptions)
   const requireEvidenceKey = async (key: string): Promise<void> => {
     assertObjectKey(key);
     const scope = artifactKeyScopeOf(key);
-    const folder = key.split("/")[3];
+    const folder = folderOf(key);
     if (scope === undefined || scope.form !== "owner" || folder === undefined || !EVIDENCE_FOLDERS.has(folder)) { note("not_evidence_key"); throw new ObjectKeyError(EVIDENCE_STORE_REFUSAL); }
     const held = await workspaceHoldingKey({ store, companyId }, scope);
     if (typeof held === "string") { note(held); throw new ObjectKeyError(EVIDENCE_STORE_REFUSAL); }
@@ -45,7 +48,7 @@ export function createCompanyEvidenceBlobs(options: CompanyEvidenceBlobsOptions)
     async get(key: string, maxBytes: number): Promise<Uint8Array | undefined> {
       // The keeper's own folders, and a worker's saved artifact (callback-shaped key, held to this company's ARTIFACT row by the reader); no other owner-keyed document (plans, designs) is read through here.
       const scope = artifactKeyScopeOf(key);
-      const folder = key.split("/")[3];
+      const folder = folderOf(key);
       if (scope !== undefined && scope.form === "owner" && (folder === undefined || !EVIDENCE_FOLDERS.has(folder))) { note("not_evidence_key"); return undefined; }
       return await reader.get(key, maxBytes);
     },

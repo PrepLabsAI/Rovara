@@ -71,7 +71,7 @@ describe("a company's evidence store", () => {
   it("writes only the keeper's two folders: a plan document, a callback-shaped key, an install-wide key and a malformed key are refused", async () => {
     const w = world(); await w.workspace(A, "ws-a", "owner-a");
     const a = w.blobsOf(A);
-    for (const key of ["private/owner-a/ws-a/plan-documents/art-1.json", "private/owner-a/ws-a/op-1/evidence-raw.json", artifactObjectKey("ws-a", "op-1", "evidence-raw.json"), "evals/x.json", "private/owner-a/ws-a", "private/owner-a/ws-a/evidence-pack-x/task-1/a.json", "private/owner-a/ws-a/../ws-b/evidence/task-1/a"]) {
+    for (const key of ["private/owner-a/ws-a/plan-documents/art-1.json", "private/owner-a/ws-a/op-1/evidence-raw.json", artifactObjectKey("ws-a", "op-1", "evidence-raw.json"), "evals/x.json", "private/owner-a/ws-a", "private/owner-a/ws-a/evidence", "private/owner-a/ws-a/evidence-pack", "private/owner-a/ws-a/evidence-pack-x/task-1/a.json", "private/owner-a/ws-a/../ws-b/evidence/task-1/a"]) {
       await expect(a.put(key, bytes("x"), META), key).rejects.toThrow();
       await expect(a.delete(key), key).rejects.toThrow();
       expect(await a.stat(key), key).toBeUndefined();
