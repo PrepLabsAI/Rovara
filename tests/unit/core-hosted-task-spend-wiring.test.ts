@@ -68,14 +68,14 @@ describe("the broker's core root gives each company's flow a taskSpendUsd over i
   it("an unknown spend throws in fixed words (never zero), and the refusal is logged without the task or company id of the task", async () => {
     const { root, total, logs } = await world();
     const a = (await root.app.runtimeFor(A)).flow.deps;
-    // another company's row only: nothing recorded for A
+    // another company's task: its record names the other company, so this company holds no run of it
     await total(B, 1_000_000);
     await expect(a.taskSpendUsd!(TASK_B)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     await total(A, 1_000_000, { unpricedEntries: 1 });
     await expect(a.taskSpendUsd!(TASK)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     const refusals = logs.filter((entry) => entry["event"] === "core_engine.task_spend_refused");
     expect(refusals).toEqual([
-      { event: "core_engine.task_spend_refused", companyId: A, reason: "not_recorded" },
+      { event: "core_engine.task_spend_refused", companyId: A, reason: "run_unreported" },
       { event: "core_engine.task_spend_refused", companyId: A, reason: "unpriced_usage" },
     ]);
     expect(JSON.stringify(refusals)).not.toContain(TASK);

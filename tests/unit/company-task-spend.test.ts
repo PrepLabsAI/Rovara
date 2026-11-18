@@ -23,7 +23,7 @@ const total = (companyId: OrgId, taskId: string, over: Record<string, unknown> =
 };
 
 const WS = "ws-spend-1";
-interface Run { id: string; workflowMode?: string; status: string; kind?: string; usageUnflushed?: true; booked?: "usage" | "checkpoint" | "none" }
+interface Run { id: string; workflowMode?: string; status: string; kind?: string; usageUnflushed?: true; booked?: "usage" | "checkpoint" | "none"; machineless?: true }
 /** The task's runs as a healthy hosted task has them: a coding run and a review run that succeeded, each with its end report booked. */
 const HEALTHY: Run[] = [{ id: "op-1", workflowMode: "IMPLEMENT", status: "SUCCEEDED" }, { id: "op-2", workflowMode: "REVIEW", status: "SUCCEEDED" }];
 
@@ -41,7 +41,7 @@ async function rowStore(rows: StoredDocument[], options: { runs?: Run[]; company
     await memory.put({ item: { ...workspaceKey(owner, WS), entityType: "WORKSPACE", id: WS, companyId: owner, orgId: owner } });
     for (const run of options.runs ?? HEALTHY) {
       at += 1;
-      await memory.put({ item: { ...operationKey(owner, WS, run.id), entityType: "OPERATION", id: run.id, companyId: owner, kind: run.kind ?? "task", workflowMode: run.workflowMode, status: run.status, createdAt: `2026-11-18T07:00:${String(at).padStart(2, "0")}.000Z`, fence: at, ...(run.usageUnflushed === true ? { usageUnflushed: true } : {}) } });
+      await memory.put({ item: { ...operationKey(owner, WS, run.id), entityType: "OPERATION", id: run.id, companyId: owner, kind: run.kind ?? "task", workflowMode: run.workflowMode, status: run.status, ...(run.machineless === true ? {} : { machineId: "machine-1" }), createdAt: `2026-11-18T07:00:${String(at).padStart(2, "0")}.000Z`, fence: at, ...(run.usageUnflushed === true ? { usageUnflushed: true } : {}) } });
       if (run.booked !== "none" && run.booked !== "checkpoint") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage:${run.id}:abc`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
       if (run.booked === "checkpoint") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage-checkpoint:${run.id}:abc`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
     }
@@ -151,17 +151,20 @@ describe("the hosted task spend reader (L4-TSU)", () => {
   it("reads this company's own partitions only: its cost total, the task's record, its workspace and its runs", async () => {
     const held = await rowStore([total(A, TASK)]);
     const seen: string[] = [];
+    let lastSk = "";
     const watching = new Proxy(held.store, {
       get(target, property) {
         const value = Reflect.get(target, property, target) as unknown;
         if (property !== "get" && property !== "query") return value;
-        return async (request: { pk: string }) => { seen.push(request.pk); return (value as (r: unknown) => Promise<unknown>)(request); };
+        return async (request: { pk: string; sk: string | { prefix?: string } }) => { seen.push(request.pk); lastSk = typeof request.sk === "string" ? request.sk : "query"; return (value as (r: unknown) => Promise<unknown>)(request); };
       },
     });
     expect(await createCompanyTaskSpend({ store: watching, companyId: A })(TASK)).toBe(4.25);
     expect(seen).toContain(`ORG#${A}#COST#${TASK}`);
     for (const pk of seen) expect(pk.startsWith(`ORG#${A}#`) || pk === `DEVTASK#${TASK}`, pk).toBe(true);
     expect(JSON.stringify(seen)).not.toContain(B);
+    // the total is read LAST: a usage booked after the runs were looked at is then in the total (booking writes both in one transaction)
+    expect(lastSk).toBe("TOTAL");
   });
 
   it("a failing log never changes the answer (it throws, or answers a failing promise), and the log carries fixed words only", async () => {
@@ -184,9 +187,9 @@ describe("the hosted task spend reader (L4-TSU)", () => {
       return { answer, seen };
     };
 
-    it("answers when every coding and review run has its end report, and passes over the checks, other succeeded model runs, runs of other kinds", async () => {
-      const runs: Run[] = [...HEALTHY, { id: "op-3", workflowMode: "CHECKS", status: "FAILED", booked: "none" }, { id: "op-4", workflowMode: "PLAN", status: "SUCCEEDED", booked: "none" },
-        { id: "op-5", workflowMode: "IMPLEMENT", status: "FAILED", kind: "cancel", booked: "none" }];
+    it("answers when every model run has its end report, and passes over the checks, runs of other kinds, and a run that never reached a machine", async () => {
+      const runs: Run[] = [...HEALTHY, { id: "op-3", workflowMode: "CHECKS", status: "FAILED", booked: "none" }, { id: "op-4", workflowMode: "PLAN", status: "SUCCEEDED" },
+        { id: "op-5", workflowMode: "IMPLEMENT", status: "FAILED", kind: "cancel", booked: "none" }, { id: "op-6", workflowMode: "REVIEW", status: "CANCELLED", booked: "none", machineless: true }];
       expect(await refusedFor(runs)).toEqual({ answer: 4.25, seen: [] });
     });
 
@@ -194,18 +197,37 @@ describe("the hosted task spend reader (L4-TSU)", () => {
       expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "REVIEW", status: "INTERRUPTED", booked: "none" }])).toEqual({ answer: "refused", seen: ["run_unreported"] });
     });
 
-    it("a run still going, a failed or stopped model run with nothing booked, and a run with only a checkpoint are not reported", async () => {
-      for (const status of ["RUNNING", "QUEUED", "FAILED", "CANCELLED"]) expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status, booked: "none" }]), status).toEqual({ answer: "refused", seen: ["run_unreported"] });
+    it("a failed or stopped model run with nothing booked, and a run with only a checkpoint, are not reported", async () => {
+      for (const status of ["FAILED", "CANCELLED"]) expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status, booked: "none" }]), status).toEqual({ answer: "refused", seen: ["run_unreported"] });
       expect(await refusedFor([{ id: "op-3", workflowMode: "IMPLEMENT", status: "FAILED", booked: "checkpoint" }])).toEqual({ answer: "refused", seen: ["run_unreported"] });
+    });
+
+    it("a run still going is not reported, even with a part of its usage already booked", async () => {
+      for (const status of ["RUNNING", "QUEUED", "DISPATCHING", "CANCEL_REQUESTED"]) {
+        expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status, booked: "usage" }]), status).toEqual({ answer: "refused", seen: ["run_unreported"] });
+      }
     });
 
     it("a run kept as an estimate leaves its hold's room outside the total, so even with its estimate entry booked it is not reported", async () => {
       expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "usage" }])).toEqual({ answer: "refused", seen: ["run_unreported"] });
     });
 
-    it("a coding or review run that SUCCEEDED with no end report booked (the worker's flush was refused) is not reported; a succeeded plan run needs none", async () => {
-      for (const workflowMode of ["IMPLEMENT", "REVIEW"]) expect(await refusedFor([{ id: "op-3", workflowMode, status: "SUCCEEDED", booked: "none" }]), workflowMode).toEqual({ answer: "refused", seen: ["run_unreported"] });
-      expect((await refusedFor([{ id: "op-3", workflowMode: "PLAN", status: "SUCCEEDED", booked: "none" }])).answer).toBe(4.25);
+    it("a model run that SUCCEEDED with no end report booked (the worker's flush was refused) is not reported, in every step", async () => {
+      for (const workflowMode of ["IMPLEMENT", "REVIEW", "PLAN", "UNDERSTAND", "PLAN_CRITIQUE", "FEEDBACK_REVIEW"]) {
+        expect(await refusedFor([{ id: "op-3", workflowMode, status: "SUCCEEDED", booked: "none" }]), workflowMode).toEqual({ answer: "refused", seen: ["run_unreported"] });
+      }
+    });
+
+    it("a task with a plan, a coding run, a second coding run after a send back, checks and a review answers", async () => {
+      const runs: Run[] = [{ id: "p", workflowMode: "PLAN", status: "SUCCEEDED" }, { id: "c1", workflowMode: "IMPLEMENT", status: "SUCCEEDED" }, { id: "k1", workflowMode: "CHECKS", status: "SUCCEEDED", booked: "none" },
+        { id: "r1", workflowMode: "REVIEW", status: "SUCCEEDED" }, { id: "c2", workflowMode: "IMPLEMENT", status: "SUCCEEDED" }, { id: "k2", workflowMode: "CHECKS", status: "FAILED", booked: "none" }, { id: "r2", workflowMode: "REVIEW", status: "SUCCEEDED" }];
+      expect(await refusedFor(runs)).toEqual({ answer: 4.25, seen: [] });
+    });
+
+    it("a task record with no workspace id is not reported", async () => {
+      const held = await rowStore([total(A, TASK)]);
+      await held.store.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK", taskId: TASK, companyId: A } });
+      await expect(createCompanyTaskSpend({ store: held.store, companyId: A })(TASK)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     });
 
     it("a task whose record cannot be found, or is another company's, and a task with more runs than are read, are not reported", async () => {

@@ -419,7 +419,7 @@ describe("the core on the dispatcher", () => {
     await total(COMPANY_A, task, 7_000_000, { unpricedEntries: 1 });
     await expect(a.flow.deps.taskSpendUsd!(task)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     const refusals = logs.filter((entry) => entry["event"] === "dispatch.task_spend_refused");
-    expect(refusals.map((entry) => entry["reason"])).toEqual(["not_recorded", "unpriced_usage"]);
+    expect(refusals.map((entry) => entry["reason"])).toEqual(["run_unreported", "unpriced_usage"]);
     expect(JSON.stringify(refusals)).not.toContain(task);
   });
 
