@@ -186,8 +186,14 @@ export async function startRepairDraft(deps: RepairDraftDeps, project: string, r
   try {
     taskId = (await startUnattendedRun(door, request)).taskId;
   } catch (error) {
-    // A fault is not known to have failed: if the starter holds a run for this request, it is the draft's run.
-    const made = await door.starter.read(row.runRequestId).catch(() => undefined);
+    // A fault is not known to have failed: if the starter holds a run for this request, it is the draft's run. A read that itself fails says nothing (L4-SR2 REVIEW-1 L1): the claim, the revision claim and the pointer STAY,
+    // so no second paid run can start for this revision; the stale-claim recovery adopts the run when the starter can be read again.
+    let readFailed = false;
+    const made = await door.starter.read(row.runRequestId).catch(() => { readFailed = true; return undefined; });
+    if (readFailed) {
+      logOf(deps, { event: "setup_repair.start_unknown", code: errorCode(error), error: errorName(error) });
+      return { status: "skipped", why: "start_refused" };
+    }
     if (made === undefined) {
       logOf(deps, { event: "setup_repair.start_refused", code: errorCode(error), error: errorName(error) });
       await giveBack();
@@ -302,7 +308,10 @@ async function progress(deps: RepairDraftDeps, project: string, row: RepairRow):
 
 /** A claim whose start never finished (a fault between the claim and the start): the run is adopted when the door holds one, else the claim is given back after a while. */
 async function recoverStart(deps: RepairDraftDeps, row: RepairRow, age: number): Promise<RepairRow> {
-  const made = await deps.run?.starter.read(row.runRequestId).catch(() => undefined);
+  let readFailed = false;
+  const made = await deps.run?.starter.read(row.runRequestId).catch(() => { readFailed = true; return undefined; });
+  // The starter cannot be read: nothing is known, so nothing is given back (a run may exist). A claim that stays unreadable for two days ends the draft `failed` (the card then offers the manual Fix setup again).
+  if (readFailed) return age > ABANDON_MS ? move(deps, row, "starting", { state: "failed", reason: "run_failed" }, "failed") : row;
   if (made !== undefined) {
     const result = await deps.store.transact([{ kind: "update", key: repairRowKey(deps.companyId, row.project, row.key), ops: [change.set("state", "drafting"), change.set("taskId", made.taskId), change.set("startedAt", isoOf(deps))], condition: when.eq("state", "starting") }]);
     return result.applied ? { ...row, state: "drafting", taskId: made.taskId } : ((await readRepair(deps, row.project, row.key)) ?? row);
@@ -310,7 +319,7 @@ async function recoverStart(deps: RepairDraftDeps, row: RepairRow, age: number):
   if (age <= REPAIR_START_STALE_MS) return row;
   await deps.flow.audit.record(notStartedAudit(deps, row, "NEVER_STARTED")).catch(() => undefined);
   await deps.store.transact([{ kind: "delete", key: repairRowKey(deps.companyId, row.project, row.key), condition: when.eq("state", "starting") }]).catch(() => undefined);
-  await deps.store.transact([{ kind: "delete", key: repairRevisionKey(deps.companyId, row.project, row.setupRevision), condition: when.eq("key", row.key) }]).catch(() => undefined);
+  // The revision claim STAYS (REVIEW-1 L1): a start that was in flight for ten minutes may still turn into a run, and a second paid run for this revision must never follow. The revision is tried by a person ("Fix setup").
   await deps.store.transact([{ kind: "delete", key: repairCurrentKey(deps.companyId, row.project), condition: when.eq("key", row.key) }]).catch(() => undefined);
   return row;
 }

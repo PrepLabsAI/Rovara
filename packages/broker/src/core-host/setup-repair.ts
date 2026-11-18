@@ -103,7 +103,7 @@ export function createHostedSetupRepair(inputs: HostedSetupRepairInputs): Hosted
   const depsFor = (project: string): RepairDraftDeps => {
     const run: UnattendedStartDeps = {
       // The door's switch is THIS project's upkeep row: a project that never turned it on, or turned it off, starts nothing.
-      automation: upkeepAutomationSwitch({ store: flow.store as never, companyId }, project), companyId, admission: inputs.admission, audit: flow.audit,
+      automation: upkeepAutomationSwitch({ store: flow.store, companyId }, project), companyId, admission: inputs.admission, audit: flow.audit,
       starter: createHostedSetupRepairStarter(inputs, project), enforces, store: flow.store, tasks: hostedUnattendedTasks(flow), now,
       ...(inputs.log === undefined ? {} : { log: inputs.log }),
     };

@@ -25,6 +25,7 @@ import {
   type RepairDraftDeps, type RepairRow, type UpkeepGate,
 } from "../../packages/broker/src/core/setup-agent/repair-draft.js";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
+import { hostedUnattendedTasks, createHostedAutomationStop } from "../../packages/broker/src/core-host/wiki-refresh.js";
 import { createHostedSetupRepair, createHostedSetupRepairStarter, type HostedSetupRepair } from "../../packages/broker/src/core-host/setup-repair.js";
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
 import { upkeepSettingsKey } from "../../packages/broker/src/core/upkeep/keys.js";
@@ -1088,7 +1089,7 @@ describe("L4-SR2: only a starter that declares it starts a repair draft (closes 
 
 // ---- L4-SR2 hosted: the real access rule, the real starter, the real gate (ceiling AND consent), the real upkeep switch row, the progress pass
 
-interface Hosted { w: World; hosted: HostedSetupRepair; ceiling: { on: boolean }; room: { cents: number | undefined | "throw" }; paused: Array<[string, string]>; admission: Admission; configured: { on: boolean } }
+interface Hosted { gate: { enabled(): Promise<boolean> }; w: World; hosted: HostedSetupRepair; ceiling: { on: boolean }; room: { cents: number | undefined | "throw" }; paused: Array<[string, string]>; admission: Admission; configured: { on: boolean } }
 
 async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce?: boolean; room?: number | undefined; reader?: boolean; world?: World } = {}): Promise<Hosted> {
   const w = options.world ?? await world();
@@ -1114,7 +1115,7 @@ async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce
     onUpkeepPaused: async (scope, reason) => { paused.push([scope.project, reason]); },
   });
   w.h.deps.afterSetupBroken = hosted.hook;
-  return { w, hosted, ceiling, room, paused, admission, configured };
+  return { gate, w, hosted, ceiling, room, paused, admission, configured };
 }
 const taskRow = async (h: Hosted, taskId: string) => (await h.w.h.store.get(taskKey(taskId)))!;
 
@@ -1202,6 +1203,16 @@ describe("L4-SR2 hosted: the real starter, rule and gate", () => {
     const first = await starter.start(request);
     const task = await taskRow(h, first.taskId);
     expect(JSON.stringify(task)).not.toContain("IGNORE THE SETUP");
+    // Nowhere in the store is the request's text kept (rows, queues, outbox): the run was asked the fixed sentence of the setup run.
+    const everything: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await (h.w.h.store as unknown as MemoryDocumentStore).scanPage({ limit: 200, ...(cursor === undefined ? {} : { cursor }) });
+      everything.push(JSON.stringify(page.items));
+      cursor = page.cursor;
+    } while (cursor !== undefined);
+    expect(everything.join("")).toContain("Set up the dev environment for the project payments");
+    expect(everything.join("")).not.toContain("IGNORE THE SETUP");
     expect(task).toMatchObject({ setupAgentLimits: { budgetCents: 400 } });
     expect(await starter.read(request.requestId)).toEqual({ taskId: first.taskId });
     expect(await starter.start(request)).toEqual({ taskId: first.taskId, duplicate: true });
@@ -1324,9 +1335,123 @@ describe("L4-SR2: the model token for a repair draft (spend is the project's, ki
     await breakSetup(h.w);
     const row = (await repairsOf(h.w.h.store, orgId, "payments"))[0]!;
     h.w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
+    // What the hosted runtime always puts on its flow (hostedSystemRunsFor): the effective gate, which the describer reads at every mint.
+    h.w.h.deps.systemRuns = h.gate;
     expect(await describeRepair(h, row.taskId!)).toMatchObject({ origin: "nightly", payer: { kind: "project", project: "payments" }, step: "repair_draft", project: "payments", companyId: orgId });
+    // Each lock is read at every mint: the company's consent withdrawn, the ceiling off, the project's upkeep off, or no gate on the flow at all: no token.
+    await h.w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled: false } });
+    expect(await describeRepair(h, row.taskId!)).toBeUndefined();
+    await h.w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled: true } });
+    h.ceiling.on = false;
+    expect(await describeRepair(h, row.taskId!)).toBeUndefined();
+    h.ceiling.on = true;
+    await h.w.h.store.update({ key: upkeepSettingsKey({ orgId, project: "payments" }), ops: [change.set("enabled", false)] });
+    expect(await describeRepair(h, row.taskId!)).toBeUndefined();
+    await h.w.h.store.update({ key: upkeepSettingsKey({ orgId, project: "payments" }), ops: [change.set("enabled", true)] });
+    expect(await describeRepair(h, row.taskId!)).toMatchObject({ step: "repair_draft" });
+    delete h.w.h.deps.systemRuns;
+    expect(await describeRepair(h, row.taskId!)).toBeUndefined();
+    h.w.h.deps.systemRuns = h.gate;
     expect(await describeRepair(h, row.taskId!, { developerId: h.w.h.owner.principal.personId })).toBeUndefined();
     expect(await describeRepair(h, row.taskId!, { developerId: systemOwnerIdOf(orgId, "billing") })).toBeUndefined();
     expect(await describeRepair(h, row.taskId!, { developerId: SYSTEM(h.w), purpose: "nightly_run" })).toBeUndefined();
+  });
+});
+
+describe("L4-SR2: review fixes (a start whose answer is unknown, the stale give-back, and the production wiring)", () => {
+  // MUTANT: a failed read of the starter after a faulted start is taken for "no run" (the claims are given back and a second paid run can follow).
+  it("a start that faulted AND whose run cannot be read keeps the claim, the revision claim and the pointer; once the starter can be read the run is adopted (never a second run)", async () => {
+    const r = await rig({ wireHook: false });
+    const { recheck } = await breakSetup(r.w);
+    const orgId = r.w.h.deps.companyId;
+    r.door.mode.failAfterStart = true;
+    let readable = false;
+    const inner = r.door.run.starter;
+    r.door.run.starter = { startsSetupRepair: true, start: inner.start.bind(inner), read: async (id) => { if (!readable && r.door.tasks.size > 0) throw new Error("starter down"); return inner.read(id); } };
+    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "start_refused" });
+    expect(await repairsOf(r.w.h.store, orgId, "payments")).toHaveLength(1);
+    expect(await r.w.h.store.get(repairRevisionKey(orgId, "payments", 1))).toMatchObject({ key: recheck.key });
+    expect(await r.w.h.store.get(repairCurrentKey(orgId, "payments"))).toMatchObject({ key: recheck.key });
+    expect(r.w.h.audit.some((event) => event.action === "system_run.not_started")).toBe(false);
+    expect((await advanceRepairDraft(r.deps, "payments"))?.state).toBe("starting");
+    readable = true;
+    expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "drafting", taskId: [...r.door.tasks.values()][0] });
+    expect(r.door.requests).toHaveLength(1);
+  });
+
+  // MUTANT: an unreadable starter is read as "no run" by the recovery (the claim is given back at ten minutes, or never ended).
+  it("a claim whose starter cannot be read is kept past ten minutes (a run may exist), and ends `failed` after two days so the card offers the manual Fix setup again", async () => {
+    const r = await rig({ wireHook: false });
+    const { recheck } = await breakSetup(r.w);
+    const orgId = r.w.h.deps.companyId;
+    const claimed = { entityType: "SETUP_REPAIR", orgId, project: "payments", key: recheck.key, setupRevision: 1, runRequestId: randomUUID(), confirmRequestId: randomUUID(), state: "starting", budgetCents: 400, claimedAt: new Date(r.w.h.clock.now).toISOString() };
+    await r.w.h.store.put({ item: { ...repairRowKey(orgId, "payments", recheck.key), ...claimed } });
+    await r.w.h.store.put({ item: { ...repairCurrentKey(orgId, "payments"), entityType: "SETUP_REPAIR_CURRENT", orgId, project: "payments", key: recheck.key, startedAt: claimed.claimedAt } });
+    const inner = r.door.run.starter;
+    r.door.run.starter = { startsSetupRepair: true, start: inner.start.bind(inner), read: async () => { throw new Error("starter down"); } };
+    r.w.h.clock.advance(REPAIR_START_STALE_MS / 1000 + 1);
+    expect((await advanceRepairDraft(r.deps, "payments"))?.state).toBe("starting");
+    expect(await repairsOf(r.w.h.store, orgId, "payments")).toHaveLength(1);
+    r.w.h.clock.advance(49 * 3600);
+    expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "failed", reason: "run_failed" });
+    expect(await readRepairView(r.deps, "payments")).toMatchObject({ state: "no_fix", actions: [{ id: "fix_setup" }, { id: "edit_commands" }] });
+  });
+
+  // MUTANT: the stale give-back also drops the revision claim.
+  it("a claim whose start never finished is given back after ten minutes WITHOUT the revision claim (a start still in flight may become a run; a second paid run never follows)", async () => {
+    const r = await rig({ wireHook: false });
+    const { recheck } = await breakSetup(r.w);
+    const orgId = r.w.h.deps.companyId;
+    const claimed = { entityType: "SETUP_REPAIR", orgId, project: "payments", key: recheck.key, setupRevision: 1, runRequestId: randomUUID(), confirmRequestId: randomUUID(), state: "starting", budgetCents: 400, claimedAt: new Date(r.w.h.clock.now).toISOString() };
+    await r.w.h.store.put({ item: { ...repairRowKey(orgId, "payments", recheck.key), ...claimed } });
+    await r.w.h.store.put({ item: { ...repairRevisionKey(orgId, "payments", 1), entityType: "SETUP_REPAIR_REVISION", orgId, project: "payments", revision: 1, key: recheck.key, claimedAt: claimed.claimedAt } });
+    await r.w.h.store.put({ item: { ...repairCurrentKey(orgId, "payments"), entityType: "SETUP_REPAIR_CURRENT", orgId, project: "payments", key: recheck.key, startedAt: claimed.claimedAt } });
+    r.w.h.clock.advance(REPAIR_START_STALE_MS / 1000 + 1);
+    await advanceRepairDraft(r.deps, "payments");
+    expect(await repairsOf(r.w.h.store, orgId, "payments")).toEqual([]);
+    expect(await r.w.h.store.get(repairRevisionKey(orgId, "payments", 1))).toMatchObject({ key: recheck.key });
+    expect(r.w.h.audit.some((event) => event.action === "system_run.not_started" && JSON.stringify(event.details).includes("NEVER_STARTED"))).toBe(true);
+    // The same revision is not drafted again by a later re-check.
+    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "already_drafted" });
+  });
+
+  // MUTANT: the automation-stop job does not run the repair pass (a withdrawn draft would never be stopped in production).
+  it("the per-minute automation-stop service runs the repair progress pass after its sweep, reports it, and a fault in the pass is logged and never fails the sweep", async () => {
+    const h = await hostedRig();
+    await breakSetup(h.w);
+    const orgId = h.w.h.deps.companyId;
+    const stop = createHostedAutomationStop({ flow: h.w.h.deps, companyId: orgId, admission: h.admission, now: () => h.w.h.clock.now, repairs: h.hosted });
+    await h.w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled: false } });
+    expect(await stop.pass({ budgetMs: 30_000 })).toMatchObject({ repairs: { advanced: 1 } });
+    expect((await repairsOf(h.w.h.store, orgId, "payments"))[0]).toMatchObject({ state: "ended", reason: "withdrawn" });
+    const logged: Array<Record<string, unknown>> = [];
+    const failing = createHostedAutomationStop({ flow: h.w.h.deps, companyId: orgId, admission: h.admission, now: () => h.w.h.clock.now, log: (entry) => logged.push(entry), repairs: { advanceAll: async () => { throw new Error("pass down"); } } });
+    expect(await failing.pass({ budgetMs: 30_000 })).toMatchObject({ repairs: "failed" });
+    expect(logged).toEqual([{ component: "setup-repair", event: "setup_repair.pass_failed", error: "Error" }]);
+    const without = createHostedAutomationStop({ flow: h.w.h.deps, companyId: orgId, admission: h.admission, now: () => h.w.h.clock.now });
+    expect(await without.pass({ budgetMs: 30_000 })).not.toHaveProperty("repairs");
+  });
+
+  // MUTANT: a finished setup run never reads as ended (its reservation is held until the sweep's timeout).
+  it("a setup run that reported its result reads as ended for the sweep (ready: succeeded, anything else: failed); a run with no result yet has not ended", async () => {
+    const h = await hostedRig();
+    await breakSetup(h.w);
+    const row = (await repairsOf(h.w.h.store, h.w.h.deps.companyId, "payments"))[0]!;
+    const tasks = hostedUnattendedTasks(h.w.h.deps);
+    expect(await tasks.read(row.taskId!)).toMatchObject({ waiting: false });
+    expect((await tasks.read(row.taskId!))?.end).toBeUndefined();
+    await endRun(h.w, row.taskId!, readyResult());
+    expect(await tasks.read(row.taskId!)).toMatchObject({ end: "succeeded" });
+    await endRun(h.w, row.taskId!, { status: "failed", stop: "infrastructure", failure: "x" });
+    expect(await tasks.read(row.taskId!)).toMatchObject({ end: "failed" });
+  });
+
+  // The runtime root builds the repair only where the ceiling covers the company, puts its hook on the flow and its pass on the per-minute job: the source says so (the root's own tests do not build a hosted company).
+  it("the broker root wires the hook, the pass and the upkeep reader (a guard on the source, beside the behaviour above)", () => {
+    const root = readFileSync(new URL("../../packages/broker/src/aws/core-engine-root.ts", import.meta.url), "utf8");
+    expect(root).toMatch(/const repair = switchCovers\(systemRunsFlag\.value, companyId\)\s*\?\s*createHostedSetupRepair\(/u);
+    expect(root).toContain("flow.deps.afterSetupBroken = repair.hook");
+    expect(root).toContain("repairs: repair }");
+    expect(root).toMatch(/upkeepOn: \(project\) => upkeepIsOn\(\{ store: registry\.require\("storage"\), companyId \}, project\)/u);
   });
 });
