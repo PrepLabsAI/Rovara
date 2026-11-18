@@ -59,6 +59,9 @@ import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor,
 import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
 import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
 import { queueSetupBroken } from "../core/notify/attention.js";
+import type { ChatThreads } from "../core-host/chat-threads.js";
+import { channelThreadHandler } from "../core/channel/thread-notices.js";
+import { recordChatThread } from "../core-host/chat-thread-record.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
@@ -179,6 +182,11 @@ export interface BrokerCoreRootInputs {
    * read under the company, and the ticket write-back through the company's own connection on its milestones. Absent: no intake (the Linear app webhook logs `linear.intake_not_wired`).
    */
   linearIntake?: { connections: Pick<LinearConnections, "connection" | "accessToken">; fetch?: typeof fetch };
+  /**
+   * L4-U5b: the company-scoped chat seam (core-host/chat-threads.ts). With it, a core task started from a chat thread has that thread recorded (`CoreTaskEntry.recordThread`), and its milestones (a pause at Build for a broken
+   * setup, the pull request, the end) are told in that thread through the company's own adapter, riding on the company's milestones like the ticket write-back. Absent: no thread is recorded and none is told.
+   */
+  chatThreads?: ChatThreads;
 }
 
 export interface BrokerCoreRoot {
@@ -640,6 +648,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             if (inputs.linearIntake !== undefined) {
               lessons.milestones.register(hostedTicketUpdatesHandler({ companyId, store: registry.require("storage"), connections: inputs.linearIntake.connections, fetch: inputs.linearIntake.fetch, now: () => now().getTime(), log }));
             }
+            // L4-U5b: the chat thread a task was started from is told its milestones, through this company's own chat adapter only. The person who started the task must still be this company's member.
+            if (inputs.chatThreads !== undefined) {
+              const threads = inputs.chatThreads;
+              lessons.milestones.register(channelThreadHandler({
+                store: registry.require("storage"), registry: { get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : undefined)) as never },
+                now: () => now().getTime(), companyOf: threads.companyOf,
+                isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId,
+                log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }),
+              }));
+            }
             lessons.attach();
             lessonsByCompany.set(companyId, lessons);
             // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
@@ -744,6 +762,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Lead 4 N1 + L4-P1: the nightly upkeep switch. The same live standing as the wiki controls. `available` follows the company's SystemRuns flag (default off): the system starter and the hourly `upkeep-night` job exist exactly there, so with the flag off the page hides the switch and a change is refused. (The per-project schedule is not used: one hourly job starts every due project.)
           upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value) },
+          // L4-U5b: the project notices in the person's own inbox are checked against the same live reads the notice delivery uses (does the person still administer the project, is the setup still broken).
+          projectNotices: {
+            administers: upkeepPartsFor(registry, runtime.companyId).administers,
+            setupRead: (orgId, project) => (orgId === runtime.companyId ? readSetupBrokenNotice({ flow: runtime.flow.deps, store: runtime.flow.deps.store, companyId: runtime.companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)),
+          },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,
@@ -756,7 +779,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       },
     });
     const deployedCallerOf = deployedCallerFromMembership(membershipOf);
-    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf);
+    const chatThreads = inputs.chatThreads;
+    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input));
     // Lane L12: the same routes and caller mapping on /v1/app/*, with the person erase (below) next to them.
     coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own

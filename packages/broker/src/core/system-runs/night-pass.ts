@@ -27,6 +27,11 @@ export interface UpkeepPassDeps {
   projects(): Promise<readonly string[]>;
   /** One project's night (`runUpkeepNight`). */
   night(project: string): Promise<UpkeepNightResult>;
+  /**
+   * L4-U5b: settles what an earlier night's setup check found, for a project whose upkeep is ON (`adoptNightlyBreak`, then the re-check's own advance): a break the night found tells the project's admins once, the same way
+   * the task-start re-check does. Asked for every such project each hour, whether or not it is the project's own hour (a check ends some time after its night started). Never required to succeed: a fault is logged and the pass goes on.
+   */
+  settle?(project: string): Promise<void>;
   /** Fixed codes only. */
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -59,6 +64,9 @@ export async function runUpkeepNightPass(deps: UpkeepPassDeps, options: { budget
   const rotation = names.length === 0 ? 0 : (Math.floor(startedAt / 3_600_000) % names.length);
   for (const project of [...names.slice(rotation), ...names.slice(0, rotation)]) {
     if (deps.now() - startedAt > options.budgetMs) { report.deferred += 1; continue; }
+    if (deps.settle !== undefined && (await readUpkeepSetting(deps, project)).enabled) {
+      try { await deps.settle(project); } catch (error) { deps.log?.({ event: "upkeep_pass.settle_failed", error: error instanceof Error ? error.name : "unknown" }); }
+    }
     // Not this project's hour yet (or its hour is past the window's end): nothing is read for it.
     if (!upkeepNightDue(deps.companyId, project, startedAt)) continue;
     if (!(await readUpkeepSetting(deps, project)).enabled) continue;

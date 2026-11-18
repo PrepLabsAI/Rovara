@@ -25,7 +25,7 @@ import { SessionStore } from "../sessions/store.js";
 import { upkeepExpiryOf, upkeepNoticeKey } from "../upkeep/keys.js";
 import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
 import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
-import { digestSlotDay, holdOf } from "./schedule.js"; import { putInboxRow } from "./inbox-rows.js";
+import { digestSlotDay, holdOf } from "./schedule.js"; import { projectNoticeRow, putInboxRow } from "./inbox-rows.js";
 import { tenantIsCompanys, type ChannelCompanyOf } from "../channel/company.js";
 import { repairToldExpiryOf, repairToldKey, setupBrokenSubjectId, setupBrokenSubjectOf } from "../setup-agent/broken-notice.js";
 import { setupAdminNoticeWords } from "../setup-agent/recheck-rows.js";
@@ -169,10 +169,10 @@ export async function queueUpkeepPaused(
     }
     if (people.length === 0) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
     // All the rows or none, so a partial failure never leaves some admins told and the marker standing over the rest.
-    const written = await deps.store.transact(people.map((developerId) => ({
+    const written = await deps.store.transact(people.flatMap((developerId) => [{
       kind: "put" as const,
       item: { ...pendingKey(orgId, developerId, subjectId, "upkeep_paused"), entityType: "NOTIFY_PENDING", orgId, developerId, sessionId: subjectId, kind: "upkeep_paused", at: new Date(nowMs).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
-    }))).catch(() => ({ applied: false as const }));
+    }, { kind: "put" as const, item: projectNoticeRow({ orgId, developerId, subjectId, kind: "upkeep_paused", at: new Date(nowMs).toISOString(), nowMs }, INDEX_EXPIRY_ATTRIBUTE) }])).catch(() => ({ applied: false as const }));
     if (!written.applied) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
     await publishAttentionChanged(deps.realtime, orgId, people, subjectId, "upkeep_paused");
     return { queued: people.length, deduped: false };
@@ -212,10 +212,10 @@ export async function queueSetupBroken(
       return { queued: 0, deduped: false };
     }
     if (people.length === 0) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
-    const written = await deps.store.transact(people.map((developerId) => ({
+    const written = await deps.store.transact(people.flatMap((developerId) => [{
       kind: "put" as const,
       item: { ...pendingKey(orgId, developerId, subjectId, "setup_broken"), entityType: "NOTIFY_PENDING", orgId, developerId, sessionId: subjectId, kind: "setup_broken", at: new Date(nowMs).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
-    }))).catch(() => ({ applied: false as const }));
+    }, { kind: "put" as const, item: projectNoticeRow({ orgId, developerId, subjectId, kind: "setup_broken", at: new Date(nowMs).toISOString(), nowMs }, INDEX_EXPIRY_ATTRIBUTE) }])).catch(() => ({ applied: false as const }));
     if (!written.applied) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
     await publishAttentionChanged(deps.realtime, orgId, people, subjectId, "setup_broken");
     return { queued: people.length, deduped: false };

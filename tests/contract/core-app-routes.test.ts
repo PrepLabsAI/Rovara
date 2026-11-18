@@ -69,6 +69,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
     // Web task channel C7: the in-app inbox (core/notify/inbox.ts over core-host/inbox-routes.ts).
     ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"],
+    // L4-U5b: the project notices (setup needs repair, upkeep paused) in the person's own inbox. Project-level words, so a full sign-in only (an AI tool's tasks:read token never reads them).
+    ["GET", "/v1/app/inbox/project-notices", "full"],
     // L4-P1: "Re-check setup".
     ["GET", "/v1/app/projects/payments/setup-check", "full"], ["POST", "/v1/app/projects/payments/setup-check", "full"],
     // Wiki W0: a project's free file map.

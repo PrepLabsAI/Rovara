@@ -4,3 +4,4 @@ export * from "./schedule.js";
 export * from "./email-text.js";
 export * from "./inbox-rows.js";
 export * from "./inbox.js";
+export * from "./project-notices.js";

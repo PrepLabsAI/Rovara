@@ -164,6 +164,8 @@ export interface CoreDevWiring {
   wikiBuild?: HostedWikiBuildWiring;
   /** Lead 4 N1: the nightly upkeep switch (`/v1/app/projects/<p>/upkeep`, upkeep-routes.ts). Absent: that path says "not on the core yet". */
   upkeep?: HostedUpkeepWiring;
+  /** L4-U5b: what the inbox's project notices (`GET /v1/app/inbox/project-notices`) are checked against, live: whether the person still administers the project, and the project's open repair card. Absent: that route lists nothing. */
+  projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
 }
 
 export interface CoreDevRoutesOptions {
@@ -278,7 +280,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         const blobs = (await options.app.registry()).require("object-storage");
         return {
           runtime, wiring, blobs,
-          ...(wiring.members === undefined ? {} : { sessions: createSessionRoutes({ flow: runtime.flow, blobs, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }), inbox: createInboxRoutes({ store: runtime.flow.deps.store, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }) }),
+          ...(wiring.members === undefined ? {} : { sessions: createSessionRoutes({ flow: runtime.flow, blobs, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }), inbox: createInboxRoutes({ store: runtime.flow.deps.store, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members, projectNotices: wiring.projectNotices }) }),
           ...(wiring.playbook === undefined ? {} : { playbook: createLocalPlaybook({ playbook: wiring.playbook, store: runtime.flow.deps.store, companyId: runtime.companyId }) }),
           // The owner's moves need both the money cap and the company's owner rule; with either missing they are not served (never Code's laptop owner rule on a hosted company).
           ...(wiring.taskActions === undefined || runtime.flow.deps.access.ownerActing === undefined ? {} : { actions: createTaskActions(runtime.flow.deps, { roundCap: wiring.taskActions.roundCap }) }),

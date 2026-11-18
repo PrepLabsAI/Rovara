@@ -9,7 +9,7 @@ vi.mock("../../packages/broker/src/core-host/app.js", () => ({ createCoreHostApp
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 const inputs = (extra: Partial<BrokerCoreRootInputs> = {}): BrokerCoreRootInputs => ({ env: {}, documentClient: { send: async () => { throw new Error("unused"); } }, stateTableName: "state", signInTableName: undefined, callbackSigningKey: "a".repeat(32), repositoryGrantKey: Buffer.alloc(32), repositoryCredential: async () => { throw new Error("unused"); }, codeModules: () => { throw new Error("unused"); }, origin: () => "", log: () => undefined, ...extra });
 // The registry is only asked for its store by the money stop (core-money-stop, merged with L3 in the batch of 2026-11-16); nothing here reads it.
-const registry = { require: () => ({}) } as unknown as AdapterRegistry;
+const registry = { require: () => ({}), get: () => undefined, names: () => [] } as unknown as AdapterRegistry;
 const runtimeOptions = () => (captured.options as CoreHostAppOptions).runtime(registry, A, {} as never);
 const task = (orgId: string) => ({ orgId, project: "web" }) as never;
 
@@ -27,10 +27,11 @@ it("passes the runtime's checked CI reader into the company service builder", ()
   const services = vi.fn(() => ({}));
   createBrokerCoreRoot(inputs({ services }));
   const runtime = runtimeOptions();
-  const flow = {} as never;
+  // The company service builder reads the flow's deps for the system-runs gate (L4-P1): an empty deps is enough, nothing here reads a row.
+  const flow = { deps: { admission: {}, store: {}, companyId: A } } as never;
   const ciMode = vi.fn(async () => "their_ci_watch" as const);
   runtime.services!(flow, { ciMode });
-  expect(services).toHaveBeenCalledWith(A, flow, expect.anything(), { ciMode });
+  expect(services).toHaveBeenCalledWith(A, flow, expect.anything(), { ciMode, upkeep: expect.objectContaining({ administers: expect.any(Function) as unknown, setupRead: expect.any(Function) as unknown }) as unknown });
 });
 
 it("preserves an explicitly malformed CI reporting input for the runtime to refuse", () => {
