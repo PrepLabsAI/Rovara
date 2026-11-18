@@ -27,7 +27,7 @@ import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch 
 import { Construct } from "constructs";
 import {
   CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
-  TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, SAVED_ENVIRONMENTS_PARAMETER, SAVED_ENVIRONMENTS_PARAMETER_DEFAULT, SAVED_ENVIRONMENTS_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -40,6 +40,7 @@ export const CORE_ENGINE_PARAMETER = "CoreEngine";
 export const TEST_SERVICES_PARAMETER = "TestServices";
 /** DEC 254zm: the stack parameter that says the install's copies of the starter images are in place (`mirrored`), so Code's workers run test services. */
 export const TEST_SERVICE_IMAGES_PARAMETER = "TestServiceImages";
+export const SAVED_ENVIRONMENTS_PARAMETER_NAME = SAVED_ENVIRONMENTS_PARAMETER;
 
 /** The broker's actions on the core dispatch queue and its dead letters. */
 export const CORE_BROKER_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
@@ -141,6 +142,10 @@ export class CoreEngine extends Construct {
     this.testServiceImages = new CfnParameter(stack, "TestServiceImages", { type: "String", default: TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICE_IMAGES_PARAMETER_VALUES], description: "Test service images: none (the default) or mirrored once the starter copies are checked" });
     addBrokerSetting(broker, props.naming, "testServiceImages", this.testServiceImages.valueAsString);
     addPackedSetting(dispatcher, "testServiceImages", this.testServiceImages.valueAsString);
+    // L4-SE: opt-in setting preserved on upgrades; no registry role is provisioned by this lane.
+    const savedEnvironments = new CfnParameter(stack, SAVED_ENVIRONMENTS_PARAMETER, { type: "String", default: SAVED_ENVIRONMENTS_PARAMETER_DEFAULT, allowedValues: [...SAVED_ENVIRONMENTS_PARAMETER_VALUES], description: "Saved environments: 0 (the default) or 1 when registry roles are provisioned" });
+    addBrokerSetting(broker, props.naming, "savedEnvironments", savedEnvironments.valueAsString);
+    addPackedSetting(dispatcher, "savedEnvironments", savedEnvironments.valueAsString);
     // L4-AM (DEC 254zzn(2)): the hosted answers model, for the BROKER only (the answers and the start-box classifier run there; the dispatcher runs coding steps, which keep the agent model). A
     // stack parameter, so an upgrade keeps it (OPERATOR_PARAMETERS); packed (`aa`), because the broker's 4 KB has no room for another variable. Empty (the default): answers and the
     // classifier use the agent model, exactly as before. A Claude engine name only (the answers purpose runs on the company's own Anthropic account). No IAM, no secret.

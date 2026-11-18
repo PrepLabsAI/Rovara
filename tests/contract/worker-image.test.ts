@@ -63,6 +63,19 @@ describe("the worker image", () => {
     expect(toolsStage).toMatch(/echo "\$uv_sha {2}\/tmp\/uv\.tgz" \| sha256sum -c -/);
   });
 
+  it("installs the verified buildx v0.38.2 binary only after its architecture checksum passes", () => {
+    expect(toolsStage).toContain("ARG BUILDX_VERSION=v0.38.2");
+    expect(toolsStage).toContain("arm64) buildx_sha=46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36 ;;");
+    expect(toolsStage).toContain("amd64) buildx_sha=7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6 ;;");
+    expect(toolsStage).toContain('https://github.com/docker/buildx/releases/download/$BUILDX_VERSION/buildx-$BUILDX_VERSION.linux-$TARGETARCH');
+    const start = toolsStage.indexOf("# buildx v0.38.2");
+    const install = toolsStage.slice(start, toolsStage.indexOf("# uv,", start));
+    expect(install).toContain("RUN set -eu;");
+    expect(install).toContain('echo "$buildx_sha  /tmp/docker-buildx" | sha256sum -c -;');
+    expect(install.indexOf("sha256sum -c -")).toBeLessThan(install.indexOf("install -D -m 0755 /tmp/docker-buildx"));
+    expect(finalStage).toContain("COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx");
+  });
+
   it("carries an empty, root-owned, read-only git directory for each object format, made before the image drops to its user", () => {
     const user = finalStage.indexOf("\nUSER node");
     const block = finalStage.slice(finalStage.indexOf("for format in sha1 sha256"), finalStage.indexOf("\n\n", finalStage.indexOf("for format in sha1 sha256")));

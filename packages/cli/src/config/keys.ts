@@ -52,6 +52,29 @@ const wholeNumber = (key: string, min: number, max: number) => (value: string): 
 /** The core engine switch (stack parameter CoreEngine): exactly the parameter's own pattern. */
 export const CORE_ENGINE_NOT_WIRED_WORDS = "coreEngine.switch can only be off on this release: the broker does not run the core engine yet";
 
+/** Saved image role outputs required before enabling the install switch (L4-SE-OUTPUT-CONTRACT: role ARNs carry the environment path /agentx/<env>/). */
+export const SAVED_ENV_REGISTRY_OUTPUTS = ["SavedEnvImgPushRoleArn", "SavedEnvImgPullRoleArn", "SavedEnvImgManageRoleArn", "SavedEnvRepoPrefix", "SavedEnvRegistryReady"] as const;
+
+export function savedEnvRegistryReadiness(outputs: Record<string, string> | undefined, env: string, account: string): string[] {
+  const missing = SAVED_ENV_REGISTRY_OUTPUTS.filter((key) => outputs?.[key] === undefined || outputs[key] === "");
+  if (missing.length > 0) return [...missing];
+  const expected = {
+    SavedEnvImgPushRoleArn: `arn:aws:iam::${account}:role/agentx/${env}/agentx-${env}-img-push`,
+    SavedEnvImgPullRoleArn: `arn:aws:iam::${account}:role/agentx/${env}/agentx-${env}-img-pull`,
+    SavedEnvImgManageRoleArn: `arn:aws:iam::${account}:role/agentx/${env}/agentx-${env}-img-manage`,
+    SavedEnvRepoPrefix: `rovara-env/${env}`,
+    SavedEnvRegistryReady: "1",
+  };
+  return SAVED_ENV_REGISTRY_OUTPUTS.filter((key) => outputs?.[key] !== expected[key]);
+}
+
+const savedEnvSwitchValue = (value: string): string => {
+  const trimmed = value.trim();
+  if (trimmed === "on") return "1";
+  if (trimmed === "off") return "0";
+  return refuse("savedEnvironments.switch", "on or off");
+};
+
 const coreEngineValue = (key: string, wired: boolean = CORE_ENGINE_BROKER_WIRED) => (value: string): string => {
   const trimmed = value.trim();
   if (!new RegExp(CORE_ENGINE_PARAMETER_PATTERN, "u").test(trimmed)) return refuse(key, "off, on, drain, or on:<company id>[:<company id>] (a company id is org_ and 20 lowercase letters or digits; at most two)");
@@ -194,6 +217,8 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   // DEC 254zm: Code's workers run test services only once the install's five starter copies are in place: run scripts/test-services-mirror.ts --copy, then --verify, then set this to mirrored.
   { key: "testServices.images", description: "none (the default): this install's workers do not run test services; mirrored: the five starter image copies were made and checked (scripts/test-services-mirror.ts --verify), so workers pull them at boot and run test services",
     target: parameter("control-plane", "TestServiceImages"), defaultValue: "none", parse: oneOf("testServices.images", ["none", "mirrored"]) },
+  { key: "savedEnvironments.switch", description: "on: enable saved environment images after the control plane publishes all three image roles and the registry template; off (the default): keep saved environments disabled",
+    target: parameter("control-plane", "SavedEnvironments"), defaultValue: "0", shown: (stored) => stored === "1" ? "on" : "off", parse: savedEnvSwitchValue },
   { key: "coreEngine.answersModel", description: "the model the hosted Just answer and the start-box classifier run on through the model gateway (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses coreEngine.agentModel, as before",
     target: parameter("control-plane", CORE_ANSWERS_MODEL_PARAMETER), defaultValue: "", parse: coreAnswersModel("coreEngine.answersModel") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },

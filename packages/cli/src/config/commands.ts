@@ -20,7 +20,7 @@ import { alertsTopicArn, ensureSubscribed, type AlertsApi } from "../setup/alert
 import { CLI_VERSION } from "../version.js";
 import type { DeployPart } from "../deploy/parameters.js";
 import { requireGatewayOffers } from "./gateway-offered.js";
-import { CONFIG_KEYS, configKey, whereText, type ConfigKey, type ModelRole } from "./keys.js";
+import { CONFIG_KEYS, configKey, savedEnvRegistryReadiness, whereText, type ConfigKey, type ModelRole } from "./keys.js";
 import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, eligibleE2EAgentModel, isClaudeAgentModel, isKeyedModelProvider, type ModelProvider } from "@agentx/contracts";
 
 export interface ConfigServices {
@@ -318,6 +318,11 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
   const value = entry.parse(input.value);
   const settings = await installed(services, env);
+  if (entry.key === "savedEnvironments.switch" && value === "1") {
+    const stack = await services.stacks.describe(settings.stacks["control-plane"]);
+    const missing = savedEnvRegistryReadiness(stack?.outputs, env, (await services.identity.get()).account);
+    if (missing.length > 0) throw agentXError("CONFIG_INVALID", `savedEnvironments.switch cannot be on: missing or invalid ${missing.join(", ")} on ${settings.stacks["control-plane"]}; nothing changed`);
+  }
   const role = entry.model;
   if (entry.e2eAgentModel === true) checkE2eAgentChoice(env, settings, value);
   // DEC 254g: a non-Claude core agent model must be one the model gateway offers now (live, fail closed); a Claude id keeps its catalog rule.

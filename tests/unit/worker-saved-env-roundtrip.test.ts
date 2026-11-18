@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { formatCommandLine, parseCommandLine, savedEnvRepositoryName, testEnvDigest, type ProjectDefinition, type TestEnvironmentBody } from "../../packages/contracts/src/index.js";
+import { SAVED_ENV_BUILDER_IMAGE, SAVED_ENV_IMAGE_MAX_BYTES, formatCommandLine, parseCommandLine, savedEnvRepositoryName, testEnvDigest, type ProjectDefinition, type TestEnvironmentBody } from "../../packages/contracts/src/index.js";
 import { buildEnvironmentDraft } from "../../packages/worker/src/env-detect/propose.js";
 import { emptyDetection } from "../../packages/worker/src/env-detect/types.js";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
@@ -42,7 +42,7 @@ const PROJECT: ProjectDefinition = {
 };
 
 /** Builds an image of the project with the given build names; returns what the build left (the context of the image) and the broker's manifest. */
-async function build(over: { repositoryId?: string; directory?: string } = {}) {
+async function build(over: { repositoryId?: string; directory?: string; tooLarge?: boolean; builderImage?: string | null; dockerFailure?: "run" | "create" | "build" } = {}) {
   const root = await scratch();
   const keep = await scratch();
   const tempParent = await scratch();
@@ -66,10 +66,14 @@ async function build(over: { repositoryId?: string; directory?: string } = {}) {
     id: "fresh-1", rootPath: workspace, hasStarted: () => started, start: async () => { started = true; }, stopProcesses: async () => undefined, dispose: async () => undefined,
     ports: { runCommand: async (command) => { void formatCommandLine(command); t += 1_000; return { exitCode: 0, timedOut: false, stdout: "", stderr: "" }; }, startMock: async () => undefined, probePreprod: async () => true, mockUnmatched: async () => [], buildCoverageMap: async () => undefined, suiteTestCount: async () => 1, now: () => t },
   };
+  const dockerCalls: string[][] = [];
+  let scanLimit: number | undefined;
   const docker: DockerCli = {
     async run(args) {
+      dockerCalls.push([...args]);
       const list = [...args];
       const ok = { exitCode: 0, stdout: "", stderr: "" };
+      if ((list[0] === "run" && over.dockerFailure === "run") || (list[0] === "buildx" && list[1] === over.dockerFailure)) return { ...ok, exitCode: 1 };
       if (list[0] === "buildx" && list[1] === "build") {
         const context = list[list.length - 1]!;
         await cp(join(context, "seed"), join(keep, "seed"), { recursive: true, verbatimSymlinks: true });
@@ -82,7 +86,11 @@ async function build(over: { repositoryId?: string; directory?: string } = {}) {
   };
   const ports: SavedEnvBuildPorts = {
     docker, makeFresh: async () => sandbox, snapshotGit: snapshotGitOf, gitState: gitStateOf, rebuildIndex: rebuildIndexOf, trackedTree: trackedTreeOf, stage: stageTree, fsck: fsckOf, hashWithAttributes: hashWithAttributesOf, installGit: installGitInto,
-    scan: (dir, options) => scanTreeForSecrets(dir, { forbiddenValues: options.forbiddenValues, deadlineAtMs: Date.now() + options.budgetMs, links: options.links }),
+    scan: async (dir, options) => {
+      scanLimit = options.maxTotalBytes;
+      if (over.tooLarge === true) return { ok: false, reason: "unscannable", detail: "too_many_bytes" };
+      return scanTreeForSecrets(dir, { forbiddenValues: options.forbiddenValues, deadlineAtMs: Date.now() + options.budgetMs, ...(options.maxTotalBytes === undefined ? {} : { maxTotalBytes: options.maxTotalBytes }), links: options.links });
+    },
     pushSession: async () => ({ registry: REGISTRY, repository: REPOSITORY, username: "AWS", password: ["login", "-", "p".repeat(30)].join(""), expiresAt: new Date(Date.now() + 1_800_000).toISOString() }),
     temporaryFolder: async () => { const d = await mkdtemp(join(tempParent, "t-")); return { path: d, remove: () => rm(d, { recursive: true, force: true }) }; },
     now: () => Date.now(), random: () => "0123456789abcdef",
@@ -95,12 +103,33 @@ async function build(over: { repositoryId?: string; directory?: string } = {}) {
   }
   const result = await proveAndBuildSavedImage({
     repository: REPOSITORY, environment: env, approved: { revision: 4, digest: testEnvDigest(env) }, repositories, detectorGlobs: [], secretNames: [], baseImageDigest: `sha256:${"b".repeat(64)}`,
+    ...(over.builderImage === null ? {} : { builderImage: over.builderImage ?? SAVED_ENV_BUILDER_IMAGE }),
     notFrom: [], forbiddenValues: [], signal: new AbortController().signal, proveDeadlineMs: 3_600_000,
   }, ports);
-  return { result, keep, commit, source: clone };
+  return { result, keep, commit, source: clone, dockerCalls, scanLimit };
 }
 
 describe("what the build writes is what the use reads (B4)", () => {
+  it.each([null, "", "moby/buildkit:buildx-stable-1", `moby/buildkit:v0.34.2@sha256:${"a".repeat(64)}`])("refuses an unconfigured or unpinned builder before Docker (%s)", async (builderImage) => {
+    const built = await build({ builderImage });
+    expect(built.result).toEqual({ ok: false, reason: "build_failed", step: "builder_not_configured" });
+    expect(built.dockerCalls).toEqual([]);
+  });
+  it("removes the rootless container and its volumes on startup, bootstrap and build failure", async () => {
+    for (const dockerFailure of ["run", "create", "build"] as const) {
+      const built = await build({ dockerFailure });
+      expect(built.result).toMatchObject({ ok: false, reason: "build_failed" });
+      expect(built.dockerCalls).toContainEqual(["rm", "--force", "--volumes", "rovara-build-0123456789abcdef"]);
+      expect(built.dockerCalls.some(call => call.includes("push"))).toBe(false);
+    }
+  });
+  it("refuses an oversized seed clearly before any Docker build or push", async () => {
+    const built = await build({ tooLarge: true });
+    expect(built.result).toEqual({ ok: false, reason: "too_large" });
+    expect(built.scanLimit).toBe(SAVED_ENV_IMAGE_MAX_BYTES);
+    expect(built.scanLimit).toBe(8 * 1024 ** 3);
+    expect(built.dockerCalls).toEqual([]);
+  });
   it("buildRepositoriesOf takes the repository NAME as the id and the repository PATH as the folder, and needs a commit for each", () => {
     expect(buildRepositoriesOf(PROJECT.repositories, new Map([["svc", "a".repeat(40)]]))).toEqual([{ repositoryId: "svc", directory: "repo/svc", defaultBranch: "main", commit: "a".repeat(40) }]);
     expect(() => buildRepositoriesOf(PROJECT.repositories, new Map())).toThrow();
@@ -109,6 +138,15 @@ describe("what the build writes is what the use reads (B4)", () => {
   it("an image built from a project with a nested repository path is used by the preparation of that project", async () => {
     const built = await build();
     expect(built.result.ok).toBe(true);
+    expect(built.dockerCalls.find(call => call[0] === "run")).toEqual([
+      "run", "--detach", "--name", "rovara-build-0123456789abcdef",
+      "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined", "--security-opt", "systempaths=unconfined", SAVED_ENV_BUILDER_IMAGE,
+    ]);
+    expect(built.dockerCalls.find(call => call[0] === "buildx" && call[1] === "create")).toEqual([
+      "buildx", "create", "--name", "rovara-build-0123456789abcdef", "--driver", "remote", "--bootstrap", "docker-container://rovara-build-0123456789abcdef",
+    ]);
+    expect(built.dockerCalls.flat()).not.toContain("--privileged");
+    expect(built.dockerCalls).toContainEqual(["rm", "--force", "--volumes", "rovara-build-0123456789abcdef"]);
     if (!built.result.ok) return;
     expect(built.result.manifest.commits).toEqual([{ repositoryId: "svc", sha: built.commit }]);
     expect(existsSync(join(built.keep, "seed", "repo", "svc", "node_modules", "dep", "index.js"))).toBe(true);

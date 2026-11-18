@@ -28,6 +28,7 @@ import { enginePolicyHook, policyHookSettingsFromEnvironment } from "./engine-po
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  HostedSavedEnvRegistryAuthSchema,
   CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
@@ -118,6 +119,9 @@ import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wi
 import { hostedServiceCatalog } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { hostedSavedEnvDeps } from "./hosted-saved-env.js";
+import { savedEnvRoleSessionsFromEnvironment, type SavedEnvRoleSessions } from "./saved-env-role-sessions.js";
+import { savedEnvImageModules } from "./ecr-image-registry.js";
 import { baseFlakyTests } from "../core/test-env/base-flaky.js";
 import { flakyFactsPort } from "../lessons/knowledge-facts.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
@@ -193,6 +197,8 @@ export interface BrokerCoreRootInputs {
   codeModules: (core: BrokerCoreModuleContext) => CodeModuleDeps;
   /** More modules after Code's and the step 5 ones (model keys when lane L2b lands). */
   extraModules?: () => readonly CoreAdapterModule[];
+  /** Test injection; hosted installs build the real session seam from their bindings. */
+  savedEnvSessions?: SavedEnvRoleSessions;
   /** The policy hook's asker (`policyHookInstallFromEnvironment`). Absent: an install with hook settings refuses its registry. */
   policyHookInstall?: () => PolicyHookInstall | undefined;
   /** CORE-ROOT-HOOK-WIRING-TEST-20261117: how the root reaches the company rules service (its keys and its answers), for the engine's per-task limit and the hook in front of admission.
@@ -759,7 +765,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...savedEnvImageModules(env, inputs.savedEnvSessions ?? savedEnvRoleSessionsFromEnvironment(env)), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -1251,7 +1257,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
         const wiring = modelGateway();
         const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps, createHostedReviewers({ flow: runtime.flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).grants));
+        const saved = hostedSavedEnvDeps({ registry, flow: runtime.flow.deps, companyId, env, now: () => now().getTime() });
+        const grants = new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential);
         return createCallbackService({
+          ...(saved === undefined || !saved.session.config.enabled ? {} : { savedEnv: { deps: saved, inspectGrant: (grant: string) => grants.inspect(grant), registryAuthSchema: HostedSavedEnvRegistryAuthSchema } }),
           ...(gateway === undefined ? {} : { modelGateway: gateway }),
           flow: runtime.flow.deps,
           blobs: registry.require("object-storage"),

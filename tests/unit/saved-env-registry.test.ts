@@ -52,22 +52,22 @@ describe("queueing a rebuild", () => {
     expect(await checkRebuild(w.deps, ids, "push")).toEqual({ ok: false, reason: "disabled" });
     expect(await requestReset(w.deps, ids, "person-1")).toEqual({ ok: false, reason: "disabled" });
     expect(await authorizeLease(w.deps, ids, { jobId: "x", leaseToken: "y" })).toEqual({ ok: false, reason: "disabled" });
-    expect(await walk(w.deps, ids)).toEqual({ ok: false, reason: "disabled" });
+    expect(await walk(w.deps, ids)).toEqual({ ok: true, deleted: 0 });
     expect(await markStale(w.deps, ids, { digest: dig(1), step: "pull" })).toEqual({ ok: false });
     expect(await savedEnvPullLogin(w.deps, ids, dig(1))).toEqual({ ok: false, reason: "disabled" });
-    expect(await sweepDeleted(w.deps)).toEqual({ ok: false, reason: "disabled" });
+    expect(await sweepDeleted(w.deps)).toEqual({ ok: true, swept: 0, failed: 0 });
     expect(w.store.rows.size).toBe(0);
     expect(w.calls.reached).toBe(0);
   });
 
-  it("a delete or an archive is MARKED even with the switch off (nothing is built for the project when it is turned on later), and the registry is not touched", async () => {
+  it("a delete or an archive is marked with the switch off; deletion still purges stored images", async () => {
     const w = world({ enabled: false });
-    expect(await onProjectDeleted(w.deps, { orgId: "org-1", projectId: "gone" })).toEqual({ ok: false, reason: "disabled" });
+    expect(await onProjectDeleted(w.deps, { orgId: "org-1", projectId: "gone" })).toEqual({ ok: true, deleted: 0 });
     expect(w.store.rows.get("org-1#gone")).toMatchObject({ deleted: true, images: [] });
     expect(await onProjectArchived(w.deps, { orgId: "org-1", projectId: "kept" }, true)).toEqual({ ok: true });
     expect(w.store.rows.get("org-1#kept")).toMatchObject({ archived: true });
-    expect(w.calls.reached).toBe(0);
-    expect(w.calls.repoDeleted).toBe(0);
+    expect(w.calls.reached).toBe(2);
+    expect(w.calls.repoDeleted).toBe(1);
   });
 
   it("an archive that met another write is retried", async () => {

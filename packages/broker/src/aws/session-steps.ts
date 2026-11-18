@@ -74,6 +74,7 @@ export interface SessionStepsDependencies {
    * as AGENTX_TEST_SERVICES=1, and the worker's boot runs the test-services stage its image carries. Otherwise nothing is added and the boot script is byte-identical to before.
    */
   testServices?: boolean;
+  savedEnvBuilderImage?: string;
 }
 
 /** The body of the worker's /ping, or of a failed boot's report in its place. */
@@ -145,6 +146,7 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           ...(settings.openaiSecretArn ? { openaiSecretArn: settings.openaiSecretArn } : {}),
           ...(settings.modelFallback ? { modelFallback: settings.modelFallback } : {}),
           ...(dependencies.testServices === true ? { testServices: true as const } : {}),
+          ...(dependencies.savedEnvBuilderImage ? { savedEnvBuilderImage: dependencies.savedEnvBuilderImage } : {}),
           logGroupName: dependencies.logGroupName,
         }, dependencies.bootScript());
         // Already base64 gzip, the form RunInstances takes (#229).
@@ -241,4 +243,5 @@ export const handler = createSessionStepsHandler({
   logGroupName: process.env.WORKER_LOG_GROUP_NAME ?? "",
   ping: (url) => pingWorker(url),
   testServices: hostedWorkersRunTestServices(process.env),
+  ...(process.env["ROVARA_SAVED_ENVIRONMENTS"] === "1" && process.env["AGENTX_SAVED_ENV_BUILDER_IMAGE"] ? { savedEnvBuilderImage: process.env["AGENTX_SAVED_ENV_BUILDER_IMAGE"] } : {}),
 });

@@ -39,7 +39,7 @@ const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
   coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off", coreSystemRuns: "off",
-  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", testServiceImages: "mirrored", coreAttentionEmail: "off",
+  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", savedEnvironments: "0", testServiceImages: "mirrored", coreAttentionEmail: "off",
   coreAnswersModel: "claude-haiku-5-5",
 } as const satisfies Record<BrokerSettingKey, string>;
 
@@ -80,6 +80,8 @@ describe("awsPartitionOf", () => {
 describe("hydrateBrokerEnvironment: nothing packed", () => {
   it("DEC 254z-amend3: the test services setting `td` is unpacked as ROVARA_TEST_SERVICES (on by default with \"1\", the opt-out \"0\"), never under Cloud's `tx`", () => {
     expect(BROKER_SETTINGS.testServices).toEqual({ code: "td", variable: "ROVARA_TEST_SERVICES" });
+    expect(BROKER_SETTINGS.savedEnvironments).toEqual({ code: "sv", variable: "ROVARA_SAVED_ENVIRONMENTS" });
+    for (const value of ["0", "1"]) expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: `sv=${value}` })["ROVARA_SAVED_ENVIRONMENTS"]).toBe(value);
     expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=0" })["ROVARA_TEST_SERVICES"]).toBe("0");
     expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=1" })["ROVARA_TEST_SERVICES"]).toBe("1");
     // DEC 254zm: whether the starter copies are in place, packed as `ti`.

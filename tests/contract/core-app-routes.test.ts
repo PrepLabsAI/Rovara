@@ -500,3 +500,17 @@ describe("the core app entry", () => {
     expect(await entry.route({ method: "GET", path: "/v1/dev/tasks", headers: {} }, caller)).toBeUndefined();
   });
 });
+
+// Internal worker routes are inventoried in the scope table, with no person scope.
+it("inventories exactly four worker-only saved image callbacks without exposing app or developer aliases", async () => {
+  const { APP_ROUTES, DEV_ROUTES, SAVED_ENV_WORKER_ROUTES, savedEnvWorkerRouteOf, appRouteOf, devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  expect(SAVED_ENV_WORKER_ROUTES.map(row => [row.method, row.path, row.requires])).toEqual(["push-login", "result", "fallback", "login"].map(action => ["POST", `/v1/internal/workspaces/{workspace}/operations/{operation}/saved-env-${action}`, "worker"]));
+  for (const row of SAVED_ENV_WORKER_ROUTES) {
+    const path = row.path.replace("{workspace}", "w").replace("{operation}", "o");
+    expect(savedEnvWorkerRouteOf("POST", path)).toEqual(row);
+    expect(savedEnvWorkerRouteOf("GET", path)).toBeUndefined();
+    expect(appRouteOf("POST", path)).toBeUndefined();
+    expect(devRouteOf("POST", path)).toBeUndefined();
+  }
+  expect([...APP_ROUTES, ...DEV_ROUTES].some(row => row.path.includes("/v1/internal/"))).toBe(false);
+});
