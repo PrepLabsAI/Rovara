@@ -160,7 +160,7 @@ export async function queueAdminNotice(deps: { store: Pick<DocumentStore, "put">
       written += 1;
     }
   } catch (error) {
-    (deps.log ?? ((entry) => console.log(JSON.stringify({ component: "broker", ...entry }))))({ event: "attention.admin_notice_failed", error: error instanceof Error ? error.name : "unknown" });
+    deps.log?.({ event: "attention.admin_notice_failed", error: error instanceof Error ? error.name : "unknown" });
   }
   return written;
 }

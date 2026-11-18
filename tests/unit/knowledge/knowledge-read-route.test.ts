@@ -1,7 +1,6 @@
 // Agent knowledge, step (b), at the broker: the lessons route and the table of contents as a tool OUTSIDE Rovara uses them. Owner limits (2026-11-17): at most 10 units and 2 KB an answer, 300 reads a day per person with a fixed
 // refusal, no bulk mode, one audit record per answer with unit ids and no text, one admin notice a day above 150 distinct units; the `lessons` token permission ("Team knowledge") and the project and company scope hold.
-import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, LOCAL_KNOWLEDGE_NO_BULK_MESSAGE } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../../packages/broker/src/ports/adapter-registry.js";
 import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
@@ -20,7 +19,7 @@ const REPO_BILL = "https://github.com/example/billing.git";
 const OTHER_COMPANY = "org_zzzzzzzzzzzzzzzzzzzz";
 const TEXT = "BODYTEXTMARKER";
 
-interface World { h: Harness; lessons: LocalLessons; notices: { queueAdmin: ReturnType<typeof vi.fn> } }
+interface World { h: Harness; lessons: LocalLessons; notices: { queueAdmin: Mock<(notice: { orgId: string; developerIds: readonly string[]; noticeId: string; kind: "knowledge_read" }) => Promise<number>> } }
 
 async function world(): Promise<World> {
   const h = createHarness({ audit: "recording" });
@@ -35,10 +34,10 @@ async function world(): Promise<World> {
     flow: h.deps, registry, companyId: COMPANY, owner, blobs: { get: async () => undefined } as never, milestones: { register: () => () => undefined },
     audit: h.deps.audit, admission: h.deps.admission, metering: createPriceTableMetering({ currency: "USD", models: {} }),
     approvers: createLocalOwnerApprovers({ owner, verifySession: () => false }), identity: createLocalOwnerIdentity({ companyId: COMPANY, linkedAccounts: [{ provider: "github", tenant: "", accountId: "owner-gh" }] }),
-    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: (async () => new Response("{}", { status: 500 })) as typeof fetch },
+    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: () => Promise.resolve(new Response("{}", { status: 500 })) },
     enabled: () => true, now: () => h.clock.now, log: () => undefined,
   });
-  return { h, lessons, notices: { queueAdmin: vi.fn(async () => 1) } };
+  return { h, lessons, notices: { queueAdmin: vi.fn(() => Promise.resolve(1)) } };
 }
 
 const active = (over: Parameters<typeof lessonRecord>[0] = {}) => lessonRecord({
@@ -51,11 +50,15 @@ async function put(w: World, ...list: ReturnType<typeof lessonRecord>[]): Promis
     await w.lessons.runtime.store.commit(key, await w.lessons.runtime.store.setVersion(key), [lesson], 1);
   }
 }
-type Caller = Harness["owner"] & { scriptToken?: { tokenId: string; name: string; permissions: ReadonlyArray<"read" | "start" | "lessons">; projects: readonly string[] } };
+type Caller = Parameters<ReturnType<typeof createLessonRoutes>>[1];
 const route = (w: World) => createLessonRoutes({ lessons: w.lessons, flow: w.h.deps, notices: w.notices });
-async function post(w: World, path: string, body: unknown, caller: Caller = w.h.owner): Promise<{ status: number | undefined; body: Record<string, any> }> {
+interface Reply {
+  status: number | undefined;
+  body: { status?: string; project?: string; lessons: Array<{ id: string }>; markdown: string; repos: Array<{ repo: string; areas: unknown[] }>; more: number; error?: { code?: string; message?: string } };
+}
+async function post(w: World, path: string, body: unknown, caller: Caller = w.h.owner): Promise<Reply> {
   const answer = await route(w)({ method: "POST", path, headers: {}, body: JSON.stringify(body) }, caller);
-  return { status: answer?.statusCode, body: answer === undefined ? {} : JSON.parse(answer.body) };
+  return { status: answer?.statusCode, body: (answer === undefined ? {} : JSON.parse(answer.body)) as Reply["body"] };
 }
 const ask = (w: World, body: unknown = {}, project = "payments", caller?: Caller) => post(w, `/v1/dev/projects/${project}/lessons`, body, caller);
 const areas = (w: World, body: unknown = {}, project = "payments", caller?: Caller) => post(w, `/v1/dev/projects/${project}/knowledge/areas`, body, caller);
@@ -93,7 +96,7 @@ describe("audit: one record per answer, unit ids only", () => {
     const token: Caller = { ...w.h.owner, scriptToken: { tokenId: "stk_abc", name: "tool", permissions: ["lessons"], projects: ["payments"] } };
     const answer = await ask(w, { task: "TASK-WORDS-never-audited", files: ["src/secret-file.ts"], repo: REPO_PAY }, "payments", token);
     expect(answer.status).toBe(200);
-    expect(answer.body["lessons"]).toHaveLength(2);
+    expect(answer.body.lessons).toHaveLength(2);
     const events = knowledgeAudit(w);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ actor: { id: w.h.owner.principal.personId }, details: { tool: "lessons", via: "token", units: 2 } });
@@ -124,8 +127,8 @@ describe("no bulk path", () => {
     expect(await ask(w, { all: true })).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID", message: `all: ${LOCAL_KNOWLEDGE_NO_BULK_MESSAGE}` } } });
     const answer = await ask(w, { all: false });
     expect(answer.status).toBe(200);
-    expect(answer.body["lessons"].length).toBeLessThanOrEqual(10);
-    expect(Buffer.byteLength(answer.body["markdown"], "utf8")).toBeLessThanOrEqual(2_048);
+    expect(answer.body.lessons.length).toBeLessThanOrEqual(10);
+    expect(Buffer.byteLength(answer.body.markdown, "utf8")).toBeLessThanOrEqual(2_048);
     for (const path of ["/v1/dev/projects/payments/knowledge", "/v1/dev/projects/payments/knowledge/all", "/v1/dev/projects/payments/lessons/all"]) expect((await post(w, path, {})).status, path).not.toBe(200);
   });
 });
@@ -148,10 +151,10 @@ describe("the permission and the scope", () => {
     const w = await world();
     await put(w, active({ id: "les_pay00001", scope: { paths: ["src/pay/**"] } }), active({ id: "les_bill0001", project: "billing", scope: { paths: ["src/bill/**"] }, title: "Billing only" }));
     const pay = await ask(w, { files: ["src/pay/a.ts"] });
-    expect(pay.body["lessons"].map((l: { id: string }) => l.id)).toEqual(["les_pay00001"]);
+    expect(pay.body.lessons.map((l: { id: string }) => l.id)).toEqual(["les_pay00001"]);
     const bill = await ask(w, { files: ["src/bill/a.ts"] }, "billing");
-    expect(bill.body["lessons"].map((l: { id: string }) => l.id)).toEqual(["les_bill0001"]);
-    expect((await ask(w, { files: ["src/bill/a.ts"] })).body["lessons"]).toEqual([]);
+    expect(bill.body.lessons.map((l: { id: string }) => l.id)).toEqual(["les_bill0001"]);
+    expect((await ask(w, { files: ["src/bill/a.ts"] })).body.lessons).toEqual([]);
     const tree = await areas(w);
     expect(JSON.stringify(tree.body)).not.toContain("bill");
     expect((await ask(w, {}, "nope")).status).toBe(404);
@@ -164,14 +167,14 @@ describe("the permission and the scope", () => {
     const w = await world();
     await put(w, active({ id: "les_other001", workspaceId: OTHER_COMPANY, title: "Other company" }), active({ id: "les_mine0001" }));
     const answer = await ask(w);
-    expect(answer.body["lessons"].map((l: { id: string }) => l.id)).toEqual(["les_mine0001"]);
+    expect(answer.body.lessons.map((l: { id: string }) => l.id)).toEqual(["les_mine0001"]);
     expect(JSON.stringify((await areas(w)).body)).not.toContain("Other");
     const mine = await w.h.store.query({ pk: `ORG#${COMPANY}#KNOWLEDGE_READ_DAY` });
     const theirs = await w.h.store.query({ pk: `ORG#${OTHER_COMPANY}#KNOWLEDGE_READ_DAY` });
     expect(mine.items.length).toBe(1);
     expect(theirs.items).toEqual([]);
     // A caller of another company is refused outright.
-    expect((await ask(w, {}, "payments", { ...w.h.owner, principal: { ...w.h.owner.principal, companyId: OTHER_COMPANY } } as Caller)).status).toBe(403);
+    expect((await ask(w, {}, "payments", { ...w.h.owner, principal: { ...w.h.owner.principal, companyId: OTHER_COMPANY } })).status).toBe(403);
   });
 });
 
@@ -181,13 +184,13 @@ describe("the admin notice: above 150 distinct units, once a day", () => {
     await put(w, ...Array.from({ length: 152 }, (_, i) => active({ id: `les_dist${String(i).padStart(5, "0")}`, scope: { paths: [`src/f${String(i)}.ts`] } })));
     let calls = 0;
     const read = async (i: number) => { if (calls % 50 === 0) w.h.clock.advance(60); calls += 1; return ask(w, { files: [`src/f${String(i)}.ts`] }); };
-    for (let i = 0; i < 150; i += 1) expect((await read(i)).body["lessons"]).toHaveLength(1);
+    for (let i = 0; i < 150; i += 1) expect((await read(i)).body.lessons).toHaveLength(1);
     // The same units again: nothing new, so no notice.
     for (let i = 0; i < 20; i += 1) await read(i);
     expect(w.notices.queueAdmin).not.toHaveBeenCalled();
     await read(150);
     expect(w.notices.queueAdmin).toHaveBeenCalledTimes(1);
-    expect(w.notices.queueAdmin.mock.calls[0]![0]).toMatchObject({ orgId: COMPANY, developerIds: [w.lessons.owner.id], kind: "knowledge_read", noticeId: expect.stringMatching(/^knowledge-2026-11-09-[0-9a-f]{16}$/u) });
+    expect(w.notices.queueAdmin.mock.calls[0]![0]).toMatchObject({ orgId: COMPANY, developerIds: [w.lessons.owner.id], kind: "knowledge_read", noticeId: expect.stringMatching(/^knowledge-2026-11-09-[0-9a-f]{16}$/u) as string });
     await read(151);
     expect(w.notices.queueAdmin).toHaveBeenCalledTimes(1);
     const alerts = w.h.audit.filter((event) => event.action === "lesson.knowledge_read_alert");
@@ -198,6 +201,17 @@ describe("the admin notice: above 150 distinct units, once a day", () => {
     w.h.clock.advance(86_400);
     for (let i = 0; i < 151; i += 1) await read(i);
     expect(w.notices.queueAdmin).toHaveBeenCalledTimes(2);
+  });
+
+  it("a counter fault while noting the units leaves the answer and logs one fixed event, no text", async () => {
+    const w = await world();
+    await put(w, active());
+    const logs: Array<Record<string, unknown>> = [];
+    w.h.deps.log = (entry: Record<string, unknown>) => { logs.push(entry); };
+    const realPut = w.h.store.put.bind(w.h.store);
+    w.h.store.put = (async (request: Parameters<typeof realPut>[0]) => { if (String(request.item.pk).includes("KNOWLEDGE_UNIT_DAY")) throw new Error("store down"); return realPut(request); });
+    expect((await ask(w)).status).toBe(200);
+    expect(logs.filter((entry) => entry["event"] === "knowledge.note_failed")).toEqual([{ component: "lessons", event: "knowledge.note_failed", error: "Error" }]);
   });
 
   it("a person under the line is never told, and a failing notice never changes the answer", async () => {
@@ -211,7 +225,7 @@ describe("the admin notice: above 150 distinct units, once a day", () => {
     let last: Awaited<ReturnType<typeof ask>> | undefined;
     for (let i = 0; i < 151; i += 1) { if (i % 50 === 0) failing.h.clock.advance(60); last = await ask(failing, { files: [`src/f${String(i)}.ts`] }); }
     expect(last!.status).toBe(200);
-    expect(last!.body["lessons"]).toHaveLength(1);
+    expect(last!.body.lessons).toHaveLength(1);
   });
 });
 
@@ -226,21 +240,32 @@ describe("the table of contents: a tree, names and numbers only", () => {
     const tree = await areas(w);
     expect(tree.status).toBe(200);
     expect(tree.body).toMatchObject({ status: "ok", project: "payments", complete: true, more: 0 });
-    const demo = tree.body["repos"].find((r: { repo: string }) => r.repo === "demo");
-    expect(demo.areas).toEqual([{ area: "src/", rules: 0, lessons: 2, facts: 0, skills: 0 }, { area: "tests/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
-    const any = tree.body["repos"].find((r: { repo: string }) => r.repo === "any repository");
-    expect(any.areas).toEqual([{ area: "any folder", rules: 0, lessons: 1, facts: 0, skills: 0 }, { area: "whole repository", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
+    const demo = tree.body.repos.find((r: { repo: string }) => r.repo === "demo");
+    expect(demo?.areas).toEqual([{ area: "src/", rules: 0, lessons: 2, facts: 0, skills: 0 }, { area: "tests/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
+    const any = tree.body.repos.find((r: { repo: string }) => r.repo === "any repository");
+    expect(any?.areas).toEqual([{ area: "any folder", rules: 0, lessons: 1, facts: 0, skills: 0 }, { area: "whole repository", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
     const written = JSON.stringify(tree.body);
     for (const text of ["TITLE-NOT-IN-TREE", "les_tree", "withRetry", TEXT]) expect(written, text).not.toContain(text);
     // Narrowed to one repository (the checkout's remote): that repository's rows and the ones that apply to every repository.
     const only = await areas(w, { repo: REPO_PAY });
-    expect(only.body["repos"].map((r: { repo: string }) => r.repo).sort()).toEqual(["any repository", "demo"]);
+    expect(only.body.repos.map((r: { repo: string }) => r.repo).sort()).toEqual(["any repository", "demo"]);
     // Cut at 100 rows, biggest first, with a count of the rest.
     const big = await world();
     await put(big, ...Array.from({ length: 130 }, (_, i) => active({ id: `les_big${String(i).padStart(5, "0")}`, scope: { paths: [`dir${String(i)}/**`] } })));
     const cut = await areas(big);
-    expect(cut.body["repos"].flatMap((r: { areas: unknown[] }) => r.areas)).toHaveLength(100);
-    expect(cut.body["more"]).toBe(30);
+    expect(cut.body.repos.flatMap((r: { areas: unknown[] }) => r.areas)).toHaveLength(100);
+    expect(cut.body.more).toBe(30);
+  });
+
+  it("shows no secret-shaped label and no lesson whose scope names a person", async () => {
+    const w = await world();
+    const ownerName = w.lessons.owner.name;
+    await put(w, active({ id: "les_secret01", scope: { repos: ["sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"], paths: ["src/**"] } }), active({ id: "les_person01", scope: { paths: [`${ownerName}/**`] } }), active({ id: "les_fine0001", scope: { paths: ["lib/**"] } }));
+    const written = JSON.stringify((await areas(w)).body);
+    expect(written).not.toContain("sk-ant-api03");
+    expect(written).not.toContain(ownerName);
+    expect(written).toContain("lib/");
+    expect(written).toContain("any repository");
   });
 
   it("counts only what an answer could give: a pending lesson, a lesson on trial and a lesson that names a person are not counted", async () => {
@@ -248,6 +273,6 @@ describe("the table of contents: a tree, names and numbers only", () => {
     await put(w, active({ id: "les_ok000001", scope: { paths: ["src/**"] } }), active({ id: "les_pend0001", status: "pending", approvals: [], pendingExpiresAt: 1_900_000_000_000, scope: { paths: ["src/**"] } }),
       active({ id: "les_trial001", approvals: [{ approvalId: "tr", by: "system:trial", at: 1, mode: "trial" }], trial: { state: "trial", startedAt: 1 }, scope: { paths: ["src/**"] } }));
     const tree = await areas(w);
-    expect(tree.body["repos"][0].areas).toEqual([{ area: "src/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
+    expect(tree.body.repos[0]?.areas).toEqual([{ area: "src/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
   });
 });

@@ -40,12 +40,21 @@ export interface McpServeDeps extends DeveloperSessionDeps {
   clock?: { now(): number; sleep(ms: number, signal: AbortSignal): Promise<void> };
 }
 
+/**
+ * The PATH git is looked up on: the inherited entries that are absolute (an empty entry, `.` or any relative one would run a `git` planted in the checkout this server was started in), or a fixed list of the usual
+ * places when none is left. Exported for its test.
+ */
+export function safeGitPath(inherited: string | undefined): string {
+  const kept = (inherited ?? "").split(":").filter((entry) => entry.startsWith("/") && !entry.split("/").includes(".."));
+  return kept.length > 0 ? kept.join(":") : "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin";
+}
+
 /** `git remote get-url origin` in the working directory: one short answer, two seconds at most, never an error (no git, no checkout or no remote is just "none"). */
 function gitOriginOfCwd(): Promise<string | undefined> {
   return new Promise((resolve) => {
-    execFile("git", ["remote", "get-url", "origin"], { cwd: process.cwd(), timeout: 2_000, maxBuffer: 4_096, env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
+    execFile("git", ["remote", "get-url", "origin"], { cwd: process.cwd(), timeout: 2_000, maxBuffer: 4_096, env: { PATH: safeGitPath(process.env["PATH"]), HOME: process.env["HOME"] ?? "", GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
       const remote = error === null ? stdout.trim() : "";
-      resolve(remote === "" || remote.length > 400 || /[\u0000-\u001f]/u.test(remote) ? undefined : remote);
+      resolve(remote === "" || remote.length > 400 || /\p{Cc}/u.test(remote) ? undefined : remote);
     });
   });
 }
