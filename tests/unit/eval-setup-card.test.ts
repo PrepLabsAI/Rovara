@@ -1,15 +1,14 @@
 // L4-EVC (DEC 254zzz20 D5, D6, D8): the eval's ONE setup card. One approval in plain dollars (the confirm and the spend approval in one act, through the existing approvers); a changed eval set rides on the
 // earlier approval while it stays inside the approved limit, and asks again (with its reason) when it does not. Every guard has a named mutant in
 // briefs/lead4/L4-EVC-MUTANTS-20261118.md, each broken by hand and seen to fail one of these tests.
-import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { EvalDiscoveryConfirmBodySchema, EvalSpendApprovalRecordSchema, evalCommandFingerprintOf, evalQuestionHash, type Principal } from "@agentx/contracts";
+import { EvalDiscoveryConfirmBodySchema, EvalSpendApprovalRecordSchema, evalCommandFingerprintOf, evalQuestionHash } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { dollarRangeOf, dollarsOf, evalApprovalSentence, evalDollarsOf } from "../../packages/broker/src/core/setup-agent/eval-cost.js";
 import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-card.js";
 import { readEvalDiscovery } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
 import { evalSpendKey, proposeEvalSpendApproval, readApprovedEvalPlan } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
-import { A, B, CAP, COST_PER_CASE, MODEL, NOW, ROLES, VERSION, command, company, filesOf, person, project, reportOf, reportPath, type Role } from "../support/eval-card-world.js";
+import { A, B, CAP, COST_PER_CASE, MODEL, ROLES, VERSION, command, company, filesOf, person, project, reportOf, reportPath, type Role } from "../support/eval-card-world.js";
 
 describe("the dollars on the card", () => {
   it("reads in plain words: one run, the most a check can cost, and the monthly cap", () => {
@@ -27,6 +26,10 @@ describe("the dollars on the card", () => {
     expect(dollarsOf(4_000_000)).toBe("$4.00");
     expect(dollarRangeOf(20, 180)).toBe("under $0.01");
     expect(dollarRangeOf(20, 50_000)).toBe("up to $0.05");
+  });
+  it("a most (the per-PR top, the monthly cap) is rounded UP to the cent, never shown below what is approved", () => {
+    expect(dollarsOf(1_804_900)).toBe("$1.80");
+    expect(evalApprovalSentence({ perCheckLowMicros: 200_000, perCheckHighMicros: 1_804_900, monthlyCapMicros: 50_000_001 })).toBe("Running your evals on each AI change will cost about $0.20-$1.81 per PR, at most $50.01 a month. Approve?");
   });
   it("refuses a figure that is not a whole positive number", () => {
     for (const bad of [{ questions: 0 }, { costMicrosPerQuestion: 1.5 }, { maximumMicros: -1 }, { monthlyCapMicros: Number.NaN }]) {
@@ -56,7 +59,7 @@ describe("one approval (D8)", () => {
     expect(record).toMatchObject({ state: "approved", approvedBy: { personId: who }, setupRevision: 7, plan: { dollars: { perCheckLowMicros: 200_000, perCheckHighMicros: 1_800_000, monthlyCapMicros: CAP } } });
     expect((await readApprovedEvalPlan({ store: w.store, companyId: A }, project))?.plan.selection).toBe("evals/demo");
   });
-  it.each(["member", "contributor", "revoked", "auditor"])("%s may neither confirm nor approve: nothing is marked, kept or approved", async who => {
+  it.each(["member", "contributor", "revoked"])("%s may neither confirm nor approve: nothing is marked, kept or approved", async who => {
     const w = company(A); const r = await w.run(filesOf(2), reportOf());
     await expect(r.approve(person(A, who))).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(w.approved).toEqual([]);
@@ -93,17 +96,27 @@ describe("one approval (D8)", () => {
     expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
     expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))?.state).toBe("reported");
   });
+  it("the approval step is offered exactly the item this confirm proposed (its own revision and digest)", async () => {
+    const w = company(A); const r = await w.run(filesOf(2), reportOf());
+    const offers: Array<{ requestId: string; revision: number; artifactDigest: string }> = [];
+    await r.approve(person(A, "admin"), {}, { approve: async (offer, principal) => { offers.push(offer); await w.decide(offer, principal); } });
+    const stored = (await w.record())!;
+    expect(offers).toEqual([{ requestId: `eval-${stored.digest.slice(0, 40)}-${stored.revision}`, revision: stored.revision, artifactDigest: stored.digest }]);
+  });
+  it("a refused approval step puts the report back to 'reported' so the person can approve again, and the second try approves the same waiting item", async () => {
+    const w = company(A); const r = await w.run(filesOf(2), reportOf());
+    await expect(r.approve(person(A, "admin"), {}, { approve: async () => { throw new Error("refused:sign_in_not_fresh"); } })).rejects.toThrow("sign_in_not_fresh");
+    expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))?.state).toBe("reported");
+    const waiting = (await w.record())!;
+    expect(waiting.state).toBe("waiting");
+    await r.approve(person(A, "admin"));
+    expect((await w.record())).toMatchObject({ state: "approved", digest: waiting.digest, revision: waiting.revision });
+  });
   it("a plain confirm (no approve) still leaves the spend waiting for its own approval, as before", async () => {
     const w = company(A); const r = await w.run(filesOf(2), reportOf());
     const answer = await r.confirmOnly();
     expect(answer.evalSpend?.state).toBe("waiting");
     expect(w.approved).toEqual([]);
-  });
-  it("if the approval step is refused the eval stays confirmed with its spend waiting, and nothing may be spent", async () => {
-    const w = company(A); const r = await w.run(filesOf(2), reportOf());
-    await expect(r.approve(person(A, "admin"), {}, { approve: async () => { throw new Error("refused:sign_in_not_fresh"); } })).rejects.toThrow("sign_in_not_fresh");
-    expect((await w.item())?.state).toBe("waiting");
-    expect(await readApprovedEvalPlan({ store: w.store, companyId: A }, project)).toBeUndefined();
   });
   it("the card after approval shows the approved dollars", async () => {
     const w = company(A); const r = await w.run(filesOf(2), reportOf());

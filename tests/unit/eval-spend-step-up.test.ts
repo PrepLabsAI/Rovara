@@ -64,7 +64,7 @@ describe("a step-up proof for a project's eval spend item", () => {
     ["another request", { requestId: `eval-${"e".repeat(40)}-2` }, "other_request"],
     ["another card", { card: { cardId: "eval_spend:other", contentVersion: DIGEST } }, "other_card"],
   ])("a proof issued for %s is refused", async (_name, over, reason) => {
-    const token = issueEvalSpendStepUpApproval(KEY, act(over as never), NOW).token;
+    const token = issueEvalSpendStepUpApproval(KEY, act(over), NOW).token;
     expect(await verdictOf(evalRequest(), token)).toMatchObject({ approved: false, reason });
   });
   it("is refused for another company's request, for a person who is not a member of the request's company, and for a step-up that is not fresh", async () => {

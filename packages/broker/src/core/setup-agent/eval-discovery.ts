@@ -275,8 +275,9 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   ]);
   if (!marked.applied) refuse(log, "eval_discovery_confirm_refused", "stale", "CHANGE_STALE", "That eval report was already confirmed, or a newer setup run replaced it. Read it again.");
   const table = { store: deps.store, companyId: company, ...(deps.members === undefined ? {} : { members: deps.members }), monthlyCapMicros };
+  let proposed: Awaited<ReturnType<typeof proposeEvalSpendApproval>>;
   try {
-    await proposeEvalSpendApproval(table, project, { selection: suite.selection, inputs, estimate, budget, dollars }, plan, latest?.revision === undefined ? undefined : { setupRevision: latest.revision });
+    proposed = await proposeEvalSpendApproval(table, project, { selection: suite.selection, inputs, estimate, budget, dollars }, plan, latest?.revision === undefined ? undefined : { setupRevision: latest.revision });
   } catch (error) {
     await deps.store.update({ key, ops: [change.set("state", "reported"), change.remove("confirmed")], condition: when.and(when.eq("state", "confirmed"), when.eq("reportDigest", row.reportDigest)) }).catch(() => undefined);
     log?.({ event: "eval_discovery_confirm_refused", reason: "proposal" });
@@ -285,9 +286,11 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   log?.({ event: "eval_discovery_confirmed" });
   let item = await readEvalSpendItem(table, project);
   // One approval: the item this confirm just proposed, approved in the same act through the host's own decision path. A changed eval inside its approved limit is already approved (D6): nothing to ask.
-  if (body.approve === true && item?.state === "waiting" && item.approval !== undefined) {
-    try { await deps.approve!({ requestId: item.approval.requestId, revision: item.approval.revision, artifactDigest: item.approval.artifactDigest }, principal); } catch (error) {
-      // The eval stays confirmed and its spend item stays waiting, so the person can still approve it by itself; nothing is spent.
+  // The offer is the item THIS confirm proposed (its own revision and digest), never whatever is stored a moment later: a newer item of someone else's is never approved by this person's proof.
+  if (body.approve === true && proposed.state === "waiting") {
+    try { await deps.approve!({ requestId: `eval-${proposed.digest.slice(0, 40)}-${String(proposed.revision)}`, revision: proposed.revision, artifactDigest: proposed.digest }, principal); } catch (error) {
+      // Nothing is approved or spent. The report goes back to `reported` (as a failed proposal does), so the person can confirm and approve again; the waiting item is the same one then.
+      await deps.store.update({ key, ops: [change.set("state", "reported"), change.remove("confirmed")], condition: when.and(when.eq("state", "confirmed"), when.eq("reportDigest", row.reportDigest)) }).catch(() => undefined);
       log?.({ event: "eval_discovery_confirm_refused", reason: "approve" });
       throw error;
     }

@@ -4,7 +4,7 @@
 import type { DocumentStore, OrgId, Principal } from "@agentx/contracts";
 import { developerIdOf } from "../sessions/create.js";
 import type { SessionMembers } from "../sessions/access.js";
-import { dollarRangeOf, dollarsOf, evalApprovalSentence } from "./eval-cost.js";
+import { dollarRangeOf, dollarsUpOf, evalApprovalSentence } from "./eval-cost.js";
 import { evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
 import { readEvalSpendItem, roleFor } from "./eval-spend.js";
 
@@ -54,7 +54,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
     for (const suite of found.report.suites) {
       const dollars = evalProposalDollars(suite.questions.length, suite, monthlyCap);
       if (dollars === undefined) continue;
-      suites.push({ selection: suite.selection, files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsOf(dollars.monthlyCapMicros),
+      suites.push({ selection: suite.selection, files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
         seen: { perCheckHighMicros: dollars.perCheckHighMicros, monthlyCapMicros: dollars.monthlyCapMicros } });
     }
   }

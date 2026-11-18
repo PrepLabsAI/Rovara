@@ -1,7 +1,6 @@
 // L4-EVC (DEC 254zzz20 D5, D8): the hosted eval card routes on the deployed API (setup-run-routes.ts): GET eval (the card, dollars only), POST eval-approve (the confirm AND the spend approval in one
 // act: a fresh step-up, the live owner/admin/maintainer rule, the dollars the person saw) (the dollar card; eval-decide and the opt-in eval-health are a second PR). Through the real hosted approvers point, the
 // real decision gate and the real eval spend subject over the company's own store.
-import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -183,7 +182,7 @@ describe("POST eval-approve: one approval", () => {
     const admin = person("p-admin", FAKE_COMPANY, "admin");
     const body = await approveBody(call, admin);
     reader.cap = undefined;
-    expect((await call(get(`${RUN}/eval`), admin)).body).toMatchObject({ suites: [], unavailable: expect.stringContaining("no eval budget") });
+    expect((await call(get(`${RUN}/eval`), admin)).body).toMatchObject({ suites: [], unavailable: "This install has no eval budget, so an eval can't be approved here yet." });
     expect((await call(post(`${RUN}/eval-approve`, body), admin)).status).toBe(400);
     expect(await world.store.get(evalSpendKey(FAKE_COMPANY, PROJECT))).toBeUndefined();
   });

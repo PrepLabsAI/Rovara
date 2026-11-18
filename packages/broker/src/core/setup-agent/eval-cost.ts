@@ -29,9 +29,16 @@ export function dollarsOf(micros: number): string {
   return `$${(micros / 1_000_000).toFixed(2)}`;
 }
 
+/** Dollars rounded UP to the cent: a figure that stands for a most (a ceiling, a cap) is never shown below what is approved. */
+export function dollarsUpOf(micros: number): string {
+  if (!Number.isFinite(micros) || micros < 0) return "$0.00";
+  if (micros > 0 && micros < 10_000) return "under $0.01";
+  return `$${(Math.ceil(micros / 10_000) / 100).toFixed(2)}`;
+}
+
 /** "about $A-$B": the range as one phrase; "about $A" when both read the same; "up to $B" when the low end is too small to show. */
 export function dollarRangeOf(lowMicros: number, highMicros: number): string {
-  const low = dollarsOf(lowMicros); const high = dollarsOf(highMicros);
+  const low = dollarsOf(lowMicros); const high = dollarsUpOf(highMicros);
   if (highMicros < 10_000) return "under $0.01";
   if (low === high) return `about ${low}`;
   return lowMicros < 10_000 ? `up to ${high}` : `about ${low}-${high}`;
@@ -39,11 +46,11 @@ export function dollarRangeOf(lowMicros: number, highMicros: number): string {
 
 /** The card's one sentence (DEC 254zzz20 D8), in dollars only. */
 export function evalApprovalSentence(dollars: EvalSpendDollars): string {
-  return `Running your evals on each AI change will cost ${dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros)} per PR, at most ${dollarsOf(dollars.monthlyCapMicros)} a month. Approve?`;
+  return `Running your evals on each AI change will cost ${dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros)} per PR, at most ${dollarsUpOf(dollars.monthlyCapMicros)} a month. Approve?`;
 }
 
 /** The fixed reasons an approval asks again (DEC 254zzz20 D6). The first carries the approved ceiling it grew past. */
 export function evalAsksAgainWords(asks: { reason: "grew" | "changed"; approvedHighMicros?: number | undefined }): string {
-  if (asks.reason === "grew") return asks.approvedHighMicros === undefined ? "Needs approval: your eval set grew past the approved limit" : `Needs approval: your eval set grew past the approved ${dollarsOf(asks.approvedHighMicros)}`;
+  if (asks.reason === "grew") return asks.approvedHighMicros === undefined ? "Needs approval: your eval set grew past the approved limit" : `Needs approval: your eval set grew past the approved ${dollarsUpOf(asks.approvedHighMicros)}`;
   return "Needs approval: the model, judge or command of your eval changed";
 }

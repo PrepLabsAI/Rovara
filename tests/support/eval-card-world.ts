@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach } from "vitest";
-import { evalCommandFingerprintOf, type Approvers, type OrgRole, type Principal, type SetupEvalDiscoveryReport } from "@agentx/contracts";
+import { evalCommandFingerprintOf, type Approvers, type DocumentStore, type OrgRole, type Principal, type SetupEvalDiscoveryReport } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createNoopAuditSink } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
@@ -62,7 +62,7 @@ export const gitReader = (dir: string): NonNullable<EvalDiscoveryConfirmDeps["re
 export const person = (companyId: string, personId: string): Principal => ({ companyId, personId, provider: "test-identity", displayName: personId, roles: [] });
 export type Role = { company: OrgRole; grant?: "developer" | "administrator" } | undefined;
 export const ROLES: Record<string, Role> = {
-  owner: { company: "owner" }, admin: { company: "admin" }, maintainer: { company: "member", grant: "administrator" }, member: { company: "member" }, contributor: { company: "member", grant: "developer" }, revoked: undefined, auditor: { company: "auditor" },
+  owner: { company: "owner" }, admin: { company: "admin" }, maintainer: { company: "member", grant: "administrator" }, member: { company: "member" }, contributor: { company: "member", grant: "developer" }, revoked: undefined,
 };
 function people(companyId: string, roles: Record<string, Role>) {
   return { membershipOf: async (personId: string) => { const role = roles[personId]; return role === undefined ? undefined : { companyId, role: role.company }; },
@@ -70,7 +70,7 @@ function people(companyId: string, roles: Record<string, Role>) {
 }
 
 /** One company with a store shared by every setup run made on it (a later run is a later report on the same project). */
-export function company(companyId: string, roles: Record<string, Role> = { ...ROLES }, store = new MemoryDocumentStore()) {
+export function company(companyId: string, roles: Record<string, Role> = { ...ROLES }, store: DocumentStore = new MemoryDocumentStore()) {
   const members = deployedSessionMembers(companyId, people(companyId, roles));
   let decider: Principal = person(companyId, "admin");
   const approvers: Approvers = { requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_request, proof) => ({ approved: true, approver: decider, method: proof.method, proofId: proof.proofId }) };
@@ -91,9 +91,9 @@ export function company(companyId: string, roles: Record<string, Role> = { ...RO
     await store.put({ item: { ...taskKey(taskId), taskId, workspaceId, project, companyId, purpose: "setup_agent", preparedBase: [{ repositoryId: "web", baseCommitSha: repo.baseSha }] } });
     await store.put({ item: { ...setupAgentKey(companyId, project), entityType: "SETUP_AGENT", taskId } });
     const operation = { kind: "task", workflowMode: "SETUP_AGENT", status: "RUNNING", workspaceId, companyId };
-    await handleSetupAgentCallback({ store, companyId, now: () => NOW, log: () => undefined }, operation as never, { kind: "eval_discovery", report });
+    await handleSetupAgentCallback({ store, companyId, now: () => NOW, log: () => undefined }, operation, { kind: "eval_discovery", report });
     const deps = (over: Partial<EvalDiscoveryConfirmDeps> = {}): EvalDiscoveryConfirmDeps => ({ store, companyId, now: () => NOW, members, ...(state.cap === undefined ? {} : { monthlyCap: async () => state.cap }),
-      latest: async (p) => (p === project ? { revision: 7, definition: { repositories: [{ name: "web", url: "https://github.com/acme/web" }] } as never } : undefined), readFile: gitReader(repo.dir), approve: decide, ...over });
+      latest: async (p) => (p === project ? { revision: 7, definition: { repositories: [{ name: "web", url: "https://github.com/acme/web" }] } } : undefined), readFile: gitReader(repo.dir), approve: decide, ...over });
     const digest = async () => (await readEvalDiscovery({ store, companyId }, project))!.reportDigest;
     const card = (as: Principal = person(companyId, "admin")) => readEvalCard({ store, companyId, members, monthlyCap: async () => state.cap }, project, as);
     /** The person's yes as the hosted route sends it: the paths and the dollars they were shown. */

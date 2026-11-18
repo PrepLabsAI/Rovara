@@ -9,7 +9,7 @@ import { SubjectRefusal, type DecisionSubject } from "../decisions/approval-gate
 import { localOwnerMembers, type SessionMembers, type SessionPerson } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import { setupPartition } from "./keys.js";
-import { dollarRangeOf, dollarsOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
+import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
 
 export const EVAL_SPEND_KIND = "setup-eval-spend";
 /** Cap and membership come from the trusted host, never the proposal or a stored approver role. */
@@ -204,7 +204,7 @@ export async function readEvalSpendItem(deps: Table, project: string): Promise<E
     const { estimate, budget, dollars } = row.plan;
     const state = row.state === "approved" && await approvedRole(deps, row) === undefined ? "approval needs renewing" as const : row.state;
     const card: EvalSpendCardView | undefined = dollars === undefined ? undefined : {
-      sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsOf(dollars.monthlyCapMicros),
+      sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
       ...(row.state === "waiting" && row.asksAgain !== undefined ? { needsApproval: evalAsksAgainWords(row.asksAgain) } : {}),
       ...(row.state === "approved" && row.carriedFrom !== undefined ? { carried: true } : {}),
       ...(row.setupRevision === undefined ? {} : { setupRevision: row.setupRevision }),
@@ -213,7 +213,7 @@ export async function readEvalSpendItem(deps: Table, project: string): Promise<E
       ? { label: `Run the eval health check: about ${estimate.calls} calls, about ${money(estimate.costMicros)}`,
         budget: `Usually about ${budget.usual.calls} calls (about ${money(budget.usual.costMicros)}), at most ${budget.maximum.calls} calls (about ${money(budget.maximum.costMicros)})${fitsMonthlyCap(deps, row.plan) ? ", within the monthly cap" : ""}.` }
       : { label: "Run your evals on each AI change", budget: `${card.perPr} per PR, at most ${card.monthly} a month.`, card }),
-      ...(row.state === "waiting" ? { approval: { requestId: `eval-${row.digest.slice(0, 40)}-${row.revision}`, revision: row.revision, artifactDigest: row.digest, kind: EVAL_SPEND_KIND as typeof EVAL_SPEND_KIND, risk: "high" as const } } : {}),
+      ...(row.state === "waiting" ? { approval: { requestId: `eval-${row.digest.slice(0, 40)}-${row.revision}`, revision: row.revision, artifactDigest: row.digest, kind: EVAL_SPEND_KIND, risk: "high" as const } } : {}),
     };
   } catch { return undefined; }
 }
