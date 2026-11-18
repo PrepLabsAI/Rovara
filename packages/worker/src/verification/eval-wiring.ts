@@ -23,7 +23,7 @@ import { createEvalGatewayAccess } from "./eval-gateway-access.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evalImageDigestOf } from "@agentx/contracts";
+import { EVAL_VERTEX_ROW, evalImageDigestOf } from "@agentx/contracts";
 import { createBridgedEvalExec, createFreshEvalSandbox, freshEvalSandboxOffered, FRESH_EVAL_RUN_MAX_MS, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
 import type { DockerCli } from "../swebench/containers.js";
@@ -142,6 +142,17 @@ export interface EvalFreshHost {
 }
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/**
+ * The one path shape a frame of this eval row may have for the plan's model (the worker's model pin). A `vertex` row (L4-EVV) takes only the Vertex form (`/v1` or `/v1beta1`, a project and a location of the plain shapes, Google's own
+ * publisher, the model, one of the two operations); any other row is the Gemini API form exactly as before. The project and location are not pinned here: the worker does not know the connected ones, and the gateway builds its upstream path
+ * from its own key store and refuses any pair that is neither the connected one nor Rovara's placeholder.
+ */
+export function evalModelPathPattern(rowId: string, model: string): RegExp {
+  const operations = "(?:generateContent|streamGenerateContent)";
+  return rowId === EVAL_VERTEX_ROW
+    ? new RegExp(`^/(?:v1|v1beta1)/projects/(?:[a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{1,20})/locations/(?:global|[a-z]{2,15}-[a-z]{2,15}[0-9]{1,2})/publishers/google/models/${escapeRegExp(model)}:${operations}$`, "u")
+    : new RegExp(`^/v1(?:beta)?/models/${escapeRegExp(model)}:${operations}$`, "u");
+}
 
 /**
  * DEC 253n(2): the check round's fresh sandbox and model pin, built per run from the delivered plan (`deliveredPlan`) and this check's pin. `available()` answers only what the host can know before
@@ -173,7 +184,7 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
         repository: { directory: check.repository.directory, baseCommit: check.repository.baseCommit, candidateCommit: check.repository.candidateCommit },
         command: check.command, report: check.report, rowId: check.rowId, scratchDir: check.round.scratchDir, workingSandbox: check.round.workingSandbox, environment: host.environment,
       };
-      pinned = { row: check.rowId, path: new RegExp(`^/v1(?:beta)?/models/${escapeRegExp(check.model)}:(?:generateContent|streamGenerateContent)$`, "u") };
+      pinned = { row: check.rowId, path: evalModelPathPattern(check.rowId, check.model) };
       return await (host.make ?? createFreshEvalSandbox)(config).run(input);
     },
   };

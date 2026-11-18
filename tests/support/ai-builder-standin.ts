@@ -10,14 +10,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  attestRovaraOnlyBaseCheckout, evalBaseCacheKey, evalCommandFingerprintOf, evalJudgePinOf, evalQuestionHash, evalSetHashOf, evalSpendInputsDigest,
+  EVAL_VERTEX_PLACEHOLDER, attestRovaraOnlyBaseCheckout, evalBaseCacheKey, evalCommandFingerprintOf, evalJudgePinOf, evalQuestionHash, evalSetHashOf, evalSpendInputsDigest,
   routeEgressRequest, type BaseScoreCache, type EvalBaseRecord, type EvalSpendGrant, type ModelEgressFrame, type ModelEgressRow,
 } from "@agentx/contracts";
 import { fixtureEgressRows } from "../../packages/testing/src/ports/model-egress-fixtures.js";
 import { createEvalBaselines } from "../../packages/worker/src/verification/eval-baseline-refresh.js";
 import { candidatePromptChanges, changedPromptClassifier } from "../../packages/worker/src/verification/eval-changed-prompt.js";
 import type { EvalFinalCheckPlan, EvalFinalCheckPorts } from "../../packages/worker/src/verification/eval-final-check.js";
-import { createEvalMeter } from "../../packages/worker/src/verification/eval-model-access.js";
+import { createEvalGatewayAccess } from "../../packages/worker/src/verification/eval-gateway-access.js";
+import { freshEvalEnvironment } from "../../packages/worker/src/verification/eval-bridged-exec.js";
+import { createEvalMeter, type EvalModelAccess } from "../../packages/worker/src/verification/eval-model-access.js";
+import { createModelMetadataServer } from "../../packages/worker/src/model-helper-metadata.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
 import { createEvalRunner, type EvalSandboxExec, type EvalSandboxRequest } from "../../packages/worker/src/verification/eval-runner.js";
 import { answer, classAnswer, scriptedAccess } from "./eval-model-access.js";
@@ -102,6 +105,69 @@ export async function startFakeVertex(dir: string): Promise<FakeVertex> {
   };
 }
 
+/** The Vertex project and location the stand-in's customer connected in Cloud (what the gateway's key store holds). Rovara's sandbox never learns them. */
+export const CONNECTED_VERTEX = { project: "deskbot-prod-1", location: "us-central1" } as const;
+const TASK_TOKEN = "task-token-abcdefghijklmnop";
+const STAGE_SCOPE = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const GATEWAY_URL = "https://gateway.example.test";
+const VERTEX_PRODUCT_PATH = /^\/v1\/product\/vertex\/(v1|v1beta1)\/projects\/([^/]+)\/locations\/([^/]+)\/publishers\/google\/models\/([^/:]+):(generateContent|streamGenerateContent)$/u;
+
+export interface FakeGatewayOptions {
+  readonly fake: FakeVertex;
+  readonly frames: StandInWorld["frames"];
+  readonly current: { side: "old" | "new" };
+  /** Whether the project has a Vertex connection (a hold is refused when it has none). Default true. */
+  readonly connected?: boolean;
+  readonly providerClass?: "rate_limit" | "provider_error" | undefined;
+}
+/**
+ * The Cloud model gateway as far as the eval stage sees it, in process (no socket): the whole-stage hold, a Vertex product call under the stage's scope, the release. It applies the rules Cloud's product route applies: the call needs the
+ * stage's scope; the request's project and location must be the CONNECTED ones or Rovara's placeholder pair (which the route maps to the connected ones under a scope), anything else is refused before a send; the upstream path is built from the
+ * connection, never from the request, and goes through the REAL egress route check for a Vertex row. Money: each ok call settles at CALL_COST_MICROS.
+ */
+export function fakeEvalGateway(options: FakeGatewayOptions) {
+  const holds: Array<{ calls: number; costMicros: number }> = [];
+  const releases: Array<Record<string, unknown>> = [];
+  const lines = (status: number, body: string, settle: Record<string, unknown>): Response => new Response(
+    [{ kind: "head", status, headers: [["content-type", "application/json"]] }, { kind: "chunk", b64: Buffer.from(body).toString("base64") }, { kind: "settle", status, estimated: false, ...settle }].map(l => JSON.stringify(l)).join("\n") + "\n",
+    { status: 200, headers: { "content-type": "application/x-ndjson" } });
+  const refused = (status: number, refusal: string): Response => lines(status, JSON.stringify({ error: { code: status, message: "refused" } }), { class: "refused", refusal, costMicros: 0 });
+  const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+  const vertexRow = (rows as Record<string, ModelEgressRow>)["vertex"]!;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const headers = new Headers(init?.headers);
+    const body = init?.body instanceof Uint8Array ? Buffer.from(init.body) : Buffer.from(typeof init?.body === "string" ? init.body : "");
+    if (url.origin !== GATEWAY_URL || headers.get("x-api-key") !== TASK_TOKEN) return json({ error: "unauthorized" }, 401);
+    if (url.pathname === "/v1/product/eval/hold") {
+      const asked = JSON.parse(body.toString("utf8")) as { calls: number; costMicros: number };
+      holds.push({ calls: asked.calls, costMicros: asked.costMicros });
+      if (options.connected === false) return json({ error: "not_set_up" }, 404);
+      return json({ scope: STAGE_SCOPE, calls: asked.calls, costMicros: asked.costMicros, expiresAt: 1 });
+    }
+    if (url.pathname === "/v1/product/eval/release") { releases.push(JSON.parse(body.toString("utf8")) as Record<string, unknown>); return json({ released: 1 }); }
+    const match = VERTEX_PRODUCT_PATH.exec(url.pathname);
+    if (match === null) return json({ error: "not_found" }, 404);
+    const [, version, project, location, model, operation] = match as unknown as [string, string, string, string, string, string];
+    const path = url.pathname.slice("/v1/product/vertex".length);
+    const record = (routed: boolean, refusal?: string): void => { options.frames.push({ side: options.current.side, row: "vertex", path, routed, ...(refusal === undefined ? {} : { refusal }) }); };
+    if (headers.get("x-rovara-eval-scope") !== STAGE_SCOPE) { record(false, "not_found"); return refused(404, "not_found"); }
+    const placeholder = project === EVAL_VERTEX_PLACEHOLDER.projectId && location === EVAL_VERTEX_PLACEHOLDER.location;
+    if (!placeholder && (project !== CONNECTED_VERTEX.project || location !== CONNECTED_VERTEX.location)) { record(false, "not_allowed"); return refused(400, "not_allowed"); }
+    // The upstream path is built from the connection, never from the request.
+    const upstream = `/${version}/projects/${CONNECTED_VERTEX.project}/locations/${CONNECTED_VERTEX.location}/publishers/google/models/${model}:${operation}`;
+    const routed = routeEgressRequest(vertexRow, { vertex: CONNECTED_VERTEX }, { method: "POST", path: upstream, query: url.search.slice(1) });
+    record(routed.ok, routed.ok ? undefined : routed.refusal);
+    if (!routed.ok) return refused(403, routed.refusal);
+    if (options.providerClass !== undefined) return lines(options.providerClass === "rate_limit" ? 429 : 500, "{}", { class: options.providerClass, costMicros: 0 });
+    const response = await fetch(`${options.fake.endpoint}${upstream}`, { method: "POST", headers: { "content-type": headers.get("content-type") ?? "application/json", authorization: "Bearer gateway-minted-token" }, body });
+    const text = await response.text();
+    return lines(response.status, text, response.status === 200 ? { class: "ok", costMicros: CALL_COST_MICROS } : { class: "provider_error", costMicros: CALL_COST_MICROS });
+  }) as typeof fetch;
+  const access: EvalModelAccess = createEvalGatewayAccess(GATEWAY_URL, async () => TASK_TOKEN, { fetch: fetchImpl });
+  return { access, holds, releases };
+}
+
 /** What Rovara's plan holds about the sample's eval: questions from the cases folder of the base and of the candidate, hashed the way the broker hashes them. */
 export async function questionPlan(baseDir: string, candidateDir: string): Promise<EvalFinalCheckPlan["questions"]> {
   const files = (await readdir(join(baseDir, CASES_DIR))).filter(name => name.endsWith(".json")).sort();
@@ -130,10 +196,15 @@ export function memoryBaseCache(): BaseScoreCache & { readonly records: Map<stri
   };
 }
 
+/** The eval's catalog row in the confirmed plan, and so the variables the sandbox gets: the Gemini API's, or (L4-EVV) Vertex AI's. */
 export type Transport = "gemini" | "vertex";
 export interface StandInWorldOptions {
-  /** Which client shape the eval command is pointed at. The sandbox Rovara builds sets only the Gemini one. Default "gemini". */
+  /** Which row the confirmed plan names, and so which client variables Rovara's sandbox sets (the real `freshEvalEnvironment`). Default "gemini". */
   transport?: Transport;
+  /** Vertex only: the project the client is made to use instead of the placeholder Rovara gives it (code that hardcodes its own project). */
+  clientProject?: string;
+  /** Vertex only: the project has no Vertex connection in Cloud. */
+  vertexConnected?: boolean;
   /** The sample's change patch for the candidate (a file under changes/), or undefined for no change. */
   patch?: string | undefined;
   /** Refuse every model call with this class, as the stage's gateway would. */
@@ -152,6 +223,10 @@ export interface StandInWorld {
   readonly frames: Array<{ side: "old" | "new"; row: string; path: string; routed: boolean; refusal?: string | undefined }>;
   readonly sides: Array<{ side: "old" | "new"; runs: number; ids: readonly string[]; exitCode: number | null }>;
   readonly fake: FakeVertex;
+  /** Vertex only: what the in-process gateway saw (the stage's hold and release). */
+  readonly gateway: { readonly holds: Array<{ calls: number; costMicros: number }>; readonly releases: Array<Record<string, unknown>> } | undefined;
+  /** Vertex only: how many metadata-server token requests the client made (it asks for its credential before the first call). */
+  readonly metadataTokenRequests: () => number;
   cleanup(): Promise<void>;
 }
 
@@ -183,8 +258,8 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
   const identities = [{ repositoryId: "app", commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: repo.baseSha }];
   const isChanged = changedPromptClassifier(await candidatePromptChanges(repositories, identities, new AbortController().signal, repo.baseSha));
 
-  // The model route: the egress the metered stage forwards to. It applies the REAL route check to every frame (the row's path allow-list), then answers from the fake Vertex.
-  const access = scriptedAccess(async function* (frame) {
+  // The model route: the egress the metered stage forwards to. Gemini: a scripted stage that applies the REAL route check to every frame (the row's path allow-list), then answers from the fake Vertex.
+  const scripted = scriptedAccess(async function* (frame) {
     const row: ModelEgressRow | undefined = (rows as Record<string, ModelEgressRow>)[frame.row];
     const routed = row === undefined ? { ok: false as const, refusal: "not_allowed" } : routeEgressRequest(row, {}, frame);
     frames.push({ side: current.side, row: frame.row, path: frame.path, routed: routed.ok, ...(routed.ok ? {} : { refusal: routed.refusal }) });
@@ -194,6 +269,10 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
     const text = await response.text();
     yield* answer({ status: response.status, class: response.status === 200 ? "ok" : "provider_error", costMicros: CALL_COST_MICROS }, text);
   });
+  // Vertex: the stage's access is the REAL gateway adapter (`createEvalGatewayAccess`) over an in-process Cloud gateway, so the worker's path check, the product route it picks, the scope header and the NDJSON read are all the production code.
+  const gateway = transport === "vertex" ? fakeEvalGateway({ fake, frames, current, ...(options.vertexConnected === undefined ? {} : { connected: options.vertexConnected }), providerClass: options.providerClass }) : undefined;
+  const access: { access: EvalModelAccess } = gateway === undefined ? scripted : { access: gateway.access };
+  let metadataTokenRequests = 0;
 
   const exec: EvalSandboxExec = {
     async run(request: EvalSandboxRequest) {
@@ -219,12 +298,17 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
       });
       await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
       const port = (server.address() as { port: number }).port;
-      const base = `http://127.0.0.1:${port}/p/gemini/x/runtoken`;
-      // The variables Rovara's fresh check sandbox sets (freshEvalEnvironment): the Gemini client's base URL and placeholder keys, side, runs, ids. Nothing for Vertex.
-      const env = cleanEnv({
-        ROVARA_EVAL_SIDE: request.side, ROVARA_EVAL_RUNS: String(request.runs), ROVARA_EVAL_IDS: request.ids.join(","),
-        ...(transport === "gemini" ? { GOOGLE_GEMINI_BASE_URL: base, GEMINI_API_KEY: "rovara-test-key", GOOGLE_API_KEY: "rovara-test-key" } : { VERTEX_API_ENDPOINT: base }),
-      });
+      const base = `http://127.0.0.1:${port}`;
+      // The variables Rovara's fresh check sandbox writes (`freshEvalEnvironment`, the production function): for the gemini row the Gemini client's base URL and placeholder keys, for the vertex row (L4-EVV) the Vertex client's base URL, the placeholder
+      // project and location, and the metadata-server pair. Only the addresses are swapped for local ones; every name and value is what production writes.
+      const metadata: Server | undefined = transport === "vertex" ? createModelMetadataServer({ caller: "127.0.0.1", projectId: EVAL_VERTEX_PLACEHOLDER.projectId, maxConnections: 8 }) : undefined;
+      metadata?.on("request", req => { if ((req.url ?? "").includes("/token")) metadataTokenRequests++; });
+      if (metadata !== undefined) await new Promise<void>(resolve => metadata.listen(0, "127.0.0.1", resolve));
+      const metadataAddress = metadata === undefined ? "" : `127.0.0.1:${(metadata.address() as { port: number }).port}`;
+      const written = freshEvalEnvironment({ rowId: transport, token: "runtoken0123456789", side: request.side, runs: request.runs, ids: request.ids, helperIp: "172.30.1.9" })
+        .replaceAll("http://rovara-models:8080", base).replaceAll("172.30.1.9:8081", metadataAddress);
+      const fromFile = Object.fromEntries(written.split("\n").filter(Boolean).map(line => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as [string, string]).filter(([name]) => name !== "HOME"));
+      const env = cleanEnv({ ...fromFile, ...(transport === "vertex" && options.clientProject !== undefined ? { GOOGLE_CLOUD_PROJECT: options.clientProject } : {}) });
       const notBeforeMs = Date.now() - 1000;
       try {
         const exitCode = await new Promise<number | null>((resolve, reject) => {
@@ -234,7 +318,10 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
           child.once("error", reject); child.once("exit", code => { request.signal.removeEventListener("abort", stop); resolve(code); });
         });
         sides.push({ side: request.side, runs: request.runs, ids: request.ids, exitCode });
-      } finally { await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }); }
+      } finally {
+        await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); });
+        if (metadata !== undefined) await new Promise<void>(resolve => { metadata.close(() => resolve()); metadata.closeAllConnections(); });
+      }
       return {
         report: { root: dir, cwd: EVAL_REPORT.cwd, argument: EVAL_REPORT.argument, notBeforeMs },
         changedPromptCalls,
@@ -246,10 +333,10 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
   // The plan, built the way the broker builds it from a confirmed setup.
   const settings = { imageDigest: `sha256:${"1".repeat(64)}`, route: "gateway" };
   const scoring = await readFile(join(baseDir, SCORING_PATH));
-  const judgePin = evalJudgePinOf({ catalogRowId: "gemini", judge: { kind: "rule", scoringPath: SCORING_PATH }, scoringHash: sha256(scoring) });
+  const judgePin = evalJudgePinOf({ catalogRowId: transport, judge: { kind: "rule", scoringPath: SCORING_PATH }, scoringHash: sha256(scoring) });
   const setHash = await evalSetHash(baseDir);
   const commandFingerprint = evalCommandFingerprintOf({ ...EVAL_COMMAND, args: [...EVAL_COMMAND.args] }, EVAL_REPORT);
-  const key = { company: "company-a", project: "project-a", baseCommit: repo.baseSha, codeHash: "c".repeat(64), judgePin, commandFingerprint, catalogRowId: "gemini", model: "gemini-2.5-flash", modelVersion: "gemini-2.5-flash-001" };
+  const key = { company: "company-a", project: "project-a", baseCommit: repo.baseSha, codeHash: "c".repeat(64), judgePin, commandFingerprint, catalogRowId: transport, model: "gemini-2.5-flash", modelVersion: "gemini-2.5-flash-001" };
   const inputs = { evalSetHash: setHash, judgePin, commandFingerprint, model: key.model, modelVersion: key.modelVersion, catalogRowId: key.catalogRowId, settingsFingerprint: evalSettingsFingerprint(settings, judgePin) };
   const plan: EvalFinalCheckPlan = {
     company: key.company, project: key.project, selection: "evals/support", inputs, key, settings, evalSetHash: setHash, evalConfigured: true, judgePin, baselineJudgePin: judgePin, subsetSupported: true,
@@ -262,7 +349,7 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
     meter: createEvalMeter(access.access), cache, baselines: createEvalBaselines(), runner: createEvalRunner(exec),
   };
   return {
-    repo, baseDir, candidateDir, candidate, ports, plan, grant, cache, frames, sides, fake,
+    repo, baseDir, candidateDir, candidate, ports, plan, grant, cache, frames, sides, fake, gateway: gateway === undefined ? undefined : { holds: gateway.holds, releases: gateway.releases }, metadataTokenRequests: () => metadataTokenRequests,
     cleanup: async () => { await fake.stop(); await rm(repo.root, { recursive: true, force: true }); },
   };
 }

@@ -30,6 +30,25 @@ def _env_token() -> str:
     return token
 
 
+def metadata_token_provider(host: str, timeout: float = 5.0) -> Callable[[], str]:
+    """Application Default Credentials on a machine that has a GCE metadata server (`GCE_METADATA_HOST`), as google-auth does it:
+    one GET of the default service account's token with the `Metadata-Flavor: Google` header, kept for the life of the client."""
+    cached: dict = {}
+
+    def provide() -> str:
+        if "token" not in cached:
+            request = urllib.request.Request(f"http://{host}/computeMetadata/v1/instance/service-accounts/default/token",
+                                             headers={"Metadata-Flavor": "Google"})
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 (the host is configuration)
+                    cached["token"] = json.loads(response.read().decode("utf-8"))["access_token"]
+            except (urllib.error.URLError, TimeoutError, OSError, KeyError, ValueError):
+                raise ModelError(0, "no Google credentials configured") from None
+        return cached["token"]
+
+    return provide
+
+
 def _post(url: str, headers: dict, body: dict, timeout: float) -> dict:
     data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(url, data=data, method="POST", headers={"content-type": "application/json", **headers})
@@ -63,14 +82,15 @@ class VertexClient:
     """Vertex AI: project and location in the path, a Google access token as a bearer."""
 
     def __init__(self, project: str, location: str, model: str, api_endpoint: Optional[str] = None,
-                 token_provider: Callable[[], str] = _env_token, timeout: float = 30.0) -> None:
+                 token_provider: Callable[[], str] = _env_token, timeout: float = 30.0, api_version: str = "v1") -> None:
         self.project, self.location, self.model, self.timeout = project, location, model, timeout
+        self.api_version = api_version
         host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
         self.api_endpoint = (api_endpoint or f"https://{host}").rstrip("/")
         self.token_provider = token_provider
 
     def url(self) -> str:
-        return (f"{self.api_endpoint}/v1/projects/{self.project}/locations/{self.location}"
+        return (f"{self.api_endpoint}/{self.api_version}/projects/{self.project}/locations/{self.location}"
                 f"/publishers/google/models/{self.model}:generateContent")
 
     def generate_content(self, contents: list, system_instruction: Optional[str] = None, generation_config: Optional[dict] = None) -> str:

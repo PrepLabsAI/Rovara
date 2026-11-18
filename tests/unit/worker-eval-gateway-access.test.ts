@@ -487,3 +487,76 @@ describe("with the built-in fetch against a loopback gateway", () => {
     expect(parsed(seen[2]!.body)).toEqual({ scope: SCOPE, calls: 1, costMicros: 10, unknown: false });
   });
 });
+
+describe("a Vertex AI shaped call (L4-EVV)", () => {
+  const VX = "/v1beta1/projects/rovara-eval-project/locations/rovara-eval1/publishers/google/models/gemini-2.5-flash:generateContent";
+  const vframe = (over: Partial<ModelEgressFrame> = {}): ModelEgressFrame => frame({ row: "vertex", path: VX, ...over });
+  const vforwards = (g: ReturnType<typeof gateway>) => g.sent.filter(s => s.url.includes("/v1/product/vertex/"));
+  it("goes to the Vertex product route with the stage's scope and the task token, and only the body's type and accept headers; a Google credential never leaves", async () => {
+    const g = gateway(); const hold = await holdOf(g);
+    const out = await events(hold, vframe({ headers: [["content-type", "application/json"], ["authorization", "Bearer ya29.dummy"], ["x-goog-user-project", "p"], ["x-goog-api-key", "k"], ["accept", "application/json"]] }));
+    const [f] = vforwards(g);
+    expect(f!.url).toBe(`${GATEWAY}/v1/product/vertex${VX}`);
+    expect(f!.method).toBe("POST"); expect(f!.redirect).toBe("error");
+    expect(f!.headers).toEqual({ "content-type": "application/json", accept: "application/json", [EVAL_GATEWAY_SCOPE_HEADER]: SCOPE, "x-api-key": TOKEN });
+    expect(g.forwards()).toEqual([]);
+    expect(lastSettle(out)).toMatchObject({ class: "ok", costMicros: 10 });
+  });
+  it("streams with alt=sse, on both versions and for a numeric project and the global location", async () => {
+    const g = gateway(); const hold = await holdOf(g, 5);
+    await events(hold, vframe({ path: VX.replace("generateContent", "streamGenerateContent"), query: "alt=sse" }));
+    await events(hold, vframe({ path: "/v1/projects/123456789012/locations/global/publishers/google/models/gemini-2.5-flash:generateContent" }));
+    expect(vforwards(g).map(s => s.url.slice(GATEWAY.length))).toEqual([
+      `/v1/product/vertex${VX.replace("generateContent", "streamGenerateContent")}?alt=sse`,
+      "/v1/product/vertex/v1/projects/123456789012/locations/global/publishers/google/models/gemini-2.5-flash:generateContent",
+    ]);
+  });
+  it("a Gemini API frame still goes to the Gemini route and nothing else changes for it", async () => {
+    const g = gateway(); const hold = await holdOf(g);
+    await events(hold);
+    expect(g.forwards()).toHaveLength(1); expect(vforwards(g)).toEqual([]);
+  });
+  it.each([
+    ["the express form with no project", { path: "/v1beta1/publishers/google/models/gemini-2.5-flash:generateContent" }],
+    ["another publisher", { path: VX.replace("publishers/google", "publishers/anthropic") }],
+    ["another operation", { path: VX.replace("generateContent", "countTokens") }],
+    ["rawPredict", { path: VX.replace("generateContent", "rawPredict") }],
+    ["another version", { path: VX.replace("v1beta1", "v1alpha") }],
+    ["a dot segment in the project", { path: VX.replace("rovara-eval-project", "..") }],
+    ["a dot segment after the host part", { path: "/v1beta1/projects/rovara-eval-project/locations/../../eval/release" }],
+    ["an encoded character", { path: VX.replace("rovara-eval-project", "rovara%2feval") }],
+    ["an upper-case project", { path: VX.replace("rovara-eval-project", "Rovara-Eval-Project") }],
+    ["a host-looking location", { path: VX.replace("rovara-eval1", "evil.example") }],
+    ["a model with a slash", { path: VX.replace("gemini-2.5-flash", "a/b") }],
+    ["the legacy $alt query", { query: "$alt=json;enum-encoding=int" }],
+    ["a key in the query", { query: "key=abc" }],
+    ["a GET", { method: "GET" }],
+  ] as Array<[string, Partial<ModelEgressFrame>]>)("%s is refused before anything is sent, at no cost, in the Vertex answer shape", async (_n, over) => {
+    const g = gateway(); const hold = await holdOf(g);
+    const out = await events(hold, vframe(over));
+    expect(lastSettle(out)).toMatchObject({ class: "refused", refusal: "not_allowed", costMicros: 0 });
+    expect(out[0]).toMatchObject({ kind: "head", status: 403 });
+    expect(g.forwards()).toEqual([]); expect(vforwards(g)).toEqual([]);
+  });
+  it("the held count and cost bind Vertex calls like Gemini ones: nothing is sent past the held count, and a cap answer is in the Vertex shape", async () => {
+    const g = gateway(); const hold = await holdOf(g, 2, 1000);
+    await events(hold, vframe()); await events(hold, vframe());
+    const third = await events(hold, vframe());
+    expect(lastSettle(third)).toMatchObject({ class: "cap", refusal: "cap", costMicros: 0 });
+    expect(vforwards(g)).toHaveLength(2);
+  });
+  it("a Vertex call that answers with anything but a 200 NDJSON stream is an unknown cost that stops the stage, released as unknown", async () => {
+    const g = gateway({ call: () => json({ error: "x" }, 502) });
+    const hold = await holdOf(g);
+    await expect(events(hold, vframe())).rejects.toBeInstanceOf(EvalGatewayUnknownCost);
+    expect(lastSettle(await events(hold, vframe()))).toMatchObject({ class: "cap" });
+    await hold.release({ calls: 1, costMicros: 0, unknown: false });
+    expect(g.releases().map(r => parsed(r.body))).toEqual([{ scope: SCOPE, calls: 1, costMicros: 0, unknown: true }]);
+  });
+  it("one hold serves a Gemini and a Vertex call alike under the same scope and count (the row decides the shape, not the money)", async () => {
+    const g = gateway(); const hold = await holdOf(g, 2);
+    await events(hold); await events(hold, vframe());
+    expect([...g.forwards(), ...vforwards(g)].every(s => s.headers[EVAL_GATEWAY_SCOPE_HEADER] === SCOPE)).toBe(true);
+    expect(lastSettle(await events(hold, vframe()))).toMatchObject({ class: "cap" });
+  });
+});

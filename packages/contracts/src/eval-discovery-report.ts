@@ -34,9 +34,22 @@ export function evalImageDigestOf(image: unknown): string | undefined {
   return image.slice(image.lastIndexOf("sha256:"));
 }
 
-/** DEC 253q: the catalog rows the eval's product route serves (`eval-gateway-access.ts`: Gemini only today), with the vendor family each serves. The product model and a model judge both go through it. */
+/**
+ * DEC 253q: the catalog rows the eval's product route serves (`eval-gateway-access.ts`: the Gemini API row, and the Vertex AI row since L4-EVV), with the vendor family each serves. The product model and a model judge both go
+ * through it. The row names which API shape the project's client speaks; the setup draft may name `vertex`, a person confirms it, and the row is part of the judge pin and the spend inputs, so an approval names it.
+ */
 export const EVAL_PRODUCT_ROW = "gemini";
-export const EVAL_PRODUCT_ROWS: Readonly<Record<string, VendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google" });
+export const EVAL_VERTEX_ROW = "vertex";
+export const EVAL_PRODUCT_ROWS: Readonly<Record<string, VendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google", [EVAL_VERTEX_ROW]: "google" });
+/** The rows a setup draft may name for its eval's provider. Absent is `gemini`. */
+export const EVAL_DRAFT_PROVIDERS = ["gemini", "vertex"] as const;
+export type EvalDraftProvider = (typeof EVAL_DRAFT_PROVIDERS)[number];
+/**
+ * The project and location a sandbox client of a `vertex` eval row is told (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`). They are Rovara's, never the customer's: the worker does not know the connected ones, and the
+ * model gateway maps exactly this pair, and only under an eval stage's scope, to the connected project and location (it builds the upstream path from its own key store). Both pass the gateway's path parsers and are not real Google names.
+ * The same two words are in the Cloud model gateway (`EVAL_VERTEX_PLACEHOLDER`, product-vertex.ts); a mismatch fails closed (the gateway answers 400 and the eval reads Not run).
+ */
+export const EVAL_VERTEX_PLACEHOLDER = Object.freeze({ projectId: "rovara-eval-project", location: "rovara-eval1" });
 /** The route every eval model call takes: the gateway's product route, on the customer's own connected key (DEC 240b, 253k). */
 export const EVAL_PRODUCT_ROUTE = "gateway";
 const familyOfRow = (row: string): VendorFamily | undefined => (Object.hasOwn(EVAL_PRODUCT_ROWS, row) ? EVAL_PRODUCT_ROWS[row] : undefined);
