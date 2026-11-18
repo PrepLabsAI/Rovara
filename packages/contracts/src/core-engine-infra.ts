@@ -84,6 +84,16 @@ export function isCoreAgentModelId(value: string): boolean {
   return /claude|anthropic/u.test(value) ? CORE_CLAUDE_AGENT_MODEL.test(value) : true;
 }
 /**
+ * DEC 254n(1), 243c (live switches check 2026-11-18): the per-company agent model CHOICE (setup's "AI and spending" model picker). The broker reads ROVARA_CORE_AGENT_MODEL_CHOICE and offers the
+ * choice only where it is exactly `on` (core-host/offered-models-http.ts); nothing in infra set it, so no hosted install could turn it on (the runbook's template overlay was dropped by every
+ * upgrade). It is now the stack parameter `CoreAgentModelChoice` (`off`, the default, or `on`), packed for the BROKER only (`mx`; the dispatcher reads no choice setting), kept across upgrades
+ * and set with `agentx config set coreEngine.agentModelChoice on`. Default off: DEC 254n(1) does not say default on, and the runbook keeps it off until the offered-models route is qualified.
+ */
+export const CORE_AGENT_MODEL_CHOICE_VARIABLE = "ROVARA_CORE_AGENT_MODEL_CHOICE";
+export const CORE_AGENT_MODEL_CHOICE_PARAMETER = "CoreAgentModelChoice";
+export const CORE_AGENT_MODEL_CHOICE_VALUES = ["off", "on"] as const;
+export const CORE_AGENT_MODEL_CHOICE_DEFAULT = "off";
+/**
  * DEC 254zzn(2) (lead 4, L4-AM): the hosted ANSWERS model, a stack parameter of its own (`CoreAnswersModel`, the broker's ROVARA_CORE_ANSWERS_MODEL, packed `aa`). Empty (the default) means
  * hosted answers and the hosted start-box classifier run on the install's agent model exactly as before; set, they run on this model and ONLY they do (a coding task or any other core step
  * keeps ROVARA_CORE_AGENT_MODEL). The gateway's answers purpose runs on the company's own Anthropic account, so the value is a Claude engine name (never a Bedrock `us.anthropic....` id, never a

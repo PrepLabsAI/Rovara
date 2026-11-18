@@ -14615,8 +14615,8 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
     // One wall-clock limit for the whole request: too late to register safely before the gateway gives up, so nothing is written.
     if (Date.now() > commitBy) throw unavailable();
     try {
-      // Registration checks every repository's binding once more (its own budget), in the transaction's company.
-      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) }, ...names.claim(nameOwner, name) });
+      // Registration checks every repository's binding once more (its own budget), in the transaction's company; DEC 254zzz81: with the registration preflight on, as any other registration.
+      await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: true }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) }, ...names.claim(nameOwner, name) });
     } catch (error) {
       if (await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable();
       if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
@@ -14624,10 +14624,10 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
     }
     return { name: id, latestRevision: 1 };
   };
-  return {
+  const unboundRepositories = async () => { if (((dependencies.developer ?? dependencies.linking)?.companies ?? dependencies.companies) !== undefined) throw githubBindingRefusal(); return clientProjects.repositories(); }; return { // DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 3): without the company GitHub bindings the App's installations cannot be filtered to a company: with a company layer, refused (never unfiltered); without one, as before. One line, so the line-keyed inventory sites below do not move.
     ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }), ...companyProjectCreatorOf(dependencies.githubBindings !== undefined, dependencies.companies),
     async clientRepositories(developerId) {
-      if (dependencies.githubBindings === undefined) return clientProjects.repositories();
+      if (dependencies.githubBindings === undefined) return unboundRepositories();
       const budget = boundedCompanyReads(dependencies.documentClient);
       const companyId = await githubCallerCompany(dependencies, developerId ?? "", budget);
       try {
@@ -14639,7 +14639,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       const budget = boundedCompanyReads(dependencies.documentClient);
       const companyId = await githubCallerCompany(dependencies, developerId, budget);
       let installations: ClientRepositoriesResponse["installations"];
-      if (dependencies.githubBindings === undefined) installations = await clientProjects.repositories();
+      if (dependencies.githubBindings === undefined) installations = await unboundRepositories();
       else {
         try {
           installations = await filterInstallationsFor(companyId!, await budget.read(() => clientProjects.repositories()), dependencies.githubBindings, budget);
@@ -14675,7 +14675,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       });
       // As the person: their developer ID owns the project, so they administer it and it is listed for them.
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
-      try { await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget }, ...names.claim(nameOwner, name) }); } catch (error) { if (nameOwner !== undefined && await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable(); throw error; } // L2-1
+      try { await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: true }, { githubCompany: { companyId, budget }, ...names.claim(nameOwner, name) }); } catch (error) { if (nameOwner !== undefined && await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable(); throw error; } // L2-1
       return { name: id, latestRevision: 1 };
     },
     async createClientProjects(developerId, input, naming) {
@@ -15544,8 +15544,6 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // DEC 254b (b): the operator's company import runs BEFORE COMPANY_SIGNIN is switched on, so it is wired with the company layer on or off.
     companyImport: companyImportThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
-    // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
-    ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
     channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({

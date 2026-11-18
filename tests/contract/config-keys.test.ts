@@ -15,7 +15,17 @@ describe("config keys (FR-048)", () => {
       "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "coreEngine.switch", "coreEngine.modelGatewayUrl", "coreEngine.agentModel", "testServices.images", "coreEngine.answersModel", "mcp.confirmElicitation",
       // DEC 254zg (a), 254zk: Code's company layer, self-serve create and per-company Slack bots.
       "company.signIn", "company.selfServe", "slack.companyWorkspaces",
+      // Live switches check 2026-11-18: the per-company model choice (DEC 254n(1)), which nothing set before.
+      "coreEngine.agentModelChoice",
     ]);
+  });
+
+  it("routes the per-company model choice to its control-plane parameter, off by default, off or on only (live switches check 2026-11-18)", () => {
+    const key = "coreEngine.agentModelChoice";
+    expect(configKey(key)).toMatchObject({ target: { kind: "stack-parameter", part: "control-plane", parameter: "CoreAgentModelChoice" }, defaultValue: "off" });
+    expect(configKey(key).parse(" on ")).toBe("on");
+    expect(configKey(key).parse("off")).toBe("off");
+    for (const bad of ["", "true", "1", "ON", "enabled", "on:org_aaaaaaaaaaaaaaaaaaaa"]) expect(() => configKey(key).parse(bad), bad).toThrow(`${key} must be one of`);
   });
 
   it("maps each key to exactly one place, and no two keys to the same place", () => {

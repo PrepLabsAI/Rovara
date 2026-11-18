@@ -220,7 +220,7 @@ const membership = (personId: string, companyId: string, role: string, revokedAt
 async function setUp(coreApp: CoreAppEntry | undefined, mode: "developer" | "linking" = "developer"): Promise<void> {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   const config: DeveloperApiConfiguration = {
-    issuer: ISSUER, env: "staging", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
+    issuer: ISSUER, env: "staging", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
     ...(coreApp === undefined ? {} : { coreApp }),
   };

@@ -88,15 +88,18 @@ core_preview() {
 
 3. **Agent model choice (ANSWER-3; default OFF) — CONFIG.** Keep `ROVARA_CORE_AGENT_MODEL_CHOICE` unset or `off` on the broker until its offered-models route is qualified. The broker setting alone turns model choice on: only the broker signs service tokens and reads the company's offered list; it validates saved choices and stores `agentModelValidation` on that company's existing `MODEL_SELECTION_POLICY` row in State. The dispatcher reads no choice setting. It uses a fresh, company-scoped validated row when one exists; without a fresh row it uses the configured default model. The dispatcher gets no task-signing grant or `TASK_TOKEN_KEY_ARN`.
 
+   Since the live switches check (2026-11-18) it is the control plane's stack parameter `CoreAgentModelChoice` (`off`, the default, or `on`), packed for the broker only (`mx`) and kept
+   across upgrades; the template overlay is no longer used.
+
    ```sh
-   core_environment ROVARA_CORE_AGENT_MODEL_CHOICE off '^Broker[A-F0-9]{8}$'
-   core_preview l6-model-choice-off
-   # Enable after step 16; prove below with unattended still off:
-   core_environment ROVARA_CORE_AGENT_MODEL_CHOICE on '^Broker[A-F0-9]{8}$'
+   core_parameter CoreAgentModelChoice on
    core_preview l6-model-choice-on
+   # Enable after step 16; prove below with unattended still off:
+   agentx --env staging config set coreEngine.agentModelChoice on
+   agentx --env staging config get coreEngine.agentModelChoice
    ```
 
-   Preview/readback: no IAM delta; confirm the broker flag. Rollback: set the broker flag `off` with the same overlay and reviewed change set, then verify the original default route. The choice may stay on through drain; broker validation continues to refresh for companies with tasks still on the core.
+   Preview/readback: only the broker's environment changes (Modify, no replacement, no IAM): its AGENTX_SETTINGS `mx=on`. Rollback: `agentx --env staging config set coreEngine.agentModelChoice off`, then verify the original default route. The choice may stay on through drain; broker validation continues to refresh for companies with tasks still on the core.
 
    **PROOF — after step 16, unattended still off:** prove the offered-models route is qualified. Through the existing page, save an offered model after step-up; prove the company's stored validation and a dispatched step use it, with no dispatcher HTTP list request. The broker refreshes validation before outbox handoff; dispatcher reads are consistent, use the company from the workspace record, and refuse mismatched or malformed validation in fixed words. Prove an unoffered choice is rejected, missing or expired validation uses the configured default (expiry logs one fixed-word event), and switch-off preserves the default model path. Do not log tokens or company policy contents. Keep the core draining while correcting invalid or unavailable choices. Watch the dispatcher's `core_engine.model_choice_expired` log count: each one is a step that ran on the install default instead of the company's choice (the stored choice is valid for 60 s; a slow queue makes these). A rising count means the broker isn't refreshing in time; turn the choice off on the broker (CONFIG rollback) until it is fixed.
 

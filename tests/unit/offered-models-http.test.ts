@@ -7,6 +7,7 @@ import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js"
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE, OFFERED_MODELS_AUDIENCE, OFFERED_MODELS_READ_FAILED, SERVICE_TOKEN_TYP, offeredModelsReader, offeredModelsReaderFromEnvironment } from "../../packages/broker/src/core-host/offered-models-http.js";
 import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
+import { hydrateBrokerSettings } from "../../packages/broker/src/aws/broker-environment.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { GATEWAY_OFFERED_MODELS, offeredAnswer } from "../support/offered-models-fake.js";
 
@@ -173,6 +174,16 @@ describe("the reader from the environment", () => {
       expect(offeredModelsReaderFromEnvironment(env, tokens), String(value)).toBeUndefined();
     }
     expect(offeredModelsReaderFromEnvironment(ENV, tokens)).toBeDefined();
+  });
+  // Live switches check 2026-11-18: a named install's broker gets the choice only packed (`mx`, the CoreAgentModelChoice stack parameter) beside the gateway settings (`gw`, `am`); unpacked as the
+  // broker does at load, it reaches this reader. `off` (the parameter's default) and a missing piece offer no choice.
+  it("reaches the reader from the packed settings a named install gets: mx=on builds it, mx=off or no mx does not", () => {
+    const unpacked = (settings: string) => { const env: NodeJS.ProcessEnv = { AGENTX_SETTINGS: settings }; hydrateBrokerSettings(env); return env; };
+    const gateway = "gw=gateway.staging.example,am=claude-sonnet-5-5";
+    expect(unpacked(`${gateway},mx=on`)[CORE_AGENT_MODEL_CHOICE_VARIABLE]).toBe("on");
+    expect(offeredModelsReaderFromEnvironment(unpacked(`${gateway},mx=on`), tokens)).toBeDefined();
+    expect(offeredModelsReaderFromEnvironment(unpacked(`${gateway},mx=off`), tokens)).toBeUndefined();
+    expect(offeredModelsReaderFromEnvironment(unpacked(gateway), tokens)).toBeUndefined();
   });
   it("is none without the gateway settings, with a broken setting, or without the task-token signer", () => {
     expect(offeredModelsReaderFromEnvironment({}, tokens)).toBeUndefined();

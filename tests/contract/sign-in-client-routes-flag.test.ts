@@ -1,6 +1,6 @@
-// Spec 065: a registered service's /v1/dev/client/* routes are OFF unless the deployed broker sets
-// SIGN_IN_CLIENT_ROUTES to exactly "enabled" (developerConfiguration() in the broker entry). Only the value "enabled"
-// opens them: unset, empty, "true", "disabled" and anything else leave them as 404, so a typo or a lookalike never opens them.
+// DEC 254zzz81 (owner, 2026-11-18): the SIGN_IN_CLIENT_ROUTES switch is DELETED. A registered service's /v1/dev/client/* routes are always on in the deployed broker entry; every one
+// checks the client's token, its route scope and the person's live company and role (the route tests: project-setup-status-routes, project-code-settings-routes, project-lifecycle-routes, client-repositories-company, company-reads-mount). No value of the old variable,
+// set or packed, turns them off any more: an unsigned request is refused for its missing token (401), never answered "route not found" (404).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubCallbackSigningKeySecret } from "../support/callback-key.js";
 
@@ -21,7 +21,7 @@ const BASE_ENVIRONMENT: Record<string, string> = {
   AGENTX_ENV: "staging",
 };
 
-/** The real broker entry, loaded fresh with the flag set (or unset), and the status an unsigned client route answers. */
+/** The real broker entry, loaded fresh with the old variable set (or unset), and the status an unsigned client route answers. */
 async function clientRouteStatus(flag: string | undefined): Promise<number> {
   vi.resetModules();
   for (const [name, value] of Object.entries(BASE_ENVIRONMENT)) vi.stubEnv(name, value);
@@ -42,12 +42,8 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe("the sign-in client routes flag on the deployed broker (spec 065)", () => {
-  it("opens the client routes only for exactly \"enabled\": they then ask for the person's token (401) instead of answering 404", async () => {
-    expect(await clientRouteStatus("enabled")).toBe(401);
-  });
-
-  it.each([undefined, "", "true", "disabled", "ENABLED", "1"])("leaves the client routes off (404) when the flag is %j", async (flag) => {
-    expect(await clientRouteStatus(flag)).toBe(404);
+describe("the sign-in client routes on the deployed broker (DEC 254zzz81: always on)", () => {
+  it.each([undefined, "", "disabled", "enabled", "0"])("are served whatever the old variable says (%j): they ask for the person's token (401), never 404", async (flag) => {
+    expect(await clientRouteStatus(flag)).toBe(401);
   });
 });

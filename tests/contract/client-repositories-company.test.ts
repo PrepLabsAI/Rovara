@@ -20,7 +20,6 @@ async function world(enabled = true, company: string = A, mode: "developer" | "l
   await bindings.backfill(async () => []);
   await bindings.claim(A, 77, "account-77", "operator");
   await bindings.claim(B, 88, "private-canary", "operator");
-  h.deps.developer.clientRoutes = true;
   h.claims.azp = "web-app"; h.claims.amr = "oidc"; h.claims.scope = "projects:create";
   h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app", amr: "oidc", administrator: true, endsAt: 4_000_000_000 });
   h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, provider: "oidc" });
@@ -280,4 +279,38 @@ it("operator claim refuses a mismatched or unreadable GitHub installation before
     expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")).toBeUndefined();
     expect(h.db.get("GITHUB_INSTALLATION#98", "BINDING")).toBeUndefined();
   }
+});
+
+// DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 3): without the company GitHub bindings the App's installations cannot be filtered to a company. With a company layer, both repository reads refuse in fixed
+// words (never the whole unfiltered list, never another company's account); with no company layer (one company, a Rovara administrator) they are as before.
+it("refuses the repository list and picker when a company layer has no GitHub bindings to filter by, before any installation is read", async () => {
+  // The company layer on, the Rovara administrator in the install's own (implicit) company: the one caller who reaches the list there.
+  const h = await world(false, IMPLICIT_COMPANY_ID);
+  // Both places a host gives the company layer: the deployed broker sets it on the sign-in configuration only (developer.companies); a test host may set it on the dependencies.
+  const onDependencies = createBroker({ extra: { ...h.extra, companies: { companyOf: h.companyOf } } });
+  const onSignIn = createBroker({ extra: { ...h.extra, linking: { ...h.deps.developer, companies: { companyOf: h.companyOf } } } });
+  for (const [path, created] of [["/v1/dev/client/repositories", onDependencies], ["/v1/dev/client/repositories/available", onDependencies], ["/v1/dev/client/repositories", onSignIn], ["/v1/dev/client/repositories/available", onSignIn]] as const) {
+    const refused = await h.call(path, undefined, created.handler);
+    expect(refused.statusCode, path).not.toBe(200);
+    expect(refused.body, path).toContain('"code":"GITHUB_NOT_CONNECTED"');
+    expect(refused.body, path).not.toContain("account-88");
+    expect(refused.body, path).not.toContain("private-canary");
+  }
+  expect(h.clientProjects.repositories).not.toHaveBeenCalled();
+  // No company layer: the Rovara administrator's list is as before.
+  const unchanged = await h.call();
+  expect(unchanged.statusCode).toBe(200);
+  expect((JSON.parse(unchanged.body) as { installations: unknown[] }).installations).toHaveLength(3);
+});
+
+// DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 2): a sign-in client's project create registers with the registration preflight ON, as every other registration does (it had `preflight: false`).
+it("registers every client-created project with the registration preflight on", () => {
+  const source = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
+  const start = source.indexOf("function clientProjectRouteDependencies(");
+  const end = source.indexOf("\nfunction ", start + 1);
+  const body = source.slice(start, end);
+  expect(start).toBeGreaterThan(0);
+  expect(body.match(/registerProject\(/gu)).toHaveLength(2);
+  expect(body.match(/preflight: true/gu)).toHaveLength(2);
+  expect(body).not.toContain("preflight: false");
 });

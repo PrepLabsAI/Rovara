@@ -33,9 +33,9 @@ function session(id: string, developerId: string, extra: Record<string, unknown>
 }
 const companyOf = async (developerId: string) => (developerId === ADA ? COMPANY_A : developerId === BO ? COMPANY_B : undefined);
 
-async function broker(options: { clientRoutes?: true; companyReads?: unknown } = { clientRoutes: true, companyReads: { store, companyOf } }) {
+async function broker(options: { companyReads?: unknown } = { companyReads: { store, companyOf } }) {
   const linking: DeveloperApiConfiguration = {
-    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), ...(options.clientRoutes === true ? { clientRoutes: true as const } : {}),
+    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
   ({ db, handler } = await createAdminBroker({ linking, channelAdapters: true, ...(options.companyReads === undefined ? {} : { companyReads: options.companyReads }) }));
@@ -139,7 +139,7 @@ describe("the company reads for a live company owner or admin (no Rovara adminis
   const roles: Record<string, { companyId: string; role: "owner" | "admin" | "member" }> = { [CY]: { companyId: COMPANY_A, role: "owner" }, [DEE]: { companyId: COMPANY_B, role: "member" } };
   const liveCompanyOf = async (developerId: string) => roles[developerId]?.companyId ?? (await companyOf(developerId));
   beforeEach(async () => {
-    await broker({ clientRoutes: true, companyReads: { store, companyOf: liveCompanyOf, membershipOf: async (developerId: string) => roles[developerId] } });
+    await broker({ companyReads: { store, companyOf: liveCompanyOf, membershipOf: async (developerId: string) => roles[developerId] } });
     session("s-dee", DEE);
     db.set({ pk: `DEVELOPER#${DEE}`, sk: "META", developerId: DEE, provider: "oidc", issuer: "https://idp.example.test", subject: "dee", displayName: "Dee", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
   });
@@ -186,18 +186,13 @@ describe("the company event read on the developer API", () => {
 
 describe("the reads are off unless the host wires them", () => {
   it("answers 404 when the install gives the routes no store", async () => {
-    await broker({ clientRoutes: true });
+    await broker({});
     expect((await call("GET", AUDIT, await token())).status).toBe(404);
     expect((await call("GET", EVENTS, await token(), "from=2026-11-01T00%3A00%3A00.000Z")).status).toBe(404);
   });
 
-  it("answers 404 when the client routes are off, even with a store", async () => {
-    await broker({ companyReads: { store, companyOf } });
-    expect((await call("GET", AUDIT, await token())).status).toBe(404);
-  });
-
   it("serves one company, the implicit one, when the host gives a store and no resolver", async () => {
-    await broker({ clientRoutes: true, companyReads: { store } });
+    await broker({ companyReads: { store } });
     const read = await call("GET", AUDIT, await token());
     expect(read.status).toBe(200);
     expect((read.body as unknown as Records).records).toEqual([]);

@@ -9,7 +9,7 @@
 // failure says fixed words only (never the gateway's answer, a URL, a token or a cause).
 import { randomUUID } from "node:crypto";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
-import { OfferedAgentModelsSchema, OrgIdSchema, TASK_KEY_PURPOSE, type OfferedAgentModels, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES } from "@agentx/contracts";
+import { CORE_AGENT_MODEL_CHOICE_VARIABLE, OfferedAgentModelsSchema, OrgIdSchema, TASK_KEY_PURPOSE, type OfferedAgentModels, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES } from "@agentx/contracts";
 import type { TokenSigner } from "../developer/tokens.js";
 import { readGatewayModelAccess, readGatewayUrl } from "./gateway-model-access.js";
 import type { OfferedModelsReader } from "./gateway-model-selection.js";
@@ -25,10 +25,10 @@ export const OFFERED_MODELS_HTTP_TIMEOUT_MS = 4_000;
 /** Cloud rejects a longer issuer in a service token. */
 export const SERVICE_TOKEN_ISSUER_MAX_CHARS = 2_048;
 /**
- * The switch that offers companies a model choice (default off, matching on broker and dispatcher). Only the broker reads the offered list and signs;
+ * The switch that offers companies a model choice (default off; the stack parameter CoreAgentModelChoice, packed `mx`, contracts core-engine-infra.ts). Only the broker reads the offered list and signs;
  * the dispatcher reads the broker's short-lived validation on the company's existing policy row (ANSWER-3). It gets no signing rights.
  */
-export const CORE_AGENT_MODEL_CHOICE_VARIABLE = "ROVARA_CORE_AGENT_MODEL_CHOICE";
+export { CORE_AGENT_MODEL_CHOICE_VARIABLE };
 /** What the admin read says where the gateway is not set up (no gateway origin, or no company for the caller). */
 export const CORE_OFFERED_MODELS_NOT_SET_UP = "the core engine's model gateway is not set up in this deployment";
 /** The only thing a failed read says. */

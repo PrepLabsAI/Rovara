@@ -38,7 +38,6 @@ async function world(company: string = A, options: { live?: boolean; administrat
   await bindings.claim(A, 78, "acme-a2", "operator");
   await bindings.claim(A, 66, "paused", "operator");
   await bindings.claim(B, 88, "acme-b", "operator");
-  h.deps.developer.clientRoutes = true;
   const amr = options.amr ?? "oidc";
   h.claims.azp = "web-app"; h.claims.amr = amr; h.claims.scope = "projects:create";
   h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app", amr, administrator: options.administrator ?? true, endsAt: 4_000_000_000 });

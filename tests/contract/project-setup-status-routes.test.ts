@@ -55,7 +55,7 @@ function harness(options: HarnessOptions = {}) {
     documentClient: db, tableName: "State", now: () => NOW,
     ...(options.companies === false ? {} : { companies: companyMembershipFromDynamo(db, "State") }),
     developer: {
-      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true, slackTeamId: TEAM,
+      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", slackTeamId: TEAM,
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
       ...(options.linear === true ? { linearConnect: linearWiring(db) } : {}),
     },
@@ -784,6 +784,21 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
     expect(JSON.stringify(h.db.find(() => true))).toBe(before);
   });
 
+  // DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 6): company isolation of the eval-none write. Company A's admin, with a grant on company B's same-shaped project, may not confirm "no evals" there;
+  // it answers like a missing project and writes nothing in either company.
+  it("another company's project (even with a grant on it), the implicit company's and an unknown one are the same 404, and nothing is written", async () => {
+    const h = companyA();
+    h.project("foreign", B); h.grant(ADA, "foreign", "administrator");
+    const task = setupRun(h, B, "foreign", READY());
+    setupApply(h, B, "foreign", { state: "approved", check: "ready" });
+    expect(task).toBeDefined();
+    h.project("legacy");
+    for (const project of ["foreign", "legacy", "nothing", CANARY]) expect(await h.call("PUT", EVAL_NONE(project), { noEvals: true }), project).toEqual(NOT_FOUND);
+    expect(record(h, B, "foreign")).toBeUndefined();
+    expect(record(h, A, "foreign")).toBeUndefined();
+    expect(audits(h)).toEqual([]);
+  });
+
   it("the run's evals were found, but the person chooses none: done as no_evals, the suites still shown", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
@@ -1097,19 +1112,40 @@ describe("a project's members, for a live company owner or admin without a proje
     expect((await h.call("GET", MEMBERS())).status).toBe(200);
   });
 
+  // DEC 254zzz81 (review High): the routes are always on, so a project-admin GRANT on another company's project (or the implicit company's) counts for nothing: it reads as missing, and nothing is written.
+  it("a project-admin grant on another company's project, or on one with no company, does not open its members: 404, no write", async () => {
+    const h = companyA();
+    h.join(ADA, A, "member");
+    h.project("beta", B); h.grant(ADA, "beta", "administrator");
+    h.project("legacy"); h.grant(ADA, "legacy", "administrator");
+    for (const project of ["beta", "legacy"]) {
+      expect(await h.call("GET", MEMBERS(project)), project).toEqual(NOT_FOUND);
+      expect(await h.call("PUT", `${MEMBERS(project)}/${CAT}`), project).toEqual(NOT_FOUND);
+      expect(await h.call("DELETE", `${MEMBERS(project)}/${ADA}`), project).toEqual(NOT_FOUND);
+    }
+    expect(h.db.find((item) => item.pk === `MEMBER#${CAT}`)).toEqual([]);
+    expect(h.db.find((item) => item.pk === `MEMBER#${ADA}` && item.sk === "PROJECT#beta")).toHaveLength(1);
+    // A project that does not exist reads the same (a 404 never tells another company's name apart from a missing one).
+    expect(await h.call("GET", MEMBERS("nothing"))).toEqual(NOT_FOUND);
+    // The same grant on the caller's own company's project still works.
+    h.grant(ADA, "alpha", "administrator");
+    expect((await h.call("GET", MEMBERS())).status).toBe(200);
+  });
+
   it("refuses an owner of another company, and a project with no company (the implicit company's, never the caller's)", async () => {
     const h = companyA();
     h.join(ADA, A, "owner");
     h.project("beta", B);
     h.project("legacy");
-    expect(await h.call("GET", MEMBERS("beta"))).toEqual(REFUSED);
-    expect(await h.call("PUT", `${MEMBERS("beta")}/${CAT}`)).toEqual(REFUSED);
-    expect(await h.call("GET", MEMBERS("legacy"))).toEqual(REFUSED);
+    // DEC 254zzz81: another company's project, and one with no company, read as missing (as on every other /{project} row), no longer as a 403.
+    expect(await h.call("GET", MEMBERS("beta"))).toEqual(NOT_FOUND);
+    expect(await h.call("PUT", `${MEMBERS("beta")}/${CAT}`)).toEqual(NOT_FOUND);
+    expect(await h.call("GET", MEMBERS("legacy"))).toEqual(NOT_FOUND);
     // Company B's owner manages B's project, and not A's.
     h.join(CAT, B, "owner");
     h.as(CAT, "s-cat");
     expect((await h.call("GET", MEMBERS("beta"))).status).toBe(200);
-    expect(await h.call("GET", MEMBERS())).toEqual(REFUSED);
+    expect(await h.call("GET", MEMBERS())).toEqual(NOT_FOUND);
   });
 
   it("refuses a removed owner, and anyone where the install has no company layer", async () => {

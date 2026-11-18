@@ -41,7 +41,7 @@ function harness(options: { companies?: boolean; fullAccess?: boolean; engine?: 
     documentClient: db, tableName: "State", now: () => NOW,
     ...(options.companies === false ? {} : { companies: companyMembershipFromDynamo(db, "SignIn") }),
     developer: {
-      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true,
+      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn",
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
       ...(options.engine === false ? {} : { projectArchiveTakesEffect: (companyId: string) => companyId === A || companyId === B || companyId === IMPLICIT_COMPANY_ID }),
     },

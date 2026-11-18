@@ -448,7 +448,7 @@ export class DeveloperSignIn extends Construct {
     if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", company.flag);
     if (tasks !== undefined) {
       addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
-      // Hosted wiring (d), named environments only: the company audit and event reads (still behind SIGN_IN_CLIENT_ROUTES, which nothing in infra sets). Membership is read from
+      // Hosted wiring (d), named environments only: the company audit and event reads (the /v1/dev/client/* routes are always on since DEC 254zzz81). Membership is read from
       // COMPANY_MEMBER# (granted below, also named only).
       // Derived by a named broker (DERIVED_BROKER_VARIABLES; DEC 254h, room for GitHub sign-in): synthesis stops unless the broker would set exactly "enabled".
       if (named) addDerivedBrokerVariable(broker, props.naming, "COMPANY_READS", "enabled");
