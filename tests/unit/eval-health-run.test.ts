@@ -8,6 +8,7 @@ import { deliverEvalHealthPlan, recordEvalHealthResult, startEvalHealthRun, type
 import { evalHealthKeyOf } from "../../packages/broker/src/core/setup-agent/eval-health-run.js";
 import { evalHealthRequestKey, readEvalHealthRow, readEvalHealthView, requestEvalHealthCheck } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
 import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-card.js";
+import { createEvalPlanSources } from "../../packages/broker/src/core/setup-agent/eval-plan-source.js";
 import { A, B, CAP, NOW, ROLES, filesOf, company, person, project, reportOf, type Role } from "../support/eval-card-world.js";
 
 const HEAD = "a".repeat(40);
@@ -36,7 +37,7 @@ async function world(options: { roles?: Record<string, Role>; adapter?: boolean 
     requestEvalHealthCheck({ store: w.store, companyId: A, now: () => clock.now, members: w.members }, project, { requestId: randomUUID(), seenCostMicros: 600_000, ...body }, as);
   const row = () => readEvalHealthRow({ store: w.store, companyId: A }, project);
   const cache = () => createDocumentBaseScoreCache(w.store, { companyId: A, now: () => clock.now });
-  return { w, r, clock, launched, audits, control, adapter, deps, ask, row, cache };
+  return { w, r, clock, launched, audits, control, adapter, deps, ask, row, cache, registry };
 }
 type World = Awaited<ReturnType<typeof world>>;
 
@@ -219,6 +220,15 @@ describe("the worker's plan and grant", () => {
     // The grant read earlier is bound to the old item: it answers nothing now, and a new delivery is refused.
     expect(await read.approval!.read()).toBeUndefined();
     expect(await deliverEvalHealthPlan(w.deps(), project, { requestId, claimId })).toBeUndefined();
+  });
+  it("the plan source itself answers a run made under one approved item for that item only (defence in depth under the re-checks)", async () => {
+    const w = await world(); const { requestId } = await started(w);
+    const row = (await w.row())!;
+    const sources = createEvalPlanSources({ store: w.w.store, companyId: A, registry: w.registry, members: w.w.members });
+    const bases = [{ repositoryId: "web", baseCommitSha: HEAD }];
+    expect(await sources.read({ companyId: A, project }, { bases, spendDigest: row.spendDigest })).toBeDefined();
+    expect(await sources.read({ companyId: A, project }, { bases, spendDigest: "f".repeat(64) })).toBeUndefined();
+    expect(requestId).toBe(row.requestId);
   });
   it("is refused for another request or claim, a claim that is not running, and a person who lost the right", async () => {
     const roles: Record<string, Role> = { ...ROLES, ada: { company: "admin" } };
