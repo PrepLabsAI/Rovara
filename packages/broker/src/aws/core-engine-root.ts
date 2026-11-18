@@ -132,7 +132,7 @@ import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
-import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
+import { CORE_ENGINE_VARIABLE, digestPilotOf, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
 import { handleCoreContextTools } from "../core-host/context-tools.js";
 import { createTaskLogHooks } from "../core/task-log/hooks.js";
@@ -181,6 +181,8 @@ export interface BrokerCoreRootInputs {
    * Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once).
    */
   lessonsPeople?: (companyId: OrgId, context: { store: () => Promise<DocumentStore> }) => HostedLessonPeople;
+  /** The pilot companies, whose projects have the weekly lessons summary ON until a project chooses otherwise. Absent: the companies ROVARA_CORE_LESSONS names (`on:<ids>`). One list for the sender and the API. */
+  lessonsDigestPilot?: (companyId: OrgId) => boolean;
   /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   lessonsLearning?: CoreLessonsOptions["learning"];
   /**
@@ -643,6 +645,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   };
   // Switch off (and not draining): the core settings are never read, so an install without the core reads exactly what it read before (CORE_ENGINE_BROKER_WIRED).
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = coreActive ? readCoreLessonsSwitch(env) : { value: { mode: "off" } };
+  // The weekly lessons summary's pilot list, resolved ONCE so the sender (createCoreLessons) and the settings API (createLessonsApi) can never disagree about which companies default to on.
+  const lessonsDigestPilot = digestPilotOf({ lessonsSwitch: lessonsSwitch.value, ...(inputs.lessonsDigestPilot === undefined ? {} : { digestPilot: inputs.lessonsDigestPilot }) });
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
   const readSettings = coreActive ? readHostedAdmissionSettings(env) : undefined;
   const admissionSettings = readSettings !== undefined && "settings" in readSettings ? readSettings.settings : undefined;
@@ -745,7 +749,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
         } else {
           lessons = createCoreLessons({
-            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
+            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, digestPilot: lessonsDigestPilot, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
             // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
             knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
             ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
@@ -1006,6 +1010,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     if (lessonsSwitch.value.mode !== "off" && lessonsPeople !== undefined) {
       lessons = createLessonsApi({
         lessonsSwitch: lessonsSwitch.value,
+        digestPilot: lessonsDigestPilot,
         companyOf: async (caller) => await membershipOf(caller.personId),
         lessonsOf: async (companyId) => {
           try { await app.runtimeFor(companyId); } catch { return undefined; }
