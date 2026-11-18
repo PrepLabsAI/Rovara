@@ -73,6 +73,24 @@ describe("the core root with the hosted people port", () => {
     await expect(ask(root, MEMBER_A)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
   });
 
+  it("authenticates before any company runtime is built: an unknown person, or one of no company, never reaches runtimeFor", async () => {
+    const { root } = await setup({ lessons: "on" });
+    const built = vi.spyOn(root.app, "runtimeFor");
+    await expect(ask(root, id(99))).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(built).not.toHaveBeenCalled();
+    // A member of company A reaches A's runtime and no other.
+    await expect(ask(root, MEMBER_A)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(built.mock.calls.map(([company]) => company)).toEqual([A]);
+  });
+
+  it("with the switch on, the team record and its knowledge search are built for the company too (defined, not 'not wired')", async () => {
+    const { root } = await setup({ lessons: "on" });
+    expect(root.lessons).toBeDefined();
+    const runtime = await root.app.runtimeFor(A);
+    expect(runtime.flow.deps.learned).toBeDefined();
+    expect(runtime.flow.deps.contextSources).toBeDefined();
+  });
+
   it("does not build lessons while the lessons switch is off, with the port given", async () => {
     for (const lessons of [undefined, "off", "", "typo"]) {
       const { root } = await setup({ ...(lessons === undefined ? {} : { lessons }) });
