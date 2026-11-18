@@ -127,6 +127,14 @@ describe("eval gateway delivery to the worker", () => {
     expect(job.payload).not.toHaveProperty("evalGatewayUrl");
   });
 
+  it("a worker that lists the gateway feature but not the eval round gets neither the request nor the field (the order of the two checks)", async () => {
+    const w = await world(false); w.h.deps.evalGatewayUrl = GATEWAY;
+    const { job } = await delivered(w);
+    expect(job.payload).not.toHaveProperty("evalRequest");
+    expect(job.payload).not.toHaveProperty("evalGatewayUrl");
+    expect(() => WorkerInvocationSchema.parse(job)).not.toThrow();
+  });
+
   it.each(["http://gateway.example.test", `${GATEWAY}/v1`, "https://u:p@gateway.example.test", `${GATEWAY}?a=b`, "gateway.example.test", ""])("refuses to send an address that is not an https origin (%s) and still delivers the step", async bad => {
     const w = await world(true); w.h.deps.evalGatewayUrl = bad;
     const { job } = await delivered(w);
@@ -166,7 +174,7 @@ describe("eval gateway delivery to the worker", () => {
   it("the worker contract refuses the field without an eval request (and with a bad origin) and accepts it with one", async () => {
     const w = await world(true); w.h.deps.evalGatewayUrl = GATEWAY;
     const { job } = await delivered(w);
-    const invocation = job as unknown as { payload: Record<string, unknown> };
+    const invocation = job;
     expect(WorkerInvocationSchema.safeParse(invocation).success).toBe(true);
     const { evalRequest: _evalRequest, ...withoutRequest } = invocation.payload; void _evalRequest;
     expect(WorkerInvocationSchema.safeParse({ ...invocation, payload: withoutRequest }).success).toBe(false);

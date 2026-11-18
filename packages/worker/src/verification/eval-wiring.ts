@@ -53,7 +53,7 @@ export function evalGatewayOriginFrom(environment: NodeJS.ProcessEnv): string | 
 
 /**
  * The environment the eval binding reads (`evalFinalCheckForTask`): the host's own, plus the gateway origin the broker delivered with this task's eval request (`evalGatewayUrl`, a hosted worker has no setting of its own).
- * The host's own `ROVARA_EVAL_GATEWAY_URL` always wins: when it is set at all (even to something that makes the eval stay off) nothing is added. A delivered value that is not exactly an https origin adds nothing. Nothing delivered
+ * The host's own `ROVARA_EVAL_GATEWAY_URL` always wins: when it is set to anything non-blank (even to something that makes the eval stay off, such as `off`) nothing is added; a blank value counts as unset, as the reader treats it. A delivered value that is not exactly an https origin adds nothing. Nothing delivered
  * (a laptop, an older broker, an install with no gateway) returns the host's environment itself, so the eval is exactly as it was. Never throws; the host's environment is not changed.
  */
 export function evalEnvironmentWithGateway(environment: NodeJS.ProcessEnv, delivered: string | undefined): NodeJS.ProcessEnv {

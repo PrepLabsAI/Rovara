@@ -330,7 +330,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   }
   // The gateway's address is the dispatcher's own (never a stored or queued value): whatever a stored payload carried is dropped, and it is sent only with an eval request to a worker that lists the feature.
   delete payload["evalGatewayUrl"];
-  if (spec.kind === "task" && payload["evalRequest"] !== undefined && features.includes(EVAL_GATEWAY_FEATURE) && EvalGatewayOriginSchema.safeParse(deps.evalGatewayUrl).success) payload["evalGatewayUrl"] = deps.evalGatewayUrl as string;
+  if (spec.kind === "task" && payload["evalRequest"] !== undefined && features.includes(EVAL_GATEWAY_FEATURE) && EvalGatewayOriginSchema.safeParse(deps.evalGatewayUrl).success) payload["evalGatewayUrl"] = deps.evalGatewayUrl;
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {
     const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features }).catch(() => undefined);
