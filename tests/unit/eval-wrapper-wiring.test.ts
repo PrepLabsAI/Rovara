@@ -41,4 +41,11 @@ describe("the setup run's eval wrapper seam", () => {
     await expect(h.deps.audit({ action: "eval_wrapper.proposed", project, details: { repository: "web" } })).rejects.toThrow();
     expect(h.events).toEqual([]);
   });
+
+  it("two repositories of one run with the same shape are two audit records (the event id names the repository)", async () => {
+    const h = setup();
+    for (const repository of ["web", "api"]) await h.deps.audit({ action: "eval_wrapper.proposed", project, details: { repository, language: "python", digest: "d".repeat(16), taskId: "task-1" } });
+    expect(h.events).toHaveLength(2);
+    expect(new Set(h.events.map((event) => event.eventId)).size).toBe(2);
+  });
 });

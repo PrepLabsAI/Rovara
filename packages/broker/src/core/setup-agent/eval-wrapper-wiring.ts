@@ -18,7 +18,7 @@ export function setupRunEvalWrapper(input: { store: DocumentStore; companyId: Or
       // No run to name, no proposal: the record must say what asked.
       if (taskId === undefined || taskId === "") throw new Error("the proposal names no setup run");
       await input.audit.record({
-        eventId: `${event.action}:${input.companyId}:${event.project}:${taskId}:${event.details["digest"] ?? ""}:${event.details["language"] ?? ""}`,
+        eventId: `${event.action}:${input.companyId}:${event.project}:${taskId}:${event.details["repository"] ?? ""}:${event.details["digest"] ?? ""}:${event.details["language"] ?? ""}`,
         companyId: input.companyId, at: new Date(input.now()).toISOString(), actor: { type: "system", id: setupRunActorOf(taskId) }, action: event.action,
         subject: { type: "project", id: event.project }, details: { project: event.project, ...event.details },
       });
