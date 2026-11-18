@@ -42,6 +42,7 @@ import { codeHostMetaHeadReader } from "../meta-repo/head-reader.js";
 import { META_PREPARE_FEATURE, metaPrepareFor } from "../meta-repo/prepare-meta.js";
 import { setupAgentPointerItem } from "../setup-agent/agent.js";
 import { developerIdOf } from "../sessions/create.js";
+import type { PinnedStanding } from "../instructions/pinned.js";
 import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
 import { PREPARE_PINS_FEATURE, type SetupAgentLimits, type WikiBuildWire } from "@agentx/contracts";
 
@@ -177,15 +178,18 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   // The project's playbook is read now, at the head of the default branch, and the task keeps the commit: every step of this task reads the file at it, so one task runs under one playbook. A file that cannot be
   // used, or a host that does not answer, refuses the start with the reason: a task is never started under rules it cannot be given.
   let playbookCommit: string | undefined;
+  let standingPin: PinnedStanding | undefined;
   try {
     playbookCommit = await deps.standingInstructions?.pin(request.project);
+    // Hosted: the file at that commit and the company's rules are copied onto the workspace now, for the dispatcher (which reads neither the code host nor the company's rules). The same refusals as the pin.
+    standingPin = await deps.standingInstructions?.pinContent?.(request.project, playbookCommit);
   } catch (error) {
     if (error instanceof AgentXError) return refused(error);
     throw error;
   }
   const workspace: WorkspaceRecord = {
     ...workspaceKey(deps.companyId, workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey,
-    projectName: project.definition.name, projectRevision: revision, ...(playbookCommit === undefined ? {} : { playbookCommit }), status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
+    projectName: project.definition.name, projectRevision: revision, ...(playbookCommit === undefined ? {} : { playbookCommit }), ...(standingPin === undefined ? {} : { standingPin }), status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
     ...workspaceProjectIndexAttributes({ orgId: deps.companyId, projectName: project.definition.name, createdAt: receivedAt }),
     createdAt: receivedAt, updatedAt: receivedAt,
   };

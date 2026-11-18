@@ -5,10 +5,12 @@
 // Fails closed: a company source that fails, a rule file over the limits, a playbook file that cannot be used, or a block too long to send refuses the step with a sentence; nothing is ever cut or
 // skipped. The refusals that will not pass by waiting are `CONFIG_INVALID` or `PROCESS_UNAVAILABLE`; a read that may pass is `RUNTIME_UNAVAILABLE`.
 import { STANDING_INSTRUCTIONS_MAX_BYTES, agentXError, type CompanyInstructionsSource, type OrgId, type StandingInstructionsPayload } from "@agentx/contracts";
-import { stepForMode, type PlaybookMode, type PlaybookService } from "../playbook/service.js";
+import { playbookLayersOf, stepForMode, type PlaybookMode, type PlaybookService } from "../playbook/service.js";
+import { playbookIsEmpty } from "../playbook/file.js";
 import { runningProcessOf } from "../playbook/process.js";
 import { isReviewingStage } from "../playbook/process-reviewers.js";
 import { readCompanyInstructions } from "./company-source.js";
+import { pinnedPlaybookFile, readPinnedStanding, type PinnedStanding } from "./pinned.js";
 import { buildStandingInstructions, type StandingLayer } from "./standing-block.js";
 
 /**
@@ -27,6 +29,11 @@ export interface StandingOperation {
   playbookCommit?: string | undefined;
   /** The files the step works on, when it knows them: a team rule scoped to other paths is then left out. Absent: every rule of the step's stage goes, each saying where it applies. */
   files?: readonly string[] | undefined;
+  /**
+   * What the task pinned at its start (hosted: read from the task's workspace record). Present: the company's rules and the project's How we work come from it ONLY, never from a live read, so one
+   * task runs under one set of rules and the caller needs no code host and no company store. Absent (a laptop's task, or a hosted task that started before this was kept): read live, as before.
+   */
+  pinned?: PinnedStanding | undefined;
 }
 
 /**
@@ -40,6 +47,11 @@ export interface StandingInstructions {
   forOperation(input: StandingOperation): Promise<StandingInstructionsPayload | undefined>;
   /** What a task starting now pins: the playbook commit its steps will read (undefined when there is no playbook source). Refuses like `forOperation`, so a task is not started under rules that cannot be read. */
   pin(project: string): Promise<string | undefined>;
+  /**
+   * Only where the task's rules are kept on the task (a hosted install: the dispatcher cannot read the code host or the company's rules). The copy of the project's How we work at `playbookCommit` (the
+   * commit `pin` answered) and of the company's rules, read now, for the task's workspace record. Refuses like `pin`. Absent on a laptop, which reads both at every step.
+   */
+  pinContent?(project: string, playbookCommit: string | undefined): Promise<PinnedStanding | undefined>;
 }
 
 export interface StandingInstructionsOptions {
@@ -47,9 +59,11 @@ export interface StandingInstructionsOptions {
   /** The company's rules. Absent: none (the Code default). */
   company?: CompanyInstructionsSource | undefined;
   /** The project's How we work. Absent: no project rules. */
-  playbook?: Pick<PlaybookService, "layersFor" | "pin"> | undefined;
+  playbook?: Pick<PlaybookService, "layersFor" | "pin" | "current"> | undefined;
   /** The project's team rules, read after the playbook's layers. Absent: none. */
   teamRules?: TeamRulesSource | undefined;
+  /** True on the hosted broker: the task's rules are copied at its start (`pinContent`) so a dispatcher can build the block from the task's own record. Never set on a laptop. */
+  pinsContent?: boolean | undefined;
 }
 
 export const TEAM_RULES_UNREADABLE = "The project's team rules can't be read right now";
@@ -57,11 +71,14 @@ export const TEAM_RULES_UNREADABLE = "The project's team rules can't be read rig
 export const STANDING_BLOCK_TOO_LONG = "The standing instructions for this step are too long to send to the worker. Shorten the company rules, the project's How we work file or the project's team rules.";
 
 export function createStandingInstructions(options: StandingInstructionsOptions): StandingInstructions {
-  return {
+  const instructions: StandingInstructions = {
     async forOperation(input) {
       if ((input.mode !== undefined && WITHOUT_BLOCK.has(input.mode)) || input.purpose === "diagnosis") return undefined;
-      const company = await readCompanyInstructions(options.company, options.companyId);
-      const playbookLayers = options.playbook === undefined ? [] : await options.playbook.layersFor(input.project, input.mode, input.playbookCommit);
+      // A pinned task takes both parts from its own record (checked again); any other task reads them live. Team rules are the project's own and are always read at the step.
+      const pinned = readPinnedStanding(input.pinned);
+      const company = pinned !== undefined ? pinned.company : await readCompanyInstructions(options.company, options.companyId);
+      const playbookLayers = pinned !== undefined ? playbookLayersOf(pinned.playbook?.file, input.mode)
+        : options.playbook === undefined ? [] : await options.playbook.layersFor(input.project, input.mode, input.playbookCommit);
       let teamLayers: StandingLayer[] = [];
       if (options.teamRules !== undefined) {
         try { teamLayers = await options.teamRules.layersFor({ project: input.project, mode: input.mode, ...(input.files === undefined ? {} : { files: input.files }) }); }
@@ -75,5 +92,19 @@ export function createStandingInstructions(options: StandingInstructionsOptions)
       return block;
     },
     pin: (project) => (options.playbook === undefined ? Promise.resolve(undefined) : options.playbook.pin(project)),
+  };
+  if (options.pinsContent !== true) return instructions;
+  return {
+    ...instructions,
+    async pinContent(project, playbookCommit) {
+      // The company's rules first (checked against the size limits: a company whose rules cannot be used refuses the start, as a step would be refused), then the file at the commit `pin` answered.
+      const company = await readCompanyInstructions(options.company, options.companyId);
+      let playbook: PinnedStanding["playbook"];
+      if (options.playbook !== undefined && playbookCommit !== undefined) {
+        const read = await options.playbook.current(project, { commit: playbookCommit });
+        if (read.file !== undefined && !playbookIsEmpty(read.file)) playbook = { commit: playbookCommit, file: pinnedPlaybookFile(read.file) };
+      }
+      return company === undefined && playbook === undefined ? undefined : { ...(playbook === undefined ? {} : { playbook }), ...(company === undefined ? {} : { company }) };
+    },
   };
 }

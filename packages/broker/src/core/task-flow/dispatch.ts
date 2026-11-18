@@ -162,6 +162,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     try {
       standing = await deps.standingInstructions.forOperation({
         project: workspace.projectName, mode: operation.dispatch.payload["workflowMode"] as PlaybookMode | undefined, ...(workspace.playbookCommit === undefined ? {} : { playbookCommit: workspace.playbookCommit }),
+        ...(workspace.standingPin === undefined ? {} : { pinned: workspace.standingPin }),
       });
     } catch (error) {
       const sentence = error instanceof AgentXError ? error.message.replace(/^[A-Z_]+: /u, "") : undefined;

@@ -151,13 +151,21 @@ export function createPlaybookService(deps: PlaybookServiceDeps): PlaybookServic
     },
     async layersFor(project, mode, commit) {
       const { file } = await current(project, commit === undefined ? {} : { commit });
-      if (file === undefined) return [];
-      const recipe = runningProcessOf(file).recipe;
-      const step = stepForMode(recipe, mode);
-      const builtin = new Set(recipe.chain.filter((entry) => entry.builtin).map((entry) => entry.name));
-      const layers: InstructionLayer[] = [...wholeAgentLayers(recipe, step), ...stepInstructionLayers(recipe, step, mode)];
-      // Rovara's own layers (the built-in's plan and build guidance) are Rovara's, not the project's process: only what the file wrote is the project's.
-      return layers.filter((layer) => layer.text.length > 0 && !builtin.has(layer.agentName)).map((layer) => ({ agentName: layer.agentName, text: layer.text }));
+      return playbookLayersOf(file, mode);
     },
   };
+}
+
+/**
+ * The instruction layers a step of this mode is given from a checked file, in order: whole-process rules (not for a reviewing stage), then the stage's own. Pure (no host, no store): the laptop reads the file
+ * at the task's pinned commit and a hosted dispatcher is handed the file the broker pinned, and both come here. Empty for no file.
+ */
+export function playbookLayersOf(file: PlaybookFile | undefined, mode: PlaybookMode | undefined): Array<{ agentName: string; text: string }> {
+  if (file === undefined) return [];
+  const recipe = runningProcessOf(file).recipe;
+  const step = stepForMode(recipe, mode);
+  const builtin = new Set(recipe.chain.filter((entry) => entry.builtin).map((entry) => entry.name));
+  const layers: InstructionLayer[] = [...wholeAgentLayers(recipe, step), ...stepInstructionLayers(recipe, step, mode)];
+  // Rovara's own layers (the built-in's plan and build guidance) are Rovara's, not the project's process: only what the file wrote is the project's.
+  return layers.filter((layer) => layer.text.length > 0 && !builtin.has(layer.agentName)).map((layer) => ({ agentName: layer.agentName, text: layer.text }));
 }

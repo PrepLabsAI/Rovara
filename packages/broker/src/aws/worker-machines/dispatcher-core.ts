@@ -127,7 +127,8 @@ export type DispatcherFlowWiring = { [K in (typeof DISPATCHER_FLOW_DECLARATIONS)
 /** The words a company's runtime on the dispatcher refuses with while a flow input is not declared. Fixed. */
 export const DISPATCHER_FLOW_NOT_DECLARED = "the dispatcher's flow inputs are not declared (standing instructions, model route, lessons): no worker job is built without them";
 /**
- * The flow inputs the deployment declares on the dispatcher: no standing instructions (no company rules seam on AWS yet), the model gateway route where it is configured, and lessons
+ * The flow inputs the deployment declares on the dispatcher: standing instructions built from the copy of the company's rules and How we work that the broker pinned on the task's workspace (plus the
+ * project's team rules where lessons cover the company; none without the company's runtime options), the model gateway route where it is configured, and lessons
  * only through the reader L6 supplies (createDispatcherLearned) for this company's runtime while ROVARA_CORE_LESSONS covers it; a missing reader still refuses declaration.
  */
 export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryTaskFlowOptions["learned"] | Omit<DispatcherLessonsOptions, "lessonsSwitch">): DispatcherFlowWiring | undefined {
@@ -137,17 +138,20 @@ export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryT
   try { gateway = gatewayModelAccessFromEnvironment(env); } catch { return undefined; }
   const modelAccess = gateway === undefined ? null : gatewayModelRoute(gateway);
   const lessonsSwitch = readCoreLessonsSwitch(env).value;
+  const options = typeof learned === "object" && learned !== null && "companyId" in learned ? learned : undefined;
+  // L4-HW3 (owner option A): the company's rules and the project's How we work were copied onto the task's workspace by the broker when the task started; the block is built from that copy, so a company's
+  // runtime always has the seam (no code host, no rules store and no lessons needed). Lessons being off, or not naming the company, only leaves out the team rules.
+  const standingOf = (teamRules: boolean): RegistryTaskFlowOptions["standingInstructions"] | null =>
+    options === undefined ? null : createStandingInstructions({ companyId: options.companyId, ...(teamRules ? { teamRules: createTeamRulesSource({ store: options.store, companyId: options.companyId }) } : {}) });
   if (lessonsSwitch.mode !== "off") {
-    const options = typeof learned === "object" && learned !== null && "companyId" in learned ? learned : undefined;
     // A narrowed lessons switch must not attach a reader to another company's runtime.
-    if (options !== undefined && !switchCovers(lessonsSwitch, options.companyId)) return { standingInstructions: null, modelAccess, learned: null };
+    if (options !== undefined && !switchCovers(lessonsSwitch, options.companyId)) return { standingInstructions: standingOf(false), modelAccess, learned: null };
     const reader = options === undefined ? learned : createDispatcherLearned({ ...options, lessonsSwitch });
     // Lessons phase 4: a rule a person made permanent from a proven lesson is read from THIS company's own team-rule row (one `get`, never another company's) and put in front of the steps it applies to as standing
-    // instructions; with no rules the step is byte for byte what it was. Only where lessons are on for the company and the deployment gave its store.
-    const standing = options === undefined ? null : createStandingInstructions({ companyId: options.companyId, teamRules: createTeamRulesSource({ store: options.store, companyId: options.companyId }) });
-    return typeof reader !== "function" ? undefined : { standingInstructions: standing, modelAccess, learned: reader };
+    // instructions, after the company's rules and How we work; with no rules the step is byte for byte what it was. Only where lessons are on for the company and the deployment gave its store.
+    return typeof reader !== "function" ? undefined : { standingInstructions: standingOf(true), modelAccess, learned: reader };
   }
-  return { standingInstructions: null, modelAccess, learned: null };
+  return { standingInstructions: standingOf(false), modelAccess, learned: null };
 }
 
 /** The words a code host call says on the dispatcher. */
