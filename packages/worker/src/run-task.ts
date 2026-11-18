@@ -50,8 +50,10 @@ import { ToolLoopGuard, toolLoopGuardExtension } from "./tool-loop-guard.js";
 import { assistantOutcome, eventType, failedTurn, type AssistantOutcome } from "./session-events.js";
 import { pinnedSkills, withStepTimeout, type AgentSkillFile } from "./agent-step.js";
 import { loadedKnowledgePayload } from "./knowledge/manifest.js";
-import { LEARNED_LOAD_REPORT_FIELD, type NightlyResultCallbackBody, type SecondReviewContext, type SecondReviewResult } from "@agentx/contracts";
+import { KNOWLEDGE_PROPOSALS_FIELD, LEARNED_LOAD_REPORT_FIELD, type NightlyResultCallbackBody, type SecondReviewContext, type SecondReviewResult } from "@agentx/contracts";
 import { prepareLearnedContext, withLearnedBlock } from "./learned-run.js";
+import { createKnowledgePropose } from "./knowledge-propose-tool.js";
+import { rovaraSkillFiles } from "./knowledge/skills.js";
 import { WIKI_READ_REPORT_FIELD, prepareWikiForStep } from "./wiki-agent.js";
 import { placeEvalFiles } from "./eval-files.js";
 import { runAgentStep, type AgentStepResult, type RunAgentStepInput } from "./agent-run/run-agent-step.js";
@@ -1006,6 +1008,10 @@ async function runTask(
       });
     },
   };
+  // Lead 4 L4-AK3: `knowledge_propose`, for the modes that work on the code only. A suggestion goes to the broker as progress (it checks, counts and limits it again); the tool says nothing about whether it was kept.
+  // The project's Rovara skills for this step (digest-checked, execution lines removed; plan and build only), offered through `read_skill` after the step's own and the meta repo's.
+  const rovaraSkills = rovaraSkillFiles(invocation.payload.rovaraSkills, payloadMode);
+  const knowledgePropose = createKnowledgePropose({ mode: payloadMode, emit: (proposal) => { void emit("progress", { [KNOWLEDGE_PROPOSALS_FIELD]: [proposal] }).catch(() => undefined); } });
   let session: PiSessionHandle;
   if (registered) {
     session = await openRegisteredWorkspacePiSession(
@@ -1024,6 +1030,8 @@ async function runTask(
         ...stepSession,
         ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
         ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
+        ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
+        ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
         compaction,
       },
       dependencies.piAdapter,
@@ -1040,6 +1048,8 @@ async function runTask(
         ...stepSession,
         ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
         ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
+        ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
+        ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
         compaction,
       },
       dependencies.piAdapter,

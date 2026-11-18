@@ -4,12 +4,13 @@
 // The caller (a route) has already proved WHO is asking (a person's sign-in, or a script token that is valid) and that the person is on the project's roster now; this module proves the rest and never reads who acts from a body.
 import { createHash } from "node:crypto";
 import {
-  LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, LOCAL_KNOWLEDGE_DISTINCT_ALERT, LOCAL_KNOWLEDGE_NO_BULK_MESSAGE, LocalKnowledgeAreasBodySchema, LocalLessonsBodySchema, agentXError, companyScoped, type DocumentStore,
+  KnowledgeProposeBodySchema, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, LOCAL_KNOWLEDGE_DISTINCT_ALERT, LOCAL_KNOWLEDGE_NO_BULK_MESSAGE, LocalKnowledgeAreasBodySchema, LocalLessonsBodySchema, agentXError, companyScoped, type DocumentStore,
 } from "@agentx/contracts";
 import { takeRate } from "../core/script-tokens/rate.js";
-import type { KnowledgeLimits } from "./knowledge-limits.js";
-import { LOCAL_OFF_MESSAGES, LocalLessonsUnavailable, knowledgeAreasForLocalTool, lessonsForLocalTool, renderLocalLessons, type LocalLessonsDeps, type LocalOffReason, type LocalToolsCounter } from "./local-tools.js";
+import { proposeLimits, type KnowledgeLimits } from "./knowledge-limits.js";
+import { LOCAL_OFF_MESSAGES, LocalLessonsUnavailable, knowledgeAreasForLocalTool, lessonsForLocalTool, localToolsGate, proveLocalRepo, renderLocalLessons, type LocalLessonsDeps, type LocalOffReason, type LocalToolsCounter } from "./local-tools.js";
 import { emitAudit, requireAudit } from "./policy.js";
+import { proposeKnowledge } from "./propose.js";
 import type { LessonsRuntime } from "./runtime.js";
 import type { ScopeKey } from "./store.js";
 import type { Lesson } from "./types.js";
@@ -22,7 +23,7 @@ export const KNOWLEDGE_NO_SUCH_PROJECT = "No such project.";
 export type KnowledgeTool = "lessons" | "areas";
 
 /** What a call needs of the lessons runtime. The laptop's runtime also carries a repository file pass (`repoFile`), which the laptop's route hands in as `repoFileIds`. */
-export type KnowledgeRuntime = Pick<LessonsRuntime, "store" | "settings" | "access" | "localTools" | "audit">;
+export type KnowledgeRuntime = Pick<LessonsRuntime, "store" | "settings" | "access" | "localTools" | "audit" | "process">;
 
 export interface KnowledgeServeOptions {
   companyId: string;
@@ -53,17 +54,26 @@ export interface KnowledgeCall {
   token?: { readonly tokenId?: string | undefined; readonly permissions: readonly string[]; readonly projects: readonly string[] } | undefined;
 }
 
+/** A tool's team suggestion (`team_propose`, L4-AK3H): the same caller facts as a read. */
+export type KnowledgeProposeCall = Omit<KnowledgeCall, "tool">;
+
 /**
  * The laptop's own "off" answer (the install's lessons switch is off, or does not cover the company), in the shape of the tool asked: a client reads the same fixed words it reads from a laptop. Reads nothing, so it is also
  * what a caller is told before anyone has been looked up.
  */
-export function knowledgeOffAnswer(tool: KnowledgeTool, project: string, at: number, reason: LocalOffReason = "install_switch"): object {
+export function knowledgeOffAnswer(tool: KnowledgeTool | "propose", project: string, at: number, reason: LocalOffReason = "install_switch"): object {
   const message = LOCAL_OFF_MESSAGES[reason];
+  // A suggestion's "off" answer is the one the laptop gives (`KnowledgeProposeResponse`): the status and the fixed sentence, nothing else.
+  if (tool === "propose") return { status: "off", message };
   if (tool === "areas") return { status: "off", reason, message, project, repos: [], more: 0, complete: true };
   return { status: "off", reason, message, project, lessons: [], markdown: renderLocalLessons({ project, lessons: [], at, complete: true, note: message }), complete: true };
 }
 
-export interface KnowledgeServer { read(call: KnowledgeCall): Promise<object> }
+export interface KnowledgeServer {
+  read(call: KnowledgeCall): Promise<object>;
+  /** A tool's team suggestion: the same door rules as a read, then the one gate, then `proposeKnowledge` (a weak-source lesson that waits for a second sighting and a person; never applied by itself). */
+  propose(call: KnowledgeProposeCall): Promise<object>;
+}
 
 export function createKnowledgeServer(options: KnowledgeServeOptions): KnowledgeServer {
   const { companyId, runtime, limits, counter, now } = options;
@@ -148,5 +158,48 @@ export function createKnowledgeServer(options: KnowledgeServeOptions): Knowledge
     return outcome.answer;
   }
 
-  return { read };
+  const suggestionLimits = proposeLimits(options.store, now);
+
+  /**
+   * A tool's team suggestion. Order (the laptop's, because it is this code): the per-minute rate, the token's permission and project, the project's existence, the body's shape, the repository proved to be the project's,
+   * the switches (`localToolsGate`: the company's "Knowledge stays in Rovara" and every other off reason answer their fixed sentence and store nothing), then `proposeKnowledge` (shape, guards, the person's day limit, the
+   * audit record BEFORE anything is stored, the weak-source lesson). It makes no model call and reads no other person's text.
+   */
+  async function propose(call: KnowledgeProposeCall): Promise<object> {
+    const { project, developerId } = call;
+    let allowed: boolean;
+    try { allowed = await takeRate(options.store, { pk: companyScoped(companyId, "LESSON_LOCAL_READS"), sk: developerId }, LOCAL_LESSONS_PER_MINUTE, 60_000, now); }
+    catch { throw agentXError("RUNTIME_UNAVAILABLE", KNOWLEDGE_UNAVAILABLE); }
+    if (!allowed) throw agentXError("TOO_MANY_REQUESTS", "Too many lesson requests. Try again in a minute.");
+    if (call.token !== undefined && (!call.token.permissions.includes("lessons") || !call.token.projects.includes(project))) throw agentXError("NOT_FOUND", KNOWLEDGE_NO_SUCH_PROJECT);
+    let exists: boolean;
+    try { exists = await options.projectExists(project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", KNOWLEDGE_UNAVAILABLE); }
+    if (!exists) throw agentXError("NOT_FOUND", KNOWLEDGE_NO_SUCH_PROJECT);
+    let raw: unknown;
+    try { raw = call.body === undefined || call.body === "" ? {} : JSON.parse(call.body); } catch { throw agentXError("CONFIG_INVALID", "body: is not JSON"); }
+    const checked = KnowledgeProposeBodySchema.safeParse(raw);
+    if (!checked.success) {
+      const issue = checked.error.issues[0];
+      // Field names only: the values are the caller's.
+      throw agentXError("CONFIG_INVALID", `${issue === undefined || issue.path.length === 0 ? "body" : issue.path.join(".")}: ${issue === undefined || issue.code === "unrecognized_keys" ? "has a field this route does not take" : issue.message}`);
+    }
+    const key: ScopeKey = { workspaceId: companyId, project };
+    const count = async (refusal: string): Promise<void> => { try { await counter.count({ orgId: companyId, project, developerId, lessons: 0, refusal }); } catch { /* bookkeeping only */ } };
+    const deps: Pick<LocalLessonsDeps, "access" | "settings" | "localTools"> = { settings: runtime.settings, access: runtime.access, localTools: runtime.localTools };
+    try {
+      const { repo: remote, ...proposal } = checked.data;
+      const proved = await proveLocalRepo(deps, key, remote);
+      if (proved === "unknown_repo") { await count("unknown_repo"); throw agentXError("NOT_FOUND", KNOWLEDGE_NO_SUCH_PROJECT); }
+      const gate = await localToolsGate(deps, key);
+      if (gate.kind === "off") { await count(gate.reason); return { status: "off", message: LOCAL_OFF_MESSAGES[gate.reason] }; }
+      const answer = await proposeKnowledge({ process: runtime.process, limits: suggestionLimits }, { companyId, project, proposer: { kind: "tool", personId: developerId }, proposal, ...(proved === undefined ? {} : { repo: proved }) });
+      await count(answer.status === "received" ? "proposed" : (answer.reason ?? "refused"));
+      return answer;
+    } catch (error) {
+      if (error instanceof LocalLessonsUnavailable) { await count("unavailable"); throw agentXError("RUNTIME_UNAVAILABLE", KNOWLEDGE_UNAVAILABLE); }
+      throw error;
+    }
+  }
+
+  return { read, propose };
 }

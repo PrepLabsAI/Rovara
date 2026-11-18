@@ -44,6 +44,9 @@ import {
   type WorkflowPublishRetryRequest,
   type WorkflowResolveFindingsInput,
   forwardReader,
+  KnowledgeProposeReaderSchema,
+  type KnowledgeProposeBody,
+  type KnowledgeProposeRead,
   LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE,
   LocalKnowledgeAreasReaderSchema,
   LocalLessonsResponseReaderSchema,
@@ -147,6 +150,8 @@ export interface ControlPlaneClient {
   knowledgeFor(project: string, body: Omit<LocalLessonsBody, "all" | "skipRepoFile">): Promise<KnowledgeAsk<LocalLessonsRead>>;
   /** The table of contents of one project's team knowledge (`POST /v1/dev/projects/<project>/knowledge/areas`): a tree project > repository > top folder, counts only. */
   knowledgeAreas(project: string, body: { repo?: string }): Promise<KnowledgeAsk<LocalKnowledgeAreasRead>>;
+  /** A team SUGGESTION for one project (`POST /v1/dev/projects/<project>/knowledge/propose`): a weak-source lesson that waits for a second sighting and then for a person. The one write of the team knowledge tools. */
+  knowledgePropose(project: string, body: KnowledgeProposeBody): Promise<KnowledgeAsk<KnowledgeProposeRead>>;
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
   projects(): Promise<DeveloperProjectsResponse>;
@@ -421,6 +426,7 @@ export function httpControlPlaneClient(options: {
   return {
     knowledgeFor: (project, body) => knowledgeCall(LocalLessonsResponseReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/lessons`, body),
     knowledgeAreas: (project, body) => knowledgeCall(LocalKnowledgeAreasReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/knowledge/areas`, body),
+    knowledgePropose: (project, body) => knowledgeCall(KnowledgeProposeReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/knowledge/propose`, body),
     configuration: async () => {
       const current = await session();
       const value = await send(current, ConfigurationSchema, "GET", "/v1/auth/.well-known/agentx-configuration", undefined, false);

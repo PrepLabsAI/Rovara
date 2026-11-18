@@ -39,6 +39,8 @@ export interface CurateDeps extends LessonDeps {
   access?: AccessCheckPort | undefined;
   /** The project's configured expiry window in days (14-365), if any. */
   expiryDays?: number;
+  /** No judge call at all (a team suggestion from a tool or an agent, L4-AK3: no model call is made for it): the ordered word test decides alone, exactly as with no judge. */
+  noJudge?: boolean;
   /** The sources (and the project's volume, `PROJECT_VOLUME_KEY`) an earlier try of the same draft already counted (a retry): they are not counted again, and the ones it did not reach still are. */
   alreadyNoted?: ReadonlySet<string>;
   /**
@@ -317,7 +319,7 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
     const hitIds = new Set(rejectedHits.map((l) => l.id));
     const reserved = [...rejectedHits.filter((l) => visible.has(l.id)), ...rejectedGated.filter((l) => !hitIds.has(l.id))].slice(0, JUDGE_REJECTED);
     const top = [...live.slice(0, JUDGE_CANDIDATES).map((c) => c.lesson), ...reserved];
-    const judged = top.length === 0 ? undefined : await judgeList(deps, key, draft, top);
+    const judged = top.length === 0 || deps.noJudge === true ? undefined : await judgeList(deps, key, draft, top);
     if (judged !== undefined) {
       judgeEscalate = judged.escalate;
       top.forEach((lesson, i) => { verdicts.set(lesson.id, judged.verdicts[i]!); judgedBy.add(lesson.id); });

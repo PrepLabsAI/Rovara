@@ -174,6 +174,10 @@ export interface PiSessionInput {
    * judges (Understand, Plan, the plan check, a review); never to Build or a setup run. After `ANSWER_REFUSALS_MAX` refused answers in a row the session is told to answer in plain text instead.
    */
   answerTools?: readonly ToolDefinition[];
+  /** L4-AK3: `knowledge_propose`, the tool a coding step suggests team knowledge through (knowledge-propose-tool.ts). Never offered to a judging, setup, wiki or agent-run session; the caller builds it for the modes that may. */
+  proposeTool?: ToolDefinition;
+  /** L4-AK3: the project's Rovara skills for this step (`rovaraSkillFiles`), offered through `read_skill` after the step's own and the meta repo's; the meta repo's wins a name clash. */
+  rovaraSkills?: readonly AgentSkillFile[];
   /**
    * What the conversation-compaction hook knows (compaction.ts): the stage's source-text guard, the approved plan's facts and where to report a compaction. The hook is on in every
    * session; without these it still stubs any source result in what it summarises.
@@ -193,8 +197,13 @@ export interface AgentRunSession {
   tools: readonly ToolDefinition[];
 }
 
+/** What a session says when the meta repo (or the step) already has a skill of a Rovara skill's name: the Rovara skill is left out, and the person can see why. */
+const rovaraClash = (onDiagnostic: ((message: string) => void) | undefined) => (name: string): void => {
+  try { onDiagnostic?.(`a team skill named ${name.slice(0, 64)} was not offered: a skill with that name already comes from the meta repo`); } catch { /* reporting must not break a session */ }
+};
+
 /** The names no worker tool of an agent step may take: Pi's own, the shell and `read_skill`. */
-const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "powershell", "read_skill", "read_knowledge", TOOL_SEARCH_TOOL_NAME]);
+const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "powershell", "read_skill", "read_knowledge", "knowledge_propose", TOOL_SEARCH_TOOL_NAME]);
 
 /** The worker's own tools that are always declared, however many connector or source tools there are: they are few and the model needs them every time. */
 const ALWAYS_DIRECT_TOOL_NAMES: ReadonlySet<string> = new Set(["choose_branch", SEARCH_TEAM_KNOWLEDGE_TOOL]);
@@ -279,6 +288,9 @@ export async function createWorkspacePiSession(
     contextMcp?: ContextMcpSession;
     /** Structured answers: the tool(s) the step delivers its answer through (see PiSessionInput.answerTools). */
     answerTools?: readonly ToolDefinition[];
+    /** See PiSessionInput.proposeTool. */
+    proposeTool?: ToolDefinition;
+    rovaraSkills?: readonly AgentSkillFile[];
     /** The compaction hook's inputs (see PiSessionInput.compaction). */
     compaction?: SessionCompactionOptions;
     /** Where the agent works, when that is not the workspace root: a folder inside it (a parallel part's working copy). Its saved transcript and settings stay in the root's. */
@@ -322,6 +334,7 @@ export async function createWorkspacePiSession(
   // An agent step reads the repository as information: its context files (written by whoever can push) are not loaded.
   const knowledgeLoad = input.agentRun === undefined && !(input.workflowMode !== undefined && NO_REPOSITORY_CONTEXT_MODES.has(input.workflowMode)) ? await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits, { workflowMode: input.workflowMode, knowledge: input.knowledge, onLoaded: input.onKnowledgeLoaded }) : undefined;
   const contextFiles = knowledgeLoad?.files ?? [];
+  const sessionSkills = mergeSkills(input.skills, knowledgeLoad?.skills ?? [], input.rovaraSkills, rovaraClash(input.onDiagnostic));
   const knowledgeSession = knowledgeLoad?.session;
   if (input.contextNote !== undefined && ((input.contextTools !== undefined && input.contextTools.length > 0) || input.contextMcp !== undefined)) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
   const handle = await adapter.create({
@@ -342,12 +355,13 @@ export async function createWorkspacePiSession(
     ...(input.extensionFactories === undefined ? {} : { extensionFactories: input.extensionFactories }),
     ...(input.onDiagnostic === undefined ? {} : { onDiagnostic: input.onDiagnostic }),
     ...(input.agentTools === undefined ? {} : { agentTools: input.agentTools }),
-    ...(mergeSkills(input.skills, knowledgeLoad?.skills ?? []) === undefined ? {} : { skills: mergeSkills(input.skills, knowledgeLoad?.skills ?? [])! }),
+    ...(sessionSkills === undefined ? {} : { skills: sessionSkills }),
     ...(input.agentRun === undefined ? {} : { agentRun: input.agentRun }),
     ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
     ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
+    ...(input.proposeTool === undefined ? {} : { proposeTool: input.proposeTool }),
     ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
@@ -384,6 +398,9 @@ export async function openRegisteredWorkspacePiSession(
     contextMcp?: ContextMcpSession;
     /** As for `createWorkspacePiSession`. */
     answerTools?: readonly ToolDefinition[];
+    /** As for `createWorkspacePiSession`. */
+    proposeTool?: ToolDefinition;
+    rovaraSkills?: readonly AgentSkillFile[];
     compaction?: SessionCompactionOptions;
     /** As for `createWorkspacePiSession`. */
     contextFilesAt?: "working-tree" | "base-commit";
@@ -412,6 +429,7 @@ export async function openRegisteredWorkspacePiSession(
   // A setup run reads no repository context file when it is reopened either: the repository's rule files are data, never loaded into the session that has a shell.
   const knowledgeLoad = input.workflowMode !== undefined && NO_REPOSITORY_CONTEXT_MODES.has(input.workflowMode) ? undefined : await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits, { workflowMode: input.workflowMode, knowledge: input.knowledge, onLoaded: input.onKnowledgeLoaded });
   const contextFiles = knowledgeLoad?.files ?? [];
+  const sessionSkills = mergeSkills(input.skills, knowledgeLoad?.skills ?? [], input.rovaraSkills, rovaraClash(input.onDiagnostic));
   if (input.contextNote !== undefined && ((input.contextTools !== undefined && input.contextTools.length > 0) || input.contextMcp !== undefined)) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
   const handle = await adapter.open({
     ...(knowledgeLoad?.session === undefined ? {} : { knowledgeSession: knowledgeLoad.session }),
@@ -431,11 +449,12 @@ export async function openRegisteredWorkspacePiSession(
     ...(input.extensionFactories === undefined ? {} : { extensionFactories: input.extensionFactories }),
     ...(input.onDiagnostic === undefined ? {} : { onDiagnostic: input.onDiagnostic }),
     ...(input.agentTools === undefined ? {} : { agentTools: input.agentTools }),
-    ...(mergeSkills(input.skills, knowledgeLoad?.skills ?? []) === undefined ? {} : { skills: mergeSkills(input.skills, knowledgeLoad?.skills ?? [])! }),
+    ...(sessionSkills === undefined ? {} : { skills: sessionSkills }),
     ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
     ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
+    ...(input.proposeTool === undefined ? {} : { proposeTool: input.proposeTool }),
     ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
@@ -627,7 +646,7 @@ async function createDefaultSession(
       thinkingLevel: requestedLevel ?? (model.reasoning ? "medium" : "off"),
       // read_skill is the worker's own tool, never a file tool: it is there only when the operation has skills.
       // With the rovara server, its tools are named by pattern; naming any MCP tool makes the list filter MCP tools, so no other server's could be active.
-      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...exposure.names, ...(input.contextMcp === undefined ? [] : [ROVARA_MCP_TOOL_PATTERN])],
+      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...(input.proposeTool === undefined || input.agentRun !== undefined ? [] : [input.proposeTool.name]), ...exposure.names, ...(input.contextMcp === undefined ? [] : [ROVARA_MCP_TOOL_PATTERN])],
       // Only the host tools this stage chose can be active: a deferred tool's `name*` entry (a tool called `wr`) must not switch on Pi's own `write`.
       excludeTools: excludeUnselectedBuiltIns(stepTools.tools),
       // A custom tool with a built-in's name replaces it.
@@ -640,6 +659,7 @@ async function createDefaultSession(
             : devcontainerFileTools(input.cwd, input.devcontainerPaths).filter((tool) => stepTools.tools.includes(tool.name))),
         ...(skillFiles.length === 0 ? [] : [readSkillTool(skillFiles)]),
         ...knowledgeTool,
+        ...(input.proposeTool === undefined || input.agentRun !== undefined ? [] : [input.proposeTool]),
         ...exposure.tools,
       ],
       resourceLoader,

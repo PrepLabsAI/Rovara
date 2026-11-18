@@ -2032,10 +2032,10 @@ async function companySelfCreateRoute(deps: DeveloperRouteDependencies, request:
 }
 
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
-export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request|skill))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
 
 /** L4-AK1H: the team knowledge reads' paths (`core-host/knowledge-api.ts` parses the same paths; a test holds the two equal). Both are POSTs (a repository's address stays out of addresses and access logs). */
-export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/areas)$/u;
+export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/(?:areas|propose))$/u;
 
 /** The Home number's paths (`core-host/lessons-repeats-api.ts` parses the same paths; a test holds the two equal). */
 export const LESSONS_REPEATS_ROUTES = /^\/v1\/dev\/(?:projects\/([^/]+)\/)?lessons\/repeats$/u;
