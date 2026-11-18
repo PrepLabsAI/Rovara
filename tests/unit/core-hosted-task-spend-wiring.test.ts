@@ -125,6 +125,6 @@ describe("the laptop's own taskSpendUsd is unchanged", () => {
     expect(autofix).toContain("deps.taskSpendUsd === undefined ? 0 : (await deps.taskSpendUsd(task.taskId)) ?? 0");
     // L4-TA6: and its live cap is the run limit (`taskLimitUsd`, the round cap's own figure), set only while the run limit is held.
     expect(app).toContain("...(options.runLimit === false ? {} : { taskCapUsd: async (task: TaskRecord) => taskLimitUsd(task) }),");
-    expect(autofix).toContain("capUsd: await autofixCapUsd(deps, task, config.capUsd)");
+    expect(autofix).toContain("const capUsd = await autofixCapUsd(deps, task, config.capUsd);");
   });
 });
