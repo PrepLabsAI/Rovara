@@ -24,6 +24,9 @@ import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { lessonRecord, draft } from "./lessons/lesson-helpers.js";
+import { answersBriefingOf } from "../../packages/broker/src/aws/core-engine-root.js";
+import { routeHostedAnswers, type HostedAnswersWiring } from "../../packages/broker/src/core-host/answer-routes.js";
+import { HEAD, REFUND_TS, answer, goodSentence, scriptedModel } from "../support/answer-world.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));
 
@@ -243,6 +246,69 @@ describe("the team knowledge briefing of an answer on the deployed engine (lead 
     expect(companies.get(B)!.lessons).toBeUndefined();
     await putLesson(companies.get(A)!.lessons!, scopedLesson(A, "les_aaaa1111", "Retry network calls with the A helper"));
     expect(await companies.get(A)!.lessons!.host.answerBriefing(ask)).toContain("A helper");
+  });
+});
+
+describe("the hosted answer route with the engine's briefing join (lead 4 L4-AK2g)", () => {
+  const ANSWER_PATH = "/v1/app/projects/payments/answers";
+  const scopedLesson = (company: string, id: string, title: string) => ({ ...activeLesson(company, id, title), type: "convention" as const, scope: { repos: ["demo"], paths: ["src/net/**"] } });
+  async function hostedWorld(roles: Record<string, "view" | "manage">) {
+    const world = createFakeWorld();
+    const hosts = new Map<string, CoreLessons>();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: ["person-1"], [B]: ["person-1"] }), hosts);
+    await putLesson(companies.get(A)!.lessons!, scopedLesson(A, "les_aaaa1111", "Retry network calls with the A helper"));
+    await putLesson(companies.get(B)!.lessons!, scopedLesson(B, "les_bbbb1111", "Retry network calls with the B helper"));
+    const asked: string[] = [];
+    // The engine's own join, over the real lessons hosts; every ask of a company's host is recorded.
+    const hostOf = (companyId: OrgId) => {
+      const host = hosts.get(companyId)?.host;
+      return host === undefined ? undefined : { answerBriefing: async (input: Parameters<typeof host.answerBriefing>[0]) => { asked.push(companyId); return await host.answerBriefing(input); } };
+    };
+    const model = scriptedModel([answer([goodSentence])]);
+    const wiringOf = (runtimeCompany: OrgId): HostedAnswersWiring => ({
+      standing: async (personId, companyId, project) => { const access = roles[`${companyId}/${project}/${personId}`]; return access === undefined ? undefined : { access, basis: access === "manage" ? "company-admin" : "project-grant" } as never; },
+      repositories: async () => ({ names: ["demo"], handles: [{ name: "demo", defaultBranch: "main", repository: { url: "https://github.com/example/demo.git" }, scope: { orgId: runtimeCompany }, host: { baseBranchHead: async () => HEAD, fileAtRevision: async () => REFUND_TS } }] }),
+      model: () => model,
+      briefing: answersBriefingOf(runtimeCompany, hostOf),
+    });
+    const post = async (runtimeCompany: OrgId, companyId: OrgId, personId: string) => {
+      const body = JSON.stringify({ requestId: randomUUID(), question: "How do we retry network calls?" });
+      const response = await routeHostedAnswers({ request: { method: "POST", path: ANSWER_PATH, headers: {}, body }, path: ANSWER_PATH, personId, companyId, store: world.store, wiring: wiringOf(runtimeCompany), now: () => world.clock.now });
+      return { status: response.statusCode, raw: response.body ?? "" };
+    };
+    return { post, asked, model };
+  }
+
+  it("a company's answer is briefed with ITS lessons alone (same project name in both), and only the company's own host is asked", async () => {
+    const w = await hostedWorld({ [`${A}/payments/ada`]: "view", [`${B}/payments/bob`]: "view" });
+    expect((await w.post(A, A, "ada")).status).toBe(200);
+    expect(w.asked).toEqual([A]);
+    const forA = w.model.turns.map((turn) => turn.transcript).join("\n");
+    expect(forA).toContain("A helper");
+    expect(forA).not.toMatch(/B helper|bbbb1111/u);
+    const before = w.model.turns.length;
+    expect((await w.post(B, B, "bob")).status).toBe(200);
+    expect(w.asked).toEqual([A, B]);
+    const forB = w.model.turns.slice(before).map((turn) => turn.transcript).join("\n");
+    expect(forB).toContain("B helper");
+    expect(forB).not.toMatch(/A helper|aaaa1111/u);
+  });
+
+  it("another company's runtime never reads a company's lessons: a request for B on A's wiring is not briefed, and no host is asked", async () => {
+    const w = await hostedWorld({ [`${B}/payments/bob`]: "view" });
+    expect((await w.post(A, B, "bob")).status).toBe(200);
+    expect(w.asked).toEqual([]);
+    expect(w.model.turns.map((turn) => turn.transcript).join("\n")).not.toContain("team-knowledge");
+  });
+
+  it("the role is checked BEFORE the briefing: a person with no role gets the one 404, the briefing is never called, and the model is never opened", async () => {
+    const w = await hostedWorld({ [`${A}/payments/ada`]: "view" });
+    for (const [company, person] of [[A, "stranger"], [B, "ada"], [A, "bob"]] as const) {
+      const result = await w.post(company, company, person);
+      expect(result.status, `${company} ${person}`).toBe(404);
+    }
+    expect(w.asked).toEqual([]);
+    expect(w.model.opened).toHaveLength(0);
   });
 });
 

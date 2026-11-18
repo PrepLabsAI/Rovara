@@ -73,6 +73,8 @@ import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
+import type { HostedAnswersWiring } from "../core-host/answer-routes.js";
+import type { LessonsHost } from "../lessons/host-glue.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
@@ -303,6 +305,14 @@ export function personStandingFromDynamo(client: DynamoSender, tableName: string
 export function projectGrantFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string) => Promise<boolean> {
   const role = projectGrantRoleFromDynamo(client, tableName);
   return async (personId, project) => (await role(personId, project)) !== undefined;
+}
+
+/**
+ * Lead 4 L4-AK2g: the hosted answers' team knowledge briefing. A company's answer is briefed by THAT company's own lessons host, and only on the runtime that is that company's (the engine builds one runtime per
+ * company); another company's id, or a company the lessons switch does not cover, has none and the answer is made as before. The seam is asked only after the answer service checked the person's role.
+ */
+export function answersBriefingOf(runtimeCompanyId: OrgId, hostOf: (companyId: OrgId) => Pick<LessonsHost, "answerBriefing"> | undefined): NonNullable<HostedAnswersWiring["briefing"]> {
+  return (companyId) => { const host = companyId === runtimeCompanyId ? hostOf(companyId) : undefined; return host === undefined ? undefined : (input) => host.answerBriefing(input); };
 }
 
 /** The project role the lessons API reads, from the broker's grant: a project administrator is a `maintainer`, a developer a `contributor`; anything else none. */
@@ -835,6 +845,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // every answer is the fixed "answers are not set up here yet" outcome.
           answers: {
             model: answersModel(),
+            // Lead 4 L4-AK2g: this company's own lessons host answers its briefing (never another company's); absent where the lessons switch does not cover it.
+            briefing: answersBriefingOf(runtime.companyId, (id) => lessonsByCompany.get(id)?.host),
             standing: setupRunStanding,
             repositories: async (companyId, project) => {
               if (companyId !== runtime.companyId) return undefined;
