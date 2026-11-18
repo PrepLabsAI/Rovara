@@ -35,7 +35,7 @@ function root(env: NodeJS.ProcessEnv, options: { linear?: boolean } = {}) {
   });
   return { root: built, accessToken };
 }
-const extrasInput = (withTicket: boolean) => ({ taskId: "11111111-1111-4111-8111-111111111111", project: "payments", title: "t", principal, client: "web", receivedAt: "2026-11-17T00:00:00.000Z", ...(withTicket ? { ticket } : {}) });
+const extrasInput = (withTicket: boolean) => ({ taskId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", project: "payments", title: "t", principal, client: "web", receivedAt: "2026-11-17T00:00:00.000Z", ...(withTicket ? { ticket } : {}) });
 
 describe("the core root's hosted intake", () => {
   it("is not built while the switch is off, its settings are unreadable, or Linear is not wired", () => {
