@@ -189,6 +189,8 @@ export const WikiNoteApprovalSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("approved"), by: WikiPersonIdSchema, at: isoTime }).strict(),
 ]);
 export type WikiNoteApproval = z.infer<typeof WikiNoteApprovalSchema>;
+export const WikiNoteChangedAcknowledgementSchema = z.object({ by: WikiPersonIdSchema, at: isoTime }).strict();
+export type WikiNoteChangedAcknowledgement = z.infer<typeof WikiNoteChangedAcknowledgementSchema>;
 
 /** A note by a named person, pinned to a page. Shown to people at once; given to agents only once approved. It survives every refresh (it is stored apart from the page). */
 export const WikiNoteSchema = z.object({
@@ -199,6 +201,8 @@ export const WikiNoteSchema = z.object({
   createdAt: isoTime,
   /** A file the note is tied to (its author and the admins are asked to check it when the file changes). */
   file: z.object({ repo: WikiRepoSchema, path: WikiPathSchema }).strict().optional(),
+  /** The author or a maintainer acknowledged that the tied file changed. */
+  changedAcknowledgement: WikiNoteChangedAcknowledgementSchema.optional(),
   approval: WikiNoteApprovalSchema,
 }).strict();
 export type WikiNote = z.infer<typeof WikiNoteSchema>;
@@ -427,6 +431,8 @@ export interface WikiStore {
   addNote(project: string, note: WikiNoteAdd): Promise<WikiNote>;
   /** Approves a pending note (the caller checked the approver is a maintainer or a company owner or admin). Answers undefined when there is no such note. */
   approveNote(project: string, pageId: string, noteId: string, by: string): Promise<WikiNote | undefined>;
+  /** Records that the note's author or a maintainer reviewed its changed file. */
+  acknowledgeNote(project: string, pageId: string, noteId: string, by: string): Promise<WikiNote | undefined>;
   deleteNote(project: string, pageId: string, noteId: string): Promise<boolean>;
   addFlag(project: string, flag: WikiFlagAdd): Promise<WikiFlag>;
   /** Resolves every open flag on a page (a refresh rewrote it). */

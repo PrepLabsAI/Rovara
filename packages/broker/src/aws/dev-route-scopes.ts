@@ -208,6 +208,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/approve", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/delete", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/suggest-lesson", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/acknowledge", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/flags", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/flags/resolve", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/disputed", requires: "full" },

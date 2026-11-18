@@ -70,7 +70,7 @@ describe("the /v1/app route table", () => {
     // Lead 4 C1: the wiki's corrections (additive: no existing row changed).
     ["GET", "/v1/app/projects/payments/wiki/pages/overview/corrections", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes", "full"],
     ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/delete", "full"],
-    ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/suggest-lesson", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags", "full"],
+    ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/suggest-lesson", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/acknowledge", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags", "full"],
     ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags/resolve", "full"], ["GET", "/v1/app/projects/payments/wiki/disputed", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
