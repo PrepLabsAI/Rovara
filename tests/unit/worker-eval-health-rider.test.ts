@@ -27,7 +27,7 @@ function network(answers: Array<number | "throw"> = [200]) {
   const sent: Sent[] = []; let n = 0;
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const headers: Record<string, string> = {}; new Headers(init?.headers).forEach((v, k) => { headers[k] = v; });
-    sent.push({ url: String(input), headers, body: typeof init?.body === "string" ? init.body : "" });
+    sent.push({ url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url, headers, body: typeof init?.body === "string" ? init.body : "" });
     const answer = answers[Math.min(n++, answers.length - 1)]!;
     if (answer === "throw") throw new Error("down");
     return new Response("{}", { status: answer });
@@ -40,7 +40,7 @@ async function withPorts(over: Partial<EvalHealthRiderDeps> = {}) {
   const w = await createEvalFinalCheckWorld(true, 2); roots.push(w.root);
   const net = network();
   const seen: { treeAsked: Array<[string, string]> } = { treeAsked: [] };
-  const base = deps({ fetch: net.fetchImpl, treeOf: async (directory, commit) => { seen.treeAsked.push([directory, commit]); return TREE; }, ports: () => ({ plan: w.ports.plan, approval: w.ports.approval, meter: w.ports.meter, runner: w.ports.runner }), ...over });
+  const base = deps({ fetch: net.fetchImpl, treeOf: async (directory, commit) => { seen.treeAsked.push([directory, commit]); return TREE; }, ports: () => ({ plan: () => w.ports.plan(), approval: w.ports.approval, meter: w.ports.meter, runner: (r) => w.ports.runner(r) }), ...over });
   return { w, net, seen, base };
 }
 
@@ -79,7 +79,7 @@ describe("the rider measures main and posts the one result", () => {
     expect(t.w.holds).toHaveLength(1);
   });
   it("hands the job the delivered plan inside the pin: the plan's per-question hashes are read at the pinned commit", async () => {
-    const t = await withPorts({ ports: (inv) => { void inv; return { plan: async () => { const planned = await pinnedEvalPlan({}); return planned as never; }, approval: { read: async () => undefined }, meter: { reserve: async () => undefined }, runner: async () => { throw new Error("no"); } }; } });
+    const t = await withPorts({ ports: (inv) => { void inv; return { plan: async () => { const planned = await pinnedEvalPlan({}); return planned; }, approval: { read: async () => undefined }, meter: { reserve: async () => undefined }, runner: async () => { throw new Error("no"); } }; } });
     const answer = await runEvalHealthRider(t.base);
     // The empty plan is not runnable (nothing was delivered): not connected, nothing held, and the person is told.
     expect(answer?.result).toEqual({ status: "not_run", reason: "not_connected" });
@@ -98,7 +98,7 @@ describe("the rider measures main and posts the one result", () => {
   });
   it("main must be exactly what the broker pinned: a repository the preparation resolved elsewhere, or not in the pins, is refused before any sandbox", async () => {
     for (const m of [manifest("a".repeat(40)), { repositories: [] }, { repositories: [{ ...manifest().repositories[0]!, name: "other" }] }, { repositories: [...manifest().repositories, ...manifest().repositories] }]) {
-      const t = await withPorts({ manifest: m as never });
+      const t = await withPorts({ manifest: m });
       const answer = await runEvalHealthRider(t.base);
       expect(answer?.result, JSON.stringify(m)).toEqual({ status: "not_run", reason: "invalid_identity" });
       expect(t.w.holds).toEqual([]); expect(t.w.calls).toEqual([]);
@@ -129,7 +129,7 @@ describe("the rider measures main and posts the one result", () => {
   });
   it("a result that leaves the worker carries no company, project, key, payer or cost", async () => {
     const t = await withPorts(); await runEvalHealthRider(t.base);
-    expect(Object.keys(JSON.parse(t.net.sent[0]!.body)).sort()).toEqual(["claimId", "requestId", "result"]);
+    expect(Object.keys((JSON.parse(t.net.sent[0]!.body) as object)).sort()).toEqual(["claimId", "requestId", "result"]);
     expect(t.net.sent[0]!.body).not.toMatch(/company-a|project-a|costMicros|"payer"/u);
   });
 });

@@ -118,7 +118,7 @@ describe("a health run starts only from a yes, once", () => {
   });
   it("a project whose main cannot be read is not run", async () => {
     for (const heads of [undefined, [], [{ repositoryId: "web", baseCommitSha: "nothex" }]]) {
-      const w = await world(); await w.ask(); w.control.heads = heads as never;
+      const w = await world(); await w.ask(); w.control.heads = heads;
       expect(await startEvalHealthRun(w.deps(), project)).toMatchObject({ outcome: "not_run", reason: "main_unreadable" });
       expect(w.launched).toEqual([]);
     }

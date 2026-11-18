@@ -12,7 +12,7 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const job = () => ({ requestId: randomUUID(), claimId: randomUUID() });
 async function world(n = 2) { const w = await createEvalFinalCheckWorld(true, n); roots.push(w.root); return w; }
-const portsOf = (w: Awaited<ReturnType<typeof world>>): EvalHealthJobPorts => ({ plan: w.ports.plan, approval: w.ports.approval, meter: w.ports.meter, runner: w.ports.runner });
+const portsOf = (w: Awaited<ReturnType<typeof world>>): EvalHealthJobPorts => ({ plan: () => w.ports.plan(), approval: w.ports.approval, meter: w.ports.meter, runner: (r) => w.ports.runner(r) });
 const signal = () => new AbortController().signal;
 
 describe("the health job measures the evals on main", () => {
@@ -48,7 +48,7 @@ describe("the health job measures the evals on main", () => {
 describe("the health job spends nothing it was not given", () => {
   it.each(["plan", "approval", "meter", "runner"] as const)("a missing %s is not connected, with no hold and no call", async field => {
     const w = await world(2);
-    const answer = await runEvalHealthJob(job(), { ...portsOf(w), [field]: undefined } as EvalHealthJobPorts, signal());
+    const answer = await runEvalHealthJob(job(), { ...portsOf(w), [field]: undefined }, signal());
     expect(answer.result).toEqual({ status: "not_run", reason: "not_connected" });
     expect(w.holds).toEqual([]); expect(w.calls).toEqual([]);
   });

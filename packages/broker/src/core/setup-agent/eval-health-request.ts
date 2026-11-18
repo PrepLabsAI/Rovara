@@ -11,7 +11,7 @@
 import { z } from "zod";
 import {
   EVAL_HEALTH_MAX_AGE_MS, EVAL_HEALTH_RUN_MAX_MS, EvalHealthNotRunReasonSchema, agentXError, change, evalBaseCacheKey, when,
-  type DocumentStore, type EvalBaseCacheKeyParts, type JsonValue, type EvalHealthNotRunReason, type OrgId, type Principal, type StoredDocument,
+  type DocumentStore, type JsonValue, type EvalHealthNotRunReason, type OrgId, type Principal, type StoredDocument,
 } from "@agentx/contracts";
 import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
@@ -34,7 +34,7 @@ const hex40 = z.string().regex(/^[a-f0-9]{40}$/u);
 const KeyPartsSchema = z.object({
   company: z.string().min(1).max(100), project: z.string().min(1).max(200), baseCommit: hex40, codeHash: hash, judgePin: hash, evalSetHash: hash, hiddenSetHash: z.literal("none"),
   commandFingerprint: hash, catalogRowId: z.string().min(1).max(40), model: z.string().min(1).max(200), modelVersion: z.string().min(1).max(200), settingsFingerprint: hash,
-}).strict().refine(parts => { try { evalBaseCacheKey(parts as EvalBaseCacheKeyParts); return true; } catch { return false; } }, "a valid cache key");
+}).strict().refine(parts => { try { evalBaseCacheKey(parts); return true; } catch { return false; } }, "a valid cache key");
 const ClaimSchema = z.object({
   claimId: z.string().uuid(), at: z.iso.datetime(),
   bases: z.array(z.object({ repositoryId: z.string().min(1).max(200), baseCommitSha: hex40 }).strict()).min(1).max(16),

@@ -51,7 +51,7 @@ export async function runEvalHealthJob(job: PrepareEvalHealth, ports: EvalHealth
     };
     const outcome = await runEvalHealth(input);
     if (signal.aborted) return notRun("stopped");
-    if (outcome.status === "not_run") return notRun(WORKER_REASONS.has(outcome.reason) ? outcome.reason as (typeof EVAL_HEALTH_WORKER_REASONS)[number] : "unavailable");
+    if (outcome.status === "not_run") return notRun(WORKER_REASONS.has(outcome.reason) ? outcome.reason : "unavailable");
     return caught === undefined ? notRun("unavailable") : result({ status: "measured", record: caught });
   } catch { return notRun("unavailable"); }
 }

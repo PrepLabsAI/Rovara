@@ -13,7 +13,7 @@
 // text is echoed. Nothing in this file calls a model or reaches AWS.
 import { randomUUID } from "node:crypto";
 import {
-  EvalBaseRecordSchema, EvalHealthResultBodySchema, createDocumentBaseScoreCache, evalBaseCacheKey, inertEvidenceText,
+  EvalBaseRecordSchema, EvalHealthResultBodySchema, createDocumentBaseScoreCache, evalBaseCacheKey,
   type AdapterRegistry, type DocumentStore, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalHealthNotRunReason, type OrgId,
 } from "@agentx/contracts";
 import { baselineParts, type EvalPlanRead } from "../proof/eval-plan-delivery.js";
@@ -84,11 +84,15 @@ async function settleNotRun(deps: EvalHealthRunDeps, project: string, row: EvalH
   return done ? { outcome: "not_run", requestId: row.requestId, reason } : { outcome: "nothing" };
 }
 
+/** A case's name as it is kept for the card: one line of printable text (markup and control characters out), at most 160 characters. It is only ever shown as text. */
+// eslint-disable-next-line no-control-regex -- control characters are exactly what is removed
+const caseName = (id: string): string => id.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff<>[\]`@]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 160) || "case";
+
 /** What a person is told of a baseline record: how many of the three answers passed for each case, and how many cases gave different answers. Never an answer's text. */
 export function evalHealthSummaryOf(record: EvalBaseRecord, flags: { saved: boolean; reused: boolean }, atMs: number): EvalHealthResultSummary | undefined {
   const rows = record.questions;
   if (rows === undefined || rows.length < 1) return undefined;
-  const cases = rows.map(row => ({ id: inertEvidenceText(row.id, 160) || "case", passes: row.samples.filter(sample => sample.pass).length }));
+  const cases = rows.map(row => ({ id: caseName(row.id), passes: row.samples.filter(sample => sample.pass).length }));
   const differing = rows.filter(row => new Set(row.samples.map(sample => JSON.stringify([sample.pass, sample.answer]))).size > 1).length;
   const total = rows.reduce((n, row) => n + row.samples.length, 0);
   return { at: new Date(atMs).toISOString(), questionCount: rows.length, passedAnswers: cases.reduce((n, c) => n + c.passes, 0), totalAnswers: total, differing, cases, saved: flags.saved, reused: flags.reused };
@@ -107,7 +111,8 @@ export async function startEvalHealthRun(deps: EvalHealthRunDeps, project: strin
     if (reason !== undefined) return await settleNotRun(deps, project, row, reason);
     // The broker reads main itself; a worker's word about the base is never used.
     const bases = await deps.mainHeads(project).catch(() => undefined);
-    const heads = Array.isArray(bases) && bases.length >= 1 && bases.length <= 16 && bases.every(b => /^[a-f0-9]{40}$/u.test(b?.baseCommitSha) && typeof b.repositoryId === "string" && b.repositoryId !== "") ? bases : undefined;
+    const heads: ReadonlyArray<{ repositoryId: string; baseCommitSha: string }> | undefined = bases !== undefined && bases.length >= 1 && bases.length <= 16
+      && bases.every(b => typeof b?.baseCommitSha === "string" && /^[a-f0-9]{40}$/u.test(b.baseCommitSha) && typeof b.repositoryId === "string" && b.repositoryId !== "") ? bases : undefined;
     const found = await readApprovedEvalPlan(table(deps, cap), project);
     if (found === undefined || found.spend.digest !== row.spendDigest) return await settleNotRun(deps, project, row, "approval_changed");
     // The plan names which repository holds the eval; main's head for THAT repository is the base (a head of another repository is not).
@@ -184,7 +189,7 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
     // The same result again (a retried post) is the same answer; a different one after the first is not taken.
     if (row.state === "finished" || row.state === "not_run") return { outcome: "duplicate" };
     if (row.state !== "running" || evalHealthRunExpired(row, deps.now())) return { outcome: "refused" };
-    const claim = row.claim!;
+    const claim = row.claim;
     const parts = claim.parts as unknown as EvalBaseCacheKeyParts;
     const cache = cacheOf(deps);
     const end = async (reason: EvalHealthNotRunReason): Promise<EvalHealthRecorded> => {
@@ -213,4 +218,4 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
 }
 
 /** The cache key this run keeps its result under (for a caller that needs to look): derived from the claim only. */
-export const evalHealthKeyOf = (row: EvalHealthRequestRecord): string | undefined => { try { return row.claim === undefined ? undefined : evalBaseCacheKey(row.claim.parts as unknown as EvalBaseCacheKeyParts); } catch { return undefined; } };
+export const evalHealthKeyOf = (row: EvalHealthRequestRecord): string | undefined => { try { return row.claim === undefined ? undefined : evalBaseCacheKey(row.claim.parts); } catch { return undefined; } };
